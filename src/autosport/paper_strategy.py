@@ -130,6 +130,7 @@ class PaperValueAgent:
             context.paper_book,
             expected_profit_per_unit,
         )
+
     @staticmethod
     def _risk_amount(event: MarketEvent, chosen_stake: Decimal) -> Decimal | None:
         """Return bankroll capital at risk while preserving the provider order-stake unit."""

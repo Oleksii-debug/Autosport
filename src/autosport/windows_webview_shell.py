@@ -84,6 +84,10 @@ class WindowsWebViewUnavailable(RuntimeError):
     pass
 
 
+class WindowsWebBridgeTrustError(RuntimeError):
+    pass
+
+
 def web_shell_index_path() -> Path:
     return Path(__file__).resolve().with_name(WEB_SHELL_DIRNAME) / WEB_SHELL_INDEX
 
@@ -1082,18 +1086,113 @@ class AutosportWebController:
 
 
 class AutosportWebBridge:
-    """Minimal pywebview API: one command ingress and one read-only state egress."""
+    """Minimal pywebview API bound to one trusted launch document."""
 
     def __init__(self, controller: AutosportWebController | None = None) -> None:
         self._controller = controller or AutosportWebController()
+        self._trust_lock = threading.RLock()
+        self._trusted_window: object | None = None
+        self._trusted_url: str | None = None
+        self._trust_revoked = False
+        self._host_shutdown = False
+
+    @staticmethod
+    def _current_window_url(window: object) -> str:
+        getter = getattr(window, "get_current_url", None)
+        if not callable(getter):
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge cannot verify the active document URL"
+            )
+        try:
+            value = getter()
+        except Exception as exc:
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge could not read the active document URL"
+            ) from exc
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+            or any(ord(char) < 0x20 for char in value)
+        ):
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge observed an invalid active document URL"
+            )
+        return value
+
+    def _revoke_trust(self) -> None:
+        with self._trust_lock:
+            self._trust_revoked = True
+
+    def _bind_trusted_window(self, window: object) -> None:
+        """Bind once to the exact first document seen before API injection.
+
+        The same trusted URL may reload inside the same native window. Any other
+        window or URL permanently revokes this bridge instance for the launch.
+        """
+
+        with self._trust_lock:
+            if self._host_shutdown or self._trust_revoked:
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge launch trust is no longer active"
+                )
+            current_url = self._current_window_url(window)
+            if self._trusted_window is None:
+                self._trusted_window = window
+                self._trusted_url = current_url
+                return
+            if self._trusted_window is not window or self._trusted_url != current_url:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge rejected a different window or document"
+                )
+
+    def _assert_trusted_session_locked(self) -> None:
+        if (
+            self._host_shutdown
+            or self._trust_revoked
+            or self._trusted_window is None
+            or self._trusted_url is None
+        ):
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge is not bound to the trusted launch document"
+            )
+        try:
+            current_url = self._current_window_url(self._trusted_window)
+        except WindowsWebBridgeTrustError:
+            self._trust_revoked = True
+            raise
+        if current_url != self._trusted_url:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge rejected active document URL drift"
+            )
 
     def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
-        return self._controller.dispatch(raw)
+        with self._trust_lock:
+            self._assert_trusted_session_locked()
+            return self._controller.dispatch(raw)
 
     def get_state(self) -> dict[str, Any]:
-        return {"ok": True, "state": self._controller.state()}
+        with self._trust_lock:
+            self._assert_trusted_session_locked()
+            return {"ok": True, "state": self._controller.state()}
 
     def close(self) -> None:
+        with self._trust_lock:
+            self._assert_trusted_session_locked()
+            self._host_shutdown = True
+            self._trust_revoked = True
+        self._controller.close()
+
+    def _close_from_host(self) -> None:
+        """Host-only finalizer; intentionally not exposed through pywebview API."""
+
+        with self._trust_lock:
+            if self._host_shutdown:
+                return
+            self._host_shutdown = True
+            self._trust_revoked = True
         self._controller.close()
 
 
@@ -1116,15 +1215,37 @@ def launch_windows_shell(
         )
 
     api = bridge or AutosportWebBridge()
+    canonical_bridge = isinstance(api, AutosportWebBridge)
     required_renderer = "edgechromium"
     renderer_observed = False
+    trusted_document_observed = not canonical_bridge
+    trusted_document_violation = False
+    window: object | None = None
 
     def verify_initialized_renderer(renderer: object) -> bool:
         nonlocal renderer_observed
         if type(renderer) is not str or renderer != required_renderer:
+            if canonical_bridge:
+                api._revoke_trust()
             return False
         renderer_observed = True
         return True
+
+    def bind_trusted_document() -> None:
+        nonlocal trusted_document_observed, trusted_document_violation
+        if not canonical_bridge:
+            return
+        if not renderer_observed or window is None:
+            api._revoke_trust()
+            trusted_document_violation = True
+            return
+        try:
+            api._bind_trusted_window(window)
+        except WindowsWebBridgeTrustError:
+            api._revoke_trust()
+            trusted_document_violation = True
+            return
+        trusted_document_observed = True
 
     try:
         window = webview.create_window(
@@ -1138,11 +1259,22 @@ def launch_windows_shell(
             zoomable=True,
         )
         window.events.initialized += verify_initialized_renderer
+        if canonical_bridge:
+            # before_load is synchronous and runs immediately before pywebview
+            # injects window.pywebview into each document. Re-check every load so
+            # a navigated document cannot inherit the privileged Python API.
+            window.events.before_load += bind_trusted_document
         webview.start(gui=required_renderer)
         if not renderer_observed:
             raise WindowsWebViewUnavailable(
                 "The Autosport semantic shell started without an observed "
                 "EdgeChromium/WebView2 renderer witness"
+            )
+        if canonical_bridge and (
+            not trusted_document_observed or trusted_document_violation
+        ):
+            raise WindowsWebViewUnavailable(
+                "The Autosport semantic shell lost its trusted WebView document binding"
             )
     except WindowsWebViewUnavailable:
         raise
@@ -1151,7 +1283,10 @@ def launch_windows_shell(
             "Microsoft Edge WebView2 could not start the Autosport semantic shell"
         ) from exc
     finally:
-        api.close()
+        if canonical_bridge:
+            api._close_from_host()
+        else:
+            api.close()
     return 0
 
 

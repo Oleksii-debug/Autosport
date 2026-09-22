@@ -367,4 +367,10 @@ def reconcile_replay(observations: Iterable[MatchbookOfferReadback]) -> dict[int
                 "terminal offer changed status without correction authority"
             )
         latest[item.offer_id] = item
+    # Structural DTO integrity is not provider-origin authority.  A replay may
+    # encounter unissued rows while checking contradictions, but no row may
+    # survive into authoritative exposure truth unless it was issued by the
+    # product acquisition seam in this process.
+    for item in latest.values():
+        _assert_provider_readback_issued(item)
     return latest

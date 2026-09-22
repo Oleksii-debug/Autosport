@@ -271,6 +271,36 @@ def test_partial_fill_requires_explicit_terminal_order_status(
     assert _report_outcome(report, action) is expected
 
 
+@pytest.mark.parametrize(
+    ("size_matched", "average_price_matched"),
+    (
+        (2, 2),
+        (0, 2),
+    ),
+)
+def test_failure_claiming_matched_economics_is_ambiguous(
+    size_matched: int,
+    average_price_matched: int,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="FAILURE",
+        instruction_status="FAILURE",
+        include_size_matched=True,
+        size_matched=size_matched,
+        average_price_matched=average_price_matched,
+        bet_id="bet-contradictory-match",
+        order_status="EXECUTION_COMPLETE",
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="matched execution economics",
+    ):
+        _parse(payload, action)
+
+
 def test_failure_with_executable_order_status_is_ambiguous() -> None:
     action = _action()
     payload = _payload(

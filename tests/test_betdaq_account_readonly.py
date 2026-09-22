@@ -363,9 +363,81 @@ def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions(
     assert snapshot.balance.available_balance == Decimal("100.01")
     assert [p.external_position_id for p in snapshot.open_positions] == ["1", "2", "3", "4"]
     assert all(p.state is BookmakerPositionState.OPEN for p in snapshot.open_positions)
-    assert snapshot.open_positions[0].provider_amount == Decimal("0")
-    assert snapshot.open_positions[0].provider_amount_semantics == "betdaq_matched_stake"
+    assert [p.provider_amount for p in snapshot.open_positions] == [
+        Decimal("5"),
+        Decimal("3"),
+        Decimal("1"),
+        Decimal("2"),
+    ]
+    assert all(
+        p.provider_amount_semantics == "betdaq_matched_plus_active_unmatched_stake"
+        for p in snapshot.open_positions
+    )
+    assert [p.decimal_odds for p in snapshot.open_positions] == [
+        Decimal("2.50"),
+        Decimal("2.2"),
+        Decimal("3.1"),
+        Decimal("2.50"),
+    ]
     assert snapshot.open_positions[0].provider_side == "BACK"
+
+
+def test_partially_matched_order_preserves_live_unmatched_remainder_without_false_single_odds():
+    c, _ = client(
+        balance(),
+        bootstrap(
+            1,
+            order(
+                "1",
+                1,
+                status=1,
+                unmatched="3",
+                matched="2",
+                matched_price="2.2",
+            ),
+        ),
+        changed(),
+    )
+    evidence = c.read_account_evidence(
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ})
+    )
+
+    raw = evidence.current_orders.orders[0]
+    position = evidence.snapshot.open_positions[0]
+    assert raw.matched_stake == Decimal("2")
+    assert raw.unmatched_stake == Decimal("3")
+    assert position.provider_amount == Decimal("5")
+    assert (
+        position.provider_amount_semantics
+        == "betdaq_matched_plus_active_unmatched_stake"
+    )
+    assert position.decimal_odds is None
+
+
+def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precision():
+    c, _ = client(
+        balance(),
+        bootstrap(
+            1,
+            order(
+                "1",
+                1,
+                status=1,
+                unmatched="0.0000000000000000000000000009",
+                matched="1234567890123456789012345678.1",
+                matched_price="2.2",
+            ),
+        ),
+        changed(),
+    )
+    position = c.read_account_snapshot(
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ})
+    ).open_positions[0]
+
+    assert position.provider_amount == Decimal(
+        "1234567890123456789012345678.1000000000000000000000000009"
+    )
+    assert position.decimal_odds is None
 
 
 def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position():

@@ -133,12 +133,25 @@ def test_short_complete_window_collects_more() -> None:
 
 
 def test_fourteen_days_minus_one_microsecond_does_not_cross_checkpoint() -> None:
+    window_end = BASE + timedelta(days=14) - timedelta(microseconds=1)
+    row = obs(1, AcquisitionState.ZERO_RESULT)
+    closure = AnchorWindowClosure(
+        scope=SCOPE,
+        window_start=BASE,
+        window_end=window_end,
+        first_sequence=1,
+        last_sequence=1,
+        closed_at=window_end,
+        source_universe_sha256=SHA_B,
+        closure_evidence_sha256=SHA_A,
+    )
     report = evaluate_anchor_feasibility(
         scope=SCOPE,
         window_start=BASE,
-        window_end=BASE + timedelta(days=14) - timedelta(microseconds=1),
+        window_end=window_end,
         review_as_of=BASE + timedelta(days=15),
-        observations=[obs(1, AcquisitionState.ZERO_RESULT)],
+        observations=[row],
+        window_closure=closure,
     )
     assert report.disposition is FeasibilityDisposition.COLLECT_MORE
     assert report.review_window_days < Decimal("14")

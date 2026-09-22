@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
 from autosport.scientific_registry import Hypothesis, ResearchQuestion, ScientificRegistry
 
 
@@ -43,8 +44,10 @@ def _rewrite_state(path, state: dict[str, object]) -> None:
     )
 
 
-def test_reordering_individually_valid_records_must_fail_closed(tmp_path):
-    """A byte-level reorder must not invert ScientificRegistry causal authority."""
+def test_reordering_individually_valid_records_is_rejected_by_monotonic_authority(
+    tmp_path,
+):
+    """Per-record-valid reorder must not invert ScientificRegistry causal authority."""
 
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)
@@ -67,11 +70,14 @@ def test_reordering_individually_valid_records_must_fail_closed(tmp_path):
         original_digests
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority",
+    ):
         ScientificRegistry(path)
 
 
-def test_deleting_committed_predecessor_must_not_leave_valid_dependent_history(tmp_path):
+def test_deleting_committed_predecessor_is_rejected_by_monotonic_authority(tmp_path):
     """Deleting a valid predecessor cannot silently shrink scientific history."""
 
     path = tmp_path / "scientific_registry.json"
@@ -90,7 +96,10 @@ def test_deleting_committed_predecessor_must_not_leave_valid_dependent_history(t
     ]
     _rewrite_state(path, state)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority",
+    ):
         ScientificRegistry(path)
 
 
@@ -106,9 +115,9 @@ def test_truncated_registry_cannot_be_pristine_reinitialized_over_history(tmp_pa
     path.write_bytes(original[:-7])
     corrupted = path.read_bytes()
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="valid UTF-8 JSON"):
         ScientificRegistry(path)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="valid UTF-8 JSON"):
         ScientificRegistry.initialize_pristine(path)
 
     assert path.read_bytes() == corrupted

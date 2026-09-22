@@ -625,17 +625,35 @@ class BookmakerAccountReconciliationStore:
     def _require_nested_evidence_after(
         snapshot: BookmakerAccountSnapshot,
         previous_snapshot_at: datetime,
+        *,
+        balance_observations: dict[str, dict[str, object]],
+        position_observations: dict[str, dict[str, object]],
     ) -> None:
+        """Require causal freshness only when a nested observation identity is new.
+
+        A later account snapshot may legitimately carry the exact same provider
+        observation again.  Previously seen identities therefore pass through to
+        the canonical payload conflict/dedup checks below; changed content under an
+        existing identity still fails closed there.  Only previously unseen nested
+        evidence can advance reconciliation truth, so only that evidence must be
+        newer than the preceding account snapshot.
+        """
+
         evidence: list[tuple[str, str]] = []
-        if snapshot.balance is not None:
+        if (
+            snapshot.balance is not None
+            and snapshot.balance.observation_id not in balance_observations
+        ):
             evidence.append(("balance", snapshot.balance.observed_at))
         evidence.extend(
             ("open position", observation.observed_at)
             for observation in snapshot.open_positions
+            if observation.observation_id not in position_observations
         )
         evidence.extend(
             ("settled position", observation.observed_at)
             for observation in snapshot.settled_positions
+            if observation.observation_id not in position_observations
         )
         for label, observed_at in evidence:
             if _time(observed_at, f"{label}.observed_at") <= previous_snapshot_at:
@@ -667,7 +685,12 @@ class BookmakerAccountReconciliationStore:
                     raise AccountReconciliationIntegrityError(
                         "persisted account snapshot history must be strictly chronological"
                     )
-                cls._require_nested_evidence_after(snapshot, previous_at)
+                cls._require_nested_evidence_after(
+                    snapshot,
+                    previous_at,
+                    balance_observations=balance_observations,
+                    position_observations=position_observations,
+                )
             previous_at = current_at
             balance_delta = None
 

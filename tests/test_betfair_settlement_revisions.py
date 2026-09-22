@@ -253,17 +253,40 @@ def test_superseded_semantic_revision_cannot_reappear_as_new_current_truth(tmp_p
     assert store.current("betfair", "acct-1", "bet-777") == corrected
 
 
-def test_changed_content_at_same_provider_settled_time_fails_closed(tmp_path) -> None:
+def test_changed_content_at_equal_provider_settled_time_appends_observed_revision(tmp_path) -> None:
     transport = _Transport()
     ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
     store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
 
     first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
     transport.profit = -1
+    corrected = _ingest(
+        store,
+        ledger,
+        plan,
+        action,
+        _capture(client, provider_ref),
+    ).revision
+
+    assert corrected.revision_number == 2
+    assert corrected.previous_revision_id == first.revision_id
+    assert corrected.settled_date == first.settled_date
+    assert corrected.provider_profit == Decimal("-1")
+    assert store.current("betfair", "acct-1", "bet-777") == corrected
+
+
+def test_changed_content_with_older_provider_settled_time_fails_closed(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    transport.profit = -1
+    transport.settled_date = "2026-09-21T18:59:59+00:00"
 
     with pytest.raises(
         BetfairSettlementRevisionError,
-        match="later provider settled_date",
+        match="regressed provider settled_date",
     ):
         _ingest(store, ledger, plan, action, _capture(client, provider_ref))
 

@@ -629,7 +629,7 @@ class TheOddsApiProvider:
         batch = ProviderBatch(
             self.source_id,
             quotes,
-            cursor=snapshot_at,
+            cursor=evidence.response_sha256 or snapshot_at,
             quality_flags=tuple(flags),
         )
         self._last_request_evidence = evidence

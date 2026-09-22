@@ -887,6 +887,93 @@ def test_registry_detects_tampering_on_restart(tmp_path):
         ScientificRegistry(path)
 
 
+
+def test_restart_revalidates_promotion_candidate_against_durable_evaluation(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="restart-binding",
+        rollback_identity="NONE",
+    )
+    registry.append(evidence)
+    registry.append(
+        StrategyVersion(
+            "strategy-shadow",
+            "canonical-strategy",
+            SHA_C,
+            SHA_D,
+            SHA_B,
+            T3,
+            model_version_id="model-1",
+            predecessor_strategy_version_id="strategy-1",
+        )
+    )
+    registry.record_promotion(
+        PromotionDecision(
+            "promotion-restart-binding",
+            PromotionAction.PROMOTE,
+            "strategy-1",
+            "protocol-1",
+            foundation["protocol"].protocol_sha256,
+            "eval-1",
+            foundation["bundle"].bundle_sha256,
+            T3,
+            candidate_model_version_id="model-1",
+            promotion_evidence_id=evidence.promotion_evidence_id,
+        )
+    )
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    entry = next(
+        item
+        for item in raw["records"]
+        if item["record_type"] == "PromotionDecision"
+        and item["record_id"] == "promotion-restart-binding"
+    )
+    entry["payload"]["candidate_strategy_version_id"] = "strategy-shadow"
+    envelope = {
+        "record_type": entry["record_type"],
+        "record_id": entry["record_id"],
+        "available_at": entry["available_at"],
+        "payload": entry["payload"],
+    }
+    entry["record_sha256"] = hashlib.sha256(
+        json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(
+        json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="evaluation strategy mismatch",
+    ):
+        ScientificRegistry(path)
+
+
 @pytest.mark.parametrize("bad_schema_version", [True, 1.0])
 def test_registry_rejects_noncanonical_schema_version_types(
     tmp_path, bad_schema_version

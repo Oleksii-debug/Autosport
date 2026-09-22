@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 from autosport.parlayapi_provider import ProviderTransportError, _default_transport
 
 
@@ -28,7 +29,7 @@ def _stop_server(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
 def _json_handler(seen: list[dict[str, str]]) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            seen.append({key: value for key, value in self.headers.items()})
+            seen.append({key.lower(): value for key, value in self.headers.items()})
             payload = b'{"ok":true}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -49,7 +50,7 @@ def _redirect_handler(
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            seen.append({key: value for key, value in self.headers.items()})
+            seen.append({key.lower(): value for key, value in self.headers.items()})
             self.send_response(status_code)
             self.send_header("Location", location)
             self.send_header("Content-Length", "0")
@@ -85,7 +86,7 @@ class ParlayApiRedirectSecurityTests(unittest.TestCase):
 
                     self.assertEqual(captured.exception.status_code, status_code)
                     self.assertEqual(len(origin_seen), 1)
-                    self.assertEqual(origin_seen[0].get("X-API-Key"), _DUMMY_API_KEY)
+                    self.assertEqual(origin_seen[0].get("x-api-key"), _DUMMY_API_KEY)
                     self.assertEqual(target_seen, [])
                     self.assertNotIn(_DUMMY_API_KEY, str(captured.exception))
         finally:
@@ -106,7 +107,7 @@ class ParlayApiRedirectSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.payload, {"ok": True})
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0].get("X-API-Key"), _DUMMY_API_KEY)
+        self.assertEqual(seen[0].get("x-api-key"), _DUMMY_API_KEY)
 
 
 if __name__ == "__main__":

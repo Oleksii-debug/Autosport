@@ -249,11 +249,20 @@ def test_retry_after_generic_not_found_keeps_both_possible_effects(tmp_path) -> 
     # The canonical ledger now permits a retry. This risk layer intentionally
     # does not equate that generic not-found fact with provider-origin capital
     # release, so the prior physical attempt remains a possible effect here.
-    _attempt(ledger, plan, attempt_id="attempt-2")
+    ledger.begin_attempt(
+        plan_id=plan.plan_id,
+        action_id=plan.actions[0].action_id,
+        attempt_id="attempt-2",
+        reserved_at="2026-09-22T07:00:05+00:00",
+    )
+    ledger.mark_submitted(
+        "attempt-2",
+        submitted_at="2026-09-22T07:00:06+00:00",
+    )
     ledger.mark_unknown(
         "attempt-2",
         reason="transport_timeout",
-        observed_at=ACKNOWLEDGED_AT,
+        observed_at="2026-09-22T07:00:07+00:00",
     )
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
@@ -306,6 +315,29 @@ def test_caller_copy_cannot_mint_issued_risk_evidence(tmp_path) -> None:
         match="not canonically issued",
     ):
         forged.assert_issued_current(ledger)
+
+
+
+def test_direct_copy_cannot_enable_residual_capacity_authority(tmp_path) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="cannot grant execution, release, or residual-capacity authority",
+    ):
+        replace(evidence, residual_capacity_authority=True)
+
+
+def test_direct_copy_cannot_publish_mismatched_aggregate(tmp_path) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="confirmed aggregate does not match attempts",
+    ):
+        replace(evidence, confirmed_open_capital=Decimal("1"))
 
 
 def test_generic_non_betfair_provider_fails_closed(tmp_path) -> None:

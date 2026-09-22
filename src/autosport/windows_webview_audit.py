@@ -74,12 +74,14 @@ _REQUIRED_SHORTCUT_MARKERS = (
     'event.key === "F8"',
     'event.key === "F9"',
     'event.key === "F10"',
-    'event.ctrlKey && event.altKey',
     'key === "o"',
-    'key === "r"',
     'key === "e"',
     'key === "l"',
     'isEditable(event.target)',
+)
+_FORBIDDEN_SHORTCUT_MARKERS = (
+    'event.ctrlKey && event.altKey',
+    'key === "r"',
 )
 _REQUIRED_BRIDGE_MARKERS = (
     'window.addEventListener("pywebviewready"',
@@ -266,6 +268,18 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     for marker in _REQUIRED_SHORTCUT_MARKERS:
         if marker not in javascript:
             failures.append(f"keyboard marker missing: {marker}")
+    for marker in _FORBIDDEN_SHORTCUT_MARKERS:
+        if marker in javascript:
+            failures.append(f"screen-reader/browser shortcut collision remains: {marker}")
+    if "replaceChildren()" in javascript:
+        failures.append("poll projection must preserve semantic descendants when state is unchanged")
+    for marker in (
+        "setTextIfChanged(statusNode",
+        "setTextIfChanged(errorNode",
+        "syncTextChildren(node, values",
+    ):
+        if marker not in javascript:
+            failures.append(f"stable dynamic projection marker missing: {marker}")
 
     focusable_ids = {
         element_id
@@ -313,8 +327,9 @@ def inspect_keyboard_contract() -> dict[str, Any]:
         "failures": failures,
         "evidence_scope": (
             "machine inspection of native semantic focusability, DOM-order discipline, "
-            "editable-control shortcut guard, and declared keyboard shortcuts in the packaged "
-            "WebView2 shell; not physical keyboard/NVDA speech proof."
+            "screen-reader/browser shortcut preservation, stable dynamic DOM projection, and "
+            "declared keyboard shortcuts in the packaged WebView2 shell; not physical "
+            "keyboard/NVDA speech proof."
         ),
         **_base_truth(),
     }

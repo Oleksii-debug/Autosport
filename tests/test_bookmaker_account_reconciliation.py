@@ -70,13 +70,14 @@ def _balance(
     venue_id: str = "book-a",
     account_id: str = "acct-a",
     adapter_id: str = "adapter-a",
+    currency: str = "EUR",
 ) -> BookmakerBalanceObservation:
     return BookmakerBalanceObservation(
         venue_id=venue_id,
         account_id=account_id,
         adapter_id=adapter_id,
         observation_id=observation_id,
-        currency="EUR",
+        currency=currency,
         available_balance=Decimal(amount),
         observed_at=observed_at,
         source_payload_sha256=_HASH,
@@ -792,3 +793,124 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     assert writer_errors == []
     assert reader_errors == []
     assert tuple(reader_history) == (first,)
+
+
+
+@pytest.mark.parametrize(
+    ("later_state", "capability"),
+    (
+        (BookmakerPositionState.OPEN, BookmakerCapability.OPEN_POSITIONS_READ),
+        (BookmakerPositionState.SETTLED, BookmakerCapability.SETTLED_POSITIONS_READ),
+    ),
+)
+def test_later_snapshot_rejects_backdated_position_evidence(
+    tmp_path,
+    later_state: BookmakerPositionState,
+    capability: BookmakerCapability,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(
+        _snapshot(
+            _T2,
+            capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+            open_positions=(
+                _position(
+                    BookmakerPositionState.OPEN,
+                    _T2,
+                    observation_id="fresh-open",
+                ),
+            ),
+        )
+    )
+
+    kwargs = (
+        {"open_positions": (
+            _position(
+                later_state,
+                _T1,
+                observation_id=f"backdated-{later_state.value.lower()}",
+            ),
+        )}
+        if later_state is BookmakerPositionState.OPEN
+        else {"settled_positions": (
+            _position(
+                later_state,
+                _T1,
+                observation_id=f"backdated-{later_state.value.lower()}",
+            ),
+        )}
+    )
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="position evidence must be newer than the previous account snapshot",
+    ):
+        store.append_snapshot(
+            _snapshot(
+                _T3,
+                capabilities=(capability,),
+                **kwargs,
+            )
+        )
+
+    state = store.latest_state()
+    assert state is not None
+    assert state.position_state("pos-1") is ReconciledPositionState.OPEN
+
+
+def test_later_snapshot_rejects_backdated_balance_evidence(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(
+        _snapshot(
+            _T2,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=_balance(_T2, "100", observation_id="fresh-balance"),
+        )
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="balance evidence must be newer than the previous account snapshot",
+    ):
+        store.append_snapshot(
+            _snapshot(
+                _T3,
+                capabilities=(BookmakerCapability.BALANCE_READ,),
+                balance=_balance(_T1, "80", observation_id="backdated-balance"),
+            )
+        )
+
+    state = store.latest_state()
+    assert state is not None
+    assert state.latest_balance_observation is not None
+    assert state.latest_balance_observation.available_balance == Decimal("100")
+    assert state.unexplained_balance_delta is None
+
+
+def test_cross_currency_balance_reconciliation_fails_closed(tmp_path) -> None:
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=_balance(_T1, "100", observation_id="balance-eur"),
+        )
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="available-balance currency changed",
+    ):
+        store.append_snapshot(
+            _snapshot(
+                _T2,
+                capabilities=(BookmakerCapability.BALANCE_READ,),
+                balance=_balance(
+                    _T2,
+                    "100",
+                    observation_id="balance-usd",
+                    currency="USD",
+                ),
+            )
+        )

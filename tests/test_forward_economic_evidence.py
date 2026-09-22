@@ -487,3 +487,191 @@ def test_summary_payload_preserves_explicit_fail_closed_authority_truth():
     assert payload["protocol_sha256"] == protocol().identity_sha256
     assert payload["observed_events"] == 0
     assert payload["next_sequence"] == 0
+
+def test_all_in_protocol_binds_frozen_economic_cost_support():
+    base = protocol(maximum_economic_cost_currency=Decimal("0"))
+    bounded = protocol(maximum_economic_cost_currency=Decimal("2"))
+    assert base.identity_sha256 != bounded.identity_sha256
+    assert bounded.maximum_economic_cost_currency == Decimal("2")
+    with pytest.raises(ForwardEconomicEvidenceError, match="must be non-negative"):
+        protocol(maximum_economic_cost_currency=Decimal("-0.01"))
+
+
+def test_none_preserves_authoritative_nonzero_cost_and_causal_availability():
+    acc = ForwardEconomicEvidenceAccumulator(
+        protocol(
+            minimum_events=1,
+            maximum_economic_cost_currency=Decimal("2"),
+            maximum_drawdown_currency=Decimal("0.5"),
+        )
+    )
+    obs = observation(0)
+    cost_available_at = T0 + timedelta(hours=2)
+    challenger = ResolvedPolicyOutcome(
+        policy_id="challenger",
+        sequence=obs.sequence,
+        universe_event_sha256=obs.universe_event_sha256,
+        decision_sha256=obs.challenger_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.NONE,
+        accepted_odds=None,
+        accepted_stake=None,
+        net_pnl_currency=Decimal("-1"),
+        execution_evidence_sha256=None,
+        execution_accepted_at=None,
+        settlement_evidence_sha256=None,
+        settlement_available_at=None,
+        economic_cost_currency=Decimal("1"),
+        economic_cost_evidence_sha256=SHA_C,
+        economic_cost_available_at=cost_available_at,
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    step = acc.record(obs, resolver_for([(obs, challenger, champion)]))
+    summary = acc.summary()
+
+    assert step.challenger_wager_pnl_currency == Decimal("0")
+    assert step.challenger_economic_cost_currency == Decimal("1")
+    assert step.challenger_economic_available_at == cost_available_at
+    assert step.challenger_normalized_pnl == Decimal("-0.1")
+    assert step.absolute_low == Decimal("-0.2")
+    assert step.absolute_high == Decimal("0")
+    assert summary.challenger_total_pnl_currency == Decimal("-1")
+    assert summary.challenger_max_drawdown_currency == Decimal("1")
+    assert summary.drawdown_guard_passed is False
+    assert summary.positive_authority_verified is False
+    assert summary.scientific_promotion_gate_passed is False
+
+
+def test_back_all_in_loss_can_extend_below_gross_wager_bound_when_cost_is_bounded():
+    acc = ForwardEconomicEvidenceAccumulator(
+        protocol(
+            minimum_events=1,
+            maximum_economic_cost_currency=Decimal("2"),
+        )
+    )
+    obs = observation(0)
+    challenger = ResolvedPolicyOutcome(
+        policy_id="challenger",
+        sequence=obs.sequence,
+        universe_event_sha256=obs.universe_event_sha256,
+        decision_sha256=obs.challenger_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.BACK,
+        accepted_odds=Decimal("2"),
+        accepted_stake=Decimal("10"),
+        net_pnl_currency=Decimal("-11"),
+        execution_evidence_sha256=SHA_C,
+        execution_accepted_at=T0 + timedelta(minutes=3),
+        settlement_evidence_sha256=SHA_D,
+        settlement_available_at=T0 + timedelta(hours=1),
+        wager_pnl_currency=Decimal("-10"),
+        economic_cost_currency=Decimal("1"),
+        economic_cost_evidence_sha256=SHA_A,
+        economic_cost_available_at=T0 + timedelta(hours=2),
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    step = acc.record(obs, resolver_for([(obs, challenger, champion)]))
+
+    assert step.challenger_wager_pnl_currency == Decimal("-10")
+    assert step.challenger_net_pnl_currency == Decimal("-11")
+    assert step.challenger_normalized_pnl == Decimal("-1.1")
+    assert step.absolute_low == Decimal("-1.2")
+    assert step.absolute_high == Decimal("1")
+    assert step.challenger_economic_available_at == T0 + timedelta(hours=2)
+    assert acc.summary().challenger_max_drawdown_currency == Decimal("11")
+
+
+def test_nonzero_economic_cost_requires_bound_evidence():
+    obs = observation(0)
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="requires canonical evidence and availability",
+    ):
+        ResolvedPolicyOutcome(
+            policy_id="challenger",
+            sequence=obs.sequence,
+            universe_event_sha256=obs.universe_event_sha256,
+            decision_sha256=obs.challenger_decision_sha256,
+            decision_committed_at=T0 + timedelta(minutes=2),
+            side=BetSide.NONE,
+            accepted_odds=None,
+            accepted_stake=None,
+            net_pnl_currency=Decimal("-1"),
+            execution_evidence_sha256=None,
+            execution_accepted_at=None,
+            settlement_evidence_sha256=None,
+            settlement_available_at=None,
+            economic_cost_currency=Decimal("1"),
+        )
+
+
+def test_cost_above_frozen_support_fails_without_accumulator_mutation():
+    acc = ForwardEconomicEvidenceAccumulator(
+        protocol(maximum_economic_cost_currency=Decimal("1"))
+    )
+    obs = observation(0)
+    challenger = ResolvedPolicyOutcome(
+        policy_id="challenger",
+        sequence=obs.sequence,
+        universe_event_sha256=obs.universe_event_sha256,
+        decision_sha256=obs.challenger_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.NONE,
+        accepted_odds=None,
+        accepted_stake=None,
+        net_pnl_currency=Decimal("-2"),
+        execution_evidence_sha256=None,
+        execution_accepted_at=None,
+        settlement_evidence_sha256=None,
+        settlement_available_at=None,
+        economic_cost_currency=Decimal("2"),
+        economic_cost_evidence_sha256=SHA_C,
+        economic_cost_available_at=T0 + timedelta(hours=1),
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+    resolver = resolver_for([(obs, challenger, champion)])
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="exceeds frozen protocol maximum",
+    ):
+        acc.record(obs, resolver)
+    assert acc.steps == ()
+    assert acc.next_sequence == 0
+
+
+def test_cost_authority_and_availability_are_bound_into_evidence_identity():
+    obs = observation(0)
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    def evidence(cost_sha: str, cost_time: datetime) -> str:
+        challenger = ResolvedPolicyOutcome(
+            policy_id="challenger",
+            sequence=obs.sequence,
+            universe_event_sha256=obs.universe_event_sha256,
+            decision_sha256=obs.challenger_decision_sha256,
+            decision_committed_at=T0 + timedelta(minutes=2),
+            side=BetSide.NONE,
+            accepted_odds=None,
+            accepted_stake=None,
+            net_pnl_currency=Decimal("-1"),
+            execution_evidence_sha256=None,
+            execution_accepted_at=None,
+            settlement_evidence_sha256=None,
+            settlement_available_at=None,
+            economic_cost_currency=Decimal("1"),
+            economic_cost_evidence_sha256=cost_sha,
+            economic_cost_available_at=cost_time,
+        )
+        acc = ForwardEconomicEvidenceAccumulator(
+            protocol(maximum_economic_cost_currency=Decimal("2"))
+        )
+        acc.record(obs, resolver_for([(obs, challenger, champion)]))
+        return acc.summary().evidence_sha256
+
+    base = evidence(SHA_C, T0 + timedelta(hours=1))
+    assert evidence(SHA_D, T0 + timedelta(hours=1)) != base
+    assert evidence(SHA_C, T0 + timedelta(hours=2)) != base
+

@@ -394,6 +394,8 @@ def collect_coverage_witness(
     """Collect one context-bound coverage witness through the canonical read-only client."""
     if not isinstance(client, BetfairReadOnlyClient):
         raise TypeError("client must be BetfairReadOnlyClient")
+    if not isinstance(scope, ScopeIdentity):
+        raise BetfairPnlCoverageError("scope must be ScopeIdentity")
     if not isinstance(max_closed_pages, int) or isinstance(max_closed_pages, bool) or max_closed_pages <= 0:
         raise BetfairPnlCoverageError("max_closed_pages must be a positive integer")
 

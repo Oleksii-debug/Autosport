@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import fields, replace
 from decimal import Decimal
+from fractions import Fraction
 import hashlib
+from math import comb
 from pathlib import Path
 
 import pytest
@@ -150,6 +152,54 @@ def test_decimal_materialization_bound_matches_durable_parser_domain() -> None:
         match="fixed-point representation exceeds supported canonical size",
     ):
         risk_module._decimal_text(Decimal("1." + ("0" * 511)))
+
+
+def _exact_binomial_cdf(
+    *,
+    successes_at_most: int,
+    trials: int,
+    probability: Fraction,
+) -> Fraction:
+    complement = Fraction(1) - probability
+    return sum(
+        Fraction(comb(trials, successes))
+        * probability**successes
+        * complement ** (trials - successes)
+        for successes in range(successes_at_most + 1)
+    )
+
+
+@pytest.mark.parametrize(
+    ("ruin_count", "independent_units", "confidence"),
+    [
+        (0, 3, Decimal("0.95")),
+        (0, 10, Decimal("0.95")),
+        (1, 10, Decimal("0.95")),
+        (2, 100, Decimal("0.95")),
+    ],
+)
+def test_clopper_pearson_returned_endpoint_is_outward_conservative(
+    ruin_count: int,
+    independent_units: int,
+    confidence: Decimal,
+) -> None:
+    upper = clopper_pearson_upper_bound(
+        ruin_count=ruin_count,
+        independent_units=independent_units,
+        confidence_level=confidence,
+    )
+
+    exact_cdf = _exact_binomial_cdf(
+        successes_at_most=ruin_count,
+        trials=independent_units,
+        probability=Fraction(upper),
+    )
+    alpha = Fraction(Decimal(1) - confidence)
+
+    assert exact_cdf <= alpha, (
+        "returned Clopper-Pearson endpoint rounded below the exact upper root; "
+        f"exact CDF(U)-alpha={exact_cdf - alpha}"
+    )
 
 
 def test_zero_events_never_become_zero_risk() -> None:

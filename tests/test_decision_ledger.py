@@ -197,6 +197,25 @@ class DecisionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
+    def test_symlink_alias_uses_canonical_append_lock_domain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "decisions.jsonl"
+            alias = root / "decision-alias.jsonl"
+            try:
+                alias.symlink_to(target.name)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            ledger = JsonlDecisionLedger(alias)
+            ledger.append(self._record(decision_id="through-symlink"))
+
+            self.assertTrue(alias.is_symlink())
+            self.assertTrue(target.exists())
+            self.assertTrue((root / ".decisions.jsonl.lock").exists())
+            self.assertFalse((root / ".decision-alias.jsonl.lock").exists())
+            self.assertEqual(JsonlDecisionLedger(target).verify_integrity(), 1)
+
     def test_append_rejects_duplicate_decision_identity_without_corrupting_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

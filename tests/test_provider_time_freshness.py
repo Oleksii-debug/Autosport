@@ -38,7 +38,7 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         result = self.assess(evidence)
 
         self.assertEqual(result.status, ProviderTimeStatus.FRESH)
-        self.assertTrue(result.eligible)
+        self.assertFalse(hasattr(result, "eligible"))
         self.assertEqual(result.sequence_id, 17)
         self.assertEqual(result.transport_elapsed_ns, 250_000_000)
         self.assertEqual(result.source_to_receive_delay, timedelta(milliseconds=250))
@@ -76,7 +76,6 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ProviderTimeStatus.NEGATIVE_WALL_LATENCY)
-        self.assertFalse(result.eligible)
         self.assertEqual(result.source_to_receive_delay, timedelta(milliseconds=-50))
         self.assertEqual(result.source_clock_skew, timedelta(milliseconds=50))
 
@@ -91,7 +90,6 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ProviderTimeStatus.CLOCK_SKEW_EXCEEDED)
-        self.assertFalse(result.eligible)
         self.assertEqual(result.source_to_receive_delay, timedelta(milliseconds=-250))
         self.assertEqual(result.source_clock_skew, timedelta(milliseconds=250))
         self.assertEqual(result.quote_age, timedelta(milliseconds=500))
@@ -105,7 +103,6 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
 
         self.assertEqual(result.status, ProviderTimeStatus.NEGATIVE_MONOTONIC_LATENCY)
         self.assertEqual(result.transport_elapsed_ns, -1)
-        self.assertFalse(result.eligible)
 
     def test_future_receipt_cannot_be_used_for_earlier_decision(self) -> None:
         evidence = self.evidence(
@@ -118,7 +115,6 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ProviderTimeStatus.FUTURE_RECEIPT)
-        self.assertFalse(result.eligible)
 
     def test_timezone_equivalent_instants_compare_semantically_but_keep_exact_identity(self) -> None:
         utc_evidence = self.evidence()
@@ -138,6 +134,23 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
             offset_result.source_to_receive_delay,
         )
         self.assertNotEqual(utc_result.evidence_id, offset_result.evidence_id)
+
+    def test_opaque_sequence_identity_round_trips_without_numeric_surrogate(self) -> None:
+        opaque = self.evidence(sequence_id="opaque-clk-token")
+        result = self.assess(opaque)
+
+        self.assertEqual(result.sequence_id, "opaque-clk-token")
+        self.assertEqual(opaque.sequence_id, "opaque-clk-token")
+        self.assertNotEqual(opaque.evidence_id, self.evidence(sequence_id=17).evidence_id)
+        self.assertNotEqual(
+            self.evidence(sequence_id=1).evidence_id,
+            self.evidence(sequence_id="1").evidence_id,
+        )
+
+    def test_opaque_sequence_identity_is_bounded_and_canonical_text(self) -> None:
+        for value in ("", " leading", "trailing ", "x" * 513):
+            with self.subTest(value=value[:20]), self.assertRaises(ValueError):
+                self.evidence(sequence_id=value)
 
     def test_evidence_identity_changes_for_each_bound_dimension(self) -> None:
         base = self.evidence()

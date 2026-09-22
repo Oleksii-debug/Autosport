@@ -263,15 +263,11 @@ def _install_live_loop_guard() -> None:
 
     def guarded_recover(loop):
         progress = loop._progress
-        if (
-            progress is not None
-            and progress.phase == "append_pending"
-            and loop.paper_execution is None
-        ):
+        if progress is not None and progress.phase == "append_pending":
             try:
                 pre_action_book = _load_pre_action_path(
                     loop.pre_action_book_path,
-                    label="live no-runtime recovery",
+                    label="live append-pending recovery",
                 )
             except PaperExecutionAdoptionError as exc:
                 raise live.LiveDecisionProgressError(str(exc)) from exc
@@ -279,7 +275,10 @@ def _install_live_loop_guard() -> None:
                 raise live.LiveDecisionProgressError(
                     "append-pending recovery requires exact pre-action PaperBook witness"
                 )
-            if not loop._same_book_state(loop.book, pre_action_book):
+            if (
+                loop.paper_execution is None
+                and not loop._same_book_state(loop.book, pre_action_book)
+            ):
                 raise live.LiveDecisionProgressError(
                     "append-pending PaperBook changed without exact execution authority"
                 )

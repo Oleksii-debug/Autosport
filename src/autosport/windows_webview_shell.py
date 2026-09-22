@@ -274,6 +274,7 @@ class AutosportWebController:
         self.bank = ""
         self.log: list[str] = []
         self.last_error = ""
+        self._bridge_validation_error = ""
         self.manual_result = ""
         self.manual_status = text("ui.windows.manual_calculation.status.ready")
         self.owner_review_lines: list[str] = []
@@ -567,7 +568,7 @@ class AutosportWebController:
             surface = SURFACE_BY_KEY[self.surface_key]
             return {
                 "status": self.status,
-                "last_error": self.last_error,
+                "last_error": self._bridge_validation_error or self.last_error,
                 "workspace": str(self.workspace),
                 "active_workspace": str(self._active_workspace),
                 "bank": self.bank,
@@ -997,7 +998,7 @@ class AutosportWebController:
         refresh, but they must not become domain/log events or execute an action.
         """
         with self._lock:
-            self.last_error = message
+            self._bridge_validation_error = message
         return {
             "request_id": request_id,
             "status": "rejected",
@@ -1066,6 +1067,7 @@ class AutosportWebController:
                 "Невідома команда інтерфейсу.",
             )
         with self._lock:
+            self._bridge_validation_error = ""
             previous = self._request_results.get(request_id)
             if previous is not None:
                 previous_identity, previous_result = previous

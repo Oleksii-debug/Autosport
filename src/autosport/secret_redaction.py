@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -233,42 +234,14 @@ def safe_exception_detail(
     )
 
 
-_MAX_EXCEPTION_TYPE_LABEL_LENGTH = 128
-_SENSITIVE_EXCEPTION_TYPE_MARKERS = (
-    "apikey",
-    "applicationkey",
-    "authentication",
-    "authorization",
-    "token",
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "privatekey",
-    "credential",
-)
-
-
-def _is_safe_exception_type_label(value: str) -> bool:
-    if (
-        not value
-        or len(value) > _MAX_EXCEPTION_TYPE_LABEL_LENGTH
-        or not value.isidentifier()
-    ):
-        return False
-    normalized = _normalized_key(value)
-    return not any(
-        marker in normalized for marker in _SENSITIVE_EXCEPTION_TYPE_MARKERS
-    )
-
-
 def _safe_exception_type_label(exc: BaseException) -> str:
-    """Return the nearest bounded non-secret exception category.
+    """Return the nearest actual built-in BaseException category.
 
-    Exception class names are code metadata but are still untrusted presentation
-    input: dynamically-created provider/plugin types can encode response data,
-    credentials, or control characters in their class name. Preserve an ordinary
-    safe custom type label; otherwise walk its MRO to a safe parent category.
+    Exception class names are untrusted presentation input: dynamically-created
+    provider/plugin types can encode arbitrary response data or credentials in
+    their class name. A syntactically valid custom identifier is therefore not
+    presentation authority. Only exact built-in BaseException classes found in
+    the exception MRO may supply the rendered type label.
     """
 
     try:
@@ -282,12 +255,16 @@ def _safe_exception_type_label(exc: BaseException) -> str:
             candidate = str.__str__(
                 type.__getattribute__(candidate_type, "__name__")
             )
+            builtin_candidate = vars(builtins).get(candidate)
+            if (
+                builtin_candidate is candidate_type
+                and isinstance(candidate_type, type)
+                and issubclass(candidate_type, BaseException)
+            ):
+                return candidate
         except BaseException:
             continue
-        if _is_safe_exception_type_label(candidate):
-            return candidate
     return "BaseException"
-
 
 def safe_exception_text(
     exc: BaseException,

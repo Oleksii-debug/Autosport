@@ -409,6 +409,8 @@ class MatchbookPriceSnapshotEvidence:
             "raw_response_size_bytes": self.raw_response_size_bytes,
             "prices": self.price_projection(),
             "proves_market_has_no_liquidity": False,
+            "parsed_rows_bound_to_raw_response": False,
+            "grants_provider_acquisition_authority": False,
             "grants_execution_authority": False,
             "grants_settlement_authority": False,
             "grants_strategy_promotion_authority": False,

@@ -8,9 +8,9 @@ request cannot be durably promoted to product authority.
 
 The only estimator currently qualified here is a one-sided exact
 Clopper-Pearson bound under a pre-registered fixed-N independent Bernoulli-trial
-contract. Durable journal readback remains strict for already-issued compatible
-records, but new positive issuance is closed until canonical upstream input
-authority is composed.
+contract. Legacy durable journal bytes remain parseable only as quarantined
+audit history; both positive issuance and positive re-resolution stay closed
+until canonical upstream input authority is composed.
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ _AUTHORITY_DOMAIN = "risk-of-ruin-product-evaluator-v1"
 _AUTHORITY_KEY = "issued-results-v1"
 _JOURNAL_NAME = "risk-of-ruin-evaluator-v1.json"
 _HEX = frozenset("0123456789abcdef")
+_MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
 
 
 class RiskTargetKind(StrEnum):
@@ -103,12 +104,37 @@ def _probability(value: object, name: str) -> Decimal:
     return result
 
 
+def _fixed_point_materialization_length(value: Decimal) -> int:
+    """Return format(value, "f") size without materializing that string."""
+
+    value = _decimal(value, "decimal")
+    if value.is_zero():
+        return 1
+    sign, digits, exponent = value.as_tuple()
+    sign_length = 1 if sign else 0
+    digit_count = len(digits)
+    if exponent >= 0:
+        return sign_length + digit_count + exponent
+    if digit_count + exponent > 0:
+        return sign_length + digit_count + 1
+    return sign_length + 2 - exponent
+
+
 def _decimal_text(value: Decimal) -> str:
     value = _decimal(value, "decimal")
+    if value.is_zero():
+        return "0"
+    if (
+        _fixed_point_materialization_length(value)
+        > _MAX_FIXED_POINT_MATERIALIZATION_LENGTH
+    ):
+        raise RiskOfRuinEvaluationError(
+            "decimal fixed-point representation exceeds supported canonical size"
+        )
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
-    return "0" if text in {"", "-0"} else text
+    return text
 
 
 def _decimal_from_payload(value: object, name: str) -> Decimal:
@@ -208,7 +234,7 @@ class RiskPathObservation:
     def __post_init__(self) -> None:
         _text(self.independent_unit_id, "independent_unit_id")
         _text(self.dependence_group_id, "dependence_group_id")
-        _decimal(self.minimum_equity, "minimum_equity")
+        _decimal_text(self.minimum_equity)
         _instant(self.outcome_available_at, "outcome_available_at")
         _sha256(self.source_evidence_sha256, "source_evidence_sha256")
 
@@ -280,7 +306,7 @@ class RiskOfRuinEvaluationRequest:
                 "causal_cutoff must not be after evaluated_at"
             )
         _probability(self.confidence_level, "confidence_level")
-        _decimal(self.ruin_threshold, "ruin_threshold")
+        _decimal_text(self.ruin_threshold)
         if (
             isinstance(self.planned_independent_units, bool)
             or not isinstance(self.planned_independent_units, int)
@@ -298,6 +324,7 @@ class RiskOfRuinEvaluationRequest:
                 raise RiskOfRuinEvaluationError(
                     "evaluated stakes must be positive exact Decimals"
                 )
+            _decimal_text(stake)
         if self.target_kind is RiskTargetKind.SINGLE and len(self.evaluated_stakes) != 1:
             raise RiskOfRuinEvaluationError(
                 "single target requires exactly one evaluated stake"

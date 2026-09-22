@@ -49,7 +49,6 @@ def test_transient_failure_is_diagnostic_but_never_fallback_or_execution_authori
 
 def test_recovery_class_is_deterministic_for_every_reason() -> None:
     expected = {
-        ProviderDegradationReason.CAPABILITY_UNSUPPORTED: ProviderRecoveryClass.NO_AUTOMATIC_RETRY,
         ProviderDegradationReason.TRANSIENT_PROVIDER_FAILURE: ProviderRecoveryClass.RETRY_WITH_BACKOFF,
         ProviderDegradationReason.STALE_DATA: ProviderRecoveryClass.REFRESH_EVIDENCE,
         ProviderDegradationReason.MALFORMED_EVIDENCE: ProviderRecoveryClass.OPERATOR_REVIEW,
@@ -63,11 +62,16 @@ def test_recovery_class_is_deterministic_for_every_reason() -> None:
     for index, (reason, recovery) in enumerate(expected.items()):
         event = _event(
             reason=reason,
-            source_seed=chr(ord("a") + index),
+            source_seed=f"{index:x}",
             detail_code=f"DETAIL_{index}",
         )
         assert event.recovery_class is recovery
         assert event.automatic_fallback_authorized is False
+
+
+def test_unsupported_capability_truth_is_not_mintable_as_degradation_reason() -> None:
+    with pytest.raises(ValueError):
+        ProviderDegradationReason("capability_unsupported")
 
 
 def test_event_identity_binds_scope_capability_reason_and_source() -> None:

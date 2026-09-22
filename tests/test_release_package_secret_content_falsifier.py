@@ -267,5 +267,198 @@ class ReleasePackageSecretContentFalsifierTests(unittest.TestCase):
                 )
 
 
+    def test_bom_encoded_secret_assignments_are_rejected(self) -> None:
+        synthetic_secret = "not-a-real-secret-" + ("B" * 64)
+        text = f"api_key={synthetic_secret}\r\n"
+        cases = (
+            ("utf-8-sig", text.encode("utf-8-sig")),
+            ("utf-16-le", b"\xff\xfe" + text.encode("utf-16-le")),
+            ("utf-16-be", b"\xfe\xff" + text.encode("utf-16-be")),
+            ("utf-32-le", b"\xff\xfe\x00\x00" + text.encode("utf-32-le")),
+            ("utf-32-be", b"\x00\x00\xfe\xff" + text.encode("utf-32-be")),
+        )
+        for encoding, payload in cases:
+            with self.subTest(encoding=encoding):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_bom_encoded_environment_references_stay_clean(self) -> None:
+        text = "api_key=${AUTOSPORT_API_KEY}\r\n"
+        cases = (
+            ("utf-8-sig", text.encode("utf-8-sig")),
+            ("utf-16-le", b"\xff\xfe" + text.encode("utf-16-le")),
+            ("utf-16-be", b"\xfe\xff" + text.encode("utf-16-be")),
+            ("utf-32-le", b"\xff\xfe\x00\x00" + text.encode("utf-32-le")),
+            ("utf-32-be", b"\x00\x00\xfe\xff" + text.encode("utf-32-be")),
+        )
+        for encoding, payload in cases:
+            with self.subTest(encoding=encoding):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    result = verify_windows_package(
+                        package,
+                        expected_source_sha=self.SOURCE_SHA,
+                    )
+                    self.assertEqual(result["status"], "PASS")
+
+    def test_json_escaped_secret_key_is_rejected(self) -> None:
+        synthetic_secret = b"not-a-real-secret-" + b"C" * 64
+        payload = b'{"api\\u005fkey":"' + synthetic_secret + b'"}\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            with self.assertRaisesRegex(ValueError, "secret|credential"):
+                verify_windows_package(
+                    package,
+                    expected_source_sha=self.SOURCE_SHA,
+                )
+
+    def test_yaml_block_scalar_secret_is_rejected(self) -> None:
+        synthetic_secret = b"not-a-real-secret-" + b"D" * 64
+        cases = (
+            b"api_key: >-\n  " + synthetic_secret + b"\nnext: clean\n",
+            b"api_key: |-\n  "
+            + synthetic_secret[:30]
+            + b"\n  "
+            + synthetic_secret[30:]
+            + b"\nnext: clean\n",
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_yaml_block_scalar_environment_reference_stays_clean(self) -> None:
+        payload = b"api_key: >-\n  ${AUTOSPORT_API_KEY}\nnext: clean\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            result = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertEqual(result["status"], "PASS")
+
+    def test_short_authorization_and_cookie_carriers_are_rejected(self) -> None:
+        cases = (
+            b"Authorization: Basic dTpw\n",
+            b"Authorization: Bearer abc\n",
+            b"Cookie: sid=x\n",
+            b"Set-Cookie: sid=x; Secure\n",
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_direct_high_confidence_token_signatures_are_rejected(self) -> None:
+        cases = (
+            b"github_pat_11AA00ABCDEFGHIJKLMNOPQRSTUVWXYZ\n",
+            b"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n",
+            b"ASIAABCDEFGHIJKLMNOP\n",
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_extended_environment_references_stay_clean(self) -> None:
+        controls = (
+            b"api_key=!AUTOSPORT_RELEASE_SECRET_REFERENCE!\n",
+            b"api_key=${env:AUTOSPORT_RELEASE_SECRET_REFERENCE}\n",
+            b"api_key=${{ secrets.AUTOSPORT_RELEASE_SECRET_REFERENCE }}\n",
+            b"Authorization: Basic !AUTH_TOKEN!\n",
+        )
+        for payload in controls:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    result = verify_windows_package(
+                        package,
+                        expected_source_sha=self.SOURCE_SHA,
+                    )
+                    self.assertEqual(result["status"], "PASS")
+
+    def test_compact_inline_separators_and_comments_are_rejected(self) -> None:
+        synthetic_secret = b"not-a-real-secret-" + b"E" * 64
+        cases = (
+            b"echo safe;API_KEY=" + synthetic_secret + b"\n",
+            b"echo safe&&set API_KEY=" + synthetic_secret + b"\n",
+            b"true||export API_KEY=" + synthetic_secret + b"\n",
+            b"const x=1;// API_KEY=" + synthetic_secret + b"\n",
+            b"echo safe;# API_KEY=" + synthetic_secret + b"\n",
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_token_like_substrings_inside_unrelated_values_stay_clean(self) -> None:
+        payload = (
+            b"sha256=aaaaaaaaaaaaaaaaaghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789bbbbbbbb\n"
+            b"url=https://example.invalid/a#fragment\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            result = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertEqual(result["status"], "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from enum import Enum
 
 _SQLITE_SEQUENCE_MIN = -(1 << 63)
 _SQLITE_SEQUENCE_MAX = (1 << 63) - 1
+_MAX_OPAQUE_SEQUENCE_UTF8 = 512
 
 
 class ProviderTimeStatus(str, Enum):
@@ -42,12 +43,19 @@ def _monotonic_ns(value: object, field_name: str) -> int:
     return value
 
 
-def _sequence_id(value: object) -> int:
-    if type(value) is not int:
-        raise TypeError("sequence_id must be a non-boolean int")
-    if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
-        raise ValueError("sequence_id must fit signed 64-bit SQLite INTEGER")
-    return value
+def _sequence_id(value: object) -> int | str:
+    if type(value) is int:
+        if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
+            raise ValueError("integer sequence_id must fit signed 64-bit SQLite INTEGER")
+        return value
+    if type(value) is str:
+        if not value or value != value.strip():
+            raise ValueError("opaque sequence_id must be non-empty trimmed text")
+        encoded = value.encode("utf-8")
+        if len(encoded) > _MAX_OPAQUE_SEQUENCE_UTF8:
+            raise ValueError("opaque sequence_id exceeds UTF-8 size bound")
+        return value
+    raise TypeError("sequence_id must be an exact int or opaque string")
 
 
 def _non_negative_duration(value: object, field_name: str) -> timedelta:
@@ -81,7 +89,7 @@ class ProviderTimeEvidence:
     received_wall_at: str
     acquisition_started_monotonic_ns: int
     received_monotonic_ns: int
-    sequence_id: int
+    sequence_id: int | str
 
     def __post_init__(self) -> None:
         _aware_datetime(self.source_updated_at, "source_updated_at")
@@ -101,6 +109,9 @@ class ProviderTimeEvidence:
                 "received_monotonic_ns": self.received_monotonic_ns,
                 "received_wall_at": self.received_wall_at,
                 "sequence_id": self.sequence_id,
+                "sequence_id_kind": (
+                    "integer" if type(self.sequence_id) is int else "opaque"
+                ),
                 "source_updated_at": self.source_updated_at,
             },
             ensure_ascii=False,
@@ -116,7 +127,7 @@ class ProviderFreshnessAssessment:
     """A diagnostic result that grants no provider-write or execution authority."""
 
     evidence_id: str
-    sequence_id: int
+    sequence_id: int | str
     status: ProviderTimeStatus
     quote_age: timedelta
     source_to_receive_delay: timedelta
@@ -124,10 +135,6 @@ class ProviderFreshnessAssessment:
     source_clock_skew: timedelta
     max_quote_age: timedelta
     max_source_clock_skew: timedelta
-
-    @property
-    def eligible(self) -> bool:
-        return self.status is ProviderTimeStatus.FRESH
 
 
 def assess_provider_time_freshness(

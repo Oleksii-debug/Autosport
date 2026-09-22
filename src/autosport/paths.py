@@ -26,7 +26,7 @@ class WorkspaceConfigurationError(ValueError):
 
 def default_workspace() -> Path:
     override = os.environ.get("AUTOSPORT_WORKSPACE")
-    if override is not None and override.strip():
+    if override is not None:
         try:
             override_path = Path(override).expanduser()
         except RuntimeError as exc:

@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
@@ -110,7 +110,7 @@ def _provider_identity(value: object, *, field: str, allow_colon: bool = True) -
     return value
 
 
-def _decode_provider_json(raw: bytes) -> Any:
+def _decode_provider_json(raw: bytes, *, exact_decimals: bool = False) -> Any:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -132,6 +132,7 @@ def _decode_provider_json(raw: bytes) -> Any:
             text,
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_non_finite,
+            parse_float=Decimal if exact_decimals else float,
         )
     except json.JSONDecodeError as exc:
         raise ProviderPayloadError("provider returned invalid JSON") from exc
@@ -151,7 +152,8 @@ def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> 
         opener = build_opener(_RejectAuthenticatedRedirects())
         with opener.open(request, timeout=timeout) as response:  # nosec B310 - caller pins HTTPS provider URL
             raw = response.read()
-            payload = _decode_provider_json(raw)
+            exact_decimals = urlsplit(url).path.rstrip("/").endswith("/odds")
+            payload = _decode_provider_json(raw, exact_decimals=exact_decimals)
             return HttpJsonResponse(payload, int(response.status), dict(response.headers.items()))
     except HTTPError as exc:
         retry_after = _parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
@@ -514,11 +516,48 @@ def _market_type(key: str) -> MarketType:
     return MarketType.OTHER
 
 
+def _canonical_decimal_identity(value: Decimal, *, field: str) -> str:
+    """Return one exact numeric identity for equivalent finite Decimal values."""
+
+    if not value.is_finite():
+        raise ProviderPayloadError(f"{field} must be a finite decimal")
+    if value.is_zero():
+        return "0"
+
+    sign, digits_tuple, exponent = value.as_tuple()
+    digits = list(digits_tuple)
+    while digits and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    coefficient = "".join(str(digit) for digit in digits)
+    sign_length = 1 if sign else 0
+    if exponent >= 0:
+        if sign_length + len(coefficient) + exponent > 128:
+            raise ProviderPayloadError(f"{field} canonical identity is too long")
+        body = coefficient + ("0" * exponent)
+    else:
+        decimal_point = len(coefficient) + exponent
+        if decimal_point > 0:
+            body = coefficient[:decimal_point] + "." + coefficient[decimal_point:]
+        else:
+            leading_zeros = -decimal_point
+            if sign_length + 2 + leading_zeros + len(coefficient) > 128:
+                raise ProviderPayloadError(f"{field} canonical identity is too long")
+            body = "0." + ("0" * leading_zeros) + coefficient
+
+    result = ("-" if sign else "") + body
+    if len(result) > 128:
+        raise ProviderPayloadError(f"{field} canonical identity is too long")
+    return result
+
+
 def _market_identity(book_key: str, market_key: str, point: Decimal | None) -> str:
     if point is None or _market_type(market_key) is MarketType.WINNER:
         return f"{book_key}:{market_key}"
-    line = abs(point) if _market_type(market_key) is MarketType.HANDICAP else point
-    return f"{book_key}:{market_key}:{line}"
+    line = point.copy_abs() if _market_type(market_key) is MarketType.HANDICAP else point
+    canonical_line = _canonical_decimal_identity(line, field="market line")
+    return f"{book_key}:{market_key}:{canonical_line}"
 
 
 def _decimal_price(raw: Any) -> Decimal | None:

@@ -221,3 +221,72 @@ def test_noncanonical_or_unsupported_request_currency_is_rejected(currency: str)
             lambda *_: _response(currency="EUR"),
             currency=currency,
         )
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("currency", "GBP"),
+        ("event_ids", (999,)),
+        ("states", ("graded",)),
+        ("price_mode", "aggregated"),
+        ("minimum_liquidity", Decimal("10")),
+        ("offset", 20),
+        ("per_page", 50),
+        ("sport_key", "tennis"),
+    ],
+)
+def test_request_semantics_cannot_be_mutated_after_construction(
+    field: str,
+    replacement: object,
+) -> None:
+    client = _client(lambda *_: _response(currency="EUR"))
+
+    with pytest.raises(
+        AttributeError,
+        match="request configuration is immutable after construction",
+    ):
+        setattr(client, field, replacement)
+
+
+def test_low_level_request_config_mutation_fails_before_transport() -> None:
+    calls: list[str] = []
+
+    def transport(url, headers, timeout):
+        calls.append(url)
+        return _response(currency="EUR")
+
+    client = _client(transport)
+    frozen_query_sha256 = client.request_query_sha256
+
+    object.__setattr__(client, "event_ids", (999,))
+
+    with pytest.raises(
+        MatchbookPayloadError,
+        match="request configuration changed after construction",
+    ):
+        client.read_batch()
+
+    assert calls == []
+    assert client.request_query_sha256 == frozen_query_sha256
+
+
+def test_request_config_mutation_during_transport_fails_before_publication() -> None:
+    holder: dict[str, MatchbookReadOnlyProvider] = {}
+    calls: list[str] = []
+
+    def transport(url, headers, timeout):
+        calls.append(url)
+        object.__setattr__(holder["client"], "currency", "GBP")
+        return _response(currency="GBP")
+
+    client = _client(transport, currency="EUR")
+    holder["client"] = client
+
+    with pytest.raises(
+        MatchbookPayloadError,
+        match="request configuration changed after construction",
+    ):
+        client.read_batch()
+
+    assert len(calls) == 1
+

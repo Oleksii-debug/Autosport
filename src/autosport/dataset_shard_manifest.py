@@ -211,7 +211,19 @@ class DatasetShardManifest:
             raise ValueError(
                 "shards must be a tuple of exact DatasetShardDescriptor values"
             )
-        ordered = tuple(sorted(self.shards, key=lambda item: item.ordinal))
+        detached = tuple(
+            DatasetShardDescriptor(
+                ordinal=item.ordinal,
+                shard_id=item.shard_id,
+                relative_path=item.relative_path,
+                byte_size=item.byte_size,
+                content_sha256=item.content_sha256,
+                event_start_utc=item.event_start_utc,
+                event_end_utc=item.event_end_utc,
+            )
+            for item in self.shards
+        )
+        ordered = tuple(sorted(detached, key=lambda item: item.ordinal))
         ordinals = tuple(item.ordinal for item in ordered)
         if ordinals != tuple(range(len(ordered))):
             raise ValueError("shard ordinals must be contiguous from zero")

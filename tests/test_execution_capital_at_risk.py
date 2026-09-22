@@ -36,6 +36,7 @@ def _action(
     *,
     action_id: str = "action-1",
     bookmaker_id: str = "betfair",
+    account_id: str = "acct-1",
     side: str = "BACK",
     odds: str = "2",
     stake: str = "10",
@@ -43,7 +44,7 @@ def _action(
     return ExecutionAction(
         action_id=action_id,
         bookmaker_id=bookmaker_id,
-        account_id="acct-1",
+        account_id=account_id,
         event_id="event-1",
         market_id="1.234",
         selection_id="10",
@@ -463,6 +464,40 @@ def test_multi_action_plan_aggregates_confirmed_and_unknown_gross_commitment(
     }
     # action-c was only planned. It never crossed the durable attempt boundary.
     assert all(item.action_id != "action-c" for item in evidence.attempts)
+
+
+def test_cross_account_attempts_fail_closed_without_common_denomination(
+    tmp_path,
+) -> None:
+    action_a = _action(
+        action_id="action-a",
+        account_id="account-a",
+        stake="10",
+    )
+    action_b = _action(
+        action_id="action-b",
+        account_id="account-b",
+        stake="20",
+    )
+    plan = _plan(action_a, action_b)
+    ledger = RealExecutionLedger(tmp_path / "cross-account.jsonl")
+    ledger.reserve_plan(plan)
+
+    for index, action in enumerate(plan.actions, start=1):
+        attempt_id = f"attempt-{index}"
+        ledger.begin_attempt(
+            plan_id=plan.plan_id,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            reserved_at=RESERVED_AT,
+        )
+        ledger.mark_submitted(attempt_id, submitted_at=SUBMITTED_AT)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskUnsupported,
+        match="multiple account scopes|common-denomination",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
 
 def test_unsupported_side_fails_closed_instead_of_using_stake_as_risk(

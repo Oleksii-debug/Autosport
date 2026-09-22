@@ -478,6 +478,72 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 timeout_seconds=float("inf"),
             )
 
+    def test_response_rejects_event_outside_explicit_event_ids_scope(self):
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            event_ids=("different-event",),
+            transport=lambda *_: HttpJsonResponse([event()], 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "eventIds request scope"):
+            provider.read_batch()
+
+    def test_response_rejects_bookmaker_outside_explicit_bookmakers_scope(self):
+        payload = event()
+        payload["bookmakers"][0]["key"] = "book-b"
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            regions=(),
+            bookmakers=("book-a",),
+            transport=lambda *_: HttpJsonResponse([payload], 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        with self.assertRaisesRegex(
+            TheOddsApiPayloadError,
+            "bookmakers request scope",
+        ):
+            provider.read_batch()
+
+    def test_response_rejects_market_outside_requested_markets_scope(self):
+        payload = event(
+            market_key="totals",
+            point=Decimal("2.5"),
+        )
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            markets=("h2h",),
+            transport=lambda *_: HttpJsonResponse([payload], 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "requested markets scope"):
+            provider.read_batch()
+
+    def test_historical_response_uses_the_same_request_scope_fence(self):
+        payload = {
+            "timestamp": "2026-09-22T12:40:00Z",
+            "previous_timestamp": None,
+            "next_timestamp": None,
+            "data": [
+                event(
+                    market_key="totals",
+                    point=Decimal("2.5"),
+                    market_last_update="2026-09-22T12:39:00Z",
+                )
+            ],
+        }
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            markets=("h2h",),
+            transport=lambda *_: HttpJsonResponse(payload, 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "requested markets scope"):
+            provider.read_historical_snapshot("2026-09-22T12:42:00Z")
+
     def test_injected_transport_and_clock_are_explicitly_non_authoritative(self):
         provider = TheOddsApiProvider(
             "k",

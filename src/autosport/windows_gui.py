@@ -400,28 +400,11 @@ class WindowsAutosportApp(AutosportApp):
             self._refresh_tickets()
             if message.error is not None:
                 # ReplayWorkerMessage.error is internal diagnostic evidence, not
-                # operator-facing presentation authority. It may contain provider
-                # payload fragments or credentials. Preserve at most a bounded
-                # technical exception-class token and suppress all raw detail.
-                raw_error = message.error
-                safe_error_type = "ReplayTaskError"
-                if type(raw_error) is str:
-                    candidate = raw_error.partition(":")[0].strip()
-                    candidate_body = candidate.replace("_", "")
-                    if (
-                        candidate
-                        and candidate.isascii()
-                        and candidate_body.isalnum()
-                        and (
-                            candidate.endswith("Error")
-                            or candidate.endswith("Exception")
-                            or candidate in {"SystemExit", "KeyboardInterrupt"}
-                        )
-                    ):
-                        safe_error_type = candidate
+                # operator-facing presentation authority. Never derive operator copy,
+                # identifiers, hashes, lengths or partial tokens from the raw value.
                 safe_detail = text(
                     "ui.error.exception.message_unavailable",
-                    exception_type=safe_error_type,
+                    exception_type="REPLAY_WORKER_FAILURE",
                 )
                 replay_error = text("ui.error.replay.worker", detail=safe_detail)
                 self._append_log(replay_error)

@@ -264,11 +264,14 @@ class MatchbookReadOnlySessionTransport:
             if current is None or current.generation_id != session.generation_id:
                 return
             try:
+                logout_ns = self._clock()
                 self._lifecycle.record_logout_200(
                     generation_id=session.generation_id,
-                    monotonic_ns=self._clock(),
+                    monotonic_ns=logout_ns,
                 )
-            except SessionLifecycleError:
+            except (SessionLifecycleError, MatchbookSessionTransportError):
+                # Provider already confirmed logout. Never retain local token authority
+                # merely because the local audit/lifecycle commit could not complete.
                 self._live_session = None
                 self._condition.notify_all()
                 raise MatchbookSessionTransportError(

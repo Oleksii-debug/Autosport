@@ -39,13 +39,13 @@ def test_render_arguments_expands_case_and_package_tokens(tmp_path: Path) -> Non
     case = tmp_path / "Автоспорт Перевірка"
     package = case / "package"
     rendered = m.render_arguments(
-        ("--workspace", "{CASE_ROOT}/workspace", "--package={PACKAGE_ROOT}"),
+        ("repair-workspace", "--workspace", "{WORKSPACE_ROOT}", "--package={PACKAGE_ROOT}"),
         case_root=case,
         package_root=package,
     )
-    assert rendered[0] == "--workspace"
-    assert str(case) in rendered[1]
-    assert str(package) in rendered[2]
+    assert rendered[:2] == ("repair-workspace", "--workspace")
+    assert rendered[2] == str(case / "workspace")
+    assert str(package) in rendered[3]
 
 
 def test_rejects_executable_traversal() -> None:

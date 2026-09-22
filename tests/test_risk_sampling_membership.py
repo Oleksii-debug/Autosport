@@ -323,6 +323,50 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 )
 
 
+    def test_rejects_reversed_registry_append_order_despite_backdated_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = ScientificRegistry.initialize_pristine(
+                Path(tmp) / "scientific_registry.json"
+            )
+            registry.append(
+                ResearchProtocol(
+                    binding=self._binding(self._design()),
+                    source_sha256="f" * 64,
+                    environment_sha256="1" * 64,
+                    dataset_manifest_sha256=self.MANIFEST_SHA,
+                    available_at_utc=self.PROTOCOL_AVAILABLE,
+                )
+            )
+            registry.append(
+                DatasetSnapshot(
+                    dataset_snapshot_id=self.DATASET_ID,
+                    manifest_sha256=self.MANIFEST_SHA,
+                    source_identity="canonical-risk-run-cohort",
+                    license_identity="internal-product-evidence",
+                    causal_cutoff=self.CUTOFF,
+                    available_at_utc=self.DATASET_AVAILABLE,
+                    outcome_reveal_after=self.REVEAL_AFTER,
+                )
+            )
+            self.assertFalse(
+                registry.causal_precedes(
+                    "DatasetSnapshot",
+                    self.DATASET_ID,
+                    "ResearchProtocol",
+                    self.PROTOCOL_ID,
+                )
+            )
+
+            with self.assertRaisesRegex(
+                RiskSamplingMembershipError,
+                "append order must prove DatasetSnapshot precedes ResearchProtocol",
+            ):
+                inspect_fixed_n_risk_membership_structure(
+                    registry.path,
+                    research_protocol_id=self.PROTOCOL_ID,
+                    dataset_snapshot_id=self.DATASET_ID,
+                )
+
     def test_positive_resolution_rejects_backdateable_registry_chronology(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._registry(Path(tmp))

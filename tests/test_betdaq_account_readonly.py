@@ -299,6 +299,66 @@ def test_terminal_order_state_cannot_regress_to_open_on_newer_sequence():
         c.read_complete_current_orders()
 
 
+@pytest.mark.parametrize("reopened_status", [1, 2, 6])
+def test_cancelled_order_cannot_reopen_on_newer_provider_sequence(reopened_status):
+    c, _ = client(
+        bootstrap(
+            10,
+            order(
+                "1",
+                10,
+                status=3,
+                unmatched="0",
+                matched="1",
+                matched_price="2.5",
+            ),
+        ),
+        changed(
+            order(
+                "1",
+                11,
+                status=reopened_status,
+                unmatched="1",
+                matched="1",
+                matched_price="2.5",
+            )
+        ),
+        changed(),
+    )
+    with pytest.raises(BetdaqAccountReadOnlyError, match="reopens a cancelled order"):
+        c.read_complete_current_orders()
+
+
+@pytest.mark.parametrize("later_status", [4, 5])
+def test_cancelled_matched_order_may_progress_to_provider_settled_or_void(later_status):
+    c, _ = client(
+        bootstrap(
+            10,
+            order(
+                "1",
+                10,
+                status=3,
+                unmatched="0",
+                matched="1",
+                matched_price="2.5",
+            ),
+        ),
+        changed(
+            order(
+                "1",
+                11,
+                status=later_status,
+                unmatched="0",
+                matched="1",
+                matched_price="2.5",
+            )
+        ),
+        changed(),
+    )
+    book = c.read_complete_current_orders()
+    assert book.orders[0].status_code == later_status
+
+
 @pytest.mark.parametrize("status", [0, 7, 255])
 def test_unknown_order_status_fails_closed(status):
     c, _ = client(bootstrap(1, order("1", 1, status=status)))

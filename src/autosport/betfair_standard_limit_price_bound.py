@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-"""Decision-time Betfair standard-LIMIT adverse-price bound authority.
+"""Decision-time Betfair standard-LIMIT request-shape evidence.
 
 This module is deliberately narrower than realized execution/slippage truth. It
-re-resolves an exact canonical supervised execution action and records only the
-provider-enforced BACK LIMIT floor emitted by the canonical Betfair supervised
-write adapter. It does not predict whether an order will fill, how much will
-fill, when it will fill, or whether best execution improves its realized price.
+re-resolves an exact canonical supervised execution action and captures the
+ordinary BACK LIMIT request emitted by the canonical Betfair supervised write
+adapter. Request shape alone is not enough to prove a prospective per-fragment
+price floor: Betfair MatchMe can match BACK bets at lower prices during initial
+placement, and the product currently has no product-owned authority proving
+MatchMe is disabled or inapplicable for the exact API execution account.
 
-The authority is useful for conservative opportunity economics: on the supported
-plain BACK LIMIT path, the requested odds are the worst admissible matched odds.
-All nonstandard/smart-order paths remain outside this schema.
+Accordingly the current resolver is explicitly fail-closed: it can prove the
+standard request projection, but the economic adverse-price conclusion remains
+UNKNOWN_MATCHME_APPLICABILITY. It does not predict fill, timing, acceptance, or
+realized price.
 """
 
 from dataclasses import dataclass
@@ -36,7 +39,7 @@ from .supervised_execution import (
 )
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _PROVIDER_ID = "betfair"
 _PROVIDER_CONTRACT_ID = "betfair-exchange-standard-back-limit-fragment-floor-v1"
 _PROVIDER_CONTRACT_REF = (
@@ -55,6 +58,7 @@ class BetfairStandardLimitPriceBoundError(ValueError):
 
 
 class BetfairStandardLimitPriceBoundStatus(StrEnum):
+    UNKNOWN_MATCHME_APPLICABILITY = "UNKNOWN_MATCHME_APPLICABILITY"
     PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION = (
         "PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION"
     )
@@ -118,13 +122,13 @@ def _digest(payload: object) -> str:
 
 @dataclass(frozen=True, slots=True, init=False)
 class BetfairStandardLimitPriceBoundEvidence:
-    """Product-issued conservative price bound for one canonical action.
+    """Product-issued assessment for one canonical standard BACK LIMIT action.
 
-    ``zero_adverse_price_deterioration`` means only that a matched fragment on
-    this exact plain BACK LIMIT contract cannot be below ``price_floor_odds``.
-    It is intentionally not a statement that realized price delta is exactly
-    zero: best execution can improve price, while partial/no-fill remains an
-    independent execution-feasibility state.
+    The ordinary request shape and submitted odds are always preserved. A
+    positive per-fragment floor is authoritative only when MatchMe applicability
+    has also been proved by product-owned evidence. Until that authority exists,
+    status is UNKNOWN_MATCHME_APPLICABILITY and the submitted odds are merely the
+    candidate standard-LIMIT floor, not a guaranteed adverse-price bound.
     """
 
     execution_plan_id: str
@@ -151,6 +155,7 @@ class BetfairStandardLimitPriceBoundEvidence:
     write_adapter_id: str
     write_adapter_version: str
     status: BetfairStandardLimitPriceBoundStatus
+    matchme_applicability_proven: bool
     zero_adverse_price_deterioration: bool
     execution_feasibility_proven: bool
     realized_price_exact: bool
@@ -218,17 +223,34 @@ class BetfairStandardLimitPriceBoundEvidence:
             raise BetfairStandardLimitPriceBoundError(
                 "evidence provider contract does not match the canonical standard-LIMIT authority"
             )
-        if (
-            type(self.status) is not BetfairStandardLimitPriceBoundStatus
-            or self.status
-            is not BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
-        ):
+        if type(self.status) is not BetfairStandardLimitPriceBoundStatus:
             raise BetfairStandardLimitPriceBoundError(
                 "unsupported price-bound status"
             )
-        if self.zero_adverse_price_deterioration is not True:
+        if self.status is BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY:
+            if self.matchme_applicability_proven is not False:
+                raise BetfairStandardLimitPriceBoundError(
+                    "unknown MatchMe applicability cannot claim applicability proof"
+                )
+            if self.zero_adverse_price_deterioration is not False:
+                raise BetfairStandardLimitPriceBoundError(
+                    "unknown MatchMe applicability cannot claim zero adverse price deterioration"
+                )
+        elif (
+            self.status
+            is BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
+        ):
+            if self.matchme_applicability_proven is not True:
+                raise BetfairStandardLimitPriceBoundError(
+                    "positive price-floor status requires MatchMe applicability proof"
+                )
+            if self.zero_adverse_price_deterioration is not True:
+                raise BetfairStandardLimitPriceBoundError(
+                    "positive price-floor status requires zero adverse price deterioration"
+                )
+        else:
             raise BetfairStandardLimitPriceBoundError(
-                "canonical standard LIMIT evidence must preserve the provider price floor"
+                "unsupported price-bound status"
             )
         if self.execution_feasibility_proven is not False:
             raise BetfairStandardLimitPriceBoundError(
@@ -273,7 +295,8 @@ class BetfairStandardLimitPriceBoundEvidence:
             "write_adapter_id": self.write_adapter_id,
             "write_adapter_version": self.write_adapter_version,
             "status": self.status.value,
-            "zero_adverse_price_deterioration": True,
+            "matchme_applicability_proven": self.matchme_applicability_proven,
+            "zero_adverse_price_deterioration": self.zero_adverse_price_deterioration,
             "execution_feasibility_proven": False,
             "realized_price_exact": False,
         }
@@ -487,8 +510,9 @@ def _issue_evidence(
         "provider_contract_ref": _PROVIDER_CONTRACT_REF,
         "write_adapter_id": _WRITE_ADAPTER_ID,
         "write_adapter_version": _WRITE_ADAPTER_VERSION,
-        "status": BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION,
-        "zero_adverse_price_deterioration": True,
+        "status": BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY,
+        "matchme_applicability_proven": False,
+        "zero_adverse_price_deterioration": False,
         "execution_feasibility_proven": False,
         "realized_price_exact": False,
     }
@@ -503,13 +527,17 @@ def resolve_betfair_standard_limit_price_bound(
     bound: BoundSupervisedExecutionPlan,
     action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
-    """Re-resolve one exact current standard BACK LIMIT price floor.
+    """Re-resolve one exact current standard BACK LIMIT request assessment.
 
     The caller supplies only the bound plan and an action identity. No caller
     instruction, price bound, zero/slippage flag, provider setting, accepted
     price, or fill assumption is accepted. The action and its quote are
-    re-resolved from the immutable bound plan, and the result remains explicitly
-    silent about execution feasibility and favorable best-price improvement.
+    re-resolved from the immutable bound plan.
+
+    The current product has no authenticated product-owned MatchMe
+    applicability/state authority for the exact Betfair execution account.
+    Therefore an otherwise canonical ordinary LIMIT request remains
+    UNKNOWN_MATCHME_APPLICABILITY and cannot claim zero adverse deterioration.
     """
 
     if type(bound) is not BoundSupervisedExecutionPlan:

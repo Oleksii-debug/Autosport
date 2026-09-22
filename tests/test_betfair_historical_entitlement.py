@@ -163,7 +163,7 @@ def _acquire(monkeypatch: pytest.MonkeyPatch):
     return client, historical, snapshot, listing, evidence, raw
 
 
-def test_full_provider_purchase_listing_and_download_binding(
+def test_structural_purchase_listing_download_binding_stays_non_authoritative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, historical, snapshot, listing, evidence, raw = _acquire(monkeypatch)
@@ -252,7 +252,7 @@ def test_http_200_non_bzip2_download_cannot_mint_file_evidence(
         historical.download_file(snapshot, listing, PATH_A)
 
 
-def test_mutated_download_bytes_fail_authoritative_revalidation(
+def test_mutated_download_bytes_fail_integrity_revalidation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, historical, _, _, evidence, raw = _acquire(monkeypatch)

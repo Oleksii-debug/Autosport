@@ -263,6 +263,26 @@ def test_result_after_action_expiry_is_expired(monkeypatch):
     assert admission.state is ProphetXGeolocationState.EXPIRED
 
 
+def test_response_arriving_after_expiry_cannot_keep_pre_request_allow(monkeypatch):
+    monkeypatch.setattr(
+        UrllibProphetXGeolocationTransport,
+        "post",
+        lambda self, endpoint, *, body, timeout_seconds: response(),
+    )
+    times = iter(
+        (
+            "2026-09-22T21:04:59+00:00",
+            "2026-09-22T21:05:01+00:00",
+        )
+    )
+    admission = ProphetXGeolocationClient(clock=lambda: next(times)).check(
+        action(),
+        "203.0.113.9",
+    )
+    assert admission.state is ProphetXGeolocationState.EXPIRED
+    assert admission.observed_at == "2026-09-22T21:05:01+00:00"
+
+
 def test_transport_refuses_unqualified_origin():
     with pytest.raises(ProphetXGeolocationError, match="unqualified"):
         UrllibProphetXGeolocationTransport().post(

@@ -290,14 +290,15 @@ def safe_exception_text(
 ) -> str:
     """Render a bounded Type: detail string and redact secret material."""
 
+    secrets = tuple(extra_secret_values)
     exception_type = _safe_exception_type_label(exc)
     detail = safe_exception_detail(
         exc,
         unavailable_detail=unavailable_detail,
-        extra_secret_values=extra_secret_values,
+        extra_secret_values=secrets,
     )
     rendered = exception_type if not detail else exception_type + ": " + detail
     return redact_operator_text(
         rendered,
-        extra_secret_values=extra_secret_values,
+        extra_secret_values=secrets,
     )

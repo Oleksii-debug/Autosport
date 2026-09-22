@@ -45,6 +45,7 @@ class HttpJsonResponse:
     status_code: int
     headers: Mapping[str, str]
     final_url: str | None = None
+    body_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,7 @@ class TheOddsApiRequestEvidence:
     observed_at: str
     provider_origin_verified: bool
     receipt_clock_verified: bool
+    response_sha256: str | None
     requested_snapshot_at: str | None = None
     actual_snapshot_at: str | None = None
     quota_remaining: int | None = None
@@ -113,6 +115,7 @@ class TheOddsApiRequestEvidence:
             "observed_at": self.observed_at,
             "provider_origin_verified": self.provider_origin_verified,
             "receipt_clock_verified": self.receipt_clock_verified,
+            "response_sha256": self.response_sha256,
             "requested_snapshot_at": self.requested_snapshot_at,
             "actual_snapshot_at": self.actual_snapshot_at,
             "request_fingerprint": self.request_fingerprint,
@@ -211,11 +214,13 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
                 raise TheOddsApiTransportError(
                     "The Odds API final URL does not match the canonical request URL"
                 )
+            raw_body = response.read()
             return HttpJsonResponse(
-                payload=_decode_provider_json(response.read()),
+                payload=_decode_provider_json(raw_body),
                 status_code=int(response.status),
                 headers=dict(response.headers.items()),
                 final_url=final_url,
+                body_sha256=hashlib.sha256(raw_body).hexdigest(),
             )
     except HTTPError as exc:
         http_status = int(exc.code)
@@ -340,6 +345,20 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
         if str(key).lower() == wanted:
             return str(value)
     return None
+
+
+def _optional_sha256(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise TheOddsApiPayloadError(
+            f"{field} must be a lowercase hexadecimal SHA-256 digest"
+        )
+    return value
 
 
 def _quota_header(headers: Mapping[str, str], name: str) -> int | None:
@@ -483,13 +502,18 @@ class TheOddsApiProvider:
             response = self._request(self._current_url())
             observed_at = _timestamp(self.clock(), "observed_at")
             evidence = self._request_evidence(
-                "current", observed_at, response.headers
+                "current",
+                observed_at,
+                response.headers,
+                response_sha256=response.body_sha256,
             )
             self._pending_quotes = self._parse_current_payload(
                 response.payload, observed_at, evidence
             )
             self._pending_offset = 0
-            self._pending_cursor = evidence.request_fingerprint
+            self._pending_cursor = (
+                evidence.response_sha256 or evidence.request_fingerprint
+            )
             self._last_request_evidence = evidence
 
         start = self._pending_offset
@@ -559,6 +583,7 @@ class TheOddsApiProvider:
             "historical",
             observed_at,
             response.headers,
+            response_sha256=response.body_sha256,
             requested_snapshot_at=requested_at,
             actual_snapshot_at=snapshot_at,
         )
@@ -612,6 +637,14 @@ class TheOddsApiProvider:
             raise TheOddsApiTransportError(
                 "The Odds API product transport did not bind the exact final URL"
             )
+        body_sha256 = _optional_sha256(
+            response.body_sha256,
+            "response.body_sha256",
+        )
+        if self._provider_origin_verified and body_sha256 is None:
+            raise TheOddsApiPayloadError(
+                "provider-origin-verified response requires exact response SHA-256"
+            )
         return response
 
     def _provenance_quality_flags(self) -> tuple[str, ...]:
@@ -656,6 +689,7 @@ class TheOddsApiProvider:
         observed_at: str,
         headers: Mapping[str, str],
         *,
+        response_sha256: str | None,
         requested_snapshot_at: str | None = None,
         actual_snapshot_at: str | None = None,
     ) -> TheOddsApiRequestEvidence:
@@ -671,6 +705,10 @@ class TheOddsApiProvider:
             observed_at=observed_at,
             provider_origin_verified=self._provider_origin_verified,
             receipt_clock_verified=self._receipt_clock_verified,
+            response_sha256=_optional_sha256(
+                response_sha256,
+                "response.body_sha256",
+            ),
             requested_snapshot_at=requested_snapshot_at,
             actual_snapshot_at=actual_snapshot_at,
             quota_remaining=_quota_header(headers, "x-requests-remaining"),

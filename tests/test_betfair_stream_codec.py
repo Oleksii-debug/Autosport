@@ -24,11 +24,11 @@ def _image(*, clk: str = "clk-1", initial: str = "initial-1", pt: int = 1000) ->
         "initialClk": initial,
         "clk": clk,
         "pt": pt,
-        "con": True,
         "mc": [
             {
                 "id": "1.234",
                 "img": True,
+                "con": True,
                 "rc": [
                     {
                         "id": 101,
@@ -451,3 +451,91 @@ def test_same_clock_different_stream_health_is_not_a_duplicate() -> None:
     unreliable["status"] = 503
     with pytest.raises(ValueError, match="same Betfair clk"):
         state.apply(decode_market_change_message(unreliable))
+
+
+def test_crlf_decoder_poison_after_mixed_valid_invalid_batch_prevents_frame_skip() -> None:
+    decoder = BetfairCrlfJsonDecoder()
+    good_a = b'{"op":"mcm","pt":1,"clk":"a","mc":[]}\r\n'
+    bad_b = b'{"op":"mcm","pt":NaN,"clk":"bad","mc":[]}\r\n'
+    good_c = b'{"op":"mcm","pt":3,"clk":"c","mc":[]}\r\n'
+
+    with pytest.raises(ValueError, match="strict UTF-8 JSON"):
+        decoder.feed(good_a + bad_b + good_c)
+
+    with pytest.raises(ValueError, match="decoder failed"):
+        decoder.feed(b'{"op":"mcm","pt":4,"clk":"d","mc":[]}\r\n')
+    with pytest.raises(ValueError, match="decoder failed"):
+        decoder.finish()
+
+
+def test_market_level_conflation_is_authoritative_over_nonschema_top_level_con() -> None:
+    raw = _image()
+    raw["con"] = False
+    raw["mc"][0]["con"] = True
+    assert decode_market_change_message(raw).conflated is True
+
+    raw = _image()
+    raw["con"] = True
+    raw["mc"][0]["con"] = False
+    assert decode_market_change_message(raw).conflated is False
+
+
+def test_market_level_conflation_is_aggregated_and_malformed_value_fails_closed() -> None:
+    raw = _image()
+    raw["mc"][0]["con"] = False
+    raw["mc"].append({"id": "2.000", "img": True, "con": True, "rc": []})
+    frame = decode_market_change_message(raw)
+    assert frame.conflated is True
+    assert [market.conflated for market in frame.market_changes] == [False, True]
+
+    malformed = _image()
+    malformed["mc"][0]["con"] = "true"
+    with pytest.raises(ValueError, match="market.con"):
+        decode_market_change_message(malformed)
+
+
+@pytest.mark.parametrize("heartbeat_ms", [500, 5000, 5001, 30000])
+def test_server_reported_inbound_heartbeat_bounds_accept_documented_range(
+    heartbeat_ms: int,
+) -> None:
+    raw = _image()
+    raw["heartbeatMs"] = heartbeat_ms
+    raw["conflateMs"] = 180000
+
+    frame = decode_market_change_message(raw)
+    assert frame.heartbeat_ms == heartbeat_ms
+    assert frame.conflate_ms == 180000
+
+    result = BetfairMarketStreamState().apply(frame)
+    assert result.heartbeat_ms == heartbeat_ms
+    assert result.conflate_ms == 180000
+
+
+@pytest.mark.parametrize("heartbeat_ms", [499, 30001, True, 500.0, "5000"])
+def test_server_reported_inbound_heartbeat_invalid_values_fail_closed(
+    heartbeat_ms: object,
+) -> None:
+    raw = _image()
+    raw["heartbeatMs"] = heartbeat_ms
+    with pytest.raises(ValueError, match="heartbeatMs"):
+        decode_market_change_message(raw)
+
+
+@pytest.mark.parametrize("conflate_ms", [-1, True, 1.5, "180000"])
+def test_server_reported_conflate_ms_requires_nonnegative_exact_integer(
+    conflate_ms: object,
+) -> None:
+    raw = _image()
+    raw["conflateMs"] = conflate_ms
+    with pytest.raises(ValueError, match="conflateMs"):
+        decode_market_change_message(raw)
+
+
+def test_absent_server_timing_metadata_remains_explicitly_unknown() -> None:
+    frame = decode_market_change_message(_image())
+    assert frame.conflate_ms is None
+    assert frame.heartbeat_ms is None
+
+    result = BetfairMarketStreamState().apply(frame)
+    assert result.conflate_ms is None
+    assert result.heartbeat_ms is None

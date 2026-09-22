@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 import time
 from typing import Callable
+from weakref import ref
 
 SCHEMA_VERSION = 1
 TIMING_SCOPE = "transport_round_trip"
@@ -27,6 +28,7 @@ def _make_witness_issuance_gate():
         "autosport_transport_timing_witness_issuance",
         default=False,
     )
+    issued: dict[int, tuple[object, str]] = {}
 
     def active() -> bool:
         return gate.get()
@@ -34,16 +36,50 @@ def _make_witness_issuance_gate():
     def issue(builder: Callable[[], "TransportRoundTripWitness"]):
         token = gate.set(True)
         try:
-            return builder()
+            witness = builder()
         finally:
             gate.reset(token)
 
-    return active, issue
+        witness_key = id(witness)
+
+        def forget(_weakref: object, *, key: int = witness_key) -> None:
+            issued.pop(key, None)
+
+        issued[witness_key] = (
+            ref(witness, forget),
+            witness.evidence_sha256,
+        )
+        return witness
+
+    def assert_authoritative(witness: "TransportRoundTripWitness") -> None:
+        if not isinstance(witness, TransportRoundTripWitness):
+            raise TransportTimingEvidenceError(
+                "transport timing witness type is not canonical"
+            )
+        record = issued.get(id(witness))
+        if record is None or record[0]() is not witness:
+            raise TransportTimingEvidenceError(
+                "transport timing witness was not issued by the canonical measurement path"
+            )
+        current_fingerprint = _digest(
+            witness.to_dict(include_evidence_sha256=False)
+        )
+        if (
+            record[1] != current_fingerprint
+            or witness.evidence_sha256 != current_fingerprint
+        ):
+            raise TransportTimingEvidenceError(
+                "transport timing witness changed after canonical issuance"
+            )
+
+    return active, issue, assert_authoritative
 
 
-_witness_issuance_active, _issue_transport_timing_witness = (
-    _make_witness_issuance_gate()
-)
+(
+    _witness_issuance_active,
+    _issue_transport_timing_witness,
+    _assert_transport_timing_witness_authoritative,
+) = _make_witness_issuance_gate()
 del _make_witness_issuance_gate
 
 
@@ -98,7 +134,7 @@ def _digest(value: object) -> str:
     return sha256(_canonical_bytes(value)).hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class TransportRoundTripWitness:
     """One exact local synchronous transport-call timing witness.
 
@@ -189,6 +225,16 @@ class TransportRoundTripWitness:
             "evidence_sha256",
             _digest(self.to_dict(include_evidence_sha256=False)),
         )
+
+    def assert_authoritative(
+        self,
+        _assertion: Callable[["TransportRoundTripWitness"], None] = (
+            _assert_transport_timing_witness_authoritative
+        ),
+    ) -> None:
+        """Reject copies, caller-minted objects and in-place post-issuance mutation."""
+
+        _assertion(self)
 
     def to_dict(self, *, include_evidence_sha256: bool = True) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -322,6 +368,8 @@ class TransportRoundTripMeasurement:
             raise TransportTimingEvidenceError(
                 "witness must be TransportRoundTripWitness or None"
             )
+        if self.witness is not None:
+            self.witness.assert_authoritative()
         if self.timing_unavailable_reason is not None:
             _text(self.timing_unavailable_reason, "timing_unavailable_reason")
         if (self.witness is None) == (self.timing_unavailable_reason is None):
@@ -356,6 +404,8 @@ class TransportRoundTripMeasurement:
 
     @property
     def timing_available(self) -> bool:
+        if self.witness is not None:
+            self.witness.assert_authoritative()
         return self.witness is not None
 
     def unwrap(self) -> bytes:
@@ -366,6 +416,8 @@ class TransportRoundTripMeasurement:
 
     def __iter__(self):
         yield self.unwrap()
+        if self.witness is not None:
+            self.witness.assert_authoritative()
         yield self.witness
 
 
@@ -560,3 +612,4 @@ measure_transport_round_trip = _bind_product_clock(
 del _bind_product_clock
 del _issue_transport_timing_witness
 del _witness_issuance_active
+del _assert_transport_timing_witness_authoritative

@@ -154,12 +154,32 @@ def resolve_active_generation(
     root = Path(install_root)
     if not root.is_absolute():
         raise LaunchIdentityError("install_root must be absolute")
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise LaunchIdentityError("install_root does not resolve to an existing directory") from exc
     executable = root.joinpath(*parts)
-    if not executable.is_file():
+    try:
+        resolved_executable = executable.resolve(strict=True)
+    except OSError as exc:
+        raise LaunchIdentityError("active-generation executable is missing") from exc
+    try:
+        resolved_executable.relative_to(resolved_root)
+    except ValueError as exc:
+        raise LaunchIdentityError(
+            "active-generation executable resolves outside the install root"
+        ) from exc
+    if not resolved_executable.is_file():
         raise LaunchIdentityError("active-generation executable is missing")
-    actual_executable_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+
+    digest = hashlib.sha256()
+    with resolved_executable.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_executable_sha256 = digest.hexdigest()
     if actual_executable_sha256 != executable_sha256:
         raise LaunchIdentityError("active-generation executable digest mismatch")
+    executable = resolved_executable
 
     return ResolvedGeneration(
         generation=generation,

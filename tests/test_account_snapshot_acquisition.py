@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import sqlite3
@@ -81,6 +82,17 @@ def _credentials() -> BetfairSessionCredentials:
 
 def _balance_capabilities() -> frozenset[BookmakerCapability]:
     return frozenset({BookmakerCapability.BALANCE_READ})
+
+
+class _ControlledDateTime(datetime):
+    current = datetime(2026, 9, 21, 18, 0, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        value = cls.current
+        if tz is None:
+            return value.replace(tzinfo=None)
+        return value.astimezone(tz)
 
 
 def test_raw_acquisition_minting_seams_are_not_exposed() -> None:
@@ -232,6 +244,56 @@ def test_retry_identity_is_idempotent_but_new_read_preserves_identical_content(
             "SELECT COUNT(*) FROM account_snapshot_acquisitions"
         ).fetchone()[0]
     assert count == 2
+
+
+def test_new_acquisition_id_preserves_later_identical_read_time(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "temporal.sqlite3"
+    monkeypatch.setattr(betfair_readonly, "datetime", _ControlledDateTime)
+
+    first_calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    first = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials(),
+    ).acquire(
+        _balance_capabilities(),
+        acquisition_id="temporal-read-1",
+    )
+    assert len(first_calls) == 2
+    assert first.receipt.acquired_at == "2026-09-21T18:00:00+00:00"
+
+    _ControlledDateTime.current = datetime(
+        2026, 9, 21, 18, 1, 0, tzinfo=timezone.utc
+    )
+    retry_calls = _install_transport(monkeypatch, [])
+    retry = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials(),
+    ).acquire(
+        _balance_capabilities(),
+        acquisition_id="temporal-read-1",
+    )
+    assert retry_calls == []
+    assert retry == first
+
+    second_calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    second = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials(),
+    ).acquire(
+        _balance_capabilities(),
+        acquisition_id="temporal-read-2",
+    )
+    assert len(second_calls) == 2
+    assert second.receipt.acquisition_id != first.receipt.acquisition_id
+    assert second.receipt.source_observation_id == first.receipt.source_observation_id
+    assert (
+        second.receipt.snapshot_content_sha256
+        == first.receipt.snapshot_content_sha256
+    )
+    assert second.receipt.acquired_at == "2026-09-21T18:01:00+00:00"
 
 
 def test_acquisition_id_reuse_with_changed_scope_fails_before_provider_io(

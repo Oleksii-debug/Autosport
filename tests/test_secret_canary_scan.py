@@ -36,7 +36,14 @@ def test_clean_tree_reports_only_canary_digest(tmp_path: Path) -> None:
         ("utf-16le", CANARY.encode("utf-16le")),
         ("utf-16be", CANARY.encode("utf-16be")),
         ("url-percent", quote(CANARY, safe="").encode("ascii")),
-        ("url-percent-lower", quote(CANARY, safe="").lower().encode("ascii")),
+        (
+            "url-percent-lower",
+            re.sub(
+                r"%[0-9A-F]{2}",
+                lambda match: match.group(0).lower(),
+                quote(CANARY, safe=""),
+            ).encode("ascii"),
+        ),
     ],
 )
 def test_detects_supported_secret_encodings(
@@ -54,6 +61,19 @@ def test_detects_supported_secret_encodings(
     assert len(report.findings) == 1
     assert report.findings[0].encodings
     assert CANARY not in repr(report)
+
+
+def test_url_percent_lowercase_hex_does_not_lowercase_literal_ascii(
+    tmp_path: Path,
+) -> None:
+    # Percent-hex digits are case-insensitive, but unescaped ASCII bytes are not.
+    false_variant = quote(CANARY, safe="").lower().encode("ascii")
+    (tmp_path / "case-sensitive-url.bin").write_bytes(false_variant)
+
+    report = scan_secret_canary(tmp_path, CANARY)
+
+    assert report.status == "CLEAN"
+    assert report.exit_code == 0
 
 
 def test_detects_match_crossing_stream_chunk_boundary(tmp_path: Path) -> None:

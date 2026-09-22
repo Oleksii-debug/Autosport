@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from autosport.matchbook_session_lifecycle import (
@@ -9,6 +11,7 @@ from autosport.matchbook_session_lifecycle import (
     RetryDisposition,
     SessionClockRollbackError,
     SessionLifecycleError,
+    SessionReadGenerationTicket,
     SessionState,
 )
 
@@ -317,3 +320,110 @@ def test_cold_snapshot_round_trip_stays_cold() -> None:
 
     assert restored.state is SessionState.COLD
     assert restored.restart_requires_reauth is False
+
+
+def test_read_generation_ticket_authorizes_one_current_positive_commit() -> None:
+    lifecycle = active()
+    ticket = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+
+    generation = lifecycle.authorize_read_response_commit(
+        ticket,
+        monotonic_ns=ns(21),
+    )
+
+    assert generation == "gen-1"
+    assert lifecycle.state is SessionState.ACTIVE
+    with pytest.raises(SessionLifecycleError, match="no longer valid"):
+        lifecycle.authorize_read_response_commit(ticket, monotonic_ns=ns(22))
+
+
+def test_copied_or_caller_constructed_read_ticket_cannot_mint_commit_authority() -> None:
+    lifecycle = active()
+    issued = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    copied = replace(issued)
+    caller_built = SessionReadGenerationTicket(
+        ticket_id=issued.ticket_id + 1,
+        generation_id="gen-1",
+        issued_monotonic_ns=ns(20),
+    )
+
+    with pytest.raises(SessionLifecycleError, match="not issued here"):
+        lifecycle.authorize_read_response_commit(copied, monotonic_ns=ns(21))
+    with pytest.raises(SessionLifecycleError, match="not issued here"):
+        lifecycle.authorize_read_response_commit(caller_built, monotonic_ns=ns(21))
+
+    assert lifecycle.authorize_read_response_commit(
+        issued,
+        monotonic_ns=ns(21),
+    ) == "gen-1"
+
+
+def test_late_predecessor_read_response_cannot_mutate_successor_generation_clock() -> None:
+    lifecycle = active()
+    ticket = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    lifecycle.record_login_200(generation_id="gen-2", monotonic_ns=ns(30))
+    before = lifecycle.audit_snapshot()
+
+    with pytest.raises(SessionLifecycleError, match="no longer valid"):
+        lifecycle.authorize_read_response_commit(ticket, monotonic_ns=ns(21))
+
+    assert lifecycle.audit_snapshot() == before
+    assert lifecycle.generation_id == "gen-2"
+    assert lifecycle.state is SessionState.ACTIVE
+
+
+@pytest.mark.parametrize("invalidator", ["401", "ambiguous", "network", "logout"])
+def test_auth_uncertainty_or_terminal_transition_invalidates_inflight_read_ticket(
+    invalidator: str,
+) -> None:
+    lifecycle = active()
+    ticket = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+
+    if invalidator == "401":
+        lifecycle.record_get_session_result(
+            generation_id="gen-1", http_status=401, monotonic_ns=ns(21)
+        )
+    elif invalidator == "ambiguous":
+        lifecycle.record_get_session_result(
+            generation_id="gen-1", http_status=503, monotonic_ns=ns(21)
+        )
+    elif invalidator == "network":
+        lifecycle.record_network_failure(
+            generation_id="gen-1", monotonic_ns=ns(21)
+        )
+    else:
+        lifecycle.record_logout_200(
+            generation_id="gen-1", monotonic_ns=ns(21)
+        )
+
+    before = lifecycle.audit_snapshot()
+    with pytest.raises(SessionLifecycleError, match="no longer valid"):
+        lifecycle.authorize_read_response_commit(ticket, monotonic_ns=ns(22))
+    assert lifecycle.audit_snapshot() == before
+
+
+def test_restart_cannot_reuse_process_local_read_generation_ticket() -> None:
+    original = active()
+    ticket = original.capture_read_generation(monotonic_ns=ns(20))
+    restored = MatchbookSessionLifecycle.from_audit_snapshot(original.audit_snapshot())
+    restored.record_login_200(generation_id="gen-2", monotonic_ns=ns(1))
+    before = restored.audit_snapshot()
+
+    with pytest.raises(SessionLifecycleError, match="not issued here"):
+        restored.authorize_read_response_commit(ticket, monotonic_ns=ns(2))
+
+    assert restored.audit_snapshot() == before
+
+
+def test_read_ticket_capture_requires_active_session_and_respects_clock_rollback() -> None:
+    lifecycle = MatchbookSessionLifecycle()
+    with pytest.raises(SessionLifecycleError, match="active session generation"):
+        lifecycle.capture_read_generation(monotonic_ns=0)
+
+    lifecycle.record_login_200(generation_id="gen-1", monotonic_ns=ns(10))
+    lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    with pytest.raises(SessionClockRollbackError):
+        lifecycle.capture_read_generation(monotonic_ns=ns(19))
+
+    assert lifecycle.state is SessionState.CLOCK_FAULT
+    assert lifecycle.is_active is False

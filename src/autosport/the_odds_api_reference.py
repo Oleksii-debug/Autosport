@@ -495,6 +495,10 @@ class TheOddsApiReferenceProvider:
                     bookmaker.get("key"),
                     field="bookmaker.key",
                 )
+                if self.bookmakers and bookmaker_key not in self.bookmakers:
+                    raise TheOddsApiPayloadError(
+                        "provider returned bookmaker outside requested scope"
+                    )
                 bookmaker_title = _text(
                     bookmaker.get("title"),
                     field="bookmaker.title",
@@ -518,6 +522,10 @@ class TheOddsApiReferenceProvider:
                         market.get("key"),
                         field="market.key",
                     )
+                    if market_key not in self.markets:
+                        raise TheOddsApiPayloadError(
+                            "provider returned market outside requested scope"
+                        )
                     market_last_update = _optional_timestamp(
                         market.get("last_update"),
                         field="market.last_update",

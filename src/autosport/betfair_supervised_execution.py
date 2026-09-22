@@ -1154,6 +1154,34 @@ def execute_betfair_supervised_action(
             action_id=action_id,
             attempt_id=attempt_id,
         )
+        attempt_state = ledger.attempt_state(attempt_id)
+        if attempt_state is AttemptState.SUBMITTED:
+            # SUBMITTED is a durable uncertainty boundary. Re-entering the
+            # same attempt after a crash must never transmit placeOrders again:
+            # the previous process may have reached Betfair before dying.
+            provider_order_ref = ledger.provider_order_reference(
+                attempt_id=attempt_id,
+                provider_id=action.bookmaker_id,
+            )
+            if provider_order_ref is None:
+                raise BetfairSupervisedExecutionError(
+                    "submitted Betfair attempt lacks durable provider order reference"
+                )
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_existing_submitted_"
+                    "requires_readback"
+                ),
+                observed_at=now(),
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                None,
+                None,
+            )
         provider_order_ref = ledger.bind_provider_order_reference(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,

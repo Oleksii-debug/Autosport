@@ -259,6 +259,30 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("list rows are not exposed" in item for item in report["failures"]))
 
+    def test_provider_trouble_is_redacted_before_evidence_projection(self):
+        description = self._passing_description()
+        secret_bearer = "ProviderTroubleBearer804"
+        secret_key = "ProviderTroubleApiKey804"
+        provider_trouble = (
+            f"Authorization: Bearer {secret_bearer}; "
+            f"api_key={secret_key}; ordinary=provider-timeout"
+        )
+        report = self._summarize(
+            SimpleNamespace(
+                **{
+                    **description.__dict__,
+                    "provider_trouble": (provider_trouble,),
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "FAIL")
+        rendered = "\n".join(report["provider_trouble"] + report["failures"])
+        self.assertIn("[REDACTED]", rendered)
+        self.assertIn("ordinary=provider-timeout", rendered)
+        self.assertNotIn(secret_bearer, rendered)
+        self.assertNotIn(secret_key, rendered)
+
     def test_failure_artifact_uses_shared_secret_redaction_boundary(self):
         class ProviderOpaqueMarker804Error(RuntimeError):
             pass

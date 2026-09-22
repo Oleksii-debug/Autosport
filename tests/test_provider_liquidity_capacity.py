@@ -22,6 +22,7 @@ def _projection(
     *,
     depth: int | None = 3,
     virtualise: bool = False,
+    rollover_stakes: bool = False,
     rollup_settings: tuple[tuple[str, str], ...] = (("model", "STAKE"),),
 ) -> ProjectionIdentity:
     if projection is OfferProjection.EX_ALL_OFFERS:
@@ -29,6 +30,7 @@ def _projection(
     return ProjectionIdentity(
         projection=projection,
         virtualise=virtualise,
+        rollover_stakes=rollover_stakes,
         rollup_settings=rollup_settings,
         depth=depth,
     )
@@ -284,6 +286,7 @@ def test_projection_rejects_ambiguous_depth_and_duplicate_rollup_keys() -> None:
         ProjectionIdentity(
             OfferProjection.EX_BEST_OFFERS,
             virtualise=False,
+            rollover_stakes=False,
             rollup_settings=(),
             depth=None,
         )
@@ -291,6 +294,7 @@ def test_projection_rejects_ambiguous_depth_and_duplicate_rollup_keys() -> None:
         ProjectionIdentity(
             OfferProjection.EX_ALL_OFFERS,
             virtualise=False,
+            rollover_stakes=False,
             rollup_settings=(),
             depth=3,
         )
@@ -298,6 +302,7 @@ def test_projection_rejects_ambiguous_depth_and_duplicate_rollup_keys() -> None:
         ProjectionIdentity(
             OfferProjection.EX_BEST_OFFERS,
             virtualise=False,
+            rollover_stakes=False,
             rollup_settings=(("model", "STAKE"), ("model", "PAYOUT")),
             depth=3,
         )
@@ -308,9 +313,39 @@ def test_projection_rejects_unknown_virtualise_semantics() -> None:
         ProjectionIdentity(
             OfferProjection.EX_BEST_OFFERS,
             virtualise=None,  # type: ignore[arg-type]
+            rollover_stakes=False,
             rollup_settings=(),
             depth=3,
         )
+
+
+def test_projection_rejects_rollover_or_unknown_volume_semantics() -> None:
+    with pytest.raises(TypeError, match="rollover_stakes must be bool"):
+        ProjectionIdentity(
+            OfferProjection.EX_BEST_OFFERS,
+            virtualise=False,
+            rollover_stakes=None,  # type: ignore[arg-type]
+            rollup_settings=(),
+            depth=3,
+        )
+
+    with pytest.raises(ValueError, match="rollover_stakes=true is unsupported"):
+        ProjectionIdentity(
+            OfferProjection.EX_BEST_OFFERS,
+            virtualise=False,
+            rollover_stakes=True,
+            rollup_settings=(),
+            depth=3,
+        )
+
+    explicit_independent_sizes = ProjectionIdentity(
+        OfferProjection.EX_BEST_OFFERS,
+        virtualise=False,
+        rollover_stakes=False,
+        rollup_settings=(),
+        depth=3,
+    )
+    assert explicit_independent_sizes.rollover_stakes is False
 
 
 class _RepeatedHourTimezone(tzinfo):

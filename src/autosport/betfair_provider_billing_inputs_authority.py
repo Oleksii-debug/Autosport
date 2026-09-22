@@ -143,7 +143,10 @@ def _build_observation_authority():
 
     # Strongly retaining the issued object prevents id reuse while its issuance is
     # authoritative. The stored projection detects object.__setattr__ tampering.
-    issued: dict[int, tuple[object, tuple[object, ...]]] = {}
+    issued: dict[
+        int,
+        tuple[object, tuple[object, ...], BetfairSessionCredentials],
+    ] = {}
 
     def assert_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
@@ -224,15 +227,29 @@ def _build_observation_authority():
                 "provider billing observation failed canonical validation"
             ) from exc
 
-    def register(source: object):
+    def register(
+        source: object,
+        session_capability: BetfairSessionCredentials,
+    ):
         if type(source) is not source_cls:
             raise error_cls(
                 "canonical provider billing read returned unexpected observation type"
             )
+        if type(session_capability) is not credentials_cls:
+            raise error_cls(
+                "provider billing session capability must be exact canonical credentials"
+            )
         # Re-run the closure-backed canonical structural/digest validator before the
-        # observation enters the private issuance relation.
+        # observation enters the private issuance relation.  The exact credentials
+        # object is retained only inside this closure as an ephemeral authenticated-
+        # session capability; credential values are never copied into provider
+        # observations or exported evidence.
         validate_structure(source)
-        issued[id(source)] = (source, projection(source))
+        issued[id(source)] = (
+            source,
+            projection(source),
+            session_capability,
+        )
         return source
 
     def read(
@@ -301,7 +318,7 @@ def _build_observation_authority():
         # A persistent executable/global-opener rebind that occurs during provider
         # I/O cannot be legitimized merely because the returned JSON is valid.
         assert_executable_authority()
-        return register(source)
+        return register(source, credentials)
 
     def validate(source: object):
         """Return only an exact, untampered observation issued by ``read`` above."""
@@ -326,10 +343,37 @@ def _build_observation_authority():
             )
         return source
 
-    return read, validate
+    def validate_traversal(pages: object):
+        """Validate one exact tuple from one authenticated session capability.
+
+        This is intentionally weaker than a stable cross-session account identity.
+        It prevents consumers from composing independently issued pages from
+        different authenticated sessions into one positive pagination traversal
+        without exporting credentials or a credential-derived identifier.
+        """
+
+        if type(pages) is not tuple or not pages:
+            raise TypeError("pages must be a non-empty exact tuple")
+
+        session_capability: BetfairSessionCredentials | None = None
+        for source in pages:
+            current = validate(source)
+            registered = issued[id(current)]
+            current_capability = registered[2]
+            if session_capability is None:
+                session_capability = current_capability
+            elif current_capability is not session_capability:
+                raise error_cls(
+                    "provider billing traversal pages must share one "
+                    "authenticated session capability"
+                )
+        return pages
+
+    return read, validate, validate_traversal
 
 
 (
     read_verified_betfair_provider_billing_inputs,
     validate_betfair_provider_billing_inputs_observation,
+    validate_betfair_provider_billing_inputs_traversal,
 ) = _build_observation_authority()

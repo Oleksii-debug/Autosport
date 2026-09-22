@@ -28,7 +28,13 @@ class ReadCompletenessStatus(str, Enum):
 
 def _canonical_json(value: object) -> str:
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as exc:
         raise MarketBookCompletenessError("provider evidence must be canonical JSON data") from exc
 
@@ -251,7 +257,9 @@ class MarketBookReadCompleteness:
             "missing_receipt_batch_ids": list(self.missing_receipt_batch_ids),
             "pending_batch_ids": list(self.pending_batch_ids),
             "status": self.status.value,
-            "provider_observation_complete": self.status is ReadCompletenessStatus.COMPLETE,
+            "structural_response_coverage_complete": self.status is ReadCompletenessStatus.COMPLETE,
+            "provider_observation_authenticated": False,
+            "provider_freshness_proven": False,
             "provider_dispatch_authorized": False,
             "execution_authorized": False,
         }

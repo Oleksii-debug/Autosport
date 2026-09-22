@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
+from http.client import HTTPException
 from urllib.error import HTTPError
+from urllib.request import ProxyHandler
 
 import pytest
 
@@ -352,6 +354,86 @@ def test_session_token_rejects_whitespace_and_header_control_characters(token: s
         match="whitespace or control characters",
     ):
         ProphetXSessionToken(token)
+
+
+def test_default_transport_disables_environment_proxies():
+    transport = UrllibProphetXHttpTransport()
+
+    proxy_handlers = [
+        handler
+        for handler in transport._opener.handlers  # type: ignore[attr-defined]
+        if isinstance(handler, ProxyHandler)
+    ]
+
+    assert len(proxy_handlers) == 1
+    assert proxy_handlers[0].proxies == {}
+
+
+@pytest.mark.parametrize(
+    "content_length,match",
+    [
+        ("999", "does not match body"),
+        ("not-a-number", "Content-Length is invalid"),
+    ],
+)
+def test_default_transport_rejects_invalid_content_length(
+    content_length: str,
+    match: str,
+):
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.headers = {
+                "Content-Type": "application/json",
+                "Content-Length": content_length,
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, limit: int) -> bytes:
+            return GOOD_BODY
+
+        def getcode(self) -> int:
+            return 200
+
+        def geturl(self) -> str:
+            return BALANCE_URL
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            return FakeResponse()
+
+    transport = UrllibProphetXHttpTransport()
+    transport._opener = FakeOpener()  # type: ignore[assignment]
+
+    with pytest.raises(ProphetXReadOnlyError, match=match):
+        transport.get(
+            BALANCE_URL,
+            headers={},
+            timeout_seconds=1.0,
+        )
+
+
+def test_default_transport_normalizes_http_protocol_failure():
+    class FailingOpener:
+        def open(self, request, timeout):
+            raise HTTPException("truncated")
+
+    transport = UrllibProphetXHttpTransport()
+    transport._opener = FailingOpener()  # type: ignore[assignment]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network request failed",
+    ):
+        transport.get(
+            BALANCE_URL,
+            headers={},
+            timeout_seconds=1.0,
+        )
 
 
 def test_default_transport_closes_http_error_response_before_failing_closed():

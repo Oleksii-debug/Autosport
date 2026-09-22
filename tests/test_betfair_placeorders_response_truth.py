@@ -179,6 +179,41 @@ def test_processed_with_errors_without_terminal_command_rejection_is_unknown() -
     assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
 
 
+@pytest.mark.parametrize(
+    ("size_matched", "average_price_matched", "order_status"),
+    (
+        (5.0, 2.0, "EXECUTION_COMPLETE"),
+        (0.0, 0.0, "EXECUTABLE"),
+    ),
+)
+def test_success_instruction_error_code_is_ambiguous(
+    size_matched: float,
+    average_price_matched: float,
+    order_status: str,
+) -> None:
+    action = _action()
+    decoded = json.loads(
+        _payload(
+            action,
+            execution_status="SUCCESS",
+            instruction_status="SUCCESS",
+            include_size_matched=True,
+            size_matched=size_matched,
+            average_price_matched=average_price_matched,
+            bet_id="bet-success-with-instruction-error",
+            order_status=order_status,
+        ).decode("utf-8")
+    )
+    decoded["result"]["instructionReports"][0]["errorCode"] = "BET_ACTION_ERROR"
+    payload = json.dumps(decoded).encode("utf-8")
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="successful placeOrders instruction must not include errorCode",
+    ):
+        _parse(payload, action)
+
+
 def test_success_with_bet_id_without_placed_date_is_ambiguous() -> None:
     action = _action()
     payload = _payload(

@@ -8,7 +8,7 @@ from autosport.external_validity_policy_issuance import (
     ProductPolicyEvaluationIssuanceError,
     _store_read,
 )
-from autosport.run_transaction import RunTransaction
+from autosport.run_transaction import RunTransaction, VerifiedFileSnapshot
 from autosport import strategy_model_factory as strategy_model_factory_module
 from autosport.strategy_model_factory import FactoryArtifactStore
 
@@ -85,6 +85,34 @@ def test_product_issuer_rejects_strategy_factory_run_transaction_symbol_rebind(
         )
 
     assert forged_reader_called is False
+
+
+def test_product_issuer_rejects_in_place_canonical_reader_code_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    reader = RunTransaction._read_canonical_file_snapshot
+
+    def forged_reader(path, label):
+        del path, label
+        return VerifiedFileSnapshot(
+            payload=b'{"kind":"caller-forged-evaluation"}',
+            sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(reader, "__code__", forged_reader.__code__)
+
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="FactoryArtifactStore executable authority was rebound",
+    ):
+        _store_read(
+            store,
+            "evaluation",
+            "caller-forged-evaluation",
+            expected_sha256="c" * 64,
+        )
 
 
 def test_product_issuer_preserves_canonical_store_reads(tmp_path):

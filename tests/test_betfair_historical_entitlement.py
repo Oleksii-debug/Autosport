@@ -331,6 +331,19 @@ def test_conflicting_purchase_item_id_fails_closed(monkeypatch: pytest.MonkeyPat
         historical.get_entitlement_snapshot()
 
 
+def test_transport_replacement_after_capture_revokes_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, identity = _context(monkeypatch)
+    _install_historical_transport(monkeypatch)
+    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    snapshot = historical.get_entitlement_snapshot()
+    historical._transport = UrllibBetfairHistoricalTransport()
+
+    with pytest.raises(BetfairHistoricalEntitlementError, match="transport origin"):
+        historical.list_files(snapshot, _filter())
+
+
 def test_context_rotation_after_capture_revokes_snapshot_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

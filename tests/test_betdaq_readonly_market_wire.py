@@ -385,3 +385,20 @@ def test_non_nil_price_level_unknown_attributes_fail_closed(provider_side: str) 
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_prices_response(_response(price_nodes=price_nodes))
 
+def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
+    result_extra = _response().replace(
+        "<GetPricesResult>",
+        '<GetPricesResult FutureSemanticField="provider-value">',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="must not contain attributes"):
+        parse_get_prices_response(result_extra)
+
+    status_extra = _response().replace(
+        'CallId="call-123"',
+        'CallId="call-123" FutureSemanticField="provider-value"',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_prices_response(status_extra)
+

@@ -108,13 +108,19 @@ def _canonical_decimal(name: str, value: object) -> Decimal:
 
 
 def _canonical_decimal_text(name: str, value: object) -> str:
-    """Return context-independent identity text for one exact Decimal value."""
+    """Return compact context-independent identity text for one exact Decimal."""
 
     decimal_value = _canonical_decimal(name, value)
     if decimal_value == 0:
         return "0"
-    text = format(decimal_value, "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    parts = decimal_value.as_tuple()
+    digits = list(parts.digits)
+    exponent = int(parts.exponent)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    normalized = Decimal((parts.sign, tuple(digits), exponent))
+    return str(normalized)
 
 
 def _stable_hash(payload: object) -> str:

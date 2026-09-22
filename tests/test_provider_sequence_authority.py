@@ -342,3 +342,24 @@ def test_meta_row_multiplicity_or_version_drift_is_rejected(tmp_path: Path) -> N
 
     with pytest.raises(ProviderSequenceAuthorityError, match="identity/schema"):
         authority(SOURCE_ID)
+
+
+def test_create_true_does_not_claim_preexisting_uninitialized_file(tmp_path: Path) -> None:
+    path = tmp_path / "provider-sequence.db"
+    path.write_bytes(b"")
+
+    with pytest.raises(ProviderSequenceAuthorityError, match="schema is not canonical"):
+        _authority(path, create=True)
+
+    assert path.read_bytes() == b""
+
+
+def test_create_true_cannot_rebind_existing_different_authority(tmp_path: Path) -> None:
+    path = tmp_path / "provider-sequence.db"
+    original = _authority(path, create=True, authority_id="authority-a")
+    assert original(SOURCE_ID) == 1
+
+    with pytest.raises(ProviderSequenceAuthorityError, match="identity/schema"):
+        _authority(path, create=True, authority_id="authority-b")
+
+    assert original(SOURCE_ID) == 2

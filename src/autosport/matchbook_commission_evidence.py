@@ -174,6 +174,14 @@ def derive_commission_cash_evidence(window: WalletWindow) -> CommissionCashEvide
             "wallet query did not include commission transactions"
         )
 
+    window_currencies = {
+        _currency(row.currency) for row in window.transactions
+    }
+    if len(window_currencies) > 1:
+        raise MatchbookCommissionEvidenceError(
+            "wallet window mixes currencies; FX/netting is not authorized"
+        )
+
     rows = tuple(
         row
         for row in window.transactions

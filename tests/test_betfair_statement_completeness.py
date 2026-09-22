@@ -403,6 +403,10 @@ def test_evidence_schema_cannot_mint_finality_or_cost_authority() -> None:
             "net_pnl",
             "settlement_authority",
             "execution_authority",
+            "application_key",
+            "session_token",
+            "session_binding",
+            "authenticated_session_id",
         }
     )
 

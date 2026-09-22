@@ -38,13 +38,14 @@ def clock():
     return datetime(2026, 9, 22, 14, 30, tzinfo=timezone.utc)
 
 
-def client(*results):
+def client(*results, credentials=None, account_id="acct"):
     transport = QueueTransport(*results)
+    credentials = credentials or BetdaqCredentials("alice", "p@ss", "app-id")
     value = BetdaqAccountReadOnlyClient(
-        BetdaqCredentials("alice", "p@ss", "app-id"),
+        credentials,
         transport=transport,
         clock=clock,
-        account_id="acct",
+        account_id=account_id,
     )
     return value, transport
 
@@ -123,6 +124,122 @@ def test_credentials_and_client_repr_do_not_expose_secure_values():
     assert "secret-app" not in value
     c = BetdaqAccountReadOnlyClient(credentials, transport=QueueTransport(), clock=clock)
     assert "secret" not in repr(c)
+
+
+def test_canonical_account_scope_ignores_caller_label_for_same_auth_context():
+    first_credentials = BetdaqCredentials("alice", "p@ss", "app-id")
+    second_credentials = BetdaqCredentials("alice", "p@ss", "app-id")
+    first, _ = client(
+        balance(),
+        credentials=first_credentials,
+        account_id="caller-label-a",
+    )
+    second, _ = client(
+        balance(),
+        credentials=second_credentials,
+        account_id="caller-label-b",
+    )
+
+    requested = frozenset({BookmakerCapability.BALANCE_READ})
+    first_evidence = first.read_account_evidence(requested)
+    second_evidence = second.read_account_evidence(requested)
+
+    first_scope = first_evidence.snapshot.profile.account_id
+    second_scope = second_evidence.snapshot.profile.account_id
+    assert first_scope == second_scope
+    assert first_scope == first_evidence.account_context.session_context_id
+    assert second_scope == second_evidence.account_context.session_context_id
+    assert first_scope not in {"caller-label-a", "caller-label-b"}
+    assert first_evidence.account_context.stable_account_identity_proven is False
+    assert first_evidence.account_context.cross_session_equivalence_proven is False
+    assert (
+        BookmakerCapability.ACCOUNT_IDENTITY_READ
+        not in first_evidence.snapshot.observed_capabilities
+    )
+
+
+def test_distinct_auth_contexts_cannot_collapse_under_same_caller_label():
+    first, _ = client(
+        balance(),
+        credentials=BetdaqCredentials("alice-a", "p@ss-a", "app-a"),
+        account_id="same-caller-label",
+    )
+    second, _ = client(
+        balance(),
+        credentials=BetdaqCredentials("alice-b", "p@ss-b", "app-b"),
+        account_id="same-caller-label",
+    )
+
+    requested = frozenset({BookmakerCapability.BALANCE_READ})
+    first_evidence = first.read_account_evidence(requested)
+    second_evidence = second.read_account_evidence(requested)
+
+    assert first_evidence.snapshot.profile.account_id != (
+        second_evidence.snapshot.profile.account_id
+    )
+    assert first_evidence.snapshot.profile.profile_id != (
+        second_evidence.snapshot.profile.profile_id
+    )
+
+
+def test_public_account_context_and_snapshot_identity_never_expose_credentials():
+    credentials = BetdaqCredentials("secret-user", "secret-pass", "secret-app")
+    value, _ = client(
+        balance(),
+        credentials=credentials,
+        account_id="friendly-label",
+    )
+
+    evidence = value.read_account_evidence(
+        frozenset({BookmakerCapability.BALANCE_READ})
+    )
+    public_text = " ".join(
+        (
+            repr(evidence.account_context),
+            evidence.snapshot.profile.account_id,
+            evidence.snapshot.profile.source_ref,
+            evidence.snapshot.profile.source_payload_sha256,
+        )
+    )
+    for secret in ("secret-user", "secret-pass", "secret-app"):
+        assert secret not in public_text
+    assert "friendly-label" not in evidence.snapshot.profile.account_id
+
+
+def test_credential_rotation_during_snapshot_fails_before_canonical_publication():
+    credentials = BetdaqCredentials("alice", "before-pass", "app-id")
+
+    class MutatingCredentialTransport(QueueTransport):
+        def post(self, url, *, headers, body, timeout_seconds):
+            payload = super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+            if len(self.calls) == 1:
+                object.__setattr__(credentials, "password", "after-pass")
+            return payload
+
+    transport = MutatingCredentialTransport(
+        balance(),
+        bootstrap(0),
+        changed(),
+    )
+    value = BetdaqAccountReadOnlyClient(
+        credentials,
+        transport=transport,
+        clock=clock,
+        account_id="caller-label",
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="authenticated account context changed during acquisition",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.OPEN_POSITIONS_READ})
+        )
 
 
 def test_http_200_provider_return_status_failure_never_becomes_success():

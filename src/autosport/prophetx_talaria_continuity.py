@@ -194,7 +194,7 @@ def build_registration_request(
         "socket_id": socket,
         "service": "pusher",
         "subscriptions": [
-            {"type": kind, "ids": tuple(ids)}
+            {"type": kind, "ids": list(ids)}
             for kind, ids in sorted(grouped.items())
         ],
     }

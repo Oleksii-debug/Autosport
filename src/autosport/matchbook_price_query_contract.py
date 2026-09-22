@@ -6,6 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 import hashlib
 import json
+import math
 import re
 from typing import Any, Mapping
 
@@ -18,6 +19,8 @@ ENDPOINT_TEMPLATE = (
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP", "AUD", "CAD", "HKD"})
+_INT32_MAX = (1 << 31) - 1
+_INT64_MAX = (1 << 63) - 1
 
 
 class MatchbookPriceQueryError(ValueError):
@@ -56,9 +59,13 @@ class MatchbookPriceRepresentation(StrEnum):
     AGGREGATED_DISPLAY = "AGGREGATED_DISPLAY"
 
 
-def _positive_int(value: int, name: str) -> int:
+def _positive_int(value: int, name: str, *, maximum: int) -> int:
     if type(value) is not int or value <= 0:
         raise MatchbookPriceQueryError(f"{name} must be a positive integer")
+    if value > maximum:
+        raise MatchbookPriceQueryError(
+            f"{name} exceeds the documented Matchbook integer domain"
+        )
     return value
 
 
@@ -72,6 +79,19 @@ def _finite_non_negative_decimal(value: Decimal, name: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite() or value < 0:
         raise MatchbookPriceQueryError(
             f"{name} must be a non-negative finite exact Decimal"
+        )
+    try:
+        provider_double = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise MatchbookPriceQueryError(
+            f"{name} is outside the documented Matchbook double domain"
+        ) from exc
+    if (
+        not math.isfinite(provider_double)
+        or (value != 0 and provider_double == 0.0)
+    ):
+        raise MatchbookPriceQueryError(
+            f"{name} is outside the documented Matchbook double domain"
         )
     return value
 
@@ -167,9 +187,9 @@ class MatchbookPriceQueryContract:
     exclude_mirrored_prices: bool
 
     def __post_init__(self) -> None:
-        _positive_int(self.event_id, "event_id")
-        _positive_int(self.market_id, "market_id")
-        _positive_int(self.runner_id, "runner_id")
+        _positive_int(self.event_id, "event_id", maximum=_INT64_MAX)
+        _positive_int(self.market_id, "market_id", maximum=_INT64_MAX)
+        _positive_int(self.runner_id, "runner_id", maximum=_INT64_MAX)
         if not isinstance(self.exchange_type, MatchbookExchangeType):
             raise MatchbookPriceQueryError(
                 "exchange_type must be MatchbookExchangeType"
@@ -193,7 +213,7 @@ class MatchbookPriceQueryContract:
             raise MatchbookPriceQueryError(
                 "currency is not a supported explicit Matchbook currency"
             )
-        _positive_int(self.depth, "depth")
+        _positive_int(self.depth, "depth", maximum=_INT32_MAX)
         _finite_non_negative_decimal(
             self.minimum_liquidity, "minimum_liquidity"
         )

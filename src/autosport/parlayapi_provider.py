@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
@@ -137,10 +137,19 @@ def _decode_provider_json(raw: bytes) -> Any:
         raise ProviderPayloadError("provider returned invalid JSON") from exc
 
 
+class _RejectAuthenticatedRedirects(HTTPRedirectHandler):
+    """Reject redirects before urllib can construct a credential-bearing follow-up request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
 def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> HttpJsonResponse:
     request = Request(url, headers=dict(headers), method="GET")
     try:
-        with urlopen(request, timeout=timeout) as response:  # nosec B310 - fixed HTTPS base URL by default
+        opener = build_opener(_RejectAuthenticatedRedirects())
+        with opener.open(request, timeout=timeout) as response:  # nosec B310 - caller pins HTTPS provider URL
             raw = response.read()
             payload = _decode_provider_json(raw)
             return HttpJsonResponse(payload, int(response.status), dict(response.headers.items()))

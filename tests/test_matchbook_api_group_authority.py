@@ -24,10 +24,12 @@ def classify(method: str, path: str):
     ("method", "path", "group", "operation_id"),
     [
         ("POST", "/bpapi/rest/security/session", MatchbookApiGroup.SECURITY, "matchbook.security.login"),
+        ("GET", "/bpapi/rest/security/session", MatchbookApiGroup.SECURITY, "matchbook.security.get_session"),
         ("DELETE", "/bpapi/rest/security/session", MatchbookApiGroup.SECURITY, "matchbook.security.logout"),
         ("GET", "/edge/rest/account", MatchbookApiGroup.ACCOUNT, "matchbook.account.get"),
         ("GET", "/edge/rest/account/balance", MatchbookApiGroup.ACCOUNT, "matchbook.account.balance"),
         ("GET", "/edge/rest/account/sports", MatchbookApiGroup.ACCOUNT, "matchbook.account.sports"),
+        ("GET", "/edge/rest/account/positions", MatchbookApiGroup.BETTING_READ, "matchbook.account.positions"),
         ("GET", "/edge/rest/navigation", MatchbookApiGroup.NAVIGATION, "matchbook.navigation.get"),
         ("GET", "/edge/rest/events", MatchbookApiGroup.EVENTS, "matchbook.events.list"),
         ("GET", "/edge/rest/events/123", MatchbookApiGroup.EVENTS, "matchbook.events.get"),
@@ -37,6 +39,9 @@ def classify(method: str, path: str):
         ("GET", "/edge/rest/v2/offers", MatchbookApiGroup.BETTING_READ, "matchbook.offers.list_unsettled"),
         ("GET", "/edge/rest/v2/offers/987", MatchbookApiGroup.BETTING_READ, "matchbook.offers.get_unsettled"),
         ("POST", "/edge/rest/v2/offers", MatchbookApiGroup.BETTING_WRITE, "matchbook.offers.submit"),
+        ("DELETE", "/edge/rest/v2/offers", MatchbookApiGroup.BETTING_WRITE, "matchbook.offers.cancel"),
+        ("PUT", "/edge/rest/v2/offers/987", MatchbookApiGroup.BETTING_WRITE, "matchbook.offers.edit"),
+        ("POST", "/edge/rest/v1/heartbeat", MatchbookApiGroup.DEFAULT, "matchbook.heartbeat.post"),
         ("GET", "/edge/rest/reports/v2/bets/current", MatchbookApiGroup.REPORTS, "matchbook.reports.current_bets"),
         ("GET", "/edge/rest/reports/v2/bets/settled", MatchbookApiGroup.REPORTS, "matchbook.reports.settled_bets"),
         ("GET", "/edge/rest/reports/v2/offers/current", MatchbookApiGroup.REPORTS, "matchbook.reports.current_offers"),
@@ -166,9 +171,16 @@ def test_receipt_binds_documented_source_and_template():
     assert receipt.evidence_as_of == "2026-09-22"
 
 
-def test_betting_read_classification_does_not_claim_numeric_limit():
-    receipt = classify("GET", "/edge/rest/v2/offers")
-    assert receipt.group is MatchbookApiGroup.BETTING_READ
+@pytest.mark.parametrize(
+    ("method", "path", "group"),
+    [
+        ("GET", "/edge/rest/v2/offers", MatchbookApiGroup.BETTING_READ),
+        ("POST", "/edge/rest/v1/heartbeat", MatchbookApiGroup.DEFAULT),
+    ],
+)
+def test_groups_without_public_numeric_limit_do_not_claim_numeric_limit(method, path, group):
+    receipt = classify(method, path)
+    assert receipt.group is group
     assert not hasattr(receipt, "requests_per_minute")
 
 

@@ -105,6 +105,11 @@ class OneShotRecoveryWorker:
             # such a thread exits without touching recovery/economic state.
             cancelled.set()
             start_gate.set()
+            # Thread.start() may have created the helper before surfacing an
+            # exception. Do not release single-flight ownership while that
+            # non-daemon helper is still alive, even though its task is cancelled.
+            if thread.ident is not None:
+                thread.join()
             self._release_unstarted_slot()
             if isinstance(exc, Exception):
                 return False

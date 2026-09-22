@@ -97,6 +97,7 @@ class BetfairFillOrKillTests(unittest.TestCase):
         )
         self.assertEqual(evidence.outcome, FillOrKillStructuralOutcome.KILLED_ZERO)
         self.assertEqual(evidence.size_matched, Decimal("0"))
+        self.assertIsNone(evidence.aggregate_vwap_limit_satisfied)
         self.assertEqual(evidence.unmatched_remainder, Decimal("5"))
         self.assertFalse(evidence.provider_origin_verified)
         self.assertFalse(evidence.grants_execution_authority)

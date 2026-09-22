@@ -223,6 +223,26 @@ def test_exact_provider_created_time_is_preserved_separately_when_present() -> N
     assert all(quote.observed_ts == OBSERVED_TS for quote in batch.quotes)
 
 
+def test_empty_getprices_scope_cannot_claim_current_market_absence() -> None:
+    with pytest.raises(BetdaqProjectionError, match="empty GetPrices scope"):
+        project_betdaq_get_prices(
+            response=_response(markets=()),
+            market_context={},
+            observed_ts=OBSERVED_TS,
+            sequence=105,
+        )
+
+
+def test_provider_source_time_cannot_postdate_product_observation_time() -> None:
+    with pytest.raises(BetdaqProjectionError, match="cannot postdate"):
+        project_betdaq_get_prices(
+            response=_response(source_timestamp=True),
+            market_context=_context(),
+            observed_ts="2026-09-22T23:59:59+00:00",
+            sequence=105,
+        )
+
+
 def test_partial_unavailable_scope_cannot_publish_successful_canonical_batch() -> None:
     response = _response(
         unavailable=(

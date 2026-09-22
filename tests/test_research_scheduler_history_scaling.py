@@ -391,6 +391,37 @@ def test_db_ahead_of_state_recovers_only_matching_completed_hot_suffix() -> None
         assert snapshot["occurrences"][occurrence_id] == occurrence
 
 
+def test_db_ahead_of_state_without_matching_hot_record_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        scheduler = _scheduler_with_history(Path(directory), _SMALL_HISTORY)
+        schedule = _schedule()
+        occurrence_id, occurrence = _accepted_occurrence(
+            schedule,
+            index=_SMALL_HISTORY,
+        )
+        interrupted_state = scheduler._read()
+        scheduler._append_cold_history_locked(
+            interrupted_state,
+            [
+                (
+                    research_scheduler._COLD_HISTORY_OCCURRENCE,
+                    occurrence_id,
+                    occurrence,
+                )
+            ],
+        )
+
+        on_disk = json.loads(scheduler.path.read_text(encoding="utf-8"))
+        assert on_disk["cold_history_count"] == _SMALL_HISTORY
+        assert occurrence_id not in on_disk["occurrences"]
+
+        with pytest.raises(
+            ResearchSchedulerError,
+            match="unanchored cold history cannot be recovered",
+        ):
+            ResearchScheduler(scheduler.path, _UnusedSink())
+
+
 def test_accepted_curriculum_history_is_cold_but_snapshot_visible() -> None:
     with tempfile.TemporaryDirectory() as directory:
         scheduler = _scheduler_with_curriculum_history(

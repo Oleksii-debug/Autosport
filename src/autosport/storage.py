@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Iterable
+from typing import Final, Iterable
 
 from .domain import MarketEvent
 

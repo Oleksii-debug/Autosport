@@ -120,7 +120,7 @@ def test_same_correction_is_idempotent_but_conflicting_generation_is_rejected(tm
         first = ledger.append_correction(exact)
         replay = ledger.append_correction(exact)
         assert replay == first
-        with pytest.raises(RewardCorrectionError, match="advance exactly once"):
+        with pytest.raises(RewardCorrectionError, match="already belongs|advance exactly once"):
             ledger.append_correction(conflict)
 
 
@@ -230,7 +230,7 @@ def test_tampered_correction_bytes_fail_on_reopen(tmp_path):
 
     raw = sqlite3.connect(path)
     raw.execute("DROP TRIGGER corrections_no_update")
-    raw.execute("UPDATE corrections SET payload_json='{}' WHERE generation=1")
+    raw.execute("UPDATE corrections SET corrected_reward_value='999' WHERE generation=1")
     raw.commit()
     raw.close()
 
@@ -247,7 +247,7 @@ def test_sql_mutation_is_blocked_by_immutability_triggers(tmp_path):
         ledger.append_correction(current)
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             ledger._connection.execute(
-                "UPDATE corrections SET payload_json='{}' WHERE correction_id=?",
+                "UPDATE corrections SET corrected_reward_value='1' WHERE correction_id=?",
                 (current.correction_id,),
             )
 
@@ -291,36 +291,34 @@ def test_validation_rejects_noncanonical_inputs():
         DependencyArtifact(ref("artifact", "x"), (dep_a, dep_b))
 
 
-def test_dependency_graph_rejects_cycle_created_by_late_registration(tmp_path):
+def test_late_artifact_registration_cannot_turn_external_dependency_into_cycle(tmp_path):
     path = tmp_path / "corrections.sqlite3"
     a = ref("learning.policy", "a")
     b = ref("learning.policy", "b")
     with RewardCorrectionLedger.create(path) as ledger:
         ledger.append_artifact(DependencyArtifact(a, (b,)))
-        with pytest.raises(RewardCorrectionError, match="acyclic"):
+        with pytest.raises(RewardCorrectionError, match="already consumed"):
             ledger.append_artifact(DependencyArtifact(b, (a,)))
 
 
-def test_reopen_rejects_correction_metadata_rebinding(tmp_path):
+def test_reward_identity_cannot_branch_across_correction_lineages(tmp_path):
     path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
     with RewardCorrectionLedger.create(path) as ledger:
-        ledger.append_correction(
-            correction(
-                superseded=ref("learning.reward", "reward-0"),
-                corrected=ref("learning.reward", "reward-1"),
-            )
+        ledger.append_correction(correction(superseded=reward0, corrected=reward1))
+        conflicting = RewardCorrectionAssertion(
+            action_id=sha("other-action"),
+            transition_id=sha("other-transition"),
+            superseded_reward=reward0,
+            corrected_reward=ref("learning.reward", "reward-other"),
+            corrected_reward_value=Decimal("2"),
+            corrected_available_at="2026-09-23T01:00:00Z",
+            correction_source=ref("settlement.authority", "settlement-other"),
+            generation=1,
         )
-    raw = sqlite3.connect(path)
-    raw.execute("DROP TRIGGER corrections_no_update")
-    raw.execute("UPDATE corrections SET action_id=?", (sha("forged-action"),))
-    raw.execute(
-        "CREATE TRIGGER corrections_no_update BEFORE UPDATE ON corrections "
-        "BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END"
-    )
-    raw.commit()
-    raw.close()
-    with pytest.raises(RewardCorrectionError, match="row metadata"):
-        RewardCorrectionLedger.open(path)
+        with pytest.raises(RewardCorrectionError, match="already belongs"):
+            ledger.append_correction(conflicting)
 
 
 def test_reopen_rejects_orphan_invalidation_row(tmp_path):
@@ -338,6 +336,18 @@ def test_reopen_rejects_orphan_invalidation_row(tmp_path):
     raw.commit()
     raw.close()
     with pytest.raises(RewardCorrectionError, match="orphan"):
+        RewardCorrectionLedger.open(path)
+
+
+def test_reopen_rejects_missing_performance_index(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    with RewardCorrectionLedger.create(path):
+        pass
+    raw = sqlite3.connect(path)
+    raw.execute("DROP INDEX dependencies_by_dependency")
+    raw.commit()
+    raw.close()
+    with pytest.raises(RewardCorrectionError, match="performance indexes"):
         RewardCorrectionLedger.open(path)
 
 

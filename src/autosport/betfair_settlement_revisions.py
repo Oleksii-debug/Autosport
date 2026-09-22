@@ -405,15 +405,21 @@ class BetfairSettlementRevisionStore:
         )
         assert intended is not None
         binding = self._monotonic_binding()
-        tx_id = _digest({
-            "operation": "APPEND_SETTLEMENT_REVISION",
-            "observed_state_sha256": observed,
-            "intended_state_sha256": intended,
-            "revision_id": revision.revision_id,
-            "semantic_binding_sha256": binding,
-        })
         try:
-            self._monotonic_authority().prepare(
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            authority_tip_sha256 = (
+                None if not history else history[-1].record_sha256
+            )
+            tx_id = _digest({
+                "operation": "APPEND_SETTLEMENT_REVISION",
+                "observed_state_sha256": observed,
+                "intended_state_sha256": intended,
+                "revision_id": revision.revision_id,
+                "semantic_binding_sha256": binding,
+                "authority_tip_sha256": authority_tip_sha256,
+            })
+            authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 intended_state_sha256=intended,

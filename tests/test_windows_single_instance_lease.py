@@ -228,7 +228,7 @@ def test_context_manager_holds_until_exit(
         "",
         " user-A",
         "user-A ",
-        "user\\nA",
+        "user\nA",
         "x" * 513,
     ),
 )

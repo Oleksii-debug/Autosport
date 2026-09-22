@@ -510,8 +510,8 @@ class AutosportWebController:
                     if self.research_plan is None
                     else text(
                         "ui.status.research_plan.selected",
-                        path=self.research_plan_path,
-                        sha_suffix=f"{self.research_plan.source_sha256[:12]}…",
+                        name=Path(self.research_plan_path).name,
+                        sha256=self.research_plan.source_sha256,
                     )
                 ),
                 "strategy_id": self.strategy_id,
@@ -597,21 +597,21 @@ class AutosportWebController:
         self.owner_review_lines = []
         self._refresh_economic_projection()
         self._refresh_owner_projection()
-        return self._ok(text("ui.status.strategy.changed"), focus_id="106")
+        return self._ok(text("ui.status.strategy.selected", strategy_id=self.strategy_id), focus_id="106")
 
     def _action_research_plan_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():
             return self._fail(text("ui.status.research_plan.dataset_busy"))
         raw = payload.get("path")
         if not isinstance(raw, str) or not raw.strip():
-            return self._fail(text("ui.status.research_plan.invalid"))
+            return self._fail(text("ui.status.research_plan.validation_failed"))
         try:
             plan_path = Path(raw).expanduser().absolute()
             plan = ResearchStrategyPlan.from_path(plan_path)
             validate_strategy_configuration(self.strategy_id, plan)
         except Exception as exc:
             return self._fail(
-                text("ui.error.research_plan.invalid", detail=_safe_exception_text(exc))
+                text("ui.error.research_plan.rejected", detail=_safe_exception_text(exc))
             )
         self.research_plan_path = plan_path
         self.research_plan = plan
@@ -619,7 +619,7 @@ class AutosportWebController:
         self.owner_review_lines = []
         self._refresh_economic_projection()
         self._refresh_owner_projection()
-        return self._ok(text("ui.status.research_plan.ready"), focus_id="research-plan-path")
+        return self._ok(text("ui.status.research_plan.bound", strategy_id=self.strategy_id, sha_short=plan.source_sha256[:12]), focus_id="research-plan-path")
 
     def _action_speed_set(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         value = payload.get("speed")
@@ -629,7 +629,7 @@ class AutosportWebController:
         if speed not in _ALLOWED_SPEEDS:
             return self._fail(text("ui.status.replay.start_failed"))
         if self._busy():
-            return self._fail(text("ui.status.replay.replay_busy"))
+            return self._fail(text("ui.status.replay.already_busy"))
         self.replay_speed = speed
         return self._ok()
 

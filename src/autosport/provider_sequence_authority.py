@@ -162,6 +162,14 @@ class SQLiteProviderSequenceAuthority:
             os.close(descriptor)
 
         try:
+            initial_stat = os.stat(self.path)
+            initial_file_identity = (int(initial_stat.st_dev), int(initial_stat.st_ino))
+        except OSError as exc:
+            raise ProviderSequenceAuthorityError(
+                "new provider sequence authority file cannot be stat-bound"
+            ) from exc
+
+        try:
             connection = sqlite3.connect(
                 self.path,
                 timeout=self.busy_timeout_seconds,
@@ -173,6 +181,18 @@ class SQLiteProviderSequenceAuthority:
             ) from exc
 
         try:
+            try:
+                opened_stat = os.stat(self.path)
+            except OSError as exc:
+                raise ProviderSequenceAuthorityError(
+                    "new provider sequence authority file disappeared during initialization"
+                ) from exc
+            opened_file_identity = (int(opened_stat.st_dev), int(opened_stat.st_ino))
+            if opened_file_identity != initial_file_identity:
+                raise ProviderSequenceAuthorityError(
+                    "provider sequence authority file changed during initialization"
+                )
+
             self._configure_connection(connection)
             journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
             if (

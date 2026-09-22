@@ -288,11 +288,11 @@ def reconcile_replay(observations: Iterable[MatchbookOfferReadback]) -> dict[int
             continue
         if item.matched_stake < prior.matched_stake:
             raise MatchbookOfferReconciliationError("matched stake decreased")
+        if prior.status in terminal and item.status in live:
+            raise MatchbookOfferReconciliationError("terminal offer regressed to live")
         if prior.status in terminal and item.status is not prior.status:
             raise MatchbookOfferReconciliationError(
                 "terminal offer changed status without correction authority"
             )
-        if prior.status in terminal and item.status in live:
-            raise MatchbookOfferReconciliationError("terminal offer regressed to live")
         latest[item.offer_id] = item
     return latest

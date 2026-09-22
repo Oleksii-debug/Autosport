@@ -672,6 +672,18 @@ def require_current_activation_eligibility(
     )
     if not candidates:
         raise ChampionEligibilityError("current champion eligibility evidence is missing")
+    if regime is None:
+        regimes = {
+            entry.payload.get("regime")
+            for entry in candidates
+            if type(entry.payload.get("regime")) is str
+        }
+        if len(regimes) != 1 or any(
+            type(entry.payload.get("regime")) is not str for entry in candidates
+        ):
+            raise ChampionEligibilityError(
+                "current champion eligibility regime is ambiguous"
+            )
 
     latest_available = max(
         _instant(entry.available_at, "ChampionEligibilityDecision.available_at")

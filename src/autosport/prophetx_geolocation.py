@@ -382,11 +382,13 @@ class ProphetXGeolocationClient:
                 "geolocation check requires ProphetX ExecutionAction"
             )
         action_sha = _action_sha(action)
-        observed_at = self._clock()
-        observed = _iso(observed_at, "observed_at")
+        request_started_at = self._clock()
+        _iso(request_started_at, "request_started_at")
         request_id = _canonical_sha(
-            {"action_sha256": action_sha, "observed_at": observed_at}
+            {"action_sha256": action_sha, "request_started_at": request_started_at}
         )
+        observed_at = request_started_at
+        observed = _iso(observed_at, "observed_at")
         state = ProphetXGeolocationState.UNKNOWN_LOCAL_IP
         source_sha: str | None = None
 
@@ -444,6 +446,8 @@ class ProphetXGeolocationClient:
                         else ProphetXGeolocationState.DENIED_PROVIDER_CONFIRMED
                     )
 
+        observed_at = self._clock()
+        observed = _iso(observed_at, "observed_at")
         if observed >= _iso(action.expires_at, "action expires_at"):
             state = ProphetXGeolocationState.EXPIRED
         return _issue_admission(

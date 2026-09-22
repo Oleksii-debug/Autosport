@@ -69,6 +69,7 @@ def provider(transport, **kwargs):
     return MatchbookReadOnlyProvider(
         "secret-session-token",
         sport_key="soccer",
+        currency="EUR",
         sport_ids=(15,),
         transport=transport,
         clock=lambda: OBSERVED,
@@ -112,6 +113,9 @@ def test_authenticated_get_scope_never_places_session_token_in_url():
     assert query["include-prices"] == ["true"]
     assert query["price-depth"] == ["1"]
     assert query["price-mode"] == ["expanded"]
+    assert query["currency"] == ["EUR"]
+    assert query["minimum-liquidity"] == ["0"]
+    assert query["exclude-mirrored-prices"] == ["false"]
     assert query["sport-ids"] == ["15"]
     assert timeout == 10.0
 
@@ -119,7 +123,9 @@ def test_authenticated_get_scope_never_places_session_token_in_url():
 def test_native_ids_back_lay_decimal_liquidity_and_no_fake_source_timestamp():
     batch = provider(lambda *_: response()).read_batch()
     back, lay = batch.quotes
-    assert batch.source_id == "matchbook:soccer:expanded"
+    assert batch.source_id == (
+        f"matchbook:soccer:EUR:expanded:{back.metadata['market_view_sha256']}"
+    )
     assert (back.provider_event_id, back.provider_market_id, back.provider_selection_id) == (
         "101",
         "202",
@@ -136,6 +142,10 @@ def test_native_ids_back_lay_decimal_liquidity_and_no_fake_source_timestamp():
     assert back.metadata["response_sha256"] == BODY_SHA
     assert back.metadata["page_scope_complete"] is False
     assert back.metadata["depth_level"] == 0
+    assert back.metadata["requested_currency"] == "EUR"
+    assert back.metadata["minimum_liquidity"] == "0"
+    assert back.metadata["side_filter"] == "both"
+    assert back.metadata["exclude_mirrored_prices"] is False
 
 
 def test_generic_normalizer_can_keep_back_and_lay_distinct_after_prerequisite():
@@ -215,8 +225,14 @@ def test_suspension_is_preserved_and_unknown_status_rejected():
 def test_expanded_and_aggregated_are_distinct_provider_series():
     expanded = provider(lambda *_: response(), price_mode="expanded").read_batch()
     aggregated = provider(lambda *_: response(), price_mode="aggregated").read_batch()
-    assert expanded.source_id == "matchbook:soccer:expanded"
-    assert aggregated.source_id == "matchbook:soccer:aggregated"
+    assert expanded.source_id == (
+        f"matchbook:soccer:EUR:expanded:"
+        f"{expanded.quotes[0].metadata['market_view_sha256']}"
+    )
+    assert aggregated.source_id == (
+        f"matchbook:soccer:EUR:aggregated:"
+        f"{aggregated.quotes[0].metadata['market_view_sha256']}"
+    )
     assert expanded.source_id != aggregated.source_id
     assert expanded.quotes[0].metadata["price_mode"] == "expanded"
     assert aggregated.quotes[0].metadata["price_mode"] == "aggregated"
@@ -296,11 +312,21 @@ def test_constructor_fences_top_of_book_filters_and_exact_liquidity_type():
     with pytest.raises(ValueError, match="price_depth must be 1"):
         provider(lambda *_: response(), price_depth=2)
     with pytest.raises(ValueError, match="filter is required"):
-        MatchbookReadOnlyProvider("token", sport_key="soccer", transport=lambda *_: response())
+        MatchbookReadOnlyProvider(
+            "token",
+            sport_key="soccer",
+            currency="EUR",
+            transport=lambda *_: response(),
+        )
     with pytest.raises(TypeError, match="minimum_liquidity must be Decimal"):
         provider(lambda *_: response(), minimum_liquidity=0.0)
     with pytest.raises(ValueError, match="session_token"):
-        MatchbookReadOnlyProvider(" token ", sport_key="soccer", sport_ids=(15,))
+        MatchbookReadOnlyProvider(
+            " token ",
+            sport_key="soccer",
+            currency="EUR",
+            sport_ids=(15,),
+        )
 
 
 def test_json_decoder_preserves_decimal_exactness_and_rejects_duplicates_nonfinite():

@@ -21,6 +21,7 @@ _MATCHBOOK_BASE_URL = "https://api.matchbook.com"
 _MATCHBOOK_EVENTS_PATH = "/edge/rest/events"
 _ALLOWED_PRICE_MODES = frozenset({"expanded", "aggregated"})
 _ALLOWED_STATES = frozenset({"open", "suspended", "closed", "graded", "withdrawn"})
+_ALLOWED_CURRENCIES = frozenset({"AUD", "CAD", "EUR", "GBP", "HKD", "USD"})
 _MAX_ATTEMPTS = 5
 _MAX_PER_PAGE = 100
 _SIGNED_64_MAX = (1 << 63) - 1
@@ -236,6 +237,59 @@ def _decimal_text(value: Decimal) -> str:
     return format(value, "f")
 
 
+def _semantic_decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
+
+
+def _currency(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("currency must be a supported Matchbook currency string")
+    if value not in _ALLOWED_CURRENCIES:
+        allowed = ", ".join(sorted(_ALLOWED_CURRENCIES))
+        raise ValueError(f"currency must be one of {allowed}")
+    return value
+
+
+def _stable_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _market_view_sha256(
+    *,
+    currency: str,
+    price_mode: str,
+    minimum_liquidity: Decimal,
+) -> str:
+    return _stable_sha256(
+        {
+            "schema_version": 1,
+            "endpoint_family": "events",
+            "exchange_type": "back-lay",
+            "odds_type": "DECIMAL",
+            "include_prices": True,
+            "price_depth": 1,
+            "price_mode": price_mode,
+            "side_filter": "both",
+            "currency": currency,
+            "minimum_liquidity": _semantic_decimal_text(minimum_liquidity),
+            "exclude_mirrored_prices": False,
+        }
+    )
+
+
+def _query_sha256(query: list[tuple[str, str]]) -> str:
+    return _stable_sha256(query)
+
+
 def _optional_sha256(value: object) -> str | None:
     if value is None:
         return None
@@ -297,6 +351,7 @@ class MatchbookReadOnlyProvider:
         session_token: str,
         *,
         sport_key: str,
+        currency: str,
         sport_ids: tuple[int, ...] = (),
         event_ids: tuple[int, ...] = (),
         states: tuple[str, ...] = ("open", "suspended"),
@@ -314,6 +369,7 @@ class MatchbookReadOnlyProvider:
     ) -> None:
         self._session_token = _session_token(session_token)
         self.sport_key = _sport_key(sport_key)
+        self.currency = _currency(currency)
         self.sport_ids = self._id_filter(sport_ids, field="sport_ids")
         self.event_ids = self._id_filter(event_ids, field="event_ids")
         if not self.sport_ids and not self.event_ids:
@@ -344,6 +400,12 @@ class MatchbookReadOnlyProvider:
         if not minimum_liquidity.is_finite() or minimum_liquidity < 0:
             raise ValueError("minimum_liquidity must be finite and non-negative")
         self.minimum_liquidity = minimum_liquidity
+        self._minimum_liquidity_query = _decimal_text(self.minimum_liquidity)
+        self.market_view_sha256 = _market_view_sha256(
+            currency=self.currency,
+            price_mode=self.price_mode,
+            minimum_liquidity=self.minimum_liquidity,
+        )
         self.offset = _nonnegative_int(offset, field="offset")
         self.per_page = _positive_int(per_page, field="per_page", maximum=_MAX_PER_PAGE)
         self.timeout_seconds = _runtime_float(
@@ -358,7 +420,11 @@ class MatchbookReadOnlyProvider:
         self.transport = transport
         self.clock = clock
         self.sleeper = sleeper
-        self.source_id = f"matchbook:{self.sport_key}:{self.price_mode}"
+        self.source_id = (
+            f"matchbook:{self.sport_key}:{self.currency}:{self.price_mode}:"
+            f"{self.market_view_sha256}"
+        )
+        self.request_query_sha256 = _query_sha256(self._query_pairs())
         self._pending_quotes: tuple[ProviderQuote, ...] | None = None
         self._pending_offset = 0
         self._pending_cursor: str | None = None
@@ -416,7 +482,7 @@ class MatchbookReadOnlyProvider:
         self._pending_cursor = None
         self._pending_flags = ()
 
-    def _url(self) -> str:
+    def _query_pairs(self) -> list[tuple[str, str]]:
         query: list[tuple[str, str]] = [
             ("offset", str(self.offset)),
             ("per-page", str(self.per_page)),
@@ -426,13 +492,21 @@ class MatchbookReadOnlyProvider:
             ("include-prices", "true"),
             ("price-depth", "1"),
             ("price-mode", self.price_mode),
-            ("minimum-liquidity", _decimal_text(self.minimum_liquidity)),
+            ("currency", self.currency),
+            ("minimum-liquidity", self._minimum_liquidity_query),
+            ("exclude-mirrored-prices", "false"),
         ]
         if self.sport_ids:
             query.append(("sport-ids", ",".join(str(value) for value in self.sport_ids)))
         if self.event_ids:
             query.append(("ids", ",".join(str(value) for value in self.event_ids)))
-        return f"{_MATCHBOOK_BASE_URL}{_MATCHBOOK_EVENTS_PATH}?{urlencode(query)}"
+        return query
+
+    def _url(self) -> str:
+        return (
+            f"{_MATCHBOOK_BASE_URL}{_MATCHBOOK_EVENTS_PATH}?"
+            f"{urlencode(self._query_pairs())}"
+        )
 
     def _request(self, url: str) -> MatchbookHttpJsonResponse:
         headers = {
@@ -557,10 +631,11 @@ class MatchbookReadOnlyProvider:
                             price.get("available-amount"),
                             field="price.available-amount",
                         )
-                        currency_raw = price.get("currency")
-                        currency = None
-                        if currency_raw is not None:
-                            currency = _text(currency_raw, field="price.currency")
+                        currency = _text(price.get("currency"), field="price.currency")
+                        if currency != self.currency:
+                            raise MatchbookPayloadError(
+                                "price.currency does not match requested currency"
+                            )
                         identity = (event_id, market_id, runner_id, side)
                         if identity in seen:
                             raise MatchbookPayloadError(
@@ -578,6 +653,13 @@ class MatchbookReadOnlyProvider:
                             "requested_price_depth": 1,
                             "exchange_type": "back-lay",
                             "odds_type": "DECIMAL",
+                            "currency": currency,
+                            "requested_currency": self.currency,
+                            "minimum_liquidity": self._minimum_liquidity_query,
+                            "side_filter": "both",
+                            "exclude_mirrored_prices": False,
+                            "market_view_sha256": self.market_view_sha256,
+                            "request_query_sha256": self.request_query_sha256,
                             "event_status": event_status,
                             "market_status": market_status,
                             "runner_status": runner_status,
@@ -588,8 +670,6 @@ class MatchbookReadOnlyProvider:
                             "page_size": self.per_page,
                             "page_scope_complete": False,
                         }
-                        if currency is not None:
-                            metadata["currency"] = currency
                         if body_sha256 is not None:
                             metadata["response_sha256"] = body_sha256
                         output.append(

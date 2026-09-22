@@ -36,6 +36,7 @@ from .supervised_provider_evidence import (
 )
 
 BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS = 15
+BETFAIR_CLEARED_HISTORY_MAX_AGE_DAYS = 90
 _BETFAIR_AMBIGUOUS_UNKNOWN_REASON = (
     "betfair_placeOrders_ambiguous_effect_requires_readback"
 )
@@ -49,6 +50,9 @@ class BetfairTimeoutResolutionKind(str, Enum):
     EFFECT_PRESENT = "effect_present"
     INDETERMINATE_BEFORE_VISIBILITY_HORIZON = (
         "indeterminate_before_visibility_horizon"
+    )
+    INDETERMINATE_OUTSIDE_CLEARED_HISTORY = (
+        "indeterminate_outside_cleared_history"
     )
     ABSENT_AFTER_VISIBILITY_HORIZON = "absent_after_visibility_horizon"
 
@@ -64,7 +68,10 @@ class BetfairTimeoutResolution:
 
     @property
     def definitive(self) -> bool:
-        return self.kind is not BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+        return self.kind in (
+            BetfairTimeoutResolutionKind.EFFECT_PRESENT,
+            BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON,
+        )
 
 
 def _time(value: str, name: str) -> datetime:
@@ -139,14 +146,10 @@ _install_betfair_readback_capture_start_authority()
 del _install_betfair_readback_capture_start_authority
 
 
-def _absence_capture_floor(readback: BetfairExecutionReadbackEnvelope) -> str:
-    """Return the earliest order-scope read in one canonical absence capture.
-
-    Definitive absence requires every current/cleared page to be observed after the
-    visibility deadline. Using only the envelope's latest `observed_at` would allow a
-    capture started before +15s to become authoritative merely because its final RPC
-    completed later.
-    """
+def _absence_capture_page_times(
+    readback: BetfairExecutionReadbackEnvelope,
+) -> list[str]:
+    """Return all canonical current/cleared page observation times."""
 
     if not isinstance(readback, BetfairExecutionReadbackEnvelope):
         raise BetfairTimeoutResolutionError(
@@ -161,8 +164,23 @@ def _absence_capture_floor(readback: BetfairExecutionReadbackEnvelope) -> str:
         raise BetfairTimeoutResolutionError(
             "absence visibility requires non-empty current/cleared page evidence"
         )
+    return observed
+
+
+def _absence_capture_floor(readback: BetfairExecutionReadbackEnvelope) -> str:
+    """Return the earliest order-scope read in one canonical absence capture."""
+
     return min(
-        observed,
+        _absence_capture_page_times(readback),
+        key=lambda value: _time(value, "provider order-scope page observed_at"),
+    )
+
+
+def _absence_capture_ceiling(readback: BetfairExecutionReadbackEnvelope) -> str:
+    """Return the latest order-scope read in one canonical absence capture."""
+
+    return max(
+        _absence_capture_page_times(readback),
         key=lambda value: _time(value, "provider order-scope page observed_at"),
     )
 
@@ -361,6 +379,10 @@ def resolve_betfair_timeout_provider_state(
         _absence_capture_floor(readback),
         "provider order-scope capture floor",
     )
+    capture_ceiling = _time(
+        _absence_capture_ceiling(readback),
+        "provider order-scope capture ceiling",
+    )
     if (
         capture_started is None
         or capture_started < deadline
@@ -369,6 +391,23 @@ def resolve_betfair_timeout_provider_state(
     ):
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
+            timeout_boundary_at,
+            evidence.observed_at,
+            deadline_raw,
+            ledger_sha,
+            None,
+        )
+
+    cleared_history_deadline = timeout_boundary + timedelta(
+        days=BETFAIR_CLEARED_HISTORY_MAX_AGE_DAYS
+    )
+    if (
+        capture_started >= cleared_history_deadline
+        or observed >= cleared_history_deadline
+        or capture_ceiling >= cleared_history_deadline
+    ):
+        return BetfairTimeoutResolution(
+            BetfairTimeoutResolutionKind.INDETERMINATE_OUTSIDE_CLEARED_HISTORY,
             timeout_boundary_at,
             evidence.observed_at,
             deadline_raw,

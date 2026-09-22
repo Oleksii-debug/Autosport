@@ -179,11 +179,16 @@ class CampaignEvidenceAssessment:
         return self.human_evidence_complete and self.nvda_evidence_complete
 
     @property
+    def positive_authority_verified(self) -> bool:
+        """Whether product-owned authorities independently prove positive handoff."""
+        return False
+
+    @property
     def pre_handoff_ready(self) -> bool:
-        return (
-            self.machine_evidence_complete
-            and self.physical_accessibility_evidence_complete
-        )
+        # This checklist is caller-constructible diagnostic evidence. Required-key
+        # selection, evidence refs, and HUMAN/NVDA claim fields are not themselves
+        # product-owned authority and therefore cannot issue a positive handoff.
+        return False
 
     @property
     def grants_execution_authority(self) -> bool:
@@ -255,10 +260,10 @@ def assess_campaign_evidence(
     """Assess deterministic pre-handoff evidence for a multi-day PAPER campaign.
 
     Missing evidence is represented by absence, failed evidence by an explicit FAILED
-    record. HUMAN_TESTED and NVDA_VERIFIED are caller-supplied truths and require
-    their own evidence references before physical acceptance can be complete. The
-    assessment grants no execution authority and cannot prove real-money execution or
-    whole-product completion.
+    record. HUMAN_TESTED/NVDA_VERIFIED fields and evidence refs are caller-supplied
+    diagnostic claims only; they do not become product-owned positive authority here.
+    The assessment grants no execution or handoff authority and cannot prove real-money
+    execution or whole-product completion.
     """
 
     if not isinstance(checklist, CampaignEvidenceChecklist):

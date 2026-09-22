@@ -187,6 +187,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
         peak_equity=running_peak,
     )
 
+
 def build_paper_risk_report(
     book: PaperBook,
     goal: EconomicGoalContract,

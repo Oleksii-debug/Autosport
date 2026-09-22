@@ -246,8 +246,9 @@ class MatchbookSessionLifecycle:
                     "authenticated read requires an active session generation"
                 )
             self._require_current_runtime_generation(self._generation_id)
+            # Compare request emission to session-state clock authority, but do not
+            # make independent concurrent READ emission order a new global baseline.
             self._observe_clock(monotonic_ns)
-            self._last_observation_monotonic_ns = monotonic_ns
             ticket = SessionReadGenerationTicket(
                 self._next_read_ticket_id,
                 self._generation_id,
@@ -282,8 +283,13 @@ class MatchbookSessionLifecycle:
                     "positive read response requires a still-active session generation"
                 )
             self._require_current_runtime_generation(ticket.generation_id)
-            self._observe_clock(monotonic_ns)
-            self._last_observation_monotonic_ns = monotonic_ns
+            if monotonic_ns < ticket.issued_monotonic_ns:
+                self._issued_read_tickets.pop(ticket.ticket_id, None)
+                raise SessionLifecycleError(
+                    "read response commit precedes its generation ticket"
+                )
+            # Response ordering across independent concurrent reads is not session
+            # generation ordering. Do not move the global session clock baseline.
             self._issued_read_tickets.pop(ticket.ticket_id, None)
             return ticket.generation_id
 

@@ -61,6 +61,7 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.turnover, Decimal("0"))
         self.assertEqual(report.current_drawdown_amount, Decimal("0"))
         self.assertEqual(report.historical_max_drawdown_amount, Decimal("0"))
+        self.assertEqual(report.historical_max_drawdown_fraction, Decimal("0"))
         self.assertIsNone(report.historical_max_drawdown_peak_id)
         self.assertIsNone(report.historical_max_drawdown_trough_id)
         self.assertEqual(report.drawdown_loss_room, Decimal("20.00"))
@@ -106,6 +107,8 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.current_equity, Decimal("90"))
         self.assertEqual(report.peak_equity, Decimal("100"))
         self.assertEqual(report.current_drawdown_amount, Decimal("10"))
+        self.assertEqual(report.historical_max_drawdown_amount, Decimal("10"))
+        self.assertEqual(report.historical_max_drawdown_fraction, Decimal("0.1"))
         self.assertEqual(report.realized_gross_loss, Decimal("10"))
         self.assertEqual(report.turnover, Decimal("10"))
         self.assertEqual(report.drawdown_loss_room, rooms[2])
@@ -192,6 +195,12 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.peak_equity, Decimal("120"))
         self.assertEqual(report.current_drawdown_amount, Decimal("0"))
         self.assertEqual(report.historical_max_drawdown_amount, Decimal("50"))
+        self.assertEqual(report.historical_max_drawdown_fraction, Decimal("0.5"))
+        self.assertEqual(report.max_drawdown_fraction, Decimal("0.20"))
+        self.assertNotEqual(
+            report.historical_max_drawdown_fraction,
+            report.max_drawdown_fraction,
+        )
         self.assertEqual(
             report.historical_max_drawdown_peak_id,
             "paper-initial-bankroll",

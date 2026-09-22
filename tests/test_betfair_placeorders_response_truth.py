@@ -17,7 +17,11 @@ from autosport.real_execution_ledger import ExecutionAction
 OBSERVED_AT = "2026-09-19T08:00:05+00:00"
 
 
-def _action() -> ExecutionAction:
+def _action(
+    *,
+    side: str = "BACK",
+    requested_odds: Decimal = Decimal("2.00"),
+) -> ExecutionAction:
     return ExecutionAction(
         action_id="action-response-truth",
         bookmaker_id="betfair",
@@ -25,8 +29,8 @@ def _action() -> ExecutionAction:
         event_id="event-1",
         market_id="1.23456789",
         selection_id="42",
-        side="BACK",
-        requested_odds=Decimal("2.00"),
+        side=side,
+        requested_odds=requested_odds,
         requested_stake=Decimal("5.00"),
         quote_id="quote-1",
         quote_observed_at="2026-09-19T07:59:59+00:00",
@@ -593,3 +597,45 @@ def test_matched_back_price_below_requested_limit_is_ambiguous(
         match="matched BACK price is worse than requested limit",
     ):
         _parse(payload, action)
+
+@pytest.mark.parametrize("size_matched", (2, 5))
+def test_matched_lay_price_above_requested_limit_is_ambiguous(
+    size_matched: int,
+) -> None:
+    action = _action(side="LAY")
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=size_matched,
+        average_price_matched=2.02,
+        bet_id="bet-lay-worse-price",
+        order_status="EXECUTION_COMPLETE",
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="matched LAY price is worse than requested limit",
+    ):
+        _parse(payload, action)
+
+
+def test_matched_lay_better_price_remains_accepted() -> None:
+    action = _action(side="LAY")
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=5,
+        average_price_matched=1.99,
+        bet_id="bet-lay-better-price",
+        order_status="EXECUTION_COMPLETE",
+    )
+
+    report = _parse(payload, action)
+
+    assert report.instruction.average_price_matched == Decimal("1.99")
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.ACCEPTED
+

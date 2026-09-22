@@ -71,6 +71,13 @@ def _client(
     currency: str = "EUR",
     minimum_liquidity: Decimal = Decimal("0"),
 ) -> MatchbookReadOnlyProvider:
+    sequence = 0
+
+    def allocate_sequence(_source_id: str) -> int:
+        nonlocal sequence
+        sequence += 1
+        return sequence
+
     return MatchbookReadOnlyProvider(
         "test-session-token",
         sport_key="soccer",
@@ -79,6 +86,7 @@ def _client(
         minimum_liquidity=minimum_liquidity,
         transport=transport,
         clock=lambda: OBSERVED,
+        sequence_allocator=allocate_sequence,
     )
 
 

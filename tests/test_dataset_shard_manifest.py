@@ -582,3 +582,48 @@ def test_boolean_schema_versions_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="manifest schema"):
         type(manifest).from_payload(raw_manifest)
 
+def test_read_rejects_shard_root_rebound_to_symlink_after_authority_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"stable-bytes"
+    shard_root = tmp_path / "root"
+    replacement_root = tmp_path / "replacement"
+    shard_root.mkdir()
+    replacement_root.mkdir()
+    (shard_root / "s.bin").write_bytes(payload)
+    (replacement_root / "s.bin").write_bytes(payload)
+
+    descriptor = _descriptor(0, "s0", "s.bin", payload)
+    manifest = verify_shard_files(shard_root, (descriptor,))
+    authority, _ = _canonical_authority(tmp_path, manifest)
+    canonical_record = DatasetSnapshotLineageAuthority.record
+
+    def _rebind_root(
+        self: DatasetSnapshotLineageAuthority,
+        snapshot_id: str,
+    ) -> object:
+        result = canonical_record(self, snapshot_id)
+        (shard_root / "s.bin").unlink()
+        shard_root.rmdir()
+        try:
+            shard_root.symlink_to(replacement_root, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlink creation is unavailable")
+        return result
+
+    monkeypatch.setattr(
+        DatasetSnapshotLineageAuthority,
+        "record",
+        _rebind_root,
+    )
+
+    with pytest.raises(DatasetShardManifestError, match="shard_root itself must not be a symlink"):
+        read_registered_shard_bytes(
+            authority,
+            snapshot_id="snapshot-1",
+            shard_root=shard_root,
+            shards=(descriptor,),
+            shard_id="s0",
+        )
+

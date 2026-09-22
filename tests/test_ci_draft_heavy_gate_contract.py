@@ -38,3 +38,16 @@ def test_windows_candidate_is_deferred_only_while_pull_request_is_draft() -> Non
     assert "./scripts/build_windows_candidate.ps1" in workflow
     assert "Execute packaged NVDA evidence contract" in workflow
     assert "External UIA fresh-extraction gate" in workflow
+
+
+def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None:
+    workflow = _workflow(".github/workflows/endurance.yml")
+
+    assert _ACTIVITY_TYPES in workflow
+    assert _DRAFT_GATE in workflow
+    assert "name: Endurance" in workflow
+    assert "os: [ubuntu-latest, windows-latest]" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "python -m autosport endurance" in workflow
+    assert "tests/test_collector_endurance_composition.py" in workflow
+    assert "Upload endurance evidence" in workflow

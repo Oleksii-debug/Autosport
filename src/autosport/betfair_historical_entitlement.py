@@ -18,7 +18,8 @@ import json
 from typing import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
+from weakref import ref
 
 from .betfair_account_identity import (
     BetfairAuthenticatedAccountIdentity,
@@ -307,6 +308,81 @@ class HistoricalDownloadedFile:
         )
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class HistoricalProviderOriginWitness:
+    """Process-local capability proving one exact canonical Betfair download path.
+
+    The witness is deliberately not durable authority. It proves only that the exact
+    file bytes were acquired through this process's still-live canonical authenticated
+    Historical Data transport chain. Usage/retention rights remain a separate authority.
+    """
+
+    session_context_id: str
+    entitlement_snapshot_sha256: str
+    listing_sha256: str
+    download_file_identity_sha256: str
+    provider_path: str
+    retrieved_at: str
+    raw_sha256: str
+    byte_length: int
+    transport_contract_sha256: str
+
+    def __post_init__(self) -> None:
+        _context_id(self.session_context_id)
+        _sha(self.entitlement_snapshot_sha256, "entitlement_snapshot_sha256")
+        _sha(self.listing_sha256, "listing_sha256")
+        _sha(self.download_file_identity_sha256, "download_file_identity_sha256")
+        _path(self.provider_path)
+        _timestamp(self.retrieved_at, "retrieved_at")
+        _sha(self.raw_sha256, "raw_sha256")
+        _uint(self.byte_length, "byte_length")
+        _sha(self.transport_contract_sha256, "transport_contract_sha256")
+
+    @property
+    def witness_sha256(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.betfair_historical_provider_origin_witness",
+                "schema_version": 1,
+                "session_context_id": self.session_context_id,
+                "entitlement_snapshot_sha256": self.entitlement_snapshot_sha256,
+                "listing_sha256": self.listing_sha256,
+                "download_file_identity_sha256": self.download_file_identity_sha256,
+                "provider_path": self.provider_path,
+                "retrieved_at": self.retrieved_at,
+                "raw_sha256": self.raw_sha256,
+                "byte_length": self.byte_length,
+                "transport_contract_sha256": self.transport_contract_sha256,
+                "usage_rights_verified": False,
+                "rights_revalidation_required": True,
+            }
+        )
+
+    def _authority_fingerprint(self) -> str:
+        return self.witness_sha256
+
+    def assert_authoritative(self) -> None:
+        raise BetfairHistoricalEntitlementError(
+            "historical provider-origin witness was not issued by the canonical client"
+        )
+
+    @property
+    def provider_origin_verified(self) -> bool:
+        try:
+            self.assert_authoritative()
+        except BetfairHistoricalEntitlementError:
+            return False
+        return True
+
+    @property
+    def usage_rights_verified(self) -> bool:
+        return False
+
+    @property
+    def rights_revalidation_required(self) -> bool:
+        return True
+
+
 class _SameOriginRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         resolved = urljoin(req.full_url, newurl)
@@ -329,9 +405,20 @@ class UrllibBetfairHistoricalTransport:
         self._json_limit = max_json_bytes
         self._file_limit = max_file_bytes
         self._opener = build_opener(_SameOriginRedirectHandler())
+        self._opener_origin = self._opener
+        self._opener_open = self._opener.open
+        self._opener_handler_ids = tuple(id(handler) for handler in self._opener.handlers)
+        self._construction_origin_verified = (
+            build_opener is _CANONICAL_BUILD_OPENER
+            and Request is _CANONICAL_REQUEST_TYPE
+            and type(self._opener) is OpenerDirector
+            and type(self._opener).open is _CANONICAL_OPENER_OPEN
+            and _SameOriginRedirectHandler.redirect_request
+            is _CANONICAL_REDIRECT_REQUEST
+        )
 
     def post_json(self, url: str, *, ssoid: str, body: bytes, timeout_seconds: float) -> bytes:
-        request = Request(
+        request = _CANONICAL_REQUEST_TYPE(
             url,
             data=body,
             headers={"Content-Type": "application/json", "ssoid": ssoid},
@@ -340,12 +427,14 @@ class UrllibBetfairHistoricalTransport:
         return self._request(request, timeout_seconds, self._json_limit)
 
     def get_file(self, url: str, *, ssoid: str, timeout_seconds: float) -> bytes:
-        request = Request(url, headers={"ssoid": ssoid}, method="GET")
+        request = _CANONICAL_REQUEST_TYPE(
+            url, headers={"ssoid": ssoid}, method="GET"
+        )
         return self._request(request, timeout_seconds, self._file_limit)
 
     def _request(self, request: Request, timeout_seconds: float, limit: int) -> bytes:
         try:
-            with self._opener.open(request, timeout=timeout_seconds) as response:
+            with self._opener_open(request, timeout=timeout_seconds) as response:
                 payload = response.read(limit + 1)
         except BetfairHistoricalEntitlementError:
             raise
@@ -366,6 +455,87 @@ class UrllibBetfairHistoricalTransport:
                 "Betfair Historical Data response exceeded size limit"
             )
         return payload
+
+
+_CANONICAL_BUILD_OPENER = build_opener
+_CANONICAL_REQUEST_TYPE = Request
+_CANONICAL_OPENER_OPEN = OpenerDirector.open
+_CANONICAL_REDIRECT_REQUEST = _SameOriginRedirectHandler.redirect_request
+_CANONICAL_HISTORICAL_POST_JSON = UrllibBetfairHistoricalTransport.post_json
+_CANONICAL_HISTORICAL_GET_FILE = UrllibBetfairHistoricalTransport.get_file
+_CANONICAL_HISTORICAL_REQUEST = UrllibBetfairHistoricalTransport._request
+_CANONICAL_QUOTE = quote
+_HISTORICAL_TRANSPORT_CONTRACT_SHA256 = _digest(
+    {
+        "schema": "autosport.betfair_historical_transport_contract",
+        "schema_version": 1,
+        "api_base": HISTORICAL_API_BASE,
+        "transport": "urllib_verified_https",
+        "redirect_policy": "same_origin_only",
+        "download_payload_fence": "bzip2_header",
+        "canonical_clock": "datetime.now(timezone.utc)",
+        "secrets_persisted": False,
+    }
+)
+
+
+def _canonical_historical_network_transport(
+    transport: object,
+) -> bool:
+    """Recognize the still-unmodified built-in Historical Data transport.
+
+    This is a trusted-process executable-surface fence, not provider-signed proof.
+    Structural/test transports remain usable but cannot obtain provider-origin capability.
+    """
+
+    if type(transport) is not UrllibBetfairHistoricalTransport:
+        return False
+    if (
+        type(transport).post_json is not _CANONICAL_HISTORICAL_POST_JSON
+        or type(transport).get_file is not _CANONICAL_HISTORICAL_GET_FILE
+        or type(transport)._request is not _CANONICAL_HISTORICAL_REQUEST
+        or build_opener is not _CANONICAL_BUILD_OPENER
+        or Request is not _CANONICAL_REQUEST_TYPE
+        or quote is not _CANONICAL_QUOTE
+        or _SameOriginRedirectHandler.redirect_request
+        is not _CANONICAL_REDIRECT_REQUEST
+    ):
+        return False
+    state = getattr(transport, "__dict__", None)
+    if type(state) is not dict or set(state) != {
+        "_json_limit",
+        "_file_limit",
+        "_opener",
+        "_opener_origin",
+        "_opener_open",
+        "_opener_handler_ids",
+        "_construction_origin_verified",
+    }:
+        return False
+    if state["_construction_origin_verified"] is not True:
+        return False
+    opener = state["_opener"]
+    if (
+        opener is not state["_opener_origin"]
+        or type(opener) is not OpenerDirector
+        or type(opener).open is not _CANONICAL_OPENER_OPEN
+    ):
+        return False
+    opener_state = getattr(opener, "__dict__", None)
+    if type(opener_state) is not dict or "open" in opener_state:
+        return False
+    open_call = state["_opener_open"]
+    if (
+        getattr(open_call, "__self__", None) is not opener
+        or getattr(open_call, "__func__", None) is not _CANONICAL_OPENER_OPEN
+    ):
+        return False
+    handlers = getattr(opener, "handlers", None)
+    if type(handlers) is not list:
+        return False
+    if tuple(id(handler) for handler in handlers) != state["_opener_handler_ids"]:
+        return False
+    return True
 
 
 class BetfairHistoricalEntitlementClient:
@@ -398,10 +568,10 @@ class BetfairHistoricalEntitlementClient:
         ):
             raise BetfairHistoricalEntitlementError("timeout_seconds must be positive")
         self._timeout = float(timeout_seconds)
-        self._issued: dict[tuple[str, int], tuple[object, str]] = {}
+        self._issued: dict[tuple[str, int], tuple[object, str, bool]] = {}
 
     def get_entitlement_snapshot(self) -> HistoricalEntitlementSnapshot:
-        payload = self._post("GetMyData", b"{}")
+        payload, provider_origin = self._post("GetMyData", b"{}")
         decoded = _strict_json(payload)
         if not isinstance(decoded, list):
             raise BetfairHistoricalEntitlementError("GetMyData response must be a JSON array")
@@ -417,7 +587,12 @@ class BetfairHistoricalEntitlementClient:
             sha256(payload).hexdigest(),
             packages,
         )
-        self._remember("snapshot", value, value.snapshot_sha256)
+        self._remember(
+            "snapshot",
+            value,
+            value.snapshot_sha256,
+            provider_origin=provider_origin,
+        )
         return value
 
     def list_files(
@@ -425,7 +600,7 @@ class BetfairHistoricalEntitlementClient:
         snapshot: HistoricalEntitlementSnapshot,
         download_filter: HistoricalDownloadFilter,
     ) -> HistoricalFileListing:
-        self._require_snapshot(snapshot)
+        snapshot_origin = self._require_snapshot(snapshot)
         if type(download_filter) is not HistoricalDownloadFilter:
             raise BetfairHistoricalEntitlementError("download_filter is not canonical")
         months = {
@@ -438,7 +613,7 @@ class BetfairHistoricalEntitlementClient:
                 "download filter month range is not covered by authenticated purchases"
             )
         body = _json_bytes(download_filter.provider_payload())
-        payload = self._post("DownloadListOfFiles", body)
+        payload, provider_origin = self._post("DownloadListOfFiles", body)
         decoded = _strict_json(payload)
         if not isinstance(decoded, list):
             raise BetfairHistoricalEntitlementError(
@@ -457,7 +632,12 @@ class BetfairHistoricalEntitlementClient:
             sha256(payload).hexdigest(),
             paths,
         )
-        self._remember("listing", value, value.listing_sha256)
+        self._remember(
+            "listing",
+            value,
+            value.listing_sha256,
+            provider_origin=snapshot_origin and provider_origin,
+        )
         return value
 
     def download_file(
@@ -466,20 +646,25 @@ class BetfairHistoricalEntitlementClient:
         listing: HistoricalFileListing,
         provider_path: str,
     ) -> tuple[HistoricalDownloadedFile, bytes]:
-        self._require_snapshot(snapshot)
-        self._require_listing(listing, snapshot)
+        snapshot_origin = self._require_snapshot(snapshot)
+        listing_origin = self._require_listing(listing, snapshot)
         path = _path(provider_path)
         if path not in listing.provider_paths:
             raise BetfairHistoricalEntitlementError(
                 "requested provider path was not returned by this exact listing"
             )
         self._require_context()
+        origin_before = _canonical_historical_network_transport(self._transport)
         payload = self._transport.get_file(
-            f"{HISTORICAL_API_BASE}/DownloadFile?filePath={quote(path, safe='')}",
+            (
+                f"{HISTORICAL_API_BASE}/DownloadFile?filePath="
+                f"{_CANONICAL_QUOTE(path, safe='')}"
+            ),
             ssoid=self._session_token(),
             timeout_seconds=self._timeout,
         )
         self._require_context()
+        origin_after = _canonical_historical_network_transport(self._transport)
         if len(payload) < 4 or payload[:3] != b"BZh" or payload[3:4] not in b"123456789":
             raise BetfairHistoricalEntitlementError(
                 "DownloadFile response is not a canonical bzip2 historical payload"
@@ -493,8 +678,25 @@ class BetfairHistoricalEntitlementClient:
             sha256(payload).hexdigest(),
             len(payload),
         )
-        self._remember("download", value, value.file_identity_sha256)
+        self._remember(
+            "download",
+            value,
+            value.file_identity_sha256,
+            provider_origin=(
+                snapshot_origin
+                and listing_origin
+                and origin_before
+                and origin_after
+            ),
+        )
         return value, payload
+
+    def issue_provider_origin_witness(
+        self, evidence: HistoricalDownloadedFile, raw_bytes: bytes
+    ) -> HistoricalProviderOriginWitness:
+        raise BetfairHistoricalEntitlementError(
+            "historical provider-origin witness issuer is not installed"
+        )
 
     def require_authoritative_download(
         self, evidence: HistoricalDownloadedFile, raw_bytes: bytes
@@ -523,8 +725,9 @@ class BetfairHistoricalEntitlementClient:
             )
         return evidence
 
-    def _post(self, operation: str, body: bytes) -> bytes:
+    def _post(self, operation: str, body: bytes) -> tuple[bytes, bool]:
         self._require_context()
+        origin_before = _canonical_historical_network_transport(self._transport)
         payload = self._transport.post_json(
             f"{HISTORICAL_API_BASE}/{operation}",
             ssoid=self._session_token(),
@@ -532,7 +735,8 @@ class BetfairHistoricalEntitlementClient:
             timeout_seconds=self._timeout,
         )
         self._require_context()
-        return payload
+        origin_after = _canonical_historical_network_transport(self._transport)
+        return payload, origin_before and origin_after
 
     def _session_token(self) -> str:
         self._require_context()
@@ -560,37 +764,168 @@ class BetfairHistoricalEntitlementClient:
                 "authenticated Betfair session context is no longer authoritative"
             ) from exc
 
-    def _remember(self, kind: str, value: object, digest: str) -> None:
-        self._issued[(kind, id(value))] = (value, digest)
+    def _remember(
+        self,
+        kind: str,
+        value: object,
+        digest: str,
+        *,
+        provider_origin: bool = False,
+    ) -> None:
+        self._issued[(kind, id(value))] = (value, digest, provider_origin)
 
-    def _require_issued(self, kind: str, value: object, digest: str) -> None:
+    def _require_issued(self, kind: str, value: object, digest: str) -> bool:
         record = self._issued.get((kind, id(value)))
         if record is None or record[0] is not value or record[1] != digest:
             raise BetfairHistoricalEntitlementError(
                 f"{kind} was not issued unchanged by this canonical client"
             )
+        return record[2]
 
-    def _require_snapshot(self, value: HistoricalEntitlementSnapshot) -> None:
+    def _require_snapshot(self, value: HistoricalEntitlementSnapshot) -> bool:
         self._require_context()
         if type(value) is not HistoricalEntitlementSnapshot:
             raise BetfairHistoricalEntitlementError("entitlement snapshot is not canonical")
-        self._require_issued("snapshot", value, value.snapshot_sha256)
+        provider_origin = self._require_issued(
+            "snapshot", value, value.snapshot_sha256
+        )
         if value.session_context_id != self._identity.session_context_id:
             raise BetfairHistoricalEntitlementError("snapshot belongs to another context")
+        return provider_origin
 
     def _require_listing(
         self, value: HistoricalFileListing, snapshot: HistoricalEntitlementSnapshot
-    ) -> None:
+    ) -> bool:
         if type(value) is not HistoricalFileListing:
             raise BetfairHistoricalEntitlementError("listing is not canonical")
-        self._require_issued("listing", value, value.listing_sha256)
+        provider_origin = self._require_issued(
+            "listing", value, value.listing_sha256
+        )
         if value.session_context_id != self._identity.session_context_id:
             raise BetfairHistoricalEntitlementError("listing belongs to another context")
         if value.entitlement_snapshot_sha256 != snapshot.snapshot_sha256:
             raise BetfairHistoricalEntitlementError("listing binds another snapshot")
+        return provider_origin
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+
+
+def _install_provider_origin_authority() -> None:
+    issued: dict[
+        int,
+        tuple[
+            object,
+            str,
+            BetfairHistoricalEntitlementClient,
+            HistoricalDownloadedFile,
+        ],
+    ] = {}
+    validate = HistoricalProviderOriginWitness.__post_init__
+
+    def issue_provider_origin_witness(
+        self: BetfairHistoricalEntitlementClient,
+        evidence: HistoricalDownloadedFile,
+        raw_bytes: bytes,
+    ) -> HistoricalProviderOriginWitness:
+        self._require_context()
+        if type(evidence) is not HistoricalDownloadedFile:
+            raise BetfairHistoricalEntitlementError(
+                "download evidence is not canonical"
+            )
+        provider_origin = self._require_issued(
+            "download", evidence, evidence.file_identity_sha256
+        )
+        if not isinstance(raw_bytes, bytes) or (
+            len(raw_bytes) != evidence.byte_length
+            or sha256(raw_bytes).hexdigest() != evidence.raw_sha256
+        ):
+            raise BetfairHistoricalEntitlementError(
+                "download bytes do not match exact captured file evidence"
+            )
+        if not provider_origin:
+            raise BetfairHistoricalEntitlementError(
+                "download did not traverse the canonical Historical Data "
+                "provider-origin transport chain"
+            )
+        if not _canonical_historical_network_transport(self._transport):
+            raise BetfairHistoricalEntitlementError(
+                "historical transport executable origin is no longer canonical"
+            )
+        witness = HistoricalProviderOriginWitness(
+            session_context_id=evidence.session_context_id,
+            entitlement_snapshot_sha256=evidence.entitlement_snapshot_sha256,
+            listing_sha256=evidence.listing_sha256,
+            download_file_identity_sha256=evidence.file_identity_sha256,
+            provider_path=evidence.provider_path,
+            retrieved_at=evidence.retrieved_at,
+            raw_sha256=evidence.raw_sha256,
+            byte_length=evidence.byte_length,
+            transport_contract_sha256=_HISTORICAL_TRANSPORT_CONTRACT_SHA256,
+        )
+        key = id(witness)
+
+        def forget(_weakref: object, *, witness_id: int = key) -> None:
+            issued.pop(witness_id, None)
+
+        issued[key] = (
+            ref(witness, forget),
+            witness._authority_fingerprint(),
+            self,
+            evidence,
+        )
+        return witness
+
+    def assert_authoritative(self: HistoricalProviderOriginWitness) -> None:
+        validate(self)
+        record = issued.get(id(self))
+        if record is None or record[0]() is not self:
+            raise BetfairHistoricalEntitlementError(
+                "historical provider-origin witness was not issued by the canonical client"
+            )
+        if record[1] != self._authority_fingerprint():
+            raise BetfairHistoricalEntitlementError(
+                "historical provider-origin witness changed after issuance"
+            )
+        client = record[2]
+        evidence = record[3]
+        client._require_context()
+        if not _canonical_historical_network_transport(client._transport):
+            raise BetfairHistoricalEntitlementError(
+                "historical transport executable origin changed after acquisition"
+            )
+        if not client._require_issued(
+            "download", evidence, evidence.file_identity_sha256
+        ):
+            raise BetfairHistoricalEntitlementError(
+                "download chain no longer carries provider-origin capability"
+            )
+        if (
+            self.session_context_id != evidence.session_context_id
+            or self.entitlement_snapshot_sha256
+            != evidence.entitlement_snapshot_sha256
+            or self.listing_sha256 != evidence.listing_sha256
+            or self.download_file_identity_sha256
+            != evidence.file_identity_sha256
+            or self.provider_path != evidence.provider_path
+            or self.retrieved_at != evidence.retrieved_at
+            or self.raw_sha256 != evidence.raw_sha256
+            or self.byte_length != evidence.byte_length
+            or self.transport_contract_sha256
+            != _HISTORICAL_TRANSPORT_CONTRACT_SHA256
+        ):
+            raise BetfairHistoricalEntitlementError(
+                "historical provider-origin witness no longer matches captured download"
+            )
+
+    BetfairHistoricalEntitlementClient.issue_provider_origin_witness = (
+        issue_provider_origin_witness
+    )
+    HistoricalProviderOriginWitness.assert_authoritative = assert_authoritative
+
+
+_install_provider_origin_authority()
+del _install_provider_origin_authority
 
 
 def _package(value: object, index: int) -> PurchasedHistoricalPackage:

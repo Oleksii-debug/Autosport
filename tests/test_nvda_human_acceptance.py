@@ -15,7 +15,7 @@ from autosport.nvda_human_acceptance import (
 )
 
 ARTIFACT_SHA = "a" * 64
-SOURCE_SHA = "b" * 64
+SOURCE_SHA = "b" * 40
 
 
 def _valid_transcript() -> dict[str, object]:
@@ -81,12 +81,17 @@ def test_generated_template_is_intentionally_invalid() -> None:
 
 
 @pytest.mark.parametrize(
-    "field, expected",
-    [("artifact_sha256", ARTIFACT_SHA), ("source_sha", SOURCE_SHA)],
+    "field, replacement, expected",
+    [
+        ("artifact_sha256", "c" * 64, ARTIFACT_SHA),
+        ("source_sha", "c" * 40, SOURCE_SHA),
+    ],
 )
-def test_exact_artifact_and_source_identity_are_required(field: str, expected: str) -> None:
+def test_exact_artifact_and_source_identity_are_required(
+    field: str, replacement: str, expected: str
+) -> None:
     transcript = _valid_transcript()
-    transcript[field] = "c" * 64
+    transcript[field] = replacement
 
     with pytest.raises(NvdaHumanAcceptanceError):
         _validate(transcript)
@@ -97,6 +102,15 @@ def test_exact_artifact_and_source_identity_are_required(field: str, expected: s
 def test_malformed_sha_fails_closed(value: object) -> None:
     transcript = _valid_transcript()
     transcript["artifact_sha256"] = value
+
+    with pytest.raises(NvdaHumanAcceptanceError):
+        _validate(transcript)
+
+
+@pytest.mark.parametrize("value", ["B" * 40, "b" * 39, "g" * 40, 1, True])
+def test_malformed_source_git_sha_fails_closed(value: object) -> None:
+    transcript = _valid_transcript()
+    transcript["source_sha"] = value
 
     with pytest.raises(NvdaHumanAcceptanceError):
         _validate(transcript)

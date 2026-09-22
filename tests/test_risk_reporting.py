@@ -9,8 +9,10 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import (
+    DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
     RISK_OF_RUIN_STATUS_UNKNOWN,
     RISK_REPORT_SCHEMA,
+    RISK_REPORT_SCOPE_PAPER_ONLY,
     build_paper_risk_report,
 )
 
@@ -49,6 +51,13 @@ class PaperRiskReportingTests(unittest.TestCase):
         report = build_paper_risk_report(book, goal)
 
         self.assertEqual(report.schema, RISK_REPORT_SCHEMA)
+        self.assertEqual(report.scope, RISK_REPORT_SCOPE_PAPER_ONLY)
+        self.assertEqual(
+            report.drawdown_metric_class,
+            DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+        )
+        self.assertFalse(report.includes_live_execution_exposure)
+        self.assertFalse(report.live_execution_headroom_authoritative)
         self.assertEqual(
             report.portfolio_risk_state_sha256,
             PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book),
@@ -68,6 +77,26 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.risk_of_ruin_limit, Decimal("0.05"))
         self.assertIsNone(report.risk_of_ruin_upper_bound)
         self.assertEqual(report.risk_of_ruin_status, RISK_OF_RUIN_STATUS_UNKNOWN)
+
+    def test_paper_report_never_claims_live_execution_headroom(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(99),),
+            Decimal("25"),
+            placed_at="2026-09-21T07:00:00+00:00",
+        )
+
+        report = build_paper_risk_report(book, self._goal())
+
+        self.assertEqual(report.scope, RISK_REPORT_SCOPE_PAPER_ONLY)
+        self.assertEqual(
+            report.drawdown_metric_class,
+            DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+        )
+        self.assertEqual(report.committed_stake, Decimal("25"))
+        self.assertFalse(report.includes_live_execution_exposure)
+        self.assertFalse(report.live_execution_headroom_authoritative)
+
 
     def test_open_stake_reduces_drawdown_room_without_fabricating_drawdown(self) -> None:
         book = PaperBook("100")

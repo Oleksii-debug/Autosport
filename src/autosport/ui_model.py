@@ -169,7 +169,14 @@ def ticket_lines(session) -> list[str]:
     lines: list[str] = []
     for ticket in session.book.tickets.values():
         legs = ", ".join(
-            f"{leg.event_id}/{leg.market_id}/{leg.selection_id}@{leg.locked_odds}"
+            text(
+                "ui.ticket.leg",
+                sport=leg.sport,
+                event_id=leg.event_id,
+                market_id=leg.market_id,
+                selection_id=leg.selection_id,
+                odds=leg.locked_odds,
+            )
             for leg in ticket.legs
         )
         lines.append(
@@ -216,6 +223,7 @@ def observation_quote_lines(result: ObservationResult) -> list[str]:
     lines = [
         text(
             "ui.observation.quote",
+            sport=event.sport,
             event_id=event.event_id,
             market_type=event.market_type.value,
             market_id=event.market_id,

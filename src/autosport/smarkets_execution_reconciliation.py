@@ -320,16 +320,28 @@ def _decimal_odds_from_price_units(price_units: int) -> Decimal:
         return +(Decimal(_PERCENT_PRICE_SCALE) / Decimal(price_units))
 
 
-def _quantity_units_for_action(action: ExecutionAction) -> int:
-    # Smarkets quantity is payout/return, not stake: quantity = stake * odds.
-    scaled = action.requested_stake * action.requested_odds * Decimal(_QUANTITY_SCALE)
-    integral = scaled.to_integral_value()
-    if scaled != integral:
+def _quantity_units_for_action(
+    action: ExecutionAction, requested_price_units: int
+) -> int:
+    # Conceptually Smarkets quantity is payout/return (stake * odds). The
+    # provider's canonical price is a percentage rounded to two decimals and
+    # quantity itself is integer 1e-4 currency, so translating from a canonical
+    # stake must also be bounded in provider units. Floor to the greatest
+    # quantity whose requested-price stake cannot exceed the requested stake.
+    _provider_uint(
+        requested_price_units,
+        "requested_price_units",
+        minimum=1,
+        maximum=_PERCENT_PRICE_SCALE - 1,
+    )
+    numerator = action.requested_stake * _STAKE_SCALE
+    quantity_units = int(numerator // Decimal(requested_price_units))
+    if quantity_units < 1:
         raise SmarketsReconciliationError(
-            "requested stake/odds cannot be represented exactly in Smarkets quantity units"
+            "requested stake is below one Smarkets quantity unit at this price"
         )
     return _provider_uint(
-        int(integral),
+        quantity_units,
         "expected_requested_quantity_units",
         minimum=1,
     )
@@ -570,10 +582,12 @@ def verify_smarkets_order_readback(
         raise SmarketsReconciliationError(
             "provider requested price conflicts with canonical odds"
         )
-    expected_quantity_units = _quantity_units_for_action(action)
+    expected_quantity_units = _quantity_units_for_action(
+        action, expected_price_units
+    )
     if readback.requested_quantity_units != expected_quantity_units:
         raise SmarketsReconciliationError(
-            "provider requested quantity conflicts with stake-times-odds economics"
+            "provider requested quantity conflicts with risk-bounded stake/price economics"
         )
 
     if readback.state is SmarketsOrderState.OPEN:

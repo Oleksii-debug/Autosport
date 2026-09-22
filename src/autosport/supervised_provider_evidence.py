@@ -576,13 +576,84 @@ def verify_betfair_provider_state(
 
 
 # Verified provider state is an in-process capability, not a caller assertion.
-# The generic verifier seals exact object identity + immutable payload fingerprint.
-# Absence has one additional requirement: the same object must also have passed the
-# durable Betfair timeout visibility resolver. This prevents a direct complete-empty
-# verifier call from becoming premature NOT_FOUND/retry authority.
+# The canonical verifier and its assertion boundary seal their executable dependency
+# graph at module initialization. Runtime rebinding of helpers/types/constants must
+# never strengthen evidence that can release an UNKNOWN execution state.
 def _install_verified_provider_evidence_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     raw_verify = verify_betfair_provider_state
+    sealed_effect_type = VerifiedProviderEffectEvidence
+    sealed_absence_type = VerifiedProviderAbsenceEvidence
+    sealed_fingerprint = _verified_provider_evidence_fingerprint
+    sealed_error = ProviderEvidenceError
+    timeout_absence_assertion: object | None = None
+    missing = object()
+
+    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+        module_globals = globals()
+        sealed: dict[str, tuple[object, object | None]] = {}
+        pending = [root]
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            function_globals = getattr(function, "__globals__", None)
+            if code is None or function_globals is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed:
+                    continue
+                value = module_globals[name]
+                value_code = getattr(value, "__code__", None)
+                sealed[name] = (value, value_code)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return sealed
+
+    sealed_verify_graph = seal_function_graph(raw_verify)
+    sealed_wrapper_bindings = {
+        "VerifiedProviderEffectEvidence": sealed_effect_type,
+        "VerifiedProviderAbsenceEvidence": sealed_absence_type,
+        "_verified_provider_evidence_fingerprint": sealed_fingerprint,
+        "ProviderEvidenceError": sealed_error,
+    }
+
+    def assert_executable_authority_intact() -> None:
+        module_globals = globals()
+        for name, (expected, expected_code) in sealed_verify_graph.items():
+            current = module_globals.get(name, missing)
+            if current is not expected:
+                raise sealed_error(
+                    f"provider evidence executable authority changed: {name}"
+                )
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"provider evidence executable code changed: {name}"
+                )
+        for name, expected in sealed_wrapper_bindings.items():
+            if module_globals.get(name, missing) is not expected:
+                raise sealed_error(
+                    f"provider evidence authority binding changed: {name}"
+                )
+
+    def register_timeout_absence_authority(assertion: object) -> None:
+        nonlocal timeout_absence_assertion
+        if not callable(assertion):
+            raise sealed_error("timeout absence authority assertion must be callable")
+        if timeout_absence_assertion is None:
+            timeout_absence_assertion = assertion
+            return
+        if timeout_absence_assertion is not assertion:
+            raise sealed_error("timeout absence authority assertion is already registered")
 
     def authoritative_verify(
         action: ExecutionAction,
@@ -592,6 +663,7 @@ def _install_verified_provider_evidence_authority() -> None:
         readback: BetfairExecutionReadbackEnvelope,
         expected_provider_order_ref: str | None = None,
     ) -> VerifiedProviderState:
+        assert_executable_authority_intact()
         evidence = raw_verify(
             action,
             profile,
@@ -606,39 +678,49 @@ def _install_verified_provider_evidence_authority() -> None:
 
         issued[evidence_key] = (
             ref(evidence, forget),
-            _verified_provider_evidence_fingerprint(evidence),
+            sealed_fingerprint(evidence),
         )
         return evidence
 
     def assert_verified_provider_evidence_authoritative(
         evidence: VerifiedProviderState,
     ) -> None:
-        if not isinstance(
-            evidence,
-            (VerifiedProviderEffectEvidence, VerifiedProviderAbsenceEvidence),
-        ):
-            raise ProviderEvidenceError("provider evidence type is not canonical")
+        nonlocal timeout_absence_assertion
+        assert_executable_authority_intact()
+        if not isinstance(evidence, (sealed_effect_type, sealed_absence_type)):
+            raise sealed_error("provider evidence type is not canonical")
         record = issued.get(id(evidence))
         if record is None or record[0]() is not evidence:
-            raise ProviderEvidenceError(
+            raise sealed_error(
                 "verified provider evidence was not issued by canonical verifier"
             )
-        if record[1] != _verified_provider_evidence_fingerprint(evidence):
-            raise ProviderEvidenceError(
+        if record[1] != sealed_fingerprint(evidence):
+            raise sealed_error(
                 "verified provider evidence changed after canonical verification"
             )
-        if isinstance(evidence, VerifiedProviderAbsenceEvidence):
-            # Lazy import avoids a module cycle: timeout resolution depends on this
-            # provider verifier, while absence consumption depends on both authorities.
-            try:
-                from .betfair_timeout_reconciliation import (
-                    BetfairTimeoutResolutionError,
-                    assert_betfair_timeout_absence_authoritative,
+        if isinstance(evidence, sealed_absence_type):
+            # Import only for registration side effect. Consumption uses the exact
+            # closure-captured assertion registered by the timeout authority, never a
+            # later mutable module attribute.
+            if timeout_absence_assertion is None:
+                try:
+                    from . import betfair_timeout_reconciliation as _timeout_authority
+                    del _timeout_authority
+                except ImportError as exc:
+                    raise sealed_error(
+                        "verified provider absence lacks durable timeout-horizon authority"
+                    ) from exc
+            assertion = timeout_absence_assertion
+            if assertion is None:
+                raise sealed_error(
+                    "verified provider absence lacks durable timeout-horizon authority"
                 )
-
-                assert_betfair_timeout_absence_authoritative(evidence)
-            except (ImportError, BetfairTimeoutResolutionError) as exc:
-                raise ProviderEvidenceError(
+            try:
+                assertion(evidence)
+            except Exception as exc:
+                # Preserve one stable provider-evidence boundary for downstream
+                # reconciliation without trusting a mutable timeout exception symbol.
+                raise sealed_error(
                     "verified provider absence lacks durable timeout-horizon authority"
                 ) from exc
 
@@ -646,6 +728,9 @@ def _install_verified_provider_evidence_authority() -> None:
     globals()[
         "assert_verified_provider_evidence_authoritative"
     ] = assert_verified_provider_evidence_authoritative
+    globals()[
+        "_register_betfair_timeout_absence_authority_assertion"
+    ] = register_timeout_absence_authority
 
 
 _install_verified_provider_evidence_authority()

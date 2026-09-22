@@ -111,7 +111,7 @@
 
     <section id="owner-authority" aria-labelledby="owner-heading">
       <h2 id="owner-heading">Економічні межі власника</h2>
-      <button id="305" type="button">Економічні межі власника</button>
+      <button id="305" type="button" aria-controls="owner-panel" aria-expanded="false">Економічні межі власника</button>
       <div id="owner-panel" hidden>
         <label for="306">Стан економічних меж власника</label>
         <input id="306" type="text" readonly aria-label="Стан економічних меж власника">
@@ -177,7 +177,7 @@
 
     <section id="manual-calculation" aria-labelledby="manual-heading">
       <h2 id="manual-heading">Ручні розрахунки</h2>
-      <button id="330" type="button">Відкрити робочу поверхню ручних розрахунків</button>
+      <button id="330" type="button" aria-controls="manual-panel" aria-expanded="false">Відкрити робочу поверхню ручних розрахунків</button>
       <div id="manual-panel" hidden>
         <label for="331">Операція ручного розрахунку</label>
         <select id="331" aria-label="Операція ручного розрахунку"></select>
@@ -199,8 +199,8 @@
 
     <section id="help-about" aria-labelledby="help-heading">
       <h2 id="help-heading">Клавіатура і межа доказів</h2>
-      <p>Ctrl+O — шлях набору даних; Ctrl+R — PAPER replay; Ctrl+Shift+R — recovery; Ctrl+E — evidence; Ctrl+L — live snapshot.</p>
-      <p>F2 — навігація екранами; F6 — квитки; F7 — живі котирування; F8 — оцінювання; F9 — економічні межі; F10 — ручні розрахунки.</p>
+      <p>Ctrl+O — шлях набору даних; Ctrl+E — evidence; Ctrl+L — live snapshot. PAPER replay і recovery запускаються через звичайні кнопки Tab + Enter/Space, без перехоплення браузерного Ctrl+R.</p>
+      <p>F2 — навігація екранами; F8 — оцінювання. F6/F7/F9/F10 залишаються браузеру/WebView2 та assistive technology; квитки, live, економічні межі й ручні розрахунки доступні через семантичні controls і навігацію екранами.</p>
       <p>Machine semantic/UIA checks не є фізичною перевіркою NVDA. NVDA_VERIFIED залишається false до людського тесту exact release artifact.</p>
     </section>
   </main>

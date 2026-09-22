@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import StrEnum
+from fractions import Fraction
 from typing import Protocol
 
 
@@ -402,23 +403,28 @@ class ResolvedPolicyOutcome:
             raise ForwardEconomicEvidenceError(
                 "non-zero economic cost requires canonical evidence and availability"
             )
-        wager_pnl = (
-            +(pnl + cost)
-            if self.wager_pnl_currency is None
-            else _decimal(self.wager_pnl_currency, "wager_pnl_currency")
-        )
-        if (
-            cost != 0
-            and self.side is not BetSide.NONE
-            and self.wager_pnl_currency is None
-        ):
-            raise ForwardEconomicEvidenceError(
-                "executed all-in cost requires explicit wager P&L"
+        if self.wager_pnl_currency is None:
+            if cost == 0:
+                wager_pnl = pnl
+            elif self.side is BetSide.NONE:
+                if Fraction(pnl) + Fraction(cost) != 0:
+                    raise ForwardEconomicEvidenceError(
+                        "NONE wager P&L must be exactly zero"
+                    )
+                wager_pnl = Decimal(0)
+            else:
+                raise ForwardEconomicEvidenceError(
+                    "executed all-in cost requires explicit wager P&L"
+                )
+        else:
+            wager_pnl = _decimal(
+                self.wager_pnl_currency,
+                "wager_pnl_currency",
             )
-        if self.wager_pnl_currency is not None and pnl != wager_pnl - cost:
-            raise ForwardEconomicEvidenceError(
-                "all-in net P&L must equal wager P&L minus economic cost"
-            )
+            if Fraction(pnl) != Fraction(wager_pnl) - Fraction(cost):
+                raise ForwardEconomicEvidenceError(
+                    "all-in net P&L must equal wager P&L minus economic cost"
+                )
         if (self.currency_code is None) != (
             self.denomination_authority_sha256 is None
         ):
@@ -992,7 +998,9 @@ class ForwardEconomicEvidenceAccumulator:
                     raise ForwardEconomicEvidenceError(
                         "challenger economic cost is missing causal availability"
                     )
-                capital_groups.setdefault(cost_available_at, []).append(-cost)
+                capital_groups.setdefault(cost_available_at, []).append(
+                    cost.copy_negate()
+                )
 
             wager_pnl = step.challenger_wager_pnl_currency
             if wager_pnl != 0:

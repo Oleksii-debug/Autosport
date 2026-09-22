@@ -164,6 +164,18 @@ def _exact_keys(
         raise MatchbookPriceQueryError(f"{name} fields are not canonical")
 
 
+def _require_canonical_false_fields(
+    raw: Mapping[str, Any],
+    fields: tuple[str, ...],
+    name: str,
+) -> None:
+    for field in fields:
+        if type(raw[field]) is not bool or raw[field] is not False:
+            raise MatchbookPriceQueryError(
+                f"{name}.{field} must be canonical false"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class MatchbookPriceQueryContract:
     """Immutable semantics for one Matchbook Get Prices acquisition.
@@ -375,12 +387,23 @@ class MatchbookPriceQueryContract:
             raw, expected, "MatchbookPriceQueryContract"
         )
         if (
-            raw["schema_version"] != SCHEMA_VERSION
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != SCHEMA_VERSION
             or raw["endpoint_family"] != ENDPOINT_FAMILY
         ):
             raise MatchbookPriceQueryError(
                 "unsupported price-query contract schema"
             )
+        _require_canonical_false_fields(
+            raw,
+            (
+                "provider_defaults_used",
+                "absence_beyond_depth_proven",
+                "omitted_side_absence_proven",
+                "execution_liquidity_reserved",
+            ),
+            "MatchbookPriceQueryContract",
+        )
         minimum = raw["minimum_liquidity"]
         if not isinstance(minimum, str):
             raise MatchbookPriceQueryError(
@@ -489,10 +512,26 @@ class MatchbookPriceObservationEvidence:
         _exact_keys(
             raw, expected, "MatchbookPriceObservationEvidence"
         )
-        if raw["schema_version"] != SCHEMA_VERSION:
+        if (
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != SCHEMA_VERSION
+        ):
             raise MatchbookPriceQueryError(
                 "unsupported observation evidence schema"
             )
+        _require_canonical_false_fields(
+            raw,
+            (
+                "provider_origin_proven",
+                "provider_authentication_proven",
+                "absence_beyond_depth_proven",
+                "omitted_side_absence_proven",
+                "execution_liquidity_reserved",
+                "grants_execution_authority",
+                "grants_real_money_authority",
+            ),
+            "MatchbookPriceObservationEvidence",
+        )
         query = MatchbookPriceQueryContract.from_dict(
             _mapping(raw["query"], "query")
         )

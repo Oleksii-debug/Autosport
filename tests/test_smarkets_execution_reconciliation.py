@@ -321,3 +321,41 @@ def test_profile_must_bind_exact_smarkets_official_adapter_identity() -> None:
     wrong = replace(_profile(), adapter_id="some-other-adapter")
     with pytest.raises(SmarketsReconciliationError, match="adapter identity"):
         _verify(_action(), wrong, _authority(), _readback())
+
+
+def test_post_hoc_execution_approval_cannot_authorize_earlier_action() -> None:
+    with pytest.raises(SmarketsReconciliationError, match="not yet causally available"):
+        _verify(
+            _action(),
+            _profile(),
+            _authority(observed_at="2026-09-22T12:11:00+00:00"),
+            _readback(),
+        )
+
+
+def test_later_readback_remains_valid_after_execution_approval_expiry() -> None:
+    effect = _verify(
+        _action(),
+        _profile(),
+        _authority(expires_at="2026-09-22T12:12:00+00:00"),
+        _readback(observed_at="2026-09-22T12:30:00+00:00"),
+    )
+    assert effect.status is AcknowledgementStatus.ACCEPTED
+
+
+def test_readback_cannot_predate_execution_action_evidence() -> None:
+    with pytest.raises(SmarketsReconciliationError, match="cannot predate"):
+        _verify(
+            _action(),
+            _profile(),
+            _authority(),
+            _readback(observed_at="2026-09-22T12:09:59+00:00"),
+        )
+
+
+def test_capability_profile_cannot_be_minted_after_action_time() -> None:
+    late_profile = replace(
+        _profile(), observed_at="2026-09-22T12:10:01+00:00"
+    )
+    with pytest.raises(SmarketsReconciliationError, match="capability profile"):
+        _verify(_action(), late_profile, _authority(), _readback())

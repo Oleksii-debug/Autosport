@@ -456,6 +456,7 @@ def test_caller_defined_record_authority_cannot_mint_positive_lineage(
 
 def test_read_revalidates_target_after_authority_lookup_to_close_toctou(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = b"AAAA"
     rewritten = b"BBBB"

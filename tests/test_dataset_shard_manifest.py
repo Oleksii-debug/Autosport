@@ -566,3 +566,19 @@ def test_authority_lookup_cannot_rebind_verified_descriptor_object(
             shards=(candidate,),
         )
 
+def test_boolean_schema_versions_are_rejected(tmp_path: Path) -> None:
+    payload = b"schema"
+    (tmp_path / "s.bin").write_bytes(payload)
+    descriptor = _descriptor(0, "s0", "s.bin", payload)
+
+    raw_descriptor = descriptor.payload()
+    raw_descriptor["schema_version"] = True
+    with pytest.raises(ValueError, match="descriptor schema"):
+        DatasetShardDescriptor.from_payload(raw_descriptor)
+
+    manifest = canonical_shard_manifest((descriptor,))
+    raw_manifest = manifest.payload()
+    raw_manifest["schema_version"] = True
+    with pytest.raises(ValueError, match="manifest schema"):
+        type(manifest).from_payload(raw_manifest)
+

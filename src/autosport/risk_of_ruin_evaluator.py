@@ -314,6 +314,9 @@ class RiskOfRuinEvaluationRequest:
             )
         unit_ids = tuple(item.independent_unit_id for item in self.observations)
         groups = tuple(item.dependence_group_id for item in self.observations)
+        evidence_ids = tuple(
+            item.source_evidence_sha256.lower() for item in self.observations
+        )
         if len(unit_ids) != len(set(unit_ids)):
             raise RiskOfRuinEvaluationError(
                 "independent_unit_id values must be unique"
@@ -321,6 +324,10 @@ class RiskOfRuinEvaluationRequest:
         if len(groups) != len(set(groups)):
             raise RiskOfRuinEvaluationError(
                 "fixed-N IID evaluation cannot reuse a dependence group"
+            )
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise RiskOfRuinEvaluationError(
+                "fixed-N IID evaluation requires unique source evidence identity"
             )
         for item in self.observations:
             if _instant(item.outcome_available_at, "outcome_available_at") > cutoff:

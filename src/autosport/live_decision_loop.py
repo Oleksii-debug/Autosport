@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
 from time import monotonic
-from typing import Callable, Protocol
+from typing import Callable, ContextManager, Protocol
 
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
@@ -117,6 +118,7 @@ Clock = Callable[[], datetime]
 ObservationRunner = Callable[[BoundedMirrorInvalidationBuffer], object]
 CatalogPageFetcher = Callable[[CatalogCheckpoint | None], CatalogPage]
 PostAppendHook = Callable[[], None]
+CommitFence = Callable[[], ContextManager[None]]
 
 
 _PROGRESS_SCHEMA = "autosport.live_decision_progress"
@@ -698,6 +700,7 @@ class PersistentLiveDecisionLoop:
         clock: Clock | None = None,
         observation_runner: ObservationRunner | None = None,
         post_append_hook: PostAppendHook | None = None,
+        commit_fence: CommitFence | None = None,
         catalog_lifecycle: ContinuousEventLifecycle | None = None,
         catalog_fetch_page: CatalogPageFetcher | None = None,
         catalog_source_id: str | None = None,
@@ -771,6 +774,9 @@ class PersistentLiveDecisionLoop:
         self.bounds = bounds or LiveLoopBounds()
         self.clock = resolved_clock
         self.post_append_hook = post_append_hook
+        if commit_fence is not None and not callable(commit_fence):
+            raise TypeError("commit_fence must be callable or None")
+        self.commit_fence = commit_fence
         if catalog_lifecycle is not None and not isinstance(
             catalog_lifecycle, ContinuousEventLifecycle
         ):
@@ -1749,7 +1755,12 @@ class PersistentLiveDecisionLoop:
 
         duplicate = False
         execution_result = None
-        with WorkspaceEconomicLock(self.workspace):
+        commit_fence = (
+            nullcontext()
+            if self.commit_fence is None
+            else self.commit_fence()
+        )
+        with commit_fence, WorkspaceEconomicLock(self.workspace):
             if (
                 decision_context_sha256_override is None
                 and self._decision_context_sha256() != decision_context_sha256

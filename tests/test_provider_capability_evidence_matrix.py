@@ -1,4 +1,5 @@
 from dataclasses import fields, replace
+import pickle
 
 import pytest
 
@@ -252,8 +253,32 @@ def test_caller_constructed_or_copied_positive_fact_cannot_mint_matrix_authority
 
 
 
+def test_pickle_replay_cannot_recreate_positive_qualification_authority():
+    p = profile()
+    issued = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+    )
+    original = matrix(p=p, facts=(issued,))
+    replayed = pickle.loads(pickle.dumps(original))
+    assert original.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}),
+        at_time=T3,
+    )
+    assert not replayed.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}),
+        at_time=T3,
+    )
+
+
+
 def test_matrix_is_complete_and_builder_rejects_duplicate_capability():
     m = matrix()
+    with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="exact evidence"):
+        replace(m, facts=("not-evidence", *m.facts[1:]))
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="every capability"):
         replace(m, facts=m.facts[:-1])
     p = profile()

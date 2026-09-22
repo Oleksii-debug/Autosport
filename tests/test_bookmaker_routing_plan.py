@@ -282,7 +282,6 @@ def test_direct_proposal_construction_rejects_contradictory_state_authority(
         )
 
 
-
 def test_parallel_plan_quantum_math_ignores_ambient_decimal_precision() -> None:
     a = _venue("book-a", "acct-a")
     b = _venue("book-b", "acct-b")

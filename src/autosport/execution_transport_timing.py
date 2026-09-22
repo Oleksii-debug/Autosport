@@ -22,10 +22,29 @@ PRODUCTION_CLOCK_SOURCE = "PROCESS_PERF_COUNTER_NS"
 TEST_CLOCK_SOURCE = "INJECTED_TEST_CLOCK"
 MAX_ELAPSED_NS = (1 << 63) - 1
 
-_WITNESS_ISSUANCE: ContextVar[bool] = ContextVar(
-    "autosport_transport_timing_witness_issuance",
-    default=False,
+def _make_witness_issuance_gate():
+    gate: ContextVar[bool] = ContextVar(
+        "autosport_transport_timing_witness_issuance",
+        default=False,
+    )
+
+    def active() -> bool:
+        return gate.get()
+
+    def issue(builder: Callable[[], "TransportRoundTripWitness"]):
+        token = gate.set(True)
+        try:
+            return builder()
+        finally:
+            gate.reset(token)
+
+    return active, issue
+
+
+_witness_issuance_active, _issue_transport_timing_witness = (
+    _make_witness_issuance_gate()
 )
+del _make_witness_issuance_gate
 
 
 class TransportTimingEvidenceError(RuntimeError):
@@ -105,8 +124,11 @@ class TransportRoundTripWitness:
     external_effect_proven: bool = False
     evidence_sha256: str = field(init=False)
 
-    def __post_init__(self) -> None:
-        if not _WITNESS_ISSUANCE.get():
+    def __post_init__(
+        self,
+        _issuance_active: Callable[[], bool] = _witness_issuance_active,
+    ) -> None:
+        if not _issuance_active():
             raise TransportTimingEvidenceError(
                 "transport timing witness must be product-issued"
             )
@@ -233,9 +255,12 @@ def _witness(
     elapsed_ns: int,
     response_sha256: str | None,
     production_clock: bool,
+    issuer: Callable[
+        [Callable[[], TransportRoundTripWitness]],
+        TransportRoundTripWitness,
+    ],
 ) -> TransportRoundTripWitness:
-    issuance = _WITNESS_ISSUANCE.set(True)
-    try:
+    def build() -> TransportRoundTripWitness:
         return TransportRoundTripWitness(
             attempt_id=attempt_id,
             action_id=action_id,
@@ -250,8 +275,8 @@ def _witness(
             ),
             clock_is_product_default=production_clock,
         )
-    finally:
-        _WITNESS_ISSUANCE.reset(issuance)
+
+    return issuer(build)
 
 
 def _timing_reason(exc: TransportTimingEvidenceError) -> str:
@@ -356,6 +381,10 @@ def _finish_timing(
     outcome: TransportRoundTripOutcome,
     response_sha256: str | None,
     production_clock: bool,
+    issuer: Callable[
+        [Callable[[], TransportRoundTripWitness]],
+        TransportRoundTripWitness,
+    ],
 ) -> tuple[TransportRoundTripWitness | None, str | None]:
     try:
         end_ns = _sample(clock, "transport_end_ns")
@@ -371,6 +400,7 @@ def _finish_timing(
                 elapsed_ns=elapsed_ns,
                 response_sha256=response_sha256,
                 production_clock=production_clock,
+                issuer=issuer,
             ),
             None,
         )
@@ -388,6 +418,10 @@ def _measure_transport_round_trip_impl(
     operation: Callable[[], bytes],
     monotonic_ns: Callable[[], int] | None,
     product_clock: Callable[[], int],
+    issuer: Callable[
+        [Callable[[], TransportRoundTripWitness]],
+        TransportRoundTripWitness,
+    ],
 ) -> TransportRoundTripMeasurement:
     for name, value in (
         ("attempt_id", attempt_id),
@@ -429,6 +463,7 @@ def _measure_transport_round_trip_impl(
             outcome=outcome,
             response_sha256=None,
             production_clock=production_clock,
+            issuer=issuer,
         )
         return TransportRoundTripMeasurement(
             response=None,
@@ -452,6 +487,7 @@ def _measure_transport_round_trip_impl(
             outcome=TransportRoundTripOutcome.INVALID_RESPONSE,
             response_sha256=None,
             production_clock=production_clock,
+            issuer=issuer,
         )
         return TransportRoundTripMeasurement(
             response=None,
@@ -471,6 +507,7 @@ def _measure_transport_round_trip_impl(
         outcome=TransportRoundTripOutcome.RETURNED,
         response_sha256=sha256(response).hexdigest(),
         production_clock=production_clock,
+        issuer=issuer,
     )
     return TransportRoundTripMeasurement(
         response=response,
@@ -482,6 +519,10 @@ def _measure_transport_round_trip_impl(
 
 def _bind_product_clock(
     product_clock: Callable[[], int],
+    issuer: Callable[
+        [Callable[[], TransportRoundTripWitness]],
+        TransportRoundTripWitness,
+    ],
 ) -> Callable[..., TransportRoundTripMeasurement]:
     """Capture the production clock so later module time rebinding cannot forge it."""
 
@@ -504,6 +545,7 @@ def _bind_product_clock(
             operation=operation,
             monotonic_ns=monotonic_ns,
             product_clock=product_clock,
+            issuer=issuer,
         )
 
     measured.__name__ = "measure_transport_round_trip"
@@ -511,5 +553,10 @@ def _bind_product_clock(
     return measured
 
 
-measure_transport_round_trip = _bind_product_clock(time.perf_counter_ns)
+measure_transport_round_trip = _bind_product_clock(
+    time.perf_counter_ns,
+    _issue_transport_timing_witness,
+)
 del _bind_product_clock
+del _issue_transport_timing_witness
+del _witness_issuance_active

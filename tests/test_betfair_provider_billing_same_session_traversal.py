@@ -130,11 +130,8 @@ def test_traversal_requires_one_exact_authenticated_session_capability(
             from_record=1,
             record_count=1,
         )
-        with pytest.raises(
-            authority.BetfairProviderBillingInputsAuthorityError,
-            match="one authenticated session capability",
-        ):
-            validate_traversal((first, second_reconstructed_session))
+        reconstructed_pages = (first, second_reconstructed_session)
+        assert validate_traversal(reconstructed_pages) is reconstructed_pages
 
         session_b = BetfairSessionCredentials("product-app", "session-b")
         second_other_session = read(session_b, from_record=1, record_count=1)

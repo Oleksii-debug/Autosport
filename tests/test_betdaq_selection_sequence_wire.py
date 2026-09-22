@@ -160,6 +160,8 @@ def test_wire_timestamp_preserves_missing_timezone_instead_of_inventing_utc() ->
         "2026-09-23T01:10",
         "2026-09-23T01:10:00,5",
         "2026-09-23T01:10:00+0000",
+        "2026-09-23T01:10:00+14:01",
+        "2026-09-23T01:10:00+15:00",
         "20260923T011000",
     ),
 )
@@ -175,6 +177,7 @@ def test_wire_timestamp_rejects_non_xsd_lexical_forms(invalid: str) -> None:
     (
         ("2026-09-23T01:10:00Z", True),
         ("2026-09-23T01:10:00+00:00", True),
+        ("2026-09-23T01:10:00+14:00", True),
         ("2026-09-23T01:10:00.125", False),
     ),
 )

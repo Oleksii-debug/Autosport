@@ -483,9 +483,10 @@ def test_statistical_thresholds_can_cross_but_caller_resolver_stays_non_promotin
     assert summary.paired_threshold_crossed is True
     assert summary.drawdown_guard_passed is True
 
-    # Mathematical strength is not authority. Until a product-owned REAL
-    # decision->execution->settlement->PnL resolver exists, this lineage is
-    # deliberately audit/statistical evidence only.
+    # Numerical threshold crossing is not optional-stopping authority. Until
+    # product-owned evidence proves the frozen filtration/conditional-null
+    # contract and the REAL economic resolver exists, this remains diagnostic.
+    assert summary.conditional_eprocess_verified is False
     assert summary.positive_authority_verified is False
     assert summary.scientific_promotion_gate_passed is False
     assert summary.promotion_authority is False
@@ -496,6 +497,7 @@ def test_summary_payload_preserves_explicit_fail_closed_authority_truth():
     payload = summary.to_payload()
 
     assert payload["positive_authority_verified"] is False
+    assert payload["conditional_eprocess_verified"] is False
     assert payload["scientific_promotion_gate_passed"] is False
     assert payload["promotion_authority"] is False
     assert payload["protocol_sha256"] == protocol().identity_sha256

@@ -59,6 +59,16 @@ class _ReplayPollHarness:
         self.log.append(value)
 
 
+def _render(app: _ReplayPollHarness, dialogs: list[tuple[str, str]]) -> str:
+    return "\n".join(
+        app.log
+        + app.status.values
+        + app.evaluation
+        + [title for title, _message in dialogs]
+        + [message for _title, message in dialogs]
+    )
+
+
 def test_replay_worker_raw_secret_diagnostic_never_reaches_operator_surfaces(
     monkeypatch,
 ) -> None:
@@ -81,13 +91,7 @@ def test_replay_worker_raw_secret_diagnostic_never_reaches_operator_surfaces(
     assert app.evaluation
     assert dialogs
 
-    rendered = "\n".join(
-        app.log
-        + app.status.values
-        + app.evaluation
-        + [title for title, _message in dialogs]
-        + [message for _title, message in dialogs]
-    )
+    rendered = _render(app, dialogs)
     for forbidden in (
         "AUTOSPORT-REPLAY-SECRET-SENTINEL",
         "Authorization",
@@ -96,4 +100,13 @@ def test_replay_worker_raw_secret_diagnostic_never_reaches_operator_surfaces(
         assert forbidden not in rendered
 
     assert "Помилка паперового повтору" in rendered
-    assert "ReplayTaskError" in rendered
+    assert "REPLAY_WORKER_FAILURE" in rendered
+
+    dialogs.clear()
+    other = _ReplayPollHarness("password=DIFFERENT-RAW-REPLAY-DIAGNOSTIC")
+    WindowsAutosportApp._poll_replay_worker(other)
+    rendered_other = _render(other, dialogs)
+
+    assert rendered_other == rendered
+    assert "DIFFERENT-RAW-REPLAY-DIAGNOSTIC" not in rendered_other
+    assert "password" not in rendered_other.casefold()

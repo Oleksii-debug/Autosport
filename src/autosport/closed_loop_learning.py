@@ -279,6 +279,18 @@ def bind_challenger_artifact(
         if getattr(staged, name) != expected:
             raise ClosedLoopBindingError(f"staged factory identity mismatch: {name}")
 
+    supervisor_bindings = dict(origin.bindings)
+    for name, expected in (
+        ("experiment_id", spec.experiment_id),
+        ("model_version_id", spec.model_version_id),
+        ("strategy_version_id", spec.strategy_version_id),
+        ("evaluation_bundle_id", spec.evaluation_bundle_id),
+    ):
+        if supervisor_bindings.get(name) != expected:
+            raise ClosedLoopBindingError(
+                f"ResearchSupervisor factory binding mismatch: {name}"
+            )
+
     experiment = registry.get("Experiment", spec.experiment_id)
     model = registry.get("ModelVersion", spec.model_version_id)
     strategy = registry.get("StrategyVersion", spec.strategy_version_id)

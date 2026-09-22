@@ -14,6 +14,7 @@ _ACTION_BINDINGS = {
     "<Control-o>": "choose_dataset",
     "<Control-r>": "run_replay",
     "<Control-Shift-R>": "repair_workspace",
+    "<Control-e>": "export_evidence",
     "<Control-l>": "live_refresh",
     "<Control-Alt-Left>": "shell_previous",
     "<Control-Alt-Right>": "shell_next",
@@ -45,6 +46,7 @@ _FOCUSABLE_CONTROLS = (
     "research_plan",
     "choose_dataset",
     "run_replay",
+    "export_evidence",
     "repair_workspace",
     "replay_speed",
     "live_mode",
@@ -173,6 +175,7 @@ def _critical_widgets(
         "research_plan": app.research_plan_button,
         "choose_dataset": app.choose_button,
         "run_replay": app.run_button,
+        "export_evidence": app.export_evidence_button,
         "repair_workspace": app.repair_button,
         "replay_speed": app.speed,
         "live_mode": app.live_mode,
@@ -180,7 +183,7 @@ def _critical_widgets(
         "live_quotes": app.live_quotes,
         "tickets": app.tickets,
         "evaluation": app.evaluation,
-        "log": app.log,
+        "log": app.log_accessible,
         "bankroll": app.bank_summary,
         "manual_calculation_open": app.manual_calculation_button,
     }
@@ -229,11 +232,64 @@ def _tab_reachable_controls(
     return list(dict.fromkeys(reachable))
 
 
+def _export_evidence_binding_dispatches(app: WindowsAutosportApp) -> bool:
+    """Prove Ctrl+E targets export_evidence without executing known actions."""
+
+    try:
+        instance_attributes = vars(app)
+    except TypeError:
+        return False
+
+    dispatched_actions: list[str] = []
+    shadowed: list[tuple[str, bool, object | None]] = []
+    restore_ok = True
+
+    try:
+        for action in dict.fromkeys(_ACTION_BINDINGS.values()):
+            try:
+                target = getattr(app, action)
+            except Exception:
+                continue
+            if not callable(target):
+                continue
+
+            had_instance_value = action in instance_attributes
+            previous_instance_value = instance_attributes.get(action)
+
+            def probe(*_args: object, _action: str = action, **_kwargs: object) -> None:
+                dispatched_actions.append(_action)
+
+            setattr(app, action, probe)
+            shadowed.append((action, had_instance_value, previous_instance_value))
+
+        if "export_evidence" not in {action for action, _had, _previous in shadowed}:
+            return False
+
+        app.event_generate("<Control-e>")
+        app.update()
+    except Exception:
+        return False
+    finally:
+        for action, had_instance_value, previous_instance_value in reversed(shadowed):
+            try:
+                if had_instance_value:
+                    setattr(app, action, previous_instance_value)
+                else:
+                    delattr(app, action)
+            except Exception:
+                restore_ok = False
+
+    return restore_ok and dispatched_actions == ["export_evidence"]
+
+
 def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
-    return {
+    bindings = {
         sequence: bool(str(app.bind(sequence) or "").strip())
         for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS)
     }
+    if bindings.get("<Control-e>", False):
+        bindings["<Control-e>"] = _export_evidence_binding_dispatches(app)
+    return bindings
 
 
 def _execute_focus_shortcuts(

@@ -17,6 +17,7 @@ class KeyboardAuditTests(unittest.TestCase):
             "<Control-o>": True,
             "<Control-r>": True,
             "<Control-Shift-R>": True,
+            "<Control-e>": True,
             "<Control-l>": True,
             "<Control-Alt-Left>": True,
             "<Control-Alt-Right>": True,
@@ -54,6 +55,7 @@ class KeyboardAuditTests(unittest.TestCase):
             "research_plan",
             "choose_dataset",
             "run_replay",
+            "export_evidence",
             "repair_workspace",
             "replay_speed",
             "live_mode",
@@ -69,6 +71,7 @@ class KeyboardAuditTests(unittest.TestCase):
     def test_keyboard_contract_passes_without_claiming_nvda(self):
         report = summarize_keyboard_contract(*self._passing())
         self.assertEqual(report["status"], "PASS")
+        self.assertTrue(report["action_shortcuts_bound"]["<Control-e>"])
         self.assertEqual(report["expected_automation_ids"]["bankroll"], WINDOWS_BANKROLL_AUTOMATION_ID)
         self.assertEqual(
             report["expected_automation_ids"]["shell_navigation"],
@@ -102,12 +105,52 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["real_money_execution"])
 
+    def test_critical_widgets_use_canonical_accessible_log_mirror(self):
+        visible_log = object()
+        accessible_log = object()
+        app = SimpleNamespace(
+            shell_navigation=object(),
+            shell_open_button=object(),
+            shell_state=object(),
+            shell_details=object(),
+            owner_economic_authority_button=object(),
+            owner_economic_authority_state=object(),
+            owner_economic_authority_readback=object(),
+            strategy=object(),
+            research_plan_button=object(),
+            choose_button=object(),
+            run_button=object(),
+            export_evidence_button=object(),
+            repair_button=object(),
+            speed=object(),
+            live_mode=object(),
+            live_refresh_button=object(),
+            live_quotes=object(),
+            tickets=object(),
+            evaluation=object(),
+            log=visible_log,
+            log_accessible=accessible_log,
+            bank_summary=object(),
+            manual_calculation_button=object(),
+        )
+        controls = keyboard_audit._critical_widgets(app)
+        self.assertIs(controls["log"], accessible_log)
+        self.assertIsNot(controls["log"], visible_log)
+
     def test_missing_action_binding_fails_closed(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         bindings["<Control-Alt-Right>"] = False
         report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("<Control-Alt-Right>" in item for item in report["failures"]))
+
+    def test_missing_evidence_export_binding_fails_closed(self):
+        bindings, focus, reachable, reverse_reachable = self._passing()
+        bindings["<Control-e>"] = False
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertFalse(report["action_shortcuts_bound"]["<Control-e>"])
+        self.assertTrue(any("<Control-e>" in item for item in report["failures"]))
 
     def test_focus_shortcut_must_reach_exact_target(self):
         bindings, focus, reachable, reverse_reachable = self._passing()

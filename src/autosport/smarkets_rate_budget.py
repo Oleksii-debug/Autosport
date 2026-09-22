@@ -191,7 +191,7 @@ class SmarketsAccountRateBudget:
         try:
             with self._connect() as connection:
                 connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_budget (\n                        account_id TEXT PRIMARY KEY,\n                        observation_sha256 TEXT NOT NULL,\n                        provider_limit INTEGER NOT NULL,\n                        provider_remaining INTEGER NOT NULL,\n                        window_seconds INTEGER NOT NULL,\n                        observed_at TEXT NOT NULL,\n                        reset_at TEXT NOT NULL,\n                        http_status INTEGER NOT NULL,\n                        error_type TEXT,\n                        reservation_sequence INTEGER NOT NULL CHECK (reservation_sequence >= 0)\n                    )\n                    ')
-                connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_reservation (\n                        reservation_id TEXT PRIMARY KEY,\n                        account_id TEXT NOT NULL,\n                        budget_reset_at TEXT NOT NULL,\n                        completed_observation_sha256 TEXT,\n                        FOREIGN KEY(account_id) REFERENCES smarkets_rate_budget(account_id)\n                    )\n                    ')
+                connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_reservation (\n                        reservation_id TEXT PRIMARY KEY,\n                        account_id TEXT NOT NULL,\n                        budget_reset_at TEXT NOT NULL,\n                        issued_observation_sha256 TEXT NOT NULL,\n                        completed_observation_sha256 TEXT,\n                        FOREIGN KEY(account_id) REFERENCES smarkets_rate_budget(account_id)\n                    )\n                    ')
                 connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_block (\n                        account_id TEXT PRIMARY KEY,\n                        observed_at TEXT NOT NULL,\n                        reason TEXT NOT NULL\n                    )\n                    ')
         except sqlite3.Error as exc:
             raise SmarketsRateBudgetError('rate-budget database initialization failed') from exc
@@ -287,6 +287,10 @@ class SmarketsAccountRateBudget:
             if completed != observation_sha256:
                 raise SmarketsRateBudgetError('reservation completion conflicts with prior evidence')
             return
+        if row['issued_observation_sha256'] == observation_sha256:
+            raise SmarketsRateBudgetError(
+                'reservation completion requires fresh provider observation evidence'
+            )
         connection.execute('UPDATE smarkets_rate_reservation SET completed_observation_sha256 = ? WHERE reservation_id = ?', (observation_sha256, reservation_id))
 
     def reserve_request(self, *, account_id: str, session_generation: str, now: datetime) -> SmarketsRateBudgetDecision:
@@ -338,7 +342,7 @@ class SmarketsAccountRateBudget:
                 sequence = _nonnegative_int(row['reservation_sequence'], 'reservation_sequence') + 1
                 reservation_id = sha256((self._account_id + '\x00' + row['observation_sha256'] + '\x00' + str(sequence)).encode('utf-8')).hexdigest()
                 connection.execute('UPDATE smarkets_rate_budget SET reservation_sequence = ? WHERE account_id = ?', (sequence, self._account_id))
-                connection.execute('\n                    INSERT INTO smarkets_rate_reservation (\n                        reservation_id, account_id, budget_reset_at,\n                        completed_observation_sha256\n                    ) VALUES (?, ?, ?, NULL)\n                    ', (reservation_id, self._account_id, row['reset_at']))
+                connection.execute('\n                    INSERT INTO smarkets_rate_reservation (\n                        reservation_id, account_id, budget_reset_at,\n                        issued_observation_sha256, completed_observation_sha256\n                    ) VALUES (?, ?, ?, ?, NULL)\n                    ', (reservation_id, self._account_id, row['reset_at'], row['observation_sha256']))
                 connection.execute('COMMIT')
                 return self._decision(True, 'budget_reserved', observed_remaining, effective_before, effective_before - 1, reset_at, row['observation_sha256'], reservation_id)
         except SmarketsRateBudgetError:

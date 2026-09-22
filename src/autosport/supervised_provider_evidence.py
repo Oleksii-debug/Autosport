@@ -587,14 +587,29 @@ def _install_verified_provider_evidence_authority() -> None:
     sealed_absence_type = VerifiedProviderAbsenceEvidence
     sealed_fingerprint = _verified_provider_evidence_fingerprint
     sealed_error = ProviderEvidenceError
+
+    def descriptor_code(value: object) -> object | None:
+        code = getattr(value, "__code__", None)
+        if code is not None:
+            return code
+        if isinstance(value, property) and value.fget is not None:
+            return getattr(value.fget, "__code__", None)
+        return None
+
     sealed_readback_assertion = BetfairExecutionReadbackEnvelope.assert_authoritative
-    sealed_readback_assertion_code = getattr(
-        sealed_readback_assertion, "__code__", None
-    )
+    sealed_readback_assertion_code = descriptor_code(sealed_readback_assertion)
     sealed_readback_fingerprint = BetfairExecutionReadbackEnvelope._authority_fingerprint
-    sealed_readback_fingerprint_code = getattr(
-        sealed_readback_fingerprint, "__code__", None
-    )
+    sealed_readback_fingerprint_code = descriptor_code(sealed_readback_fingerprint)
+    sealed_profile_descriptors = {
+        "profile_id": BookmakerCapabilityProfile.profile_id,
+        "to_canonical_dict": BookmakerCapabilityProfile.to_canonical_dict,
+        "state_of": BookmakerCapabilityProfile.state_of,
+        "require": BookmakerCapabilityProfile.require,
+    }
+    sealed_profile_descriptor_codes = {
+        name: descriptor_code(value)
+        for name, value in sealed_profile_descriptors.items()
+    }
     timeout_absence_assertion: object | None = None
     missing = object()
 
@@ -663,7 +678,7 @@ def _install_verified_provider_evidence_authority() -> None:
         )
         if (
             current_readback_assertion is not sealed_readback_assertion
-            or getattr(current_readback_assertion, "__code__", None)
+            or descriptor_code(current_readback_assertion)
             is not sealed_readback_assertion_code
         ):
             raise sealed_error(
@@ -676,12 +691,22 @@ def _install_verified_provider_evidence_authority() -> None:
         )
         if (
             current_readback_fingerprint is not sealed_readback_fingerprint
-            or getattr(current_readback_fingerprint, "__code__", None)
+            or descriptor_code(current_readback_fingerprint)
             is not sealed_readback_fingerprint_code
         ):
             raise sealed_error(
                 "provider readback authority fingerprint method changed"
             )
+        for name, expected in sealed_profile_descriptors.items():
+            current = getattr(BookmakerCapabilityProfile, name, missing)
+            if (
+                current is not expected
+                or descriptor_code(current)
+                is not sealed_profile_descriptor_codes[name]
+            ):
+                raise sealed_error(
+                    f"provider capability profile authority method changed: {name}"
+                )
 
     def register_timeout_absence_authority(assertion: object) -> None:
         nonlocal timeout_absence_assertion

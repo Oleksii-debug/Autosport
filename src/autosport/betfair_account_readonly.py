@@ -1360,7 +1360,42 @@ def _install_market_book_depth_authority():
     issued: dict[int, tuple[object, str, object]] = {}
     raw_read = BetfairReadOnlyClient.read_market_book_depth
     fingerprint = _market_book_depth_fingerprint
-    source_origin_authoritative = _market_book_source_origin_authoritative
+
+    # Capture the exact production-origin objects inside the non-exported
+    # authority closure. Function identity alone is insufficient because Python
+    # function __kwdefaults__ and __code__ are mutable at runtime; a caller that
+    # rewrites the captured _urlopen default and the module alias together could
+    # otherwise redirect the canonical transport while preserving identity.
+    canonical_client_type = BetfairReadOnlyClient
+    canonical_transport_type = UrllibBetfairHttpTransport
+    canonical_clock = _CANONICAL_MARKET_BOOK_CLOCK
+    canonical_post = canonical_transport_type.post
+    canonical_post_code = canonical_post.__code__
+    canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+    if canonical_urlopen is None or canonical_urlopen is not urlopen:
+        raise RuntimeError("canonical Betfair urlopen origin is unavailable")
+
+    def source_origin_authoritative(source: object) -> bool:
+        if type(source) is not canonical_client_type:
+            return False
+        transport = getattr(source, "_transport", None)
+        if type(transport) is not canonical_transport_type:
+            return False
+        if getattr(source, "_market_book_origin_transport", None) is not transport:
+            return False
+        if getattr(source, "_clock", None) is not canonical_clock:
+            return False
+        if getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
+            return False
+        if "post" in vars(transport):
+            return False
+        return (
+            type(transport).post is canonical_post
+            and canonical_post.__code__ is canonical_post_code
+            and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+            is canonical_urlopen
+            and urlopen is canonical_urlopen
+        )
 
     def authoritative_read(
         self: BetfairReadOnlyClient,

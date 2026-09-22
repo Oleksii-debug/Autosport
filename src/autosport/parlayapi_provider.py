@@ -180,7 +180,7 @@ class ParlayApiTableTennisProvider:
         max_attempts: int = 2,
         max_backoff_seconds: float = 2.0,
         transport: Transport = _default_transport,
-        clock: Clock = utc_now_iso,
+        clock: Clock | None = None,
         sleeper: Sleeper = time.sleep,
     ) -> None:
         if not public_preview and not api_key:
@@ -205,10 +205,12 @@ class ParlayApiTableTennisProvider:
         self.markets = markets
         self.base_url = _PARLAY_API_BASE_URL
         self.timeout_seconds = timeout_seconds
+        if transport is _default_transport and clock is not None and clock is not utc_now_iso:
+            raise ValueError("clock override requires a custom transport")
         self.max_attempts = max_attempts
         self.max_backoff_seconds = max_backoff_seconds
         self.transport = transport
-        self.clock = clock
+        self.clock = utc_now_iso if clock is None else clock
         self.sleeper = sleeper
         self._pending_quotes: Iterator[ProviderQuote] | None = None
         self._pending_quote: ProviderQuote | None = None
@@ -217,8 +219,8 @@ class ParlayApiTableTennisProvider:
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
         if self._pending_quotes is None:
-            observed_ts = self.clock()
             response = self._fetch()
+            observed_ts = self.clock()
             events = self._event_list(response.payload)
             self._pending_quotes = self._snapshot_quotes(
                 events,
@@ -294,8 +296,8 @@ class ParlayApiTableTennisProvider:
 
         query = urlencode({"dateFrom": date_from, "dateTo": date_to})
         url = f"{self.base_url}/v1/historical/sports/{self.sport_key}/coverage?{query}"
-        observed_at = self.clock()
         response = self._request(url)
+        observed_at = self.clock()
         window_hours_raw = _header(response.headers, "x-historical-window-hours")
         window_from_raw = _header(response.headers, "x-historical-window-from")
         if window_hours_raw is None or window_from_raw is None:

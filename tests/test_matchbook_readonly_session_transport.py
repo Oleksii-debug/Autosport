@@ -705,6 +705,65 @@ def test_logout_while_read_is_inflight_fences_late_predecessor_response() -> Non
     assert isinstance(errors[0], MatchbookStaleGenerationResponse)
 
 
+def test_ambiguous_logout_revokes_generation_and_fences_inflight_response() -> None:
+    login = LoginFactory()
+    read_started = Event()
+    release_read = Event()
+
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
+        if path == "/edge/rest/account/positions":
+            read_started.set()
+            assert release_read.wait(timeout=2.0)
+            return MatchbookReadResponse(200, "late-predecessor")
+        return MatchbookReadResponse(200, token)
+
+    def ambiguous_logout(token: str) -> int:
+        raise RuntimeError(f"logout response lost for {token}")
+
+    transport, lifecycle, _, _ = build_transport(
+        read=read,
+        login=login,
+        logout=ambiguous_logout,
+    )
+    first = transport.read(path="/edge/rest/events")
+    assert first.generation_id == "gen-1"
+    assert first.payload == "token-1"
+
+    results: list[object] = []
+    errors: list[BaseException] = []
+    inflight = run_in_thread(
+        lambda: transport.read(path="/edge/rest/account/positions"),
+        results=results,
+        errors=errors,
+    )
+    assert read_started.wait(timeout=1.0)
+
+    with pytest.raises(MatchbookSessionTransportError) as exc_info:
+        transport.logout()
+
+    assert "token-1" not in str(exc_info.value)
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.UNKNOWN
+
+    release_read.set()
+    inflight.join(timeout=2.0)
+
+    assert inflight.is_alive() is False
+    assert results == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], MatchbookStaleGenerationResponse)
+
+    fresh = transport.read(path="/edge/rest/events")
+    assert fresh.generation_id == "gen-2"
+    assert fresh.payload == "token-2"
+    assert login.calls == 2
+    assert lifecycle.state is SessionState.ACTIVE
+
+
 def test_failure_taxonomy_reuses_canonical_provider_and_lifecycle_boundaries() -> None:
     assert issubclass(MatchbookSessionTransportError, ProviderUnavailableError)
     assert issubclass(MatchbookAuthenticationUnavailable, ProviderUnavailableError)

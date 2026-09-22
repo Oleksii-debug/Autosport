@@ -108,8 +108,25 @@ def _readback(**changes: object) -> SmarketsOrderReadback:
     return SmarketsOrderReadback(**values)
 
 
+def _verify(
+    action: ExecutionAction,
+    profile: BookmakerCapabilityProfile,
+    authority: SmarketsExecutionAuthority,
+    readback: SmarketsOrderReadback,
+    *,
+    expected_provider_order_id: str = "order-100",
+):
+    return verify_smarkets_order_readback(
+        action,
+        profile,
+        authority,
+        readback,
+        expected_provider_order_id=expected_provider_order_id,
+    )
+
+
 def test_full_fill_is_bound_to_exact_provider_readback() -> None:
-    effect = verify_smarkets_order_readback(
+    effect = _verify(
         _action(), _profile(), _authority(), _readback()
     )
     assert effect.status is AcknowledgementStatus.ACCEPTED
@@ -119,7 +136,7 @@ def test_full_fill_is_bound_to_exact_provider_readback() -> None:
 
 
 def test_partial_fill_is_partial_not_full_acceptance() -> None:
-    effect = verify_smarkets_order_readback(
+    effect = _verify(
         _action(),
         _profile(),
         _authority(),
@@ -134,7 +151,7 @@ def test_partial_fill_is_partial_not_full_acceptance() -> None:
 
 
 def test_cancelled_unmatched_order_is_rejected_effect() -> None:
-    effect = verify_smarkets_order_readback(
+    effect = _verify(
         _action(),
         _profile(),
         _authority(),
@@ -151,7 +168,7 @@ def test_cancelled_unmatched_order_is_rejected_effect() -> None:
 
 def test_open_unmatched_order_remains_pending() -> None:
     with pytest.raises(SmarketsReconciliationPending):
-        verify_smarkets_order_readback(
+        _verify(
             _action(),
             _profile(),
             _authority(),
@@ -177,28 +194,28 @@ def test_open_unmatched_order_remains_pending() -> None:
 )
 def test_any_order_identity_or_request_drift_fails_closed(field: str, value: object) -> None:
     with pytest.raises(SmarketsReconciliationError):
-        verify_smarkets_order_readback(
+        _verify(
             _action(), _profile(), _authority(), _readback(**{field: value})
         )
 
 
 def test_readback_capability_is_required() -> None:
     with pytest.raises(SmarketsReconciliationError, match="bet_readback"):
-        verify_smarkets_order_readback(
+        _verify(
             _action(), _profile(readback=False), _authority(), _readback()
         )
 
 
 def test_expired_or_out_of_scope_authority_fails_closed() -> None:
     with pytest.raises(SmarketsReconciliationError, match="expired"):
-        verify_smarkets_order_readback(
+        _verify(
             _action(),
             _profile(),
             _authority(expires_at="2026-09-22T12:14:59+00:00"),
             _readback(),
         )
     with pytest.raises(SmarketsReconciliationError, match="event"):
-        verify_smarkets_order_readback(
+        _verify(
             _action(),
             _profile(),
             _authority(approved_event_ids=("event-other",)),
@@ -233,7 +250,7 @@ def test_rate_limit_evidence_blocks_until_provider_reset() -> None:
 def test_journal_is_restart_verifiable_and_exact_replay_is_idempotent(
     tmp_path: Path,
 ) -> None:
-    effect = verify_smarkets_order_readback(
+    effect = _verify(
         _action(), _profile(), _authority(), _readback()
     )
     path = tmp_path / "smarkets-reconciliation.jsonl"
@@ -247,7 +264,7 @@ def test_journal_is_restart_verifiable_and_exact_replay_is_idempotent(
 
 
 def test_journal_detects_tampering(tmp_path: Path) -> None:
-    effect = verify_smarkets_order_readback(
+    effect = _verify(
         _action(), _profile(), _authority(), _readback()
     )
     path = tmp_path / "smarkets-reconciliation.jsonl"
@@ -263,14 +280,44 @@ def test_journal_detects_tampering(tmp_path: Path) -> None:
 def test_same_provider_order_cannot_move_to_another_action(tmp_path: Path) -> None:
     path = tmp_path / "smarkets-reconciliation.jsonl"
     journal = SmarketsReconciliationJournal(path)
-    first = verify_smarkets_order_readback(
+    first = _verify(
         _action(), _profile(), _authority(), _readback()
     )
     journal.append(first)
 
     other_action = replace(_action(), action_id="action-2")
-    second = verify_smarkets_order_readback(
+    second = _verify(
         other_action, _profile(), _authority(), _readback()
     )
     with pytest.raises(SmarketsReconciliationError, match="provider_order_id"):
         journal.append(second)
+
+
+def test_exact_durable_provider_order_id_is_mandatory() -> None:
+    with pytest.raises(SmarketsReconciliationError, match="durable submission identity"):
+        _verify(
+            _action(),
+            _profile(),
+            _authority(),
+            _readback(),
+            expected_provider_order_id="order-other",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requested_price", 2.5),
+        ("requested_quantity", 10.0),
+        ("matched_quantity", 10.0),
+    ],
+)
+def test_binary_float_money_ingress_is_rejected(field: str, value: float) -> None:
+    with pytest.raises(SmarketsReconciliationError, match="Decimal"):
+        _readback(**{field: value})
+
+
+def test_profile_must_bind_exact_smarkets_official_adapter_identity() -> None:
+    wrong = replace(_profile(), adapter_id="some-other-adapter")
+    with pytest.raises(SmarketsReconciliationError, match="adapter identity"):
+        _verify(_action(), wrong, _authority(), _readback())

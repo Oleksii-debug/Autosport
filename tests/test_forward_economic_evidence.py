@@ -212,4 +212,278 @@ def test_duplicate_universe_sequence_fails_without_state_mutation():
     with pytest.raises(ForwardEconomicEvidenceError, match="contiguous"):
         acc.record(obs, r)
     assert len(acc.steps) == 1
-    assert ac
+    assert acc.next_sequence == 1
+    assert acc.summary().evidence_sha256 == before
+
+
+def test_wrong_resolver_authority_fails_without_state_mutation():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(0)
+    challenger = outcome("challenger", obs, side=BetSide.BACK, pnl="5")
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+    resolver = Resolver(
+        {
+            (0, "challenger"): challenger,
+            (0, "champion"): champion,
+        },
+        authority_sha256=SHA_C,
+    )
+    before = acc.summary().evidence_sha256
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="frozen authority binding"):
+        acc.record(obs, resolver)
+
+    assert acc.steps == ()
+    assert acc.next_sequence == 0
+    assert acc.summary().evidence_sha256 == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("policy_id", "other", "policy identity"),
+        ("sequence", 1, "sequence mismatch"),
+        ("universe_event_sha256", SHA_C, "universe event mismatch"),
+        ("decision_sha256", SHA_C, "decision digest mismatch"),
+    ),
+)
+def test_resolved_challenger_identity_substitution_fails_atomically(
+    field,
+    value,
+    match,
+):
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(0)
+    challenger = outcome("challenger", obs, side=BetSide.BACK, pnl="5")
+    challenger = replace(challenger, **{field: value})
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+    resolver = resolver_for([(obs, challenger, champion)])
+    before = acc.summary().evidence_sha256
+
+    with pytest.raises(ForwardEconomicEvidenceError, match=match):
+        acc.record(obs, resolver)
+
+    assert acc.steps == ()
+    assert acc.summary().evidence_sha256 == before
+
+
+def test_second_policy_identity_failure_does_not_commit_first_resolution():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(0)
+    challenger = outcome("challenger", obs, side=BetSide.BACK, pnl="5")
+    champion = replace(
+        outcome("champion", obs, side=BetSide.NONE, pnl="0"),
+        decision_sha256=SHA_C,
+    )
+    resolver = resolver_for([(obs, challenger, champion)])
+    before = acc.summary().evidence_sha256
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="decision digest mismatch"):
+        acc.record(obs, resolver)
+
+    assert acc.steps == ()
+    assert acc.next_sequence == 0
+    assert acc.summary().evidence_sha256 == before
+
+
+def test_decision_must_not_predate_prospective_protocol_freeze():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(0)
+    challenger = replace(
+        outcome("challenger", obs, side=BetSide.BACK, pnl="5"),
+        decision_committed_at=T0,
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+    resolver = resolver_for([(obs, challenger, champion)])
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="predates frozen"):
+        acc.record(obs, resolver)
+
+    assert acc.steps == ()
+
+
+def test_protocol_maximum_accepted_odds_is_enforced_before_recording():
+    acc = ForwardEconomicEvidenceAccumulator(
+        protocol(maximum_accepted_odds=Decimal("2"))
+    )
+    obs = observation(0)
+    challenger = outcome(
+        "challenger",
+        obs,
+        side=BetSide.BACK,
+        pnl="10",
+        odds="3",
+        stake="10",
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="accepted odds exceed"):
+        acc.record(obs, resolver_for([(obs, challenger, champion)]))
+
+    assert acc.steps == ()
+
+
+@pytest.mark.parametrize(
+    ("side", "odds", "stake"),
+    (
+        (BetSide.BACK, "2", "11"),
+        (BetSide.LAY, "3", "6"),
+    ),
+)
+def test_fixed_risk_unit_rejects_excess_downside_exposure(side, odds, stake):
+    acc = ForwardEconomicEvidenceAccumulator(protocol(risk_unit_currency=Decimal("10")))
+    obs = observation(0)
+    challenger = outcome(
+        "challenger",
+        obs,
+        side=side,
+        pnl="0",
+        odds=odds,
+        stake=stake,
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="fixed risk unit"):
+        acc.record(obs, resolver_for([(obs, challenger, champion)]))
+
+    assert acc.steps == ()
+
+
+def test_none_outcome_cannot_carry_money_or_execution_claims():
+    obs = observation(0)
+    none = outcome("challenger", obs, side=BetSide.NONE, pnl="0")
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="accepted odds or stake"):
+        replace(
+            none,
+            accepted_odds=Decimal("2"),
+            accepted_stake=Decimal("10"),
+        )
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="exactly zero money"):
+        replace(none, net_pnl_currency=Decimal("1"))
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="execution or settlement"):
+        replace(
+            none,
+            execution_evidence_sha256=SHA_C,
+            settlement_evidence_sha256=SHA_D,
+        )
+
+
+def test_successful_record_binds_exact_money_and_evidence_identity():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(0)
+    challenger = outcome("challenger", obs, side=BetSide.BACK, pnl="5")
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    step = acc.record(obs, resolver_for([(obs, challenger, champion)]))
+    summary = acc.summary()
+
+    assert step.sequence == 0
+    assert step.challenger_net_pnl_currency == Decimal("5")
+    assert step.challenger_normalized_pnl == Decimal("0.5")
+    assert step.paired_normalized_pnl == Decimal("0.5")
+    assert step.challenger_execution_evidence_sha256 == SHA_C
+    assert step.challenger_settlement_evidence_sha256 == SHA_D
+    assert summary.observed_events == 1
+    assert summary.next_sequence == 1
+    assert summary.challenger_total_pnl_currency == Decimal("5")
+    assert summary.champion_total_pnl_currency == Decimal("0")
+    assert summary.positive_authority_verified is False
+    assert summary.scientific_promotion_gate_passed is False
+    assert summary.promotion_authority is False
+
+
+def test_nonzero_start_sequence_is_part_of_prospective_contract():
+    acc = ForwardEconomicEvidenceAccumulator(protocol(start_sequence=5))
+    assert acc.next_sequence == 5
+
+    too_early = observation(0)
+    with pytest.raises(ForwardEconomicEvidenceError, match="contiguous"):
+        acc.record(
+            too_early,
+            resolver_for(
+                [
+                    (
+                        too_early,
+                        outcome("challenger", too_early, side=BetSide.NONE, pnl="0"),
+                        outcome("champion", too_early, side=BetSide.NONE, pnl="0"),
+                    )
+                ]
+            ),
+        )
+
+    obs = observation(5)
+    acc.record(
+        obs,
+        resolver_for(
+            [
+                (
+                    obs,
+                    outcome("challenger", obs, side=BetSide.NONE, pnl="0"),
+                    outcome("champion", obs, side=BetSide.NONE, pnl="0"),
+                )
+            ]
+        ),
+    )
+    assert acc.next_sequence == 6
+
+
+def test_statistical_thresholds_can_cross_but_caller_resolver_stays_non_promoting():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+
+    rows = []
+    for seq in range(5):
+        obs = observation(seq)
+        rows.append(
+            (
+                obs,
+                outcome("challenger", obs, side=BetSide.BACK, pnl="10"),
+                outcome("champion", obs, side=BetSide.NONE, pnl="0"),
+            )
+        )
+    resolver = resolver_for(rows)
+    for obs, _, _ in rows:
+        acc.record(obs, resolver)
+
+    summary = acc.summary()
+    with localcontext() as context:
+        context.prec = 80
+        expected_increment = (
+            Decimal("0.5") * Decimal("1")
+            - (
+                Decimal("0.5")
+                * Decimal("0.5")
+                * Decimal("2")
+                * Decimal("2")
+            )
+            / Decimal("8")
+        )
+        expected_log_e = +(Decimal(5) * expected_increment)
+
+    assert summary.absolute_log_e == expected_log_e
+    assert summary.paired_log_e == expected_log_e
+    assert summary.minimum_events_satisfied is True
+    assert summary.absolute_threshold_crossed is True
+    assert summary.paired_threshold_crossed is True
+    assert summary.drawdown_guard_passed is True
+
+    # Mathematical strength is not authority. Until a product-owned REAL
+    # decision->execution->settlement->PnL resolver exists, this lineage is
+    # deliberately audit/statistical evidence only.
+    assert summary.positive_authority_verified is False
+    assert summary.scientific_promotion_gate_passed is False
+    assert summary.promotion_authority is False
+
+
+def test_summary_payload_preserves_explicit_fail_closed_authority_truth():
+    summary = ForwardEconomicEvidenceAccumulator(protocol()).summary()
+    payload = summary.to_payload()
+
+    assert payload["positive_authority_verified"] is False
+    assert payload["scientific_promotion_gate_passed"] is False
+    assert payload["promotion_authority"] is False
+    assert payload["protocol_sha256"] == protocol().identity_sha256
+    assert payload["observed_events"] == 0
+    assert payload["next_sequence"] == 0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -712,6 +713,30 @@ def _install_verified_provider_evidence_authority() -> None:
         nonlocal timeout_absence_assertion
         if not callable(assertion):
             raise sealed_error("timeout absence authority assertion must be callable")
+
+        # This registrar is exposed only to break the provider-evidence/timeout
+        # import cycle; exposure must not become caller-mintable authority.  A
+        # foreign callback registered before the timeout module is imported could
+        # otherwise become the permanently captured absence assertion and turn
+        # generic complete-empty readback into retry-authoritative absence.
+        timeout_module_name = f"{__package__}.betfair_timeout_reconciliation"
+        timeout_module = sys.modules.get(timeout_module_name)
+        assertion_globals = getattr(assertion, "__globals__", None)
+        assertion_qualname = getattr(assertion, "__qualname__", None)
+        if (
+            getattr(assertion, "__module__", None) != timeout_module_name
+            or timeout_module is None
+            or assertion_globals is not vars(timeout_module)
+            or assertion_qualname
+            != (
+                "_install_betfair_timeout_absence_authority.<locals>."
+                "assert_betfair_timeout_absence_authoritative"
+            )
+        ):
+            raise sealed_error(
+                "timeout absence authority assertion origin is not canonical"
+            )
+
         if timeout_absence_assertion is None:
             timeout_absence_assertion = assertion
             return

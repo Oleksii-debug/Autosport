@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-
 from autosport.betfair_cancel_saga import (
     BetfairCancelSagaError,
     BetfairCancelSagaStore,

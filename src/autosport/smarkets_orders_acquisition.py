@@ -1,9 +1,10 @@
-"""Authenticated, fixed-origin acquisition for Smarkets order readback payloads.
+"""Strict fixed-origin acquisition for Smarkets order readback payloads.
 
-This module establishes only provider-origin evidence for the official Smarkets
-``GET /v3/orders/`` endpoint. It does not place/cancel orders, approve execution,
-or claim real-money readiness. Downstream reconciliation must still bind a
-witness to an existing canonical execution action and product-owned approval.
+This module performs strict transport acquisition for the official Smarkets
+``GET /v3/orders/`` endpoint. The resulting record captures validated response
+bytes and observation metadata, but its Python type is not mechanically
+unforgeable proof of provider origin. Downstream reconciliation must separately
+bind the acquisition to canonical account/session and execution authority.
 """
 
 from __future__ import annotations
@@ -29,15 +30,14 @@ SMARKETS_ORDERS_ENDPOINT: Final = "https://api.smarkets.com/v3/orders/"
 _MAX_RESPONSE_BYTES: Final = 8 * 1024 * 1024
 _READ_CHUNK_BYTES: Final = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS: Final = 10.0
-_ORIGIN_SEAL: Final = object()
 
 
 class SmarketsOrdersAcquisitionError(RuntimeError):
-    """The fixed-origin Smarkets readback could not be authenticated safely."""
+    """The fixed-origin Smarkets readback could not be acquired safely."""
 
 
 class _NoRedirect(HTTPRedirectHandler):
-    """Refuse redirects so origin authority cannot silently move hosts or paths."""
+    """Refuse redirects so the fixed endpoint cannot silently move hosts or paths."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         return None
@@ -222,7 +222,7 @@ def _product_received_at() -> str:
 
 
 def _open_orders_request(request: Request, timeout: float):
-    """Internal HTTPS authority boundary; tests patch this private seam only."""
+    """Internal HTTPS transport seam; tests patch this private seam only."""
     context = ssl.create_default_context()
     opener = build_opener(
         ProxyHandler({}),
@@ -233,8 +233,13 @@ def _open_orders_request(request: Request, timeout: float):
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class SmarketsOrdersPayloadWitness:
-    """Sealed evidence emitted only after a fixed-origin HTTPS orders readback."""
+class SmarketsOrdersAcquisitionRecord:
+    """Structural result of a fixed-origin HTTPS orders acquisition.
+
+    This record is intentionally caller-constructible Python data. Possessing an
+    instance does not by itself prove provider origin, account identity, or
+    reconciliation authority.
+    """
 
     endpoint: str
     http_status: int
@@ -256,12 +261,7 @@ class SmarketsOrdersPayloadWitness:
         payload_sha256: str,
         payload_size: int,
         payload: bytes,
-        _seal: object | None = None,
     ) -> None:
-        if _seal is not _ORIGIN_SEAL:
-            raise TypeError(
-                "SmarketsOrdersPayloadWitness is issued only by fixed-origin acquisition"
-            )
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "http_status", http_status)
         object.__setattr__(self, "provider_date", provider_date)
@@ -276,7 +276,7 @@ class SmarketsOrdersPayloadWitness:
         return bytes(self._payload)
 
     def parsed_json(self) -> Any:
-        """Return strict parsed JSON while retaining raw-byte digest as authority."""
+        """Return strict parsed JSON while retaining the raw-byte digest binding."""
         return _strict_json(self._payload)
 
     def matches_payload(self, payload: bytes) -> bool:
@@ -286,7 +286,7 @@ class SmarketsOrdersPayloadWitness:
 
     def __reduce__(self):
         raise TypeError(
-            "SmarketsOrdersPayloadWitness is intentionally non-serializable; reacquire after restart"
+            "SmarketsOrdersAcquisitionRecord is intentionally non-serializable; reacquire after restart"
         )
 
 
@@ -294,8 +294,8 @@ def acquire_smarkets_orders_payload(
     session_token: str,
     *,
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> SmarketsOrdersPayloadWitness:
-    """Fetch and seal exact bytes from the official Smarkets orders endpoint.
+) -> SmarketsOrdersAcquisitionRecord:
+    """Fetch exact bytes from the official Smarkets orders endpoint.
 
     The caller can supply credentials and a bounded timeout only. The URL,
     HTTP method, opener, redirect policy, accepted status, media type, and byte
@@ -353,7 +353,7 @@ def acquire_smarkets_orders_payload(
     _strict_json(raw)
     received_at = _product_received_at()
     digest = sha256(raw).hexdigest()
-    return SmarketsOrdersPayloadWitness(
+    return SmarketsOrdersAcquisitionRecord(
         endpoint=SMARKETS_ORDERS_ENDPOINT,
         http_status=200,
         provider_date=provider_date,
@@ -362,5 +362,4 @@ def acquire_smarkets_orders_payload(
         payload_sha256=digest,
         payload_size=len(raw),
         payload=raw,
-        _seal=_ORIGIN_SEAL,
     )

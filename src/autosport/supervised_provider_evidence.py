@@ -612,6 +612,7 @@ def _install_verified_provider_evidence_authority() -> None:
         for name, value in sealed_profile_descriptors.items()
     }
     timeout_absence_assertion: object | None = None
+    timeout_absence_assertion_code: object | None = None
     missing = object()
 
     def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
@@ -710,7 +711,7 @@ def _install_verified_provider_evidence_authority() -> None:
                 )
 
     def register_timeout_absence_authority(assertion: object) -> None:
-        nonlocal timeout_absence_assertion
+        nonlocal timeout_absence_assertion, timeout_absence_assertion_code
         if not callable(assertion):
             raise sealed_error("timeout absence authority assertion must be callable")
 
@@ -737,11 +738,21 @@ def _install_verified_provider_evidence_authority() -> None:
                 "timeout absence authority assertion origin is not canonical"
             )
 
+        assertion_code = getattr(assertion, "__code__", None)
+        if assertion_code is None:
+            raise sealed_error(
+                "timeout absence authority assertion executable code is unavailable"
+            )
         if timeout_absence_assertion is None:
             timeout_absence_assertion = assertion
+            timeout_absence_assertion_code = assertion_code
             return
         if timeout_absence_assertion is not assertion:
             raise sealed_error("timeout absence authority assertion is already registered")
+        if timeout_absence_assertion_code is not assertion_code:
+            raise sealed_error(
+                "timeout absence authority assertion executable code changed"
+            )
 
     def authoritative_verify(
         action: ExecutionAction,
@@ -800,9 +811,14 @@ def _install_verified_provider_evidence_authority() -> None:
                         "verified provider absence lacks durable timeout-horizon authority"
                     ) from exc
             assertion = timeout_absence_assertion
-            if assertion is None:
+            assertion_code = timeout_absence_assertion_code
+            if assertion is None or assertion_code is None:
                 raise sealed_error(
                     "verified provider absence lacks durable timeout-horizon authority"
+                )
+            if getattr(assertion, "__code__", None) is not assertion_code:
+                raise sealed_error(
+                    "timeout absence authority assertion executable code changed"
                 )
             try:
                 assertion(evidence)

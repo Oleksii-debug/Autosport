@@ -1124,6 +1124,8 @@ def launch_windows_shell(
             width=1180,
             height=820,
             min_size=(820, 680),
+            text_select=True,
+            zoomable=True,
         )
         webview.start(gui="edgechromium")
     except Exception as exc:

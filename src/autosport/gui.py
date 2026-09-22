@@ -877,7 +877,9 @@ class AutosportApp(tk.Tk):
             self.status.set(text("ui.status.replay.dataset_busy"))
             return
         if not self.dataset_path:
-            messagebox.showinfo(text("ui.dialog.title"), text("ui.info.replay.dataset_required"))
+            message_text = text("ui.info.replay.dataset_required")
+            self.status.set(message_text)
+            messagebox.showinfo(text("ui.dialog.title"), message_text)
             return
         if self.replay_worker.busy:
             self.status.set(text("ui.status.replay.already_busy"))

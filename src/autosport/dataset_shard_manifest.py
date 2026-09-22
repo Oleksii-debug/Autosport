@@ -179,7 +179,11 @@ class DatasetShardDescriptor:
         }
         if set(raw) != required:
             raise ValueError("dataset shard descriptor fields mismatch")
-        if raw.get("kind") != _SHARD_KIND or raw.get("schema_version") != 1:
+        if (
+            raw.get("kind") != _SHARD_KIND
+            or type(raw.get("schema_version")) is not int
+            or raw["schema_version"] != 1
+        ):
             raise ValueError("dataset shard descriptor schema mismatch")
         return cls(
             ordinal=raw["ordinal"],
@@ -251,7 +255,11 @@ class DatasetShardManifest:
     def from_payload(cls, raw: object) -> "DatasetShardManifest":
         if type(raw) is not dict or set(raw) != {"kind", "schema_version", "shards"}:
             raise ValueError("dataset shard manifest fields mismatch")
-        if raw.get("kind") != _DESCRIPTOR_SET_KIND or raw.get("schema_version") != 1:
+        if (
+            raw.get("kind") != _DESCRIPTOR_SET_KIND
+            or type(raw.get("schema_version")) is not int
+            or raw["schema_version"] != 1
+        ):
             raise ValueError("dataset shard manifest schema mismatch")
         raw_shards = raw.get("shards")
         if type(raw_shards) is not list:

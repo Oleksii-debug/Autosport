@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -258,6 +259,49 @@ class DecisionLedgerTests(unittest.TestCase):
                 ledger.append_economic(second, goal)
 
             self.assertEqual(ledger.verify_integrity(), 1)
+
+    def test_concurrent_economic_append_serializes_duplicate_material_action_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            goal = self._economic_goal()
+            barrier = threading.Barrier(2)
+            outcomes: list[str] = []
+            outcome_lock = threading.Lock()
+
+            def writer(decision_id: str) -> None:
+                record = DecisionRecord(
+                    "run-1",
+                    "agent",
+                    "2026-01-01T00:00:00+00:00",
+                    "PROPOSE_STAKE",
+                    {"x": 1, "material_action_id": "paper-action-race"},
+                    "ctx",
+                    decision_id=decision_id,
+                    decision_kind=ECONOMIC_DECISION_KIND,
+                )
+                ledger = JsonlDecisionLedger(path)
+                barrier.wait()
+                try:
+                    ledger.append_economic(record, goal)
+                    result = "appended"
+                except DecisionLedgerIntegrityError as exc:
+                    self.assertIn("already contains material_action_id", str(exc))
+                    result = "rejected"
+                with outcome_lock:
+                    outcomes.append(result)
+
+            threads = [
+                threading.Thread(target=writer, args=("race-action-1",)),
+                threading.Thread(target=writer, args=("race-action-2",)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+
+            self.assertCountEqual(outcomes, ["appended", "rejected"])
+            self.assertEqual(JsonlDecisionLedger(path).verify_integrity(), 1)
 
     def test_verify_integrity_rejects_duplicate_material_action_id_in_existing_history(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -12,8 +12,10 @@ from autosport.betfair_account_readonly import (
 )
 from autosport.betfair_read_completeness import (
     BetfairObservationCompleteness,
+    BetfairPagedReadResult,
     BetfairReadCompletenessObserver,
     BetfairReadCompletenessWitness,
+    BetfairValueReadResult,
 )
 
 
@@ -249,6 +251,73 @@ def test_caller_constructed_complete_witness_is_not_authoritative() -> None:
     with pytest.raises(BetfairReadOnlyError, match="not issued"):
         forged.assert_authoritative()
 
+
+
+def test_reconstructed_empty_result_cannot_inherit_genuine_empty_authority() -> None:
+    observer = _observer(_rpc({"currentOrders": [], "moreAvailable": False}, 1))
+    genuine = observer.read_current_orders(page_size=10)
+
+    rebound = BetfairPagedReadResult(genuine.items, genuine.witness)
+
+    assert genuine.authoritative_empty is True
+    assert rebound.authoritative_empty is False
+    with pytest.raises(BetfairReadOnlyError, match="result was not issued"):
+        rebound.assert_complete()
+
+
+def test_paged_result_rejects_content_count_rebinding_before_authority_check() -> None:
+    nonempty = _observer(
+        _rpc({"currentOrders": [_current_order("bet-1")], "moreAvailable": False}, 1)
+    ).read_current_orders(page_size=10)
+
+    with pytest.raises(BetfairReadOnlyError, match="rows do not match"):
+        BetfairPagedReadResult((), nonempty.witness)
+
+
+def test_same_count_different_row_cannot_inherit_genuine_result_authority() -> None:
+    left = _observer(
+        _rpc({"currentOrders": [_current_order("bet-left")], "moreAvailable": False}, 1)
+    ).read_current_orders(page_size=10)
+    right = _observer(
+        _rpc({"currentOrders": [_current_order("bet-right")], "moreAvailable": False}, 1)
+    ).read_current_orders(page_size=10)
+
+    rebound = BetfairPagedReadResult(right.items, left.witness)
+
+    with pytest.raises(BetfairReadOnlyError, match="result was not issued"):
+        rebound.assert_complete()
+    assert left.assert_complete()[0].bet_id == "bet-left"
+
+
+def test_account_funds_value_cannot_be_rebound_under_genuine_witness() -> None:
+    first = _observer(
+        _rpc(
+            {
+                "availableToBetBalance": 100,
+                "exposure": -5,
+                "retainedCommission": 0,
+                "exposureLimit": -1000,
+            },
+            1,
+        )
+    ).read_account_funds()
+    second = _observer(
+        _rpc(
+            {
+                "availableToBetBalance": 999,
+                "exposure": -1,
+                "retainedCommission": 0,
+                "exposureLimit": -2000,
+            },
+            1,
+        )
+    ).read_account_funds()
+
+    rebound = BetfairValueReadResult(second.value, first.witness)
+
+    with pytest.raises(BetfairReadOnlyError, match="result was not issued"):
+        rebound.assert_complete()
+    assert str(first.assert_complete().available_to_bet_balance) == "100"
 
 def test_successful_account_funds_is_complete_and_never_float_money() -> None:
     observer = _observer(

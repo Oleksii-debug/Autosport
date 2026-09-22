@@ -206,9 +206,11 @@ class DatasetShardManifest:
 
     def __post_init__(self) -> None:
         if not isinstance(self.shards, tuple) or any(
-            not isinstance(item, DatasetShardDescriptor) for item in self.shards
+            type(item) is not DatasetShardDescriptor for item in self.shards
         ):
-            raise ValueError("shards must be a tuple of DatasetShardDescriptor values")
+            raise ValueError(
+                "shards must be a tuple of exact DatasetShardDescriptor values"
+            )
         ordered = tuple(sorted(self.shards, key=lambda item: item.ordinal))
         ordinals = tuple(item.ordinal for item in ordered)
         if ordinals != tuple(range(len(ordered))):

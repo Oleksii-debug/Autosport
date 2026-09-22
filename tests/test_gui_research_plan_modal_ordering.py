@@ -90,3 +90,30 @@ def test_research_plan_validation_status_precedes_blocking_modal() -> None:
 
     assert app.status.value == text("ui.status.research_plan.validation_failed")
     showerror.assert_called_once()
+
+
+def test_replay_configuration_status_precedes_blocking_modal() -> None:
+    app = object.__new__(AutosportApp)
+    app.dataset_worker = SimpleNamespace(busy=False)
+    app.dataset_path = object()
+    app.replay_worker = SimpleNamespace(busy=False)
+    app.live_worker = SimpleNamespace(busy=False)
+    app.status = _Value()
+
+    def fail_configuration() -> tuple[str, object]:
+        raise ValueError("invalid replay configuration")
+
+    app._selected_replay_configuration = fail_configuration
+
+    def assert_persistent_status_before_modal(*_args: object) -> None:
+        assert app.status.value == text("ui.status.replay.configuration_rejected")
+
+    with patch(
+        "autosport.gui.messagebox.showerror",
+        side_effect=assert_persistent_status_before_modal,
+    ) as showerror:
+        AutosportApp.run_dataset(app)
+
+    assert app.status.value == text("ui.status.replay.configuration_rejected")
+    showerror.assert_called_once()
+

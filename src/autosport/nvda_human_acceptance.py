@@ -7,6 +7,7 @@ promotion process, bound to one exact packaged Windows artifact and source SHA.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -34,6 +35,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_TEXT_LENGTH = 16_384
 _MAX_STEPS_PER_JOURNEY = 1_000
+_MAX_LIVE_STRUCTURAL_RESULTS = 256
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -71,6 +73,13 @@ class NvdaHumanAcceptanceStructuralResult:
     """Validator-issued, non-promoting structural transcript result."""
 
     transcript_sha256: str
+    artifact_sha256: str
+    source_sha: str
+    windows_version: str
+    nvda_version: str
+    evidence_origin: str
+    human_tester_attestation_sha256: str
+    journey_content_sha256: str
     status: str = field(default=STATUS_STRUCTURALLY_COMPLETE, init=False)
     human_tested: bool = field(default=False, init=False)
     nvda_verified: bool = field(default=False, init=False)
@@ -88,19 +97,12 @@ class NvdaHumanAcceptanceStructuralResult:
         raise TypeError("NvdaHumanAcceptanceStructuralResult may not be subclassed")
 
 
-def _issue_structural_result(
-    *, transcript_sha256: str
-) -> NvdaHumanAcceptanceStructuralResult:
-    digest = _require_sha256("transcript_sha256", transcript_sha256)
-    result = object.__new__(NvdaHumanAcceptanceStructuralResult)
-    object.__setattr__(result, "transcript_sha256", digest)
-    object.__setattr__(result, "status", STATUS_STRUCTURALLY_COMPLETE)
-    object.__setattr__(result, "human_tested", False)
-    object.__setattr__(result, "nvda_verified", False)
-    object.__setattr__(result, "manual_truth_promotion_required", True)
-    object.__setattr__(result, "real_money_execution", False)
-    object.__setattr__(result, "whole_product_complete", False)
-    return result
+# Process-local structural authority.  A bounded strong-reference registry prevents
+# object-id reuse while an issuance is live.  Eviction is deliberately fail-closed:
+# a durable/restarted consumer must reopen the transcript and validate it again.
+_ISSUED_STRUCTURAL_RESULTS: OrderedDict[
+    int, tuple[NvdaHumanAcceptanceStructuralResult, str]
+] = OrderedDict()
 
 
 def _require_exact_dict(name: str, value: object) -> dict[str, Any]:
@@ -169,6 +171,102 @@ def _canonical_sha256(value: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _structural_result_fingerprint(
+    result: NvdaHumanAcceptanceStructuralResult,
+) -> str:
+    try:
+        payload = {
+            "artifact_sha256": _require_sha256(
+                "result.artifact_sha256", result.artifact_sha256
+            ),
+            "evidence_origin": result.evidence_origin,
+            "human_tested": result.human_tested,
+            "human_tester_attestation_sha256": _require_sha256(
+                "result.human_tester_attestation_sha256",
+                result.human_tester_attestation_sha256,
+            ),
+            "journey_content_sha256": _require_sha256(
+                "result.journey_content_sha256", result.journey_content_sha256
+            ),
+            "manual_truth_promotion_required": result.manual_truth_promotion_required,
+            "nvda_verified": result.nvda_verified,
+            "nvda_version": _require_text("result.nvda_version", result.nvda_version),
+            "real_money_execution": result.real_money_execution,
+            "source_sha": _require_git_commit_sha("result.source_sha", result.source_sha),
+            "status": result.status,
+            "transcript_sha256": _require_sha256(
+                "result.transcript_sha256", result.transcript_sha256
+            ),
+            "whole_product_complete": result.whole_product_complete,
+            "windows_version": _require_text(
+                "result.windows_version", result.windows_version
+            ),
+        }
+    except (AttributeError, TypeError) as exc:
+        raise NvdaHumanAcceptanceError(
+            "structural result payload is incomplete or malformed"
+        ) from exc
+
+    if payload["evidence_origin"] != HUMAN_NVDA_ORIGIN:
+        raise NvdaHumanAcceptanceError(
+            "structural result evidence_origin is not HUMAN_NVDA_SESSION"
+        )
+    if payload["status"] != STATUS_STRUCTURALLY_COMPLETE:
+        raise NvdaHumanAcceptanceError("structural result status is not canonical")
+    if type(payload["human_tested"]) is not bool or payload["human_tested"] is not False:
+        raise NvdaHumanAcceptanceError("structural result human_tested must be false")
+    if type(payload["nvda_verified"]) is not bool or payload["nvda_verified"] is not False:
+        raise NvdaHumanAcceptanceError("structural result nvda_verified must be false")
+    if (
+        type(payload["manual_truth_promotion_required"]) is not bool
+        or payload["manual_truth_promotion_required"] is not True
+    ):
+        raise NvdaHumanAcceptanceError(
+            "structural result must require manual truth promotion"
+        )
+    if (
+        type(payload["real_money_execution"]) is not bool
+        or payload["real_money_execution"] is not False
+    ):
+        raise NvdaHumanAcceptanceError(
+            "structural result real_money_execution must be false"
+        )
+    if (
+        type(payload["whole_product_complete"]) is not bool
+        or payload["whole_product_complete"] is not False
+    ):
+        raise NvdaHumanAcceptanceError(
+            "structural result whole_product_complete must be false"
+        )
+    return _canonical_sha256(payload)
+
+
+def verify_human_nvda_acceptance_structural_result(
+    result: object,
+) -> NvdaHumanAcceptanceStructuralResult:
+    """Verify live validator issuance before treating a structural result as authority."""
+
+    if type(result) is not NvdaHumanAcceptanceStructuralResult:
+        raise NvdaHumanAcceptanceError(
+            "structural result must be the exact canonical result type"
+        )
+    issued = _ISSUED_STRUCTURAL_RESULTS.get(id(result))
+    if issued is None or issued[0] is not result:
+        raise NvdaHumanAcceptanceError(
+            "structural result is not a live validator-issued authority"
+        )
+    fingerprint = _structural_result_fingerprint(result)
+    if fingerprint != issued[1]:
+        raise NvdaHumanAcceptanceError(
+            "structural result payload changed after validator issuance"
+        )
+    return result
+
+
 def _validate_step(step: object, *, journey_id: str, index: int) -> None:
     frozen = _require_exact_dict(f"journey {journey_id} step {index}", step)
     _require_exact_keys(
@@ -228,8 +326,8 @@ def validate_human_nvda_acceptance_transcript(
     if source_sha != expected_source:
         raise NvdaHumanAcceptanceError("source_sha does not match the source under review")
 
-    _require_text("windows_version", frozen["windows_version"])
-    _require_text("nvda_version", frozen["nvda_version"])
+    windows_version = _require_text("windows_version", frozen["windows_version"])
+    nvda_version = _require_text("nvda_version", frozen["nvda_version"])
     _require_bool("keyboard_only", frozen["keyboard_only"], True)
     _require_bool("mouse_used", frozen["mouse_used"], False)
     if frozen["evidence_origin"] != HUMAN_NVDA_ORIGIN:
@@ -237,7 +335,9 @@ def validate_human_nvda_acceptance_transcript(
             "evidence_origin must be HUMAN_NVDA_SESSION; "
             "automated/synthetic/template evidence is insufficient"
         )
-    _require_text("human_tester_attestation", frozen["human_tester_attestation"])
+    attestation = _require_text(
+        "human_tester_attestation", frozen["human_tester_attestation"]
+    )
 
     journeys = _require_exact_list("journeys", frozen["journeys"])
     if len(journeys) != len(REQUIRED_JOURNEY_IDS):
@@ -247,9 +347,35 @@ def validate_human_nvda_acceptance_transcript(
     for expected_id, journey in zip(REQUIRED_JOURNEY_IDS, journeys, strict=True):
         _validate_journey(journey, expected_id=expected_id)
 
-    return _issue_structural_result(
-        transcript_sha256=_canonical_sha256(frozen),
+    result = object.__new__(NvdaHumanAcceptanceStructuralResult)
+    object.__setattr__(result, "transcript_sha256", _canonical_sha256(frozen))
+    object.__setattr__(result, "artifact_sha256", artifact_sha)
+    object.__setattr__(result, "source_sha", source_sha)
+    object.__setattr__(result, "windows_version", windows_version)
+    object.__setattr__(result, "nvda_version", nvda_version)
+    object.__setattr__(result, "evidence_origin", HUMAN_NVDA_ORIGIN)
+    object.__setattr__(
+        result,
+        "human_tester_attestation_sha256",
+        _text_sha256(attestation),
     )
+    object.__setattr__(
+        result,
+        "journey_content_sha256",
+        _canonical_sha256({"journeys": journeys}),
+    )
+    object.__setattr__(result, "status", STATUS_STRUCTURALLY_COMPLETE)
+    object.__setattr__(result, "human_tested", False)
+    object.__setattr__(result, "nvda_verified", False)
+    object.__setattr__(result, "manual_truth_promotion_required", True)
+    object.__setattr__(result, "real_money_execution", False)
+    object.__setattr__(result, "whole_product_complete", False)
+
+    fingerprint = _structural_result_fingerprint(result)
+    while len(_ISSUED_STRUCTURAL_RESULTS) >= _MAX_LIVE_STRUCTURAL_RESULTS:
+        _ISSUED_STRUCTURAL_RESULTS.popitem(last=False)
+    _ISSUED_STRUCTURAL_RESULTS[id(result)] = (result, fingerprint)
+    return result
 
 
 def build_manual_nvda_transcript_template(

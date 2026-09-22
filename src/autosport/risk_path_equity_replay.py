@@ -187,6 +187,12 @@ def replay_paper_book_equity_path(
 
     base_raw = _strict_json(base_snapshot, label="base PaperBook snapshot")
     final_raw = _strict_json(final_snapshot, label="final PaperBook snapshot")
+    base_schema_version = base_raw.get("schema_version")
+    final_schema_version = final_raw.get("schema_version")
+    if base_schema_version != final_schema_version:
+        raise RiskPathEquityReplayError(
+            "PaperBook schema version changed across the replay path"
+        )
 
     if base_book.initial_bankroll != final_book.initial_bankroll:
         raise RiskPathEquityReplayError("PaperBook initial bankroll changed across path")
@@ -298,7 +304,7 @@ def replay_paper_book_equity_path(
                 observed_timestamps_complete = False
                 if require_complete_observed_timestamps:
                     raise RiskPathEquityReplayError(
-                        f"ticket {ticket_id} settlement lacks causal timestamp"
+                        f"ticket {ticket_id} settlement lacks observed timestamp"
                     )
             elif type(observed_at) is not str:
                 raise RiskPathEquityReplayError(
@@ -361,7 +367,7 @@ def replay_paper_book_equity_path(
         observed_timestamps_complete = False
         if require_complete_observed_timestamps:
             raise RiskPathEquityReplayError(
-                "empty lifecycle suffix has no product-owned causal availability"
+                "empty lifecycle suffix has no observed transition timestamp"
             )
 
     base_sha = _sha256(base_snapshot)
@@ -370,6 +376,7 @@ def replay_paper_book_equity_path(
         "schema": "AUTOSPORT_RISK_PATH_EQUITY_REPLAY_V1",
         "base_snapshot_sha256": base_sha,
         "final_snapshot_sha256": final_sha,
+        "paper_book_schema_version": base_schema_version,
         "expected_changed_ticket_ids": sorted(expected_changed_ticket_ids),
         "start_balance": format(base_book.balance, "f"),
         "final_balance": format(final_book.balance, "f"),

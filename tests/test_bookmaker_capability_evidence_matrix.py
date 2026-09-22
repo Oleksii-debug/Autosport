@@ -101,7 +101,20 @@ def _unissued_high_level(
     level: CapabilityEvidenceLevel = CapabilityEvidenceLevel.EXECUTION_OBSERVED,
     source_kind: CapabilityEvidenceSource = CapabilityEvidenceSource.EXECUTION_RECEIPT,
 ) -> BookmakerCapabilityEvidenceCell:
-    profile = _profile()
+    read_source = source_kind in {
+        CapabilityEvidenceSource.AUTHENTICATED_ACCOUNT_READ,
+        CapabilityEvidenceSource.LIVE_MARKET_READ,
+    }
+    capability = (
+        BookmakerCapability.LIVE_QUOTES_READ
+        if read_source
+        else BookmakerCapability.PLACE_BET
+    )
+    direction = (
+        CapabilityDirection.READ if read_source else CapabilityDirection.WRITE
+    )
+    operation = "listMarketBook" if read_source else "placeOrders"
+    profile = _profile(capability=capability)
     integration = _integration(profile)
     return BookmakerCapabilityEvidenceCell(
         provider_id=profile.venue_id,
@@ -111,19 +124,31 @@ def _unissued_high_level(
         profile_id=profile.profile_id,
         integration_evidence_id=integration.evidence_id,
         integration_kind=integration.integration_kind,
-        capability=BookmakerCapability.PLACE_BET,
-        technical_state=profile.state_of(BookmakerCapability.PLACE_BET),
-        operation="placeOrders",
-        direction=CapabilityDirection.WRITE,
+        capability=capability,
+        technical_state=profile.state_of(capability),
+        operation=operation,
+        direction=direction,
         source_kind=source_kind,
         evidence_level=level,
         observed_at=OBSERVED_AT,
         evidence_artifact_sha256=HASH_C,
         expires_or_revalidate_at=EXPIRES_AT,
-        sport_scope="soccer",
-        market_scope="market-1",
+        sport_scope=(
+            "soccer"
+            if level >= CapabilityEvidenceLevel.MARKET_OBSERVED
+            else None
+        ),
+        market_scope=(
+            "market-1"
+            if level >= CapabilityEvidenceLevel.MARKET_OBSERVED
+            else None
+        ),
         auth_mode="CERT_SESSION",
-        idempotency_semantics="customerOrderRef",
+        idempotency_semantics=(
+            "customerOrderRef"
+            if level >= CapabilityEvidenceLevel.EXECUTION_OBSERVED
+            else None
+        ),
         settlement_revision_semantics=(
             "append-only-provider-revisions"
             if level is CapabilityEvidenceLevel.RECONCILED
@@ -134,7 +159,6 @@ def _unissued_high_level(
 
 def test_documented_write_endpoint_is_only_l1_and_never_execution_authority():
     cell = _documented()
-
     evaluation = evaluate_bookmaker_capability_evidence(
         cell,
         as_of="2026-09-22T11:00:00Z",
@@ -149,7 +173,6 @@ def test_documented_write_endpoint_is_only_l1_and_never_execution_authority():
 
 def test_supported_profile_does_not_upgrade_documentation_to_account_observed():
     cell = _documented()
-
     assert cell.technical_state is BookmakerCapabilityState.SUPPORTED
     assert (
         evaluate_bookmaker_capability_evidence(
@@ -163,7 +186,6 @@ def test_supported_profile_does_not_upgrade_documentation_to_account_observed():
 def test_unsupported_account_profile_can_still_record_provider_documentation():
     profile = _profile(state=BookmakerCapabilityState.UNSUPPORTED)
     cell = _documented(profile)
-
     evaluation = evaluate_bookmaker_capability_evidence(
         cell,
         as_of="2026-09-22T11:00:00+00:00",
@@ -175,7 +197,6 @@ def test_unsupported_account_profile_can_still_record_provider_documentation():
 
 def test_direct_caller_construction_cannot_mint_high_level_authority():
     cell = _unissued_high_level()
-
     evaluation = evaluate_bookmaker_capability_evidence(
         cell,
         as_of="2026-09-22T11:00:00+00:00",
@@ -206,7 +227,6 @@ def test_reconstructed_documentation_copy_loses_product_issuance():
 
 def test_stale_documentation_downgrades_to_unknown_at_exact_expiry():
     cell = _documented()
-
     before = evaluate_bookmaker_capability_evidence(
         cell,
         as_of="2026-09-23T10:02:59+00:00",
@@ -223,7 +243,6 @@ def test_stale_documentation_downgrades_to_unknown_at_exact_expiry():
 
 def test_evidence_cannot_be_backdated_before_product_observation():
     cell = _documented()
-
     evaluation = evaluate_bookmaker_capability_evidence(
         cell,
         as_of="2026-09-22T10:02:59+00:00",
@@ -250,6 +269,36 @@ def test_direction_is_mechanically_bound_to_capability():
             observed_at=OBSERVED_AT,
             evidence_artifact_sha256=HASH_C,
             expires_or_revalidate_at=EXPIRES_AT,
+        )
+
+
+def test_read_observation_source_cannot_substantiate_write_operation():
+    profile = _profile()
+    integration = _integration(profile)
+    with pytest.raises(
+        BookmakerCapabilityEvidenceError,
+        match="read evidence source cannot substantiate a WRITE",
+    ):
+        BookmakerCapabilityEvidenceCell(
+            provider_id=profile.venue_id,
+            account_id=profile.account_id,
+            adapter_id=profile.adapter_id,
+            adapter_version=profile.adapter_version,
+            profile_id=profile.profile_id,
+            integration_evidence_id=integration.evidence_id,
+            integration_kind=integration.integration_kind,
+            capability=BookmakerCapability.PLACE_BET,
+            technical_state=BookmakerCapabilityState.SUPPORTED,
+            operation="placeOrders",
+            direction=CapabilityDirection.WRITE,
+            source_kind=CapabilityEvidenceSource.LIVE_MARKET_READ,
+            evidence_level=CapabilityEvidenceLevel.MARKET_OBSERVED,
+            observed_at=OBSERVED_AT,
+            evidence_artifact_sha256=HASH_C,
+            expires_or_revalidate_at=EXPIRES_AT,
+            sport_scope="soccer",
+            market_scope="market-1",
+            auth_mode="CERT_SESSION",
         )
 
 
@@ -308,7 +357,7 @@ def test_market_level_requires_exact_sport_and_market_scope():
     assert values["sport_scope"] == "soccer"
     assert values["market_scope"] == "market-1"
 
-    profile = _profile()
+    profile = _profile(capability=BookmakerCapability.LIVE_QUOTES_READ)
     integration = _integration(profile)
     with pytest.raises(
         BookmakerCapabilityEvidenceError,
@@ -322,8 +371,8 @@ def test_market_level_requires_exact_sport_and_market_scope():
             profile_id=profile.profile_id,
             integration_evidence_id=integration.evidence_id,
             integration_kind=integration.integration_kind,
-            capability=BookmakerCapability.BALANCE_READ,
-            technical_state=BookmakerCapabilityState.UNKNOWN,
+            capability=BookmakerCapability.LIVE_QUOTES_READ,
+            technical_state=BookmakerCapabilityState.SUPPORTED,
             operation="listMarketBook",
             direction=CapabilityDirection.READ,
             source_kind=CapabilityEvidenceSource.LIVE_MARKET_READ,

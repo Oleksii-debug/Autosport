@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import json
+import threading
+from time import monotonic_ns
 from weakref import ref
 
 from .betfair_account_readonly import (
@@ -96,7 +98,7 @@ def _install_betfair_readback_capture_start_authority() -> None:
     its response timestamps cross the deadline.
     """
 
-    issued: dict[int, tuple[object, str]] = {}
+    issued: dict[int, tuple[object, str, int]] = {}
     raw_read = BetfairReadOnlyClient.read_execution_readback
 
     def authoritative_read(
@@ -109,6 +111,7 @@ def _install_betfair_readback_capture_start_authority() -> None:
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
         capture_started_at = datetime.now(timezone.utc).isoformat()
+        capture_started_monotonic_ns = monotonic_ns()
         capture = raw_read(
             self,
             action_id=action_id,
@@ -125,6 +128,7 @@ def _install_betfair_readback_capture_start_authority() -> None:
         issued[capture_id] = (
             ref(capture, forget),
             capture_started_at,
+            capture_started_monotonic_ns,
         )
         return capture
 
@@ -138,12 +142,83 @@ def _install_betfair_readback_capture_start_authority() -> None:
             return None
         return record[1]
 
+    def capture_started_monotonic_ns(
+        readback: BetfairExecutionReadbackEnvelope,
+    ) -> int | None:
+        if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+            return None
+        record = issued.get(id(readback))
+        if record is None or record[0]() is not readback:
+            return None
+        return record[2]
+
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     globals()["_betfair_readback_capture_started_at"] = capture_started_at
+    globals()[
+        "_betfair_readback_capture_started_monotonic_ns"
+    ] = capture_started_monotonic_ns
 
 
 _install_betfair_readback_capture_start_authority()
 del _install_betfair_readback_capture_start_authority
+
+
+_timeout_elapsed_visibility_lock = threading.RLock()
+_timeout_elapsed_visibility_anchors: dict[
+    tuple[int, str], tuple[object, int]
+] = {}
+
+
+def _timeout_elapsed_visibility_ready(
+    ledger: RealExecutionLedger,
+    attempt_id: str,
+    capture_started_monotonic_ns: int | None,
+) -> bool:
+    """Require one full in-process monotonic horizon before negative absence.
+
+    Durable UTC timestamps remain the audit chronology, but a wall clock can jump
+    forward.  The first canonical negative capture seen for one exact live ledger
+    instance/attempt therefore establishes a process-local monotonic anchor and is
+    never enough by itself.  Only a later fresh capture whose sealed request start is
+    at least the provider visibility horizon after that anchor may contribute
+    negative absence authority.
+
+    The anchor is intentionally process-local.  Reopening the durable ledger after a
+    restart creates a new object and therefore requires a fresh full monotonic
+    horizon instead of pretending that monotonic time survived the process boundary.
+    """
+
+    if type(attempt_id) is not str or not attempt_id or attempt_id != attempt_id.strip():
+        raise BetfairTimeoutResolutionError(
+            "elapsed visibility requires canonical attempt_id"
+        )
+    if (
+        type(capture_started_monotonic_ns) is not int
+        or capture_started_monotonic_ns < 0
+    ):
+        return False
+
+    key = (id(ledger), attempt_id)
+    with _timeout_elapsed_visibility_lock:
+        record = _timeout_elapsed_visibility_anchors.get(key)
+        if record is None or record[0]() is not ledger:
+            def forget(_weakref: object, *, anchor_key: tuple[int, str] = key) -> None:
+                with _timeout_elapsed_visibility_lock:
+                    _timeout_elapsed_visibility_anchors.pop(anchor_key, None)
+
+            _timeout_elapsed_visibility_anchors[key] = (
+                ref(ledger, forget),
+                capture_started_monotonic_ns,
+            )
+            return False
+
+        anchor_ns = record[1]
+        if capture_started_monotonic_ns < anchor_ns:
+            raise BetfairTimeoutResolutionError(
+                "monotonic capture clock regressed within one process"
+            )
+        required_ns = BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS * 1_000_000_000
+        return capture_started_monotonic_ns - anchor_ns >= required_ns
 
 
 def _absence_capture_page_times(
@@ -375,6 +450,14 @@ def resolve_betfair_timeout_provider_state(
             "provider order-scope capture started_at",
         )
     )
+    capture_started_monotonic_ns = (
+        _betfair_readback_capture_started_monotonic_ns(readback)
+    )
+    elapsed_visibility_ready = _timeout_elapsed_visibility_ready(
+        ledger,
+        attempt_id,
+        capture_started_monotonic_ns,
+    )
     capture_floor = _time(
         _absence_capture_floor(readback),
         "provider order-scope capture floor",
@@ -385,6 +468,7 @@ def resolve_betfair_timeout_provider_state(
     )
     if (
         capture_started is None
+        or not elapsed_visibility_ready
         or capture_started < deadline
         or observed < deadline
         or capture_floor < deadline

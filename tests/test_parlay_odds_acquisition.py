@@ -225,7 +225,7 @@ class ParlayOddsAcquisitionTests(unittest.TestCase):
             transport=lambda *_: _response(
                 scope,
                 status_code=403,
-                headers=("X-Ignored", "value"),
+                headers=(("X-Ignored", "value"),),
                 body=b'{"error":"forbidden"}',
             ),
             clock=_clock,

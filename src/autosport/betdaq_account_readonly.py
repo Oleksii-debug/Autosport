@@ -805,6 +805,10 @@ def _fold_latest_orders(
                     "same BETDAQ order/sequence has conflicting content"
                 )
             continue
+        if previous.status_code == 3 and item.status_code in {1, 2, 6}:
+            raise BetdaqAccountReadOnlyError(
+                "newer BETDAQ evidence reopens a cancelled order"
+            )
         if (
             previous.status_code in _TERMINAL_STATUS_CODES
             and item.status_code not in _TERMINAL_STATUS_CODES

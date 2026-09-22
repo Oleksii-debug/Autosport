@@ -17,6 +17,7 @@ from .betfair_account_readonly import (
     BetfairClearedMarketPnlCoveragePage,
     BetfairMarketPnlCoverageBatch,
     BetfairReadOnlyClient,
+    BetfairReadOnlyError,
 )
 
 
@@ -179,6 +180,12 @@ def _validate_open_evidence(
         expected_tuple = tuple(expected)
         if not isinstance(batch, BetfairMarketPnlCoverageBatch):
             raise BetfairPnlCoverageError("open evidence must be canonical Betfair coverage batches")
+        try:
+            batch.assert_authoritative()
+        except BetfairReadOnlyError as exc:
+            raise BetfairPnlCoverageError(
+                "open evidence was not issued by canonical BetfairReadOnlyClient"
+            ) from exc
         if batch.requested_market_ids != expected_tuple:
             raise BetfairPnlCoverageError(f"open batch {index} request partition mismatch")
         if set(batch.returned_market_ids) != set(expected_tuple):
@@ -214,6 +221,12 @@ def _validate_closed_evidence(
     for index, page in enumerate(pages):
         if not isinstance(page, BetfairClearedMarketPnlCoveragePage):
             raise BetfairPnlCoverageError("closed evidence must be canonical Betfair coverage pages")
+        try:
+            page.assert_authoritative()
+        except BetfairReadOnlyError as exc:
+            raise BetfairPnlCoverageError(
+                "closed evidence was not issued by canonical BetfairReadOnlyClient"
+            ) from exc
         if terminal_seen:
             raise BetfairPnlCoverageError("closed page appears after terminal page")
         if tuple(sorted(page.requested_market_ids)) != expected_request:

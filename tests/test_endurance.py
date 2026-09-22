@@ -1,5 +1,6 @@
 import json
 import tempfile
+import tracemalloc
 import unittest
 from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
@@ -141,6 +142,32 @@ class EnduranceTests(unittest.TestCase):
             baseline.stable_invariant_fingerprint,
         )
         self.assertTrue(constrained.paper_economics_verified)
+
+    def test_endurance_fails_closed_without_resetting_caller_tracemalloc_history(self):
+        config = EnduranceConfig(
+            event_count=20,
+            quote_keys=10,
+            batch_size=10,
+            restart_cycles=1,
+            paper_tickets=5,
+        )
+        was_tracing = tracemalloc.is_tracing()
+        if not was_tracing:
+            tracemalloc.start()
+        try:
+            prior_allocation = bytearray(16 * 1024 * 1024)
+            historical_peak = tracemalloc.get_traced_memory()[1]
+            del prior_allocation
+
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(RuntimeError, "tracemalloc ownership conflict"):
+                    run_endurance(Path(tmp), config)
+
+            self.assertTrue(tracemalloc.is_tracing())
+            self.assertGreaterEqual(tracemalloc.get_traced_memory()[1], historical_peak)
+        finally:
+            if not was_tracing and tracemalloc.is_tracing():
+                tracemalloc.stop()
 
     def test_config_and_workspace_are_bounded_fail_closed(self):
         with self.assertRaises(ValueError):

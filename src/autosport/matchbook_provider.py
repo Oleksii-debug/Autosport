@@ -6,7 +6,6 @@ import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -49,6 +48,10 @@ class MatchbookTransportError(ProviderUnavailableError):
         self.retry_after = retry_after
 
 
+class MatchbookSequenceAuthorityError(RuntimeError):
+    """Product-owned durable acquisition ordering is unavailable or incoherent."""
+
+
 @dataclass(frozen=True, slots=True)
 class MatchbookHttpJsonResponse:
     payload: Any
@@ -60,6 +63,7 @@ class MatchbookHttpJsonResponse:
 Transport = Callable[[str, Mapping[str, str], float], MatchbookHttpJsonResponse]
 Clock = Callable[[], str]
 Sleeper = Callable[[float], None]
+SequenceAllocator = Callable[[str], int]
 
 
 def _decode_provider_json(raw: bytes) -> Any:
@@ -333,28 +337,6 @@ def _optional_sha256(value: object) -> str | None:
     return value
 
 
-def _sequence_from_observed(value: object) -> int:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise MatchbookPayloadError("observed timestamp must be a non-empty ISO-8601 string")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise MatchbookPayloadError("observed timestamp must be valid ISO-8601") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise MatchbookPayloadError("observed timestamp must include a timezone")
-    utc = parsed.astimezone(timezone.utc)
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    delta = utc - epoch
-    microseconds = (
-        delta.days * 86_400_000_000
-        + delta.seconds * 1_000_000
-        + delta.microseconds
-    )
-    if microseconds < 0 or microseconds > _SIGNED_64_MAX:
-        raise MatchbookPayloadError("observed timestamp is outside sequence range")
-    return microseconds
-
-
 def _market_type(value: str) -> MarketType:
     normalized = value.lower().replace("-", "_").replace(" ", "_")
     if normalized in {"winner", "moneyline", "money_line", "match_odds", "match_winner"}:
@@ -396,6 +378,7 @@ class MatchbookReadOnlyProvider:
         transport: Transport = _default_transport,
         clock: Clock = utc_now_iso,
         sleeper: Sleeper = time.sleep,
+        sequence_allocator: SequenceAllocator | None = None,
     ) -> None:
         self._session_token = _session_token(session_token)
         self.sport_key = _sport_key(sport_key)
@@ -450,6 +433,12 @@ class MatchbookReadOnlyProvider:
         self.transport = transport
         self.clock = clock
         self.sleeper = sleeper
+        if sequence_allocator is None or not callable(sequence_allocator):
+            raise ValueError(
+                "sequence_allocator must be an explicit product-owned durable callable"
+            )
+        self._sequence_allocator = sequence_allocator
+        self._last_sequence: int | None = None
         self.source_id = (
             f"matchbook:{self.sport_key}:{self.currency}:{self.price_mode}:"
             f"{self.market_view_sha256}"
@@ -476,7 +465,7 @@ class MatchbookReadOnlyProvider:
         if self._pending_quotes is None:
             response = self._request(self._url())
             observed_ts = self.clock()
-            sequence = _sequence_from_observed(observed_ts)
+            sequence = self._allocate_sequence()
             body_sha256 = _optional_sha256(response.body_sha256)
             quotes = self._materialize_quotes(
                 response.payload,
@@ -505,6 +494,24 @@ class MatchbookReadOnlyProvider:
         else:
             self._clear_pending_snapshot()
         return ProviderBatch(self.source_id, tuple(quotes), cursor=cursor, quality_flags=flags)
+
+    def _allocate_sequence(self) -> int:
+        try:
+            value = self._sequence_allocator(self.source_id)
+        except Exception as exc:
+            raise MatchbookSequenceAuthorityError(
+                "product sequence authority failed to allocate"
+            ) from exc
+        if type(value) is not int or value <= 0 or value > _SIGNED_64_MAX:
+            raise MatchbookSequenceAuthorityError(
+                "product sequence authority must return a positive signed-64 integer"
+            )
+        if self._last_sequence is not None and value <= self._last_sequence:
+            raise MatchbookSequenceAuthorityError(
+                "product sequence authority must strictly advance"
+            )
+        self._last_sequence = value
+        return value
 
     def _clear_pending_snapshot(self) -> None:
         self._pending_quotes = None

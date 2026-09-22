@@ -463,8 +463,8 @@ class TheOddsApiProvider:
         self.timeout_seconds = float(timeout_seconds)
         self.transport = transport
         self.clock = clock
-        self._provider_origin_verified = transport is _default_transport
-        self._receipt_clock_verified = clock is utc_now_iso
+        self._provider_origin_verified = False
+        self._receipt_clock_verified = False
         self.source_id = f"the-odds-api:{self.sport}"
         self._pending_quotes: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
@@ -500,7 +500,9 @@ class TheOddsApiProvider:
             raise ValueError("max_items must be a positive non-boolean integer")
         if self._pending_offset >= len(self._pending_quotes):
             response = self._request(self._current_url())
-            observed_at = _timestamp(self.clock(), "observed_at")
+            clock = self.clock
+            self._receipt_clock_verified = clock is utc_now_iso
+            observed_at = _timestamp(clock(), "observed_at")
             evidence = self._request_evidence(
                 "current",
                 observed_at,
@@ -545,7 +547,9 @@ class TheOddsApiProvider:
             raise ValueError("max_items must be a positive non-boolean integer")
         requested_at = _timestamp(requested_at, "requested_at")
         response = self._request(self._historical_url(requested_at))
-        observed_at = _timestamp(self.clock(), "observed_at")
+        clock = self.clock
+        self._receipt_clock_verified = clock is utc_now_iso
+        observed_at = _timestamp(clock(), "observed_at")
         if _datetime(requested_at) > _datetime(observed_at):
             raise TheOddsApiPayloadError(
                 "historical requested_at cannot be later than local receipt time"
@@ -626,7 +630,9 @@ class TheOddsApiProvider:
         self._pending_cursor = None
 
     def _request(self, url: str) -> HttpJsonResponse:
-        response = self.transport(url, self.timeout_seconds)
+        transport = self.transport
+        self._provider_origin_verified = transport is _default_transport
+        response = transport(url, self.timeout_seconds)
         if type(response) is not HttpJsonResponse:
             raise TypeError("transport must return HttpJsonResponse")
         if response.status_code != 200:

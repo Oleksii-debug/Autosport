@@ -586,7 +586,8 @@ def _atomic_json(path: Path, raw: Mapping[str, Any]) -> None:
                 os.close(descriptor)
             except OSError:
                 pass
-            descriptor = None
+            else:
+                descriptor = None
             raise
         descriptor = None
 

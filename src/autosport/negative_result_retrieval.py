@@ -93,6 +93,28 @@ def _availability_instant(entry: RegistryEntry) -> datetime:
     ).astimezone(timezone.utc)
 
 
+def _payload_instant(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+) -> datetime:
+    """Parse one required payload timestamp and normalize it to a UTC instant."""
+
+    value = _required_text(payload, key, context=context)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise NegativeResultRetrievalError(
+            f"{context}.{key} is not valid ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise NegativeResultRetrievalError(
+            f"{context}.{key} must include a timezone"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
 def _entries_by_id(
     registry: ScientificRegistry,
     record_type: str,
@@ -256,6 +278,38 @@ def search_negative_results(
                 raise NegativeResultRetrievalError(
                     f"{context} lineage does not causally precede experiment: "
                     f"{earlier_type}:{earlier_id} -> {later_type}:{later_id}"
+                )
+
+        experiment_created = _payload_instant(
+            experiment.payload,
+            "created_at",
+            context=context,
+        )
+        declared_chronology = (
+            (
+                f"ResearchQuestion:{question.record_id}",
+                _availability_instant(question),
+                f"Hypothesis:{hypothesis.record_id}",
+                _availability_instant(hypothesis),
+            ),
+            (
+                f"Hypothesis:{hypothesis.record_id}",
+                _availability_instant(hypothesis),
+                f"ResearchProtocol:{protocol.record_id}",
+                _availability_instant(protocol),
+            ),
+            (
+                f"ResearchProtocol:{protocol.record_id}",
+                _availability_instant(protocol),
+                f"{context}.created_at",
+                experiment_created,
+            ),
+        )
+        for earlier_label, earlier_at, later_label, later_at in declared_chronology:
+            if earlier_at > later_at:
+                raise NegativeResultRetrievalError(
+                    f"{context} declared lineage violates availability chronology: "
+                    f"{earlier_label} -> {later_label}"
                 )
 
         matching_postmortems = tuple(

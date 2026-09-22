@@ -18,8 +18,18 @@ from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
 
-RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v1"
+RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v2"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
+_INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoricalMaxDrawdown:
+    amount: Decimal
+    peak_id: str | None
+    trough_id: str | None
+    current_equity: Decimal
+    peak_equity: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,12 +60,131 @@ class PaperRiskReport:
     realized_gross_loss: Decimal
     turnover: Decimal
     current_drawdown_amount: Decimal
+    historical_max_drawdown_amount: Decimal
+    historical_max_drawdown_peak_id: str | None
+    historical_max_drawdown_trough_id: str | None
     drawdown_loss_room: Decimal
     max_drawdown_fraction: Decimal
     risk_of_ruin_limit: Decimal
     risk_of_ruin_upper_bound: None
     risk_of_ruin_status: str
 
+
+def _lifecycle_point_id(index: int, action: str, ticket_id: str) -> str:
+    """Return a re-resolvable identity for one durable PaperBook lifecycle point."""
+    return f"paper-lifecycle:{index}:{action}:{ticket_id}"
+
+
+def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
+    """Replay the durable PAPER equity path and preserve its worst drawdown episode.
+
+    Equal maximum episodes keep the earliest causal peak/trough pair. A zero-drawdown
+    history has no loss episode, so both identities remain None rather than
+    fabricating a trough. Peak/trough IDs are derived only from the durable lifecycle
+    order + ticket identity (or the durable initial-bankroll origin).
+    """
+
+    try:
+        PaperBook._validate_loaded_state(book)
+        replay_balance = book.initial_bankroll
+        replay_committed = Decimal("0")
+        running_peak = book.initial_bankroll
+        running_peak_id = _INITIAL_EQUITY_POINT_ID
+        maximum = Decimal("0")
+        maximum_peak_id: str | None = None
+        maximum_trough_id: str | None = None
+
+        for index, raw_entry in enumerate(book._lifecycle):
+            action, ticket_id, winners_raw, voids_raw = (
+                PaperBook._validate_lifecycle_entry(raw_entry)
+            )
+            ticket = book.tickets.get(ticket_id)
+            if ticket is None:
+                return None
+
+            if action == "open":
+                replay_balance = PaperBook._debit_balance(
+                    replay_balance,
+                    ticket.stake,
+                )
+                replay_committed = PaperRiskPolicy._exact_positive_sum(
+                    (replay_committed, ticket.stake)
+                )
+            else:
+                _, _, replay_balance = PaperBook._settlement_result(
+                    ticket,
+                    replay_balance,
+                    set(winners_raw),
+                    set(voids_raw),
+                )
+                with localcontext(PaperRiskPolicy._decimal_context()):
+                    replay_committed = replay_committed - ticket.stake
+                if replay_committed < 0:
+                    return None
+
+            equity = PaperRiskPolicy._exact_positive_sum(
+                (replay_balance, replay_committed)
+            )
+            point_id = _lifecycle_point_id(index, action, ticket_id)
+            if equity > running_peak:
+                running_peak = equity
+                running_peak_id = point_id
+                continue
+
+            with localcontext(PaperRiskPolicy._decimal_context()):
+                drawdown = running_peak - equity
+            if drawdown < 0:
+                return None
+            if drawdown > maximum:
+                maximum = drawdown
+                maximum_peak_id = running_peak_id
+                maximum_trough_id = point_id
+
+        current_committed = PaperRiskPolicy._exact_positive_sum(
+            tuple(
+                ticket.stake
+                for ticket in book.tickets.values()
+                if ticket.status.value == "OPEN"
+            )
+        )
+        current_equity = PaperRiskPolicy._exact_positive_sum(
+            (book.balance, current_committed)
+        )
+    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        return None
+
+    if replay_balance != book.balance or replay_committed != current_committed:
+        return None
+    values = (
+        maximum,
+        current_equity,
+        running_peak,
+    )
+    if any(
+        not isinstance(value, Decimal)
+        or not value.is_finite()
+        or value < Decimal("0")
+        for value in values
+    ):
+        return None
+    if running_peak <= 0 or current_equity > running_peak:
+        return None
+    if maximum == 0 and (
+        maximum_peak_id is not None or maximum_trough_id is not None
+    ):
+        return None
+    if maximum > 0 and (
+        maximum_peak_id is None or maximum_trough_id is None
+    ):
+        return None
+
+    return _HistoricalMaxDrawdown(
+        amount=maximum,
+        peak_id=maximum_peak_id,
+        trough_id=maximum_trough_id,
+        current_equity=current_equity,
+        peak_equity=running_peak,
+    )
 
 def build_paper_risk_report(
     book: PaperBook,
@@ -80,11 +209,22 @@ def build_paper_risk_report(
 
     metrics = PaperRiskPolicy._historical_risk_metrics(book)
     rooms = PaperRiskPolicy._goal_history_rooms(book, goal)
+    maximum_drawdown = _historical_max_drawdown(book)
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    if metrics is None or rooms is None or after_sha256 is None:
+    if (
+        metrics is None
+        or rooms is None
+        or maximum_drawdown is None
+        or after_sha256 is None
+    ):
         raise ValueError("canonical PAPER risk state cannot be reported")
     if after_sha256 != before_sha256:
         raise ValueError("canonical PAPER risk state changed during reporting")
+    if (
+        maximum_drawdown.current_equity != metrics.current_equity
+        or maximum_drawdown.peak_equity != metrics.peak_equity
+    ):
+        raise ValueError("canonical PAPER drawdown replay is inconsistent")
 
     _, _, drawdown_loss_room, _ = rooms
     try:
@@ -110,6 +250,9 @@ def build_paper_risk_report(
         realized_gross_loss=metrics.realized_gross_loss,
         turnover=metrics.turnover,
         current_drawdown_amount=current_drawdown_amount,
+        historical_max_drawdown_amount=maximum_drawdown.amount,
+        historical_max_drawdown_peak_id=maximum_drawdown.peak_id,
+        historical_max_drawdown_trough_id=maximum_drawdown.trough_id,
         drawdown_loss_room=drawdown_loss_room,
         max_drawdown_fraction=goal.max_drawdown_fraction,
         risk_of_ruin_limit=goal.max_risk_of_ruin,

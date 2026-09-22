@@ -29,6 +29,26 @@ _MAX_ATTEMPTS = 5
 _MAX_PER_PAGE = 100
 _SIGNED_64_MAX = (1 << 63) - 1
 _HEX = frozenset("0123456789abcdef")
+_FROZEN_REQUEST_CONFIGURATION_FIELDS = frozenset(
+    {
+        "sport_key",
+        "currency",
+        "sport_ids",
+        "event_ids",
+        "states",
+        "price_mode",
+        "price_depth",
+        "minimum_liquidity",
+        "offset",
+        "per_page",
+        "_minimum_liquidity_query",
+        "market_view_sha256",
+        "source_id",
+        "request_query_sha256",
+        "_sealed_request_configuration_state",
+        "_request_configuration_sealed",
+    }
+)
 
 
 class MatchbookPayloadError(ValueError):
@@ -389,6 +409,16 @@ class MatchbookReadOnlyProvider:
     betting-write operation.
     """
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if (
+            getattr(self, "_request_configuration_sealed", False)
+            and name in _FROZEN_REQUEST_CONFIGURATION_FIELDS
+        ):
+            raise AttributeError(
+                "Matchbook request configuration is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         session_token: str,
@@ -480,6 +510,38 @@ class MatchbookReadOnlyProvider:
         self._pending_offset = 0
         self._pending_cursor: str | None = None
         self._pending_flags: tuple[str, ...] = ()
+        self._sealed_request_configuration_state = self._request_configuration_state()
+        self._request_configuration_sealed = True
+
+    def _request_configuration_state(self) -> tuple[object, ...]:
+        minimum_liquidity = self.minimum_liquidity
+        minimum_liquidity_state: object
+        if type(minimum_liquidity) is Decimal:
+            minimum_liquidity_state = minimum_liquidity.as_tuple()
+        else:
+            minimum_liquidity_state = minimum_liquidity
+        return (
+            (type(self.sport_key), self.sport_key),
+            (type(self.currency), self.currency),
+            (type(self.sport_ids), self.sport_ids),
+            (type(self.event_ids), self.event_ids),
+            (type(self.states), self.states),
+            (type(self.price_mode), self.price_mode),
+            (type(self.price_depth), self.price_depth),
+            (type(minimum_liquidity), minimum_liquidity_state),
+            (type(self.offset), self.offset),
+            (type(self.per_page), self.per_page),
+            (type(self._minimum_liquidity_query), self._minimum_liquidity_query),
+            (type(self.market_view_sha256), self.market_view_sha256),
+            (type(self.source_id), self.source_id),
+            (type(self.request_query_sha256), self.request_query_sha256),
+        )
+
+    def _assert_request_configuration_unchanged(self) -> None:
+        if self._request_configuration_state() != self._sealed_request_configuration_state:
+            raise MatchbookPayloadError(
+                "Matchbook request configuration changed after construction"
+            )
 
     @staticmethod
     def _id_filter(values: object, *, field: str) -> tuple[int, ...]:
@@ -493,9 +555,11 @@ class MatchbookReadOnlyProvider:
         return tuple(output)
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        self._assert_request_configuration_unchanged()
         max_items = _positive_int(max_items, field="max_items")
         if self._pending_quotes is None:
             response = self._request(self._url())
+            self._assert_request_configuration_unchanged()
             observed_ts = _observation_timestamp(self.clock())
             body_sha256 = _optional_sha256(response.body_sha256)
             body_size_bytes = _optional_body_size(response.body_size_bytes)

@@ -7,7 +7,9 @@ import pytest
 
 from autosport.betfair_supervised_execution import (
     BetfairPlaceOrdersAmbiguous,
+    PlaceOrdersOutcome,
     _parse_place_orders_response,
+    _report_outcome,
 )
 from autosport.real_execution_ledger import ExecutionAction
 
@@ -99,3 +101,99 @@ def test_success_with_execution_error_code_fails_closed(
             provider_order_ref="b" * 32,
             observed_at=OBSERVED_AT,
         )
+
+
+
+def _failure_payload(
+    *,
+    execution_error_code: str,
+    instruction_error_code: str,
+) -> bytes:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "status": "FAILURE",
+                "errorCode": execution_error_code,
+                "marketId": "1.23456789",
+                "instructionReports": [
+                    {
+                        "status": "FAILURE",
+                        "errorCode": instruction_error_code,
+                        "instruction": {
+                            "selectionId": 42,
+                            "handicap": 0,
+                            "side": "BACK",
+                            "orderType": "LIMIT",
+                            "limitOrder": {
+                                "size": 5,
+                                "price": 2,
+                                "persistenceType": "LAPSE",
+                            },
+                        },
+                        "betId": "bet-rejection-123",
+                        "orderStatus": "EXECUTION_COMPLETE",
+                        "placedDate": OBSERVED_AT,
+                        "averagePriceMatched": 0,
+                        "sizeMatched": 0,
+                    }
+                ],
+            },
+            "id": 1,
+        }
+    ).encode("utf-8")
+
+
+def _parse_failure(
+    *,
+    execution_error_code: str,
+    instruction_error_code: str,
+):
+    action = _action()
+    report = _parse_place_orders_response(
+        _failure_payload(
+            execution_error_code=execution_error_code,
+            instruction_error_code=instruction_error_code,
+        ),
+        request_id=1,
+        request_sha256="a" * 64,
+        action=action,
+        provider_order_ref="b" * 32,
+        observed_at=OBSERVED_AT,
+    )
+    return action, report
+
+
+@pytest.mark.parametrize(
+    ("execution_error_code", "instruction_error_code"),
+    (
+        ("SERVICE_UNAVAILABLE", "BET_TAKEN_OR_LAPSED"),
+        ("ERROR_IN_MATCHER", "BET_TAKEN_OR_LAPSED"),
+        ("REGULATOR_IS_NOT_AVAILABLE", "BET_TAKEN_OR_LAPSED"),
+        ("BET_ACTION_ERROR", "BET_IN_PROGRESS"),
+        ("FUTURE_EXECUTION_CODE", "BET_TAKEN_OR_LAPSED"),
+        ("BET_ACTION_ERROR", "FUTURE_INSTRUCTION_CODE"),
+    ),
+)
+def test_unqualified_failure_error_codes_require_readback(
+    execution_error_code: str,
+    instruction_error_code: str,
+) -> None:
+    action, report = _parse_failure(
+        execution_error_code=execution_error_code,
+        instruction_error_code=instruction_error_code,
+    )
+
+    assert report.instruction.bet_id == "bet-rejection-123"
+    assert report.instruction.size_matched == Decimal("0")
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
+
+
+def test_documented_bet_action_rejection_remains_terminal_rejected() -> None:
+    action, report = _parse_failure(
+        execution_error_code="BET_ACTION_ERROR",
+        instruction_error_code="BET_TAKEN_OR_LAPSED",
+    )
+
+    assert report.instruction.order_status == "EXECUTION_COMPLETE"
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED

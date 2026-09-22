@@ -69,6 +69,17 @@
       <button id="109" type="button">Експортувати evidence</button>
     </section>
 
+    <section id="paper-runtime" aria-labelledby="paper-runtime-heading">
+      <h2 id="paper-runtime-heading">Тривала PAPER-робота</h2>
+      <p>Ця оболонка лише керує канонічним Python runtime. Реальні грошові ставки не виконуються.</p>
+      <div class="button-row">
+        <button id="product-runtime-start" type="button">PAPER: старт</button>
+        <button id="product-runtime-stop" type="button" disabled>PAPER: стоп</button>
+      </div>
+      <label for="product-runtime-status">Стан тривалої PAPER-роботи</label>
+      <input id="product-runtime-status" type="text" readonly aria-label="Стан тривалої PAPER-роботи">
+    </section>
+
     <section id="live-market" aria-labelledby="live-heading">
       <h2 id="live-heading">Живі ринкові дані</h2>
       <label for="104">Режим живих даних</label>
@@ -85,7 +96,13 @@
     <section id="paper-results" aria-labelledby="paper-heading">
       <h2 id="paper-heading">Паперові квитки та оцінювання</h2>
       <h3>Паперові квитки і результати</h3>
-      <ul id="201" class="readback-list" tabindex="0" aria-label="Паперові квитки і результати"></ul>
+      <table id="201" tabindex="0" aria-label="Паперові квитки і результати">
+        <caption>Паперові квитки і результати</caption>
+        <thead>
+          <tr><th scope="col">Квиток або результат</th></tr>
+        </thead>
+        <tbody id="tickets-table-body"></tbody>
+      </table>
       <h3>Оцінювання та докази портфеля</h3>
       <ul id="204" class="readback-list" tabindex="0" aria-label="Оцінювання та докази портфеля"></ul>
       <label for="202">Журнал виконання</label>

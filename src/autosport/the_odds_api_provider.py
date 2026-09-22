@@ -726,6 +726,10 @@ class TheOddsApiProvider:
         event_id = _canonical_component(
             event.get("id"), "event.id", allow_colon=False
         )
+        if evidence.event_ids and event_id not in evidence.event_ids:
+            raise TheOddsApiPayloadError(
+                "response contains event outside explicit eventIds request scope"
+            )
         event_sport = _sport(event.get("sport_key"), "event.sport_key")
         if self.sport != "upcoming" and event_sport != self.sport:
             raise TheOddsApiPayloadError(
@@ -751,6 +755,10 @@ class TheOddsApiProvider:
             bookmaker_key = _canonical_component(
                 raw_bookmaker.get("key"), "bookmaker.key"
             )
+            if evidence.bookmakers and bookmaker_key not in evidence.bookmakers:
+                raise TheOddsApiPayloadError(
+                    "response contains bookmaker outside explicit bookmakers request scope"
+                )
             bookmaker_event_sid = _optional_provider_text(
                 raw_bookmaker.get("sid"), "bookmaker.sid"
             )
@@ -766,6 +774,10 @@ class TheOddsApiProvider:
                 market_key = _canonical_component(
                     raw_market.get("key"), "market.key"
                 )
+                if market_key not in evidence.markets:
+                    raise TheOddsApiPayloadError(
+                        "response contains market outside requested markets scope"
+                    )
                 market_sid = _optional_provider_text(
                     raw_market.get("sid"), "market.sid"
                 )

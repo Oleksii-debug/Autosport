@@ -174,6 +174,25 @@ class ParlayApiProviderTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_provider_rejects_caller_selected_origin_before_request(self):
+        invalid_origins = (
+            "http://parlay-api.com",
+            "https://example.invalid",
+            "https://parlay-api.com.evil.invalid",
+            "https://parlay-api.com/v1",
+            "https://parlay-api.com:444",
+        )
+        for base_url in invalid_origins:
+            with self.subTest(base_url=base_url):
+                with self.assertRaisesRegex(ValueError, "canonical ParlayAPI origin"):
+                    ParlayApiTableTennisProvider("dummy-secret", base_url=base_url)
+
+        provider = ParlayApiTableTennisProvider(
+            "dummy-secret",
+            base_url="https://parlay-api.com/",
+        )
+        self.assertEqual(provider.base_url, "https://parlay-api.com")
+
     def test_authenticated_snapshot_maps_to_typed_provider_quotes_without_key_in_url(self):
         calls = []
 

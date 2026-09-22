@@ -10,7 +10,7 @@ from autosport.learning_environment import (
     RewardEvidence,
     Transition,
 )
-from autosport.transparent_bandit_policy import BanditPolicyState
+from autosport.transparent_bandit_policy import ActionEstimate, BanditPolicyState
 
 
 _ENVIRONMENT_ID = "a" * 64
@@ -124,3 +124,22 @@ def test_alias_replay_cannot_amplify_an_already_applied_action() -> None:
             reward=alias_reward,
             transition=alias_transition,
         )
+
+
+
+def test_canonical_reward_sum_identity_stays_compact_for_large_exponents() -> None:
+    estimate = ActionEstimate(
+        action_type="WAIT",
+        observations=1,
+        reward_sum=Decimal("1E+100000"),
+    )
+    alias = ActionEstimate(
+        action_type="WAIT",
+        observations=1,
+        reward_sum=Decimal("10E+99999"),
+    )
+
+    payload = estimate.to_payload()
+    assert payload == alias.to_payload()
+    assert payload["reward_sum"] == "1E+100000"
+    assert len(payload["reward_sum"]) < 32

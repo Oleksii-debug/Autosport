@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -309,3 +310,21 @@ def test_public_reads_recover_monotonic_state_only_under_canonical_journal_lock(
     assert store.snapshot(SAGA_ID).state is ReplaceSagaState.SUBMITTED_UNKNOWN
     assert store.verify_integrity() == 3
     assert ensure_calls >= 2
+
+
+def test_journal_path_identity_preserves_lexical_reparse_location(tmp_path):
+    target = tmp_path / "target-workspace"
+    target.mkdir()
+    alias = tmp_path / "workspace-alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlink/junction creation is unavailable")
+
+    journal = alias / "replace-sagas.jsonl"
+    store = BetfairReplaceSagaStore(journal)
+
+    assert os.fspath(store._absolute_path()) == os.path.abspath(os.fspath(journal))
+    assert os.fspath(store._absolute_path().parent) == os.path.abspath(
+        os.fspath(alias)
+    )

@@ -17,11 +17,7 @@ from autosport.real_execution_ledger import ExecutionAction
 OBSERVED_AT = "2026-09-19T08:00:05+00:00"
 
 
-def _action(
-    *,
-    side: str = "BACK",
-    requested_odds: Decimal = Decimal("2.00"),
-) -> ExecutionAction:
+def _action(*, side: str = "BACK") -> ExecutionAction:
     return ExecutionAction(
         action_id="action-response-truth",
         bookmaker_id="betfair",
@@ -30,7 +26,7 @@ def _action(
         market_id="1.23456789",
         selection_id="42",
         side=side,
-        requested_odds=requested_odds,
+        requested_odds=Decimal("2.00"),
         requested_stake=Decimal("5.00"),
         quote_id="quote-1",
         quote_observed_at="2026-09-19T07:59:59+00:00",
@@ -597,6 +593,7 @@ def test_matched_back_price_below_requested_limit_is_ambiguous(
         match="matched BACK price is worse than requested limit",
     ):
         _parse(payload, action)
+
 
 @pytest.mark.parametrize("size_matched", (2, 5))
 def test_matched_lay_price_above_requested_limit_is_ambiguous(

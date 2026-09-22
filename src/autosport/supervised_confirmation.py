@@ -128,6 +128,19 @@ class OperatorConfirmationReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class SupervisedConfirmationBinding:
+    """Immutable product-owned projection of one durable receipt and its review.
+
+    This object is audit/provenance data only. Possessing it does not transfer
+    confirmation authority; authority-bearing consumers must resolve and consume
+    the receipt through this store.
+    """
+
+    receipt: OperatorConfirmationReceipt
+    review: SupervisedExecutionReview
+
+
+@dataclass(frozen=True, slots=True)
 class _Record:
     sequence: int
     recorded_at: str
@@ -734,13 +747,21 @@ class SupervisedConfirmationAuthority:
             )
             return self._receipt_from_confirmation(record.payload, review)
 
-    def verify_receipt(
+    def resolve_receipt_binding(
         self,
         *,
         receipt_id: str,
         expected_review_sha256: str,
         require_unconsumed: bool = True,
-    ) -> OperatorConfirmationReceipt:
+    ) -> SupervisedConfirmationBinding:
+        """Resolve exact durable receipt + review provenance under product authority.
+
+        require_unconsumed=True is the authority-bearing read: it rejects an
+        already-consumed or expired receipt. False is audit-only and may return
+        consumed/expired history. The returned dataclass is descriptive evidence,
+        not a transferable capability.
+        """
+
         receipt_id = _require_sha256("receipt_id", receipt_id)
         expected_review_sha256 = _require_sha256(
             "expected_review_sha256", expected_review_sha256
@@ -763,19 +784,49 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "confirmation receipt does not match expected review"
                 )
+            review = state.reviews.get(receipt.review_id)
+            if review is None:
+                raise SupervisedConfirmationIntegrityError(
+                    "confirmation receipt references a missing durable review"
+                )
+            if (
+                receipt.review_sha256 != review.review_sha256
+                or receipt.decision_id != review.decision_id
+                or receipt.bookmaker_id != review.bookmaker_id
+                or receipt.account_id != review.account_id
+            ):
+                raise SupervisedConfirmationIntegrityError(
+                    "confirmation receipt durable review binding is inconsistent"
+                )
             if require_unconsumed and receipt.consumed_at is not None:
                 raise SupervisedConfirmationConflictError(
                     "confirmation receipt has already been consumed"
                 )
             now = self._now()
             self._observe_clock_locked(records, digest, clock_high_water, now)
-            if require_unconsumed:
-                review = state.reviews[receipt.review_id]
-                if now >= _parse_timestamp("expires_at", review.expires_at):
-                    raise SupervisedConfirmationConflictError(
-                        "confirmation receipt expired with its bound review"
-                    )
-            return receipt
+            if require_unconsumed and now >= _parse_timestamp(
+                "expires_at", review.expires_at
+            ):
+                raise SupervisedConfirmationConflictError(
+                    "confirmation receipt expired with its bound review"
+                )
+            return SupervisedConfirmationBinding(
+                receipt=receipt,
+                review=review,
+            )
+
+    def verify_receipt(
+        self,
+        *,
+        receipt_id: str,
+        expected_review_sha256: str,
+        require_unconsumed: bool = True,
+    ) -> OperatorConfirmationReceipt:
+        return self.resolve_receipt_binding(
+            receipt_id=receipt_id,
+            expected_review_sha256=expected_review_sha256,
+            require_unconsumed=require_unconsumed,
+        ).receipt
 
     def consume_receipt(
         self,

@@ -82,6 +82,8 @@ def test_projection_binds_request_censoring_and_hard_false_authorities() -> None
     assert projection["request_scope"]["price_depth"] == 3
     assert projection["request_scope"]["minimum_liquidity"] == "2.00"
     assert projection["proves_market_has_no_liquidity"] is False
+    assert projection["parsed_rows_bound_to_raw_response"] is False
+    assert projection["grants_provider_acquisition_authority"] is False
     assert projection["grants_execution_authority"] is False
     assert projection["grants_settlement_authority"] is False
     assert projection["grants_strategy_promotion_authority"] is False

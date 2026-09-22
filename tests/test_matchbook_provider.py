@@ -219,21 +219,47 @@ def test_duplicate_native_side_identity_fails_closed():
         provider(lambda *_: response(payload)).read_batch()
 
 
+def test_canonical_decimal_string_native_ids_share_integer_identity():
+    payload = sample_payload()
+    event = payload["events"][0]
+    market = event["markets"][0]
+    runner = market["runners"][0]
+
+    event["id"] = "101"
+    market["event-id"] = "101"
+    market["id"] = "202"
+    runner["event-id"] = "101"
+    runner["market-id"] = "202"
+    runner["id"] = "303"
+
+    batch = provider(lambda *_: response(payload)).read_batch()
+    assert {
+        (quote.provider_event_id, quote.provider_market_id, quote.provider_selection_id)
+        for quote in batch.quotes
+    } == {("101", "202", "303")}
+
+
 @pytest.mark.parametrize(
-    ("path", "value"),
+    "value",
     [
-        (("events", 0, "id"), "101"),
-        (("events", 0, "id"), True),
-        (("events", 0, "markets", 0, "id"), Decimal("202")),
-        (("events", 0, "markets", 0, "runners", 0, "id"), "303"),
+        True,
+        Decimal("101"),
+        101.0,
+        "",
+        "0",
+        "0101",
+        "+101",
+        "-101",
+        " 101",
+        "101 ",
+        "101.0",
+        str(1 << 63),
+        1 << 63,
     ],
 )
-def test_wrong_typed_native_ids_fail_closed(path, value):
+def test_noncanonical_native_ids_fail_closed(value):
     payload = sample_payload()
-    cursor = payload
-    for item in path[:-1]:
-        cursor = cursor[item]
-    cursor[path[-1]] = value
+    payload["events"][0]["id"] = value
     with pytest.raises(MatchbookPayloadError, match="provider integer"):
         provider(lambda *_: response(payload)).read_batch()
 
@@ -256,6 +282,22 @@ def test_suspension_is_preserved_and_unknown_status_rejected():
     bad["events"][0]["status"] = "mystery"
     with pytest.raises(MatchbookPayloadError, match="unsupported state"):
         provider(lambda *_: response(bad)).read_batch()
+
+
+def test_event_withdrawn_is_rejected_but_runner_withdrawn_is_preserved():
+    with pytest.raises(ValueError, match="event states"):
+        provider(lambda *_: response(), states=("withdrawn",))
+
+    event_withdrawn = sample_payload()
+    event_withdrawn["events"][0]["status"] = "withdrawn"
+    with pytest.raises(MatchbookPayloadError, match="unsupported event state"):
+        provider(lambda *_: response(event_withdrawn)).read_batch()
+
+    runner_withdrawn = sample_payload()
+    runner_withdrawn["events"][0]["markets"][0]["runners"][0]["status"] = "withdrawn"
+    batch = provider(lambda *_: response(runner_withdrawn)).read_batch()
+    assert {quote.status for quote in batch.quotes} == {"withdrawn"}
+    assert {quote.metadata["runner_status"] for quote in batch.quotes} == {"withdrawn"}
 
 
 def test_expanded_and_aggregated_are_distinct_provider_series():

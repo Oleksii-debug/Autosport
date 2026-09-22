@@ -20,7 +20,10 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 _MATCHBOOK_BASE_URL = "https://api.matchbook.com"
 _MATCHBOOK_EVENTS_PATH = "/edge/rest/events"
 _ALLOWED_PRICE_MODES = frozenset({"expanded", "aggregated"})
-_ALLOWED_STATES = frozenset({"open", "suspended", "closed", "graded", "withdrawn"})
+_ALLOWED_EVENT_STATES = frozenset({"open", "suspended", "closed", "graded"})
+_ALLOWED_RESPONSE_STATES = frozenset(
+    {"open", "suspended", "closed", "graded", "withdrawn"}
+)
 _ALLOWED_CURRENCIES = frozenset({"AUD", "CAD", "EUR", "GBP", "HKD", "USD"})
 _MAX_ATTEMPTS = 5
 _MAX_PER_PAGE = 100
@@ -176,11 +179,31 @@ def _sport_key(value: object) -> str:
 
 
 def _native_id(value: object, *, field: str) -> str:
-    if type(value) is not int or value <= 0:
+    parsed: int
+    if type(value) is int:
+        parsed = value
+    elif isinstance(value, str):
+        if (
+            not value
+            or any(character not in "0123456789" for character in value)
+            or (len(value) > 1 and value[0] == "0")
+        ):
+            raise MatchbookPayloadError(
+                f"{field} must be a positive canonical signed-64 provider integer "
+                "or decimal string"
+            )
+        parsed = int(value)
+    else:
         raise MatchbookPayloadError(
-            f"{field} must be a positive non-boolean provider integer"
+            f"{field} must be a positive canonical signed-64 provider integer "
+            "or decimal string"
         )
-    return str(value)
+    if parsed <= 0 or parsed > _SIGNED_64_MAX:
+        raise MatchbookPayloadError(
+            f"{field} must be a positive canonical signed-64 provider integer "
+            "or decimal string"
+        )
+    return str(parsed)
 
 
 def _native_id_matches(value: object, expected: str, *, field: str) -> None:
@@ -197,8 +220,15 @@ def _text(value: object, *, field: str) -> str:
 
 def _status(value: object, *, field: str) -> str:
     result = _text(value, field=field)
-    if result not in _ALLOWED_STATES:
+    if result not in _ALLOWED_RESPONSE_STATES:
         raise MatchbookPayloadError(f"{field} has unsupported state {result!r}")
+    return result
+
+
+def _event_status(value: object, *, field: str) -> str:
+    result = _status(value, field=field)
+    if result not in _ALLOWED_EVENT_STATES:
+        raise MatchbookPayloadError(f"{field} has unsupported event state {result!r}")
     return result
 
 
@@ -381,8 +411,8 @@ class MatchbookReadOnlyProvider:
             if not isinstance(value, str):
                 raise ValueError("states must contain strings")
             state = value.strip().lower()
-            if state not in _ALLOWED_STATES or state != value:
-                raise ValueError("states must contain canonical Matchbook states")
+            if state not in _ALLOWED_EVENT_STATES or state != value:
+                raise ValueError("states must contain canonical Matchbook event states")
             normalized_states.append(state)
         if len(set(normalized_states)) != len(normalized_states):
             raise ValueError("states must not contain duplicates")
@@ -568,7 +598,7 @@ class MatchbookReadOnlyProvider:
             if not isinstance(event, dict):
                 raise MatchbookPayloadError("event entries must be objects")
             event_id = _native_id(event.get("id"), field="event.id")
-            event_status = _status(event.get("status"), field="event.status")
+            event_status = _event_status(event.get("status"), field="event.status")
             markets = event.get("markets")
             if not isinstance(markets, list):
                 raise MatchbookPayloadError("event.markets must be a list")

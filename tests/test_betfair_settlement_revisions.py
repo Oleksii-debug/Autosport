@@ -7,6 +7,15 @@ import json
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolated_monotonic_authority(tmp_path, monkeypatch) -> None:
+    authority_root = tmp_path.parent / f"{tmp_path.name}-monotonic-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(authority_root.resolve()),
+    )
+
 from autosport.betfair_account_readonly import BetfairReadOnlyClient, BetfairSessionCredentials
 from autosport.betfair_settlement_revisions import (
     BetfairSettlementBusyError,
@@ -330,3 +339,109 @@ def test_tampered_log_and_parallel_writer_lock_fail_closed(tmp_path) -> None:
     clean_store._writer_lock_path.write_text("occupied", encoding="utf-8")
     with pytest.raises(BetfairSettlementBusyError, match="writer lock"):
         _ingest(clean_store, ledger, plan, action, _capture(client, provider_ref))
+
+
+def test_complete_valid_tail_rollback_is_rejected_by_independent_authority(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    first_bytes = path.read_bytes()
+
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    second = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    assert second.revision_number == 2
+    assert BetfairSettlementRevisionStore(path).current(
+        "betfair", "acct-1", "bet-777"
+    ) == second
+
+    # The restored file is internally valid and hash-chain complete, but stale.
+    path.write_bytes(first_bytes)
+
+    with pytest.raises(BetfairSettlementRevisionError, match="monotonic authority"):
+        BetfairSettlementRevisionStore(path)
+
+    assert first.revision_number == 1
+
+
+def test_deleted_local_journal_cannot_rebootstrap_after_committed_history(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
+    _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    path.unlink()
+
+    with pytest.raises(BetfairSettlementRevisionError, match="monotonic authority"):
+        BetfairSettlementRevisionStore(path)
+
+
+def test_prepare_without_local_append_is_aborted_and_retry_remains_available(
+    tmp_path, monkeypatch
+) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+
+    def interrupt_before_append(revision) -> None:
+        raise RuntimeError("injected before local append")
+
+    monkeypatch.setattr(store, "_append", interrupt_before_append)
+    with pytest.raises(RuntimeError, match="injected before local append"):
+        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+    monkeypatch.undo()
+
+    restarted = BetfairSettlementRevisionStore(path)
+    assert restarted.current("betfair", "acct-1", "bet-777") == first
+
+    second = _ingest(
+        restarted, ledger, plan, action, _capture(client, provider_ref)
+    ).revision
+    assert second.revision_number == 2
+    assert second.provider_status == "VOIDED"
+
+
+def test_local_append_before_monotonic_commit_recovers_exact_intended_tail(
+    tmp_path, monkeypatch
+) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    durable_append = store._append
+
+    def append_then_interrupt(revision) -> None:
+        durable_append(revision)
+        raise RuntimeError("injected after local append")
+
+    monkeypatch.setattr(store, "_append", append_then_interrupt)
+    with pytest.raises(RuntimeError, match="injected after local append"):
+        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+    monkeypatch.undo()
+
+    # The process-local store never publishes the uncommitted successor.
+    assert store.current("betfair", "acct-1", "bet-777") == first
+
+    # Restart sees the exact PREPARE target on disk and resolves it to COMMIT.
+    restarted = BetfairSettlementRevisionStore(path)
+    second = restarted.current("betfair", "acct-1", "bet-777")
+    assert second is not None
+    assert second.revision_number == 2
+    assert second.provider_status == "VOIDED"
+    assert second.previous_revision_id == first.revision_id

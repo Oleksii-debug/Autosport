@@ -11,6 +11,7 @@ from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
 from .localization_product_cli import product_cli_text
+from .paths import default_workspace
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
 
@@ -307,7 +308,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path(".autosport-product"),
+        default=default_workspace(),
         metavar="ШЛЯХ",
         help=product_cli_text("product.cli.workspace.help"),
     )

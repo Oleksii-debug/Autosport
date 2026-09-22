@@ -24,11 +24,13 @@ from . import smarkets_orders_acquisition as orders_acquisition
 
 
 SMARKETS_ACCOUNTS_ENDPOINT: Final = "https://api.smarkets.com/v3/accounts/"
+SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT: Final = "https://api.smarkets.com/v3/accounts/activity/"
 _MAX_ACCOUNTS_RESPONSE_BYTES: Final = 2 * 1024 * 1024
 _DEFAULT_TIMEOUT_SECONDS: Final = 10.0
 _SESSION_SEAL: Final = object()
 _ACCOUNT_SEAL: Final = object()
 _READBACK_SEAL: Final = object()
+_AUTHENTICATED_READ_SEAL: Final = object()
 
 
 class SmarketsSessionContextError(RuntimeError):
@@ -247,6 +249,65 @@ class SmarketsSessionOrdersReadback:
         )
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class SmarketsSessionAuthenticatedRead:
+    """Raw fixed-origin response issued by one exact live session generation."""
+
+    session_generation_id: str
+    account_context_sha256: str
+    provider_account_id: str
+    endpoint: str
+    http_status: int
+    provider_date: str
+    product_available_at: str
+    payload_sha256: str
+    payload_size: int
+    evidence_sha256: str
+    _payload: bytes = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        session_generation_id: str,
+        account_context_sha256: str,
+        provider_account_id: str,
+        endpoint: str,
+        http_status: int,
+        provider_date: str,
+        product_available_at: str,
+        payload_sha256: str,
+        payload_size: int,
+        evidence_sha256: str,
+        payload: bytes,
+        _seal: object | None = None,
+    ) -> None:
+        if _seal is not _AUTHENTICATED_READ_SEAL:
+            raise TypeError(
+                "SmarketsSessionAuthenticatedRead is issued only by an authenticated session"
+            )
+        object.__setattr__(self, "session_generation_id", session_generation_id)
+        object.__setattr__(self, "account_context_sha256", account_context_sha256)
+        object.__setattr__(self, "provider_account_id", provider_account_id)
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "http_status", http_status)
+        object.__setattr__(self, "provider_date", provider_date)
+        object.__setattr__(self, "product_available_at", product_available_at)
+        object.__setattr__(self, "payload_sha256", payload_sha256)
+        object.__setattr__(self, "payload_size", payload_size)
+        object.__setattr__(self, "evidence_sha256", evidence_sha256)
+        object.__setattr__(self, "_payload", payload)
+
+    @property
+    def payload(self) -> bytes:
+        return self._payload
+
+    def __reduce__(self):
+        raise TypeError(
+            "SmarketsSessionAuthenticatedRead is intentionally non-serializable; "
+            "reacquire after restart"
+        )
+
+
 class SmarketsAuthenticatedSession:
     """Volatile authenticated session generation bound to account readback."""
 
@@ -256,6 +317,7 @@ class SmarketsAuthenticatedSession:
         "_account_witness",
         "_account_context_sha256",
         "_issued_readbacks",
+        "_issued_authenticated_reads",
         "_closed",
     )
 
@@ -277,6 +339,7 @@ class SmarketsAuthenticatedSession:
         self._account_witness = account_witness
         self._account_context_sha256 = account_context_sha256
         self._issued_readbacks: dict[str, SmarketsSessionOrdersReadback] = {}
+        self._issued_authenticated_reads: dict[str, SmarketsSessionAuthenticatedRead] = {}
         self._closed = False
 
     @property
@@ -329,6 +392,7 @@ class SmarketsAuthenticatedSession:
     def close(self) -> None:
         self._session_token = None
         self._issued_readbacks.clear()
+        self._issued_authenticated_reads.clear()
         self._closed = True
 
     def acquire_orders(
@@ -388,6 +452,122 @@ class SmarketsAuthenticatedSession:
         )
         self._issued_readbacks[evidence_sha256] = readback
         return readback
+
+    def acquire_account_activity(
+        self,
+        *,
+        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    ) -> SmarketsSessionAuthenticatedRead:
+        """Acquire the fixed account-activity endpoint under this exact live session."""
+        token = self._require_open()
+        timeout = _validated_timeout(timeout_seconds)
+        request = Request(
+            SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Session-Token {token}",
+                "User-Agent": "Autosport/smarkets-session-context-1",
+            },
+        )
+
+        try:
+            response = _open_accounts_request(request, timeout)
+            with response:
+                final_url = response.geturl()
+                status = response.getcode()
+                if final_url != SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT:
+                    raise SmarketsSessionContextError(
+                        "Smarkets account activity final URL is not the fixed official endpoint"
+                    )
+                if type(status) is not int or status != 200:
+                    raise SmarketsSessionContextError(
+                        "Smarkets account activity endpoint returned non-success status"
+                    )
+                headers = getattr(response, "headers", None)
+                if headers is None:
+                    raise SmarketsSessionContextError(
+                        "Smarkets account activity response lacks headers"
+                    )
+                _content_type(headers.get("Content-Type"))
+                provider_date = _provider_date(headers.get("Date"))
+                try:
+                    raw = orders_acquisition._read_complete_body(response)
+                except orders_acquisition.SmarketsOrdersAcquisitionError:
+                    raise SmarketsSessionContextError(
+                        "Smarkets account activity response body framing is invalid or incomplete"
+                    ) from None
+        except SmarketsSessionContextError:
+            raise
+        except HTTPError as exc:
+            raise SmarketsSessionContextError(
+                f"Smarkets account activity endpoint is unavailable (HTTP {exc.code})"
+            ) from None
+        except (URLError, TimeoutError, OSError):
+            raise SmarketsSessionContextError(
+                "Smarkets account activity HTTPS acquisition failed"
+            ) from None
+
+        if type(raw) is not bytes or not raw:
+            raise SmarketsSessionContextError(
+                "Smarkets account activity response body is empty or invalid"
+            )
+
+        available_at = _utc_now_iso()
+        payload_sha256 = sha256(raw).hexdigest()
+        evidence_sha256 = _digest_parts(
+            "autosport.smarkets.session-authenticated-read.v1",
+            self._generation_id,
+            self._account_context_sha256,
+            self._account_witness.provider_account_id,
+            SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            provider_date,
+            available_at,
+            payload_sha256,
+            str(len(raw)),
+        )
+        read = SmarketsSessionAuthenticatedRead(
+            session_generation_id=self._generation_id,
+            account_context_sha256=self._account_context_sha256,
+            provider_account_id=self._account_witness.provider_account_id,
+            endpoint=SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            http_status=200,
+            provider_date=provider_date,
+            product_available_at=available_at,
+            payload_sha256=payload_sha256,
+            payload_size=len(raw),
+            evidence_sha256=evidence_sha256,
+            payload=raw,
+            _seal=_AUTHENTICATED_READ_SEAL,
+        )
+        self._issued_authenticated_reads[evidence_sha256] = read
+        return read
+
+    def resolve_account_activity_read(
+        self,
+        candidate: object,
+    ) -> SmarketsSessionAuthenticatedRead:
+        """Resolve only account-activity bytes issued by this exact live session object."""
+        self._require_open()
+        if type(candidate) is not SmarketsSessionAuthenticatedRead:
+            raise SmarketsSessionContextError(
+                "Smarkets account activity evidence is not canonical session readback"
+            )
+        stored = self._issued_authenticated_reads.get(candidate.evidence_sha256)
+        if stored is not candidate:
+            raise SmarketsSessionContextError(
+                "Smarkets account activity evidence was not issued by this session context"
+            )
+        if (
+            candidate.session_generation_id != self._generation_id
+            or candidate.account_context_sha256 != self._account_context_sha256
+            or candidate.provider_account_id != self._account_witness.provider_account_id
+            or candidate.endpoint != SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
+        ):
+            raise SmarketsSessionContextError(
+                "Smarkets account activity evidence does not match this session/account context"
+            )
+        return candidate
 
     def resolve_orders_readback(
         self,

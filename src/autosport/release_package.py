@@ -42,22 +42,43 @@ _ZIP_VOLUME = 0
 _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
+_SECRET_KEY_PATTERN = (
+    rb"(?:"
+    rb"api(?:[._ -]?(?:key|secret|token|hash))|"
+    rb"access[._ -]?token|refresh[._ -]?token|auth[._ -]?token|bearer[._ -]?token|"
+    rb"oauth(?:[._ -]?(?:token|secret))|client[._ -]?secret|consumer[._ -]?secret|"
+    rb"session(?:[._ -]?(?:token|id))|bot[._ -]?token|password|passwd|authorization|"
+    rb"cookie|set[._ -]?cookie"
+    rb")"
+)
 _SECRET_ASSIGNMENT_PATTERN = re.compile(
-    rb"""(?ix)
-    (?:api[_-]?key|api[_-]?secret|access[_-]?token|refresh[_-]?token|
-       client[_-]?secret|session[_-]?token|password|passwd|authorization)
-    \s*[:=]\s*
-    (?:
-        ["']([^"'\r\n]{24,4096})["']
-        |
-        ([A-Za-z0-9][A-Za-z0-9._~+/=@:-]{23,4095})
-    )
-    """
+    rb"(?ix)"
+    rb"(?:^|[,{;\\t ])"
+    rb"(?P<keyquote>[\\\"\']?)"
+    rb"(?P<key>" + _SECRET_KEY_PATTERN + rb")"
+    rb"(?P=keyquote)"
+    rb"[\\t ]*[:=][\\t ]*"
+    rb"(?P<value>\\\"[^\\\"\\r\\n]*\\\"|\'[^\'\\r\\n]*\'|[^\\t \\r\\n,;]+)"
+)
+_SECRET_AUTH_HEADER_PATTERN = re.compile(
+    rb"(?ix)^\\s*authorization\\s*:\\s*(?:bearer|basic)\\s+(?P<value>[^\\t \\r\\n,;]+)\\s*$"
+)
+_SECRET_COOKIE_HEADER_PATTERN = re.compile(
+    rb"(?ix)^\\s*(?:cookie|set[._ -]?cookie)\\s*:\\s*(?P<value>[^\\r\\n]+?)\\s*$"
+)
+_ENV_SECRET_REFERENCE_PATTERN = re.compile(
+    rb"(?ix)^(?:"
+    rb"\\$\\{[A-Z_][A-Z0-9_]*\\}|"
+    rb"%[A-Z_][A-Z0-9_]*%|"
+    rb"\\$env:[A-Z_][A-Z0-9_]*|"
+    rb"\\$[A-Z_][A-Z0-9_]*"
+    rb")$"
 )
 _PRIVATE_KEY_PATTERN = re.compile(
-    rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
     re.IGNORECASE,
 )
+_MIN_CONCRETE_SECRET_BYTES = 24
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -194,25 +215,38 @@ def _require_no_packaged_secret_content(relative: str, payload: bytes) -> None:
             f"release package contains secret or credential content: {relative}"
         )
 
-    for match in _SECRET_ASSIGNMENT_PATTERN.finditer(payload):
-        value = next(
-            (group for group in match.groups() if group is not None),
-            b"",
-        ).strip()
-        if not value:
-            continue
-        # Environment-variable references are configuration instructions, not
-        # embedded credentials. Concrete long assignments remain fail-closed.
+    def _normalized_value(value: bytes) -> bytes:
+        value = value.strip(b" \\t")
         if (
-            value.startswith(b"${") and value.endswith(b"}")
-        ) or (
-            value.startswith(b"%") and value.endswith(b"%")
+            len(value) >= 2
+            and value[:1] == value[-1:]
+            and value[:1] in {b'"', b"'"}
         ):
-            continue
-        raise ValueError(
-            f"release package contains secret or credential content: {relative}"
-        )
+            value = value[1:-1].strip(b" \\t")
+        return value
 
+    def _is_concrete_secret(value: bytes) -> bool:
+        value = _normalized_value(value)
+        if _ENV_SECRET_REFERENCE_PATTERN.fullmatch(value):
+            return False
+        return len(value) >= _MIN_CONCRETE_SECRET_BYTES
+
+    for line in payload.splitlines():
+        for header_pattern in (
+            _SECRET_AUTH_HEADER_PATTERN,
+            _SECRET_COOKIE_HEADER_PATTERN,
+        ):
+            match = header_pattern.fullmatch(line)
+            if match is not None and _is_concrete_secret(match.group("value")):
+                raise ValueError(
+                    f"release package contains secret or credential content: {relative}"
+                )
+
+        for match in _SECRET_ASSIGNMENT_PATTERN.finditer(line):
+            if _is_concrete_secret(match.group("value")):
+                raise ValueError(
+                    f"release package contains secret or credential content: {relative}"
+                )
 
 def _require_canonical_zip_metadata(
     infos: list[zipfile.ZipInfo],

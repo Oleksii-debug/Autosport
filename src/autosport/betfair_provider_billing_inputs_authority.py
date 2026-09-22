@@ -153,6 +153,7 @@ def _build_observation_authority():
     # the authenticated credential values; raw credentials are deliberately not
     # retained by the issuance registry or exported into evidence.
     issued: dict[int, tuple[object, tuple[object, ...], bytes]] = {}
+    traversals: dict[int, tuple[object, bytes]] = {}
 
     def assert_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
@@ -359,37 +360,98 @@ def _build_observation_authority():
             )
         return source
 
-    def validate_traversal(pages: object):
-        """Validate one exact tuple from one authenticated session capability.
+    def read_traversal(
+        credentials: BetfairSessionCredentials,
+        *,
+        record_count: int = 100,
+        statement_from: str | None = None,
+        statement_to: str | None = None,
+        max_pages: int = 1000,
+    ):
+        """Acquire one bounded product-owned account-statement pagination sweep."""
 
-        This is intentionally weaker than a stable cross-session account identity.
-        It prevents consumers from composing independently issued pages from
-        different authenticated sessions into one positive pagination traversal
-        without exporting credentials or a credential-derived identifier.
+        if type(credentials) is not credentials_cls:
+            raise TypeError("credentials must be exact BetfairSessionCredentials")
+        if (
+            isinstance(max_pages, bool)
+            or not isinstance(max_pages, int)
+            or max_pages <= 0
+            or max_pages > 1000
+        ):
+            raise ValueError("max_pages must be an integer from 1 through 1000")
+
+        binding = session_binding(credentials)
+        pages: list[object] = []
+        from_record = 0
+        for _page_index in range(max_pages):
+            source = read(
+                credentials,
+                from_record=from_record,
+                record_count=record_count,
+                statement_from=statement_from,
+                statement_to=statement_to,
+            )
+            registered = issued[id(source)]
+            if not compare_digest(registered[2], binding):
+                raise error_cls(
+                    "provider billing authenticated session changed during traversal"
+                )
+            pages.append(source)
+            statement = get_attr(source, "statement")
+            more_available = get_attr(statement, "more_available")
+            items = get_attr(statement, "items")
+            if not more_available:
+                result = tuple(pages)
+                traversals[id(result)] = (result, binding)
+                return result
+            item_count = len(items)
+            if item_count <= 0:
+                raise error_cls(
+                    "provider billing traversal cannot progress from an empty "
+                    "non-terminal page"
+                )
+            from_record += item_count
+
+        raise error_cls(
+            "provider billing traversal did not reach a terminal page "
+            "within max_pages"
+        )
+
+    def validate_traversal(pages: object):
+        """Validate one exact product-owned authenticated pagination sweep.
+
+        The tuple itself must have been issued by the canonical traversal reader.
+        Therefore a consumer cannot mint positive traversal evidence by splicing
+        separately issued pages, even when those pages used the same authenticated
+        session. This remains weaker than a stable cross-session account identity.
         """
 
         if type(pages) is not tuple or not pages:
             raise TypeError("pages must be a non-empty exact tuple")
+        traversal = traversals.get(id(pages))
+        if traversal is None or traversal[0] is not pages:
+            raise error_cls(
+                "provider billing traversal must be issued by canonical "
+                "pagination acquisition"
+            )
 
-        traversal_binding: bytes | None = None
+        traversal_binding = traversal[1]
         for source in pages:
             current = validate(source)
             registered = issued[id(current)]
-            current_binding = registered[2]
-            if traversal_binding is None:
-                traversal_binding = current_binding
-            elif not compare_digest(current_binding, traversal_binding):
+            if not compare_digest(registered[2], traversal_binding):
                 raise error_cls(
                     "provider billing traversal pages must share one "
                     "authenticated session capability"
                 )
         return pages
 
-    return read, validate, validate_traversal
+    return read, validate, read_traversal, validate_traversal
 
 
 (
     read_verified_betfair_provider_billing_inputs,
     validate_betfair_provider_billing_inputs_observation,
+    read_verified_betfair_provider_billing_inputs_traversal,
     validate_betfair_provider_billing_inputs_traversal,
 ) = _build_observation_authority()

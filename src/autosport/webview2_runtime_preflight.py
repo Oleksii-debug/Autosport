@@ -280,13 +280,17 @@ def evaluate_webview2_registry_reads(
         _classify_registry_read(hive, subkey, read, reg_sz_type=reg_sz_type)
         for hive, subkey, read in reads
     )
+    # Preserve the documented installed-Runtime resolution precedence: machine-level
+    # registration is considered before per-user registration.  Choosing the highest
+    # visible pv would be fail-open when a lower machine Runtime shadows a newer
+    # per-user Runtime and an explicit release minimum is in force.
     valid_versions = [
         item.version
         for item in observations
         if item.status is RegistryObservationStatus.VALID and item.version is not None
     ]
     if valid_versions:
-        selected = max(valid_versions, key=lambda value: _parse_version(value, allow_zero=False))
+        selected = valid_versions[0]
         selected_tuple = _parse_version(selected, allow_zero=False)
         status = (
             WebView2RuntimeStatus.BELOW_EXPLICIT_MINIMUM

@@ -1,13 +1,16 @@
-"""Product-owned fixed-N risk-of-ruin evaluator and durable issuer.
+"""Fixed-N risk-of-ruin estimator with a fail-closed product-issuance boundary.
 
-This module derives a conservative probability upper bound from raw bankroll-path
-observations. It never accepts a caller-supplied final upper bound. Issued results
-are durably bound to one workspace through MonotonicWorkspaceAuthority so restart,
-rollback and copied-workspace substitution fail closed.
+The pure estimator derives a conservative probability upper bound from raw
+bankroll-path observations and never accepts a caller-supplied final upper bound.
+Raw requests remain assertion-only: this module does not currently have a
+product-owned observation/dataset/independence resolver, so a caller-constructed
+request cannot be durably promoted to product authority.
 
 The only estimator currently qualified here is a one-sided exact
 Clopper-Pearson bound under a pre-registered fixed-N independent Bernoulli-trial
-contract. This is deliberately narrower than the general risk engine.
+contract. Durable journal readback remains strict for already-issued compatible
+records, but new positive issuance is closed until canonical upstream input
+authority is composed.
 """
 from __future__ import annotations
 
@@ -106,6 +109,47 @@ def _decimal_text(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return "0" if text in {"", "-0"} else text
+
+
+def _decimal_from_payload(value: object, name: str) -> Decimal:
+    text = _text(value, name)
+    if "e" in text.lower():
+        raise RiskOfRuinEvaluationError(
+            f"{name} must use canonical fixed-point decimal text"
+        )
+    try:
+        parsed = Decimal(text)
+    except Exception as exc:
+        raise RiskOfRuinEvaluationError(
+            f"{name} must use canonical fixed-point decimal text"
+        ) from exc
+    if not parsed.is_finite() or _decimal_text(parsed) != text:
+        raise RiskOfRuinEvaluationError(
+            f"{name} must use canonical fixed-point decimal text"
+        )
+    return parsed
+
+
+def _decimal_tuple_from_payload(value: object, name: str) -> tuple[Decimal, ...]:
+    if type(value) is not list or not value:
+        raise RiskOfRuinEvaluationError(f"{name} must be a non-empty JSON array")
+    return tuple(
+        _decimal_from_payload(item, f"{name} item")
+        for item in value
+    )
+
+
+def _int_from_payload(
+    value: object,
+    name: str,
+    *,
+    minimum: int = 0,
+) -> int:
+    if type(value) is not int or value < minimum:
+        raise RiskOfRuinEvaluationError(
+            f"{name} must be a canonical integer >= {minimum}"
+        )
+    return value
 
 
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -505,8 +549,8 @@ class IssuedRiskOfRuinResult:
                     payload["capital_state_sha256"], "capital_state_sha256"
                 ),
                 target_sha256=_sha256(payload["target_sha256"], "target_sha256"),
-                evaluated_stakes=tuple(
-                    Decimal(value) for value in payload["evaluated_stakes"]
+                evaluated_stakes=_decimal_tuple_from_payload(
+                    payload["evaluated_stakes"], "evaluated_stakes"
                 ),
                 research_protocol_sha256=_sha256(
                     payload["research_protocol_sha256"], "research_protocol_sha256"
@@ -541,11 +585,21 @@ class IssuedRiskOfRuinResult:
                 independence_contract=_text(
                     payload["independence_contract"], "independence_contract"
                 ),
-                confidence_level=Decimal(payload["confidence_level"]),
-                ruin_threshold=Decimal(payload["ruin_threshold"]),
-                independent_units=int(payload["independent_units"]),
-                ruin_count=int(payload["ruin_count"]),
-                upper_bound=Decimal(payload["upper_bound"]),
+                confidence_level=_decimal_from_payload(
+                    payload["confidence_level"], "confidence_level"
+                ),
+                ruin_threshold=_decimal_from_payload(
+                    payload["ruin_threshold"], "ruin_threshold"
+                ),
+                independent_units=_int_from_payload(
+                    payload["independent_units"], "independent_units", minimum=1
+                ),
+                ruin_count=_int_from_payload(
+                    payload["ruin_count"], "ruin_count", minimum=0
+                ),
+                upper_bound=_decimal_from_payload(
+                    payload["upper_bound"], "upper_bound"
+                ),
             )
         except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
             raise RiskOfRuinIssuanceError(
@@ -739,7 +793,13 @@ def _validate_journal(
 
 
 class ProductRiskOfRuinEvaluator:
-    """Canonical evaluator + restart-safe product issuance for one workspace."""
+    """Estimator journal reader with fail-closed positive issuance.
+
+    The durable journal mechanics remain available for strict resolution of
+    compatible records. New issuance is intentionally unavailable until an
+    independent product-owned input authority can re-resolve the exact observation
+    population, dataset/provenance and IID/dependence contract.
+    """
 
     def __init__(
         self,
@@ -815,61 +875,21 @@ class ProductRiskOfRuinEvaluator:
         self,
         request: RiskOfRuinEvaluationRequest,
     ) -> IssuedRiskOfRuinResult:
+        """Refuse to promote caller-owned input assertions to product authority.
+
+        RiskOfRuinEvaluationRequest remains useful as the pure estimator input
+        contract. It is not, by itself, evidence that Autosport observed the paths,
+        froze the dataset before outcomes, or established the declared
+        independence/dependence structure. Until those facts can be re-resolved
+        from a canonical product-owned producer, durable issuance remains closed.
+        """
         if type(request) is not RiskOfRuinEvaluationRequest:
             raise TypeError("request must be exact RiskOfRuinEvaluationRequest")
-        request_sha = request.request_sha256
-        with WorkspaceEconomicLock(self.workspace):
-            state, records = self._read_state_under_lock()
-            for raw in records:
-                existing = IssuedRiskOfRuinResult.from_payload(raw["result"])
-                if existing.request_sha256 == request_sha:
-                    return existing
-
-            issued_at = datetime.now(timezone.utc).isoformat()
-            result = evaluate_risk_of_ruin(
-                request,
-                workspace_instance_id=self.authority.workspace_instance_id,
-                issued_at=issued_at,
-                source_sha256=evaluator_source_sha256(),
-            )
-            previous = records[-1]["record_sha256"] if records else None
-            record = _record_payload(
-                result,
-                previous_record_sha256=previous,
-            )
-            next_state = {
-                "schema": _JOURNAL_SCHEMA,
-                "schema_version": 1,
-                "workspace_instance_id": self.authority.workspace_instance_id,
-                "records": [*state["records"], record],
-            }
-            observed = _file_sha256(self.journal_path)
-            intended = hashlib.sha256(_atomic_json_bytes(next_state)).hexdigest()
-            tx_id = record["authority_tx_id"]
-            binding = record["semantic_binding_sha256"]
-            try:
-                self.authority.prepare(
-                    tx_id=tx_id,
-                    observed_state_sha256=observed,
-                    intended_state_sha256=intended,
-                    semantic_binding_sha256=binding,
-                )
-                atomic_write_json(self.journal_path, next_state)
-                published = _file_sha256(self.journal_path)
-                if published != intended:
-                    raise RiskOfRuinIssuanceError(
-                        "published risk-of-ruin journal digest mismatch"
-                    )
-                self.authority.commit(
-                    tx_id=tx_id,
-                    observed_state_sha256=published,
-                    semantic_binding_sha256=binding,
-                )
-            except (OSError, MonotonicWorkspaceAuthorityError) as exc:
-                raise RiskOfRuinIssuanceError(
-                    "risk-of-ruin product issuance failed closed"
-                ) from exc
-            return result
+        raise RiskOfRuinIssuanceError(
+            "product-issued risk-of-ruin requires canonical product-owned "
+            "observation, dataset/provenance and independence authority; "
+            "caller-constructed evaluation requests are assertion-only"
+        )
 
     def resolve(self, result_id: str) -> IssuedRiskOfRuinResult:
         wanted = _sha256(result_id, "result_id")

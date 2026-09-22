@@ -464,6 +464,41 @@ def test_revalidation_is_semantic_not_raw_page_partition_identity(
     assert value.bet_ids == ("a", "b")
 
 
+def test_fresh_market_witness_cannot_backdate_completed_bet_passes(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt(profit="5")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=1)
+
+    def read_page(**kwargs):
+        status = kwargs["bet_status"]
+        rows = [_row("bet-1", profit="5")] if status == "SETTLED" else []
+        return _page(rows, status=status, marker=10)
+
+    monkeypatch.setattr(population, "_read_page", read_page)
+    monkeypatch.setattr(
+        population,
+        "_read_market_rollup",
+        lambda **kwargs: population.ClearedMarketRollupWitness(
+            bet_count=1,
+            profit=receipt.profit,
+            commission=receipt.commission,
+            settled_date=receipt.settled_at.isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z"),
+            response_sha256="d" * 64,
+            observed_at="2026-09-21T10:09:59+00:00",
+        ),
+    )
+
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="predate|causally",
+    ):
+        _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+
+
 def test_market_evidence_instance_does_not_change_semantic_population_identity(
     tmp_path, monkeypatch
 ) -> None:

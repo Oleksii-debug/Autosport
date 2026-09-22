@@ -240,15 +240,39 @@ def reject_aggregated_offer_identity(*, offer_id: object, offer_ids: object) -> 
     return _pos_int(offer_id, "offer_id")
 
 
-def retry_disposition(*, transport_exception: bool = False, http_status: int | None = None, observed_offer: MatchbookOfferReadback | None = None) -> MatchbookRetryDisposition:
-    """No HTTP/caller boolean can mint safe duplicate-submit authority."""
+def retry_disposition(
+    *,
+    transport_exception: bool = False,
+    http_status: int | None = None,
+    observed_offer: MatchbookOfferReadback | None = None,
+    expected_account_context_id: str | None = None,
+    expected_offer_id: int | None = None,
+) -> MatchbookRetryDisposition:
+    """Only exact provider readback for the submitted attempt can suppress retry."""
     if type(transport_exception) is not bool:
         raise MatchbookOfferReconciliationError("transport_exception must be bool")
     if http_status is not None and (type(http_status) is not int or not 100 <= http_status <= 599):
         raise MatchbookOfferReconciliationError("invalid HTTP status")
     if observed_offer is not None and type(observed_offer) is not MatchbookOfferReadback:
         raise MatchbookOfferReconciliationError("observed_offer has invalid type")
+    expected_account = (
+        None
+        if expected_account_context_id is None
+        else _text(expected_account_context_id, "expected_account_context_id")
+    )
+    expected_id = (
+        None
+        if expected_offer_id is None
+        else _pos_int(expected_offer_id, "expected_offer_id")
+    )
     if observed_offer is not None:
+        if (
+            expected_account is None
+            or expected_id is None
+            or observed_offer.account_context_id != expected_account
+            or observed_offer.offer_id != expected_id
+        ):
+            return MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
         return MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
     return MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
 

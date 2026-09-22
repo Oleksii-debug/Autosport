@@ -216,7 +216,9 @@ class AccountSnapshotAcquisitionReceipt:
             if getattr(self, field) is not False:
                 raise AccountSnapshotAcquisitionError(f"{field} must be exactly false")
         if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
-            raise AccountSnapshotAcquisitionError("schema_version must be exactly 1")
+            raise AccountSnapshotAcquisitionError(
+                "schema_version must match the current acquisition schema"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1174,6 +1176,29 @@ def _install_account_snapshot_acquisition_authority() -> None:
     ) -> AuthoritativeAccountSnapshot:
         store, client = state(self)
         acquisition_id = _text(acquisition_id, "acquisition_id")
+        if type(requested_capabilities) is not frozenset:
+            raise AccountSnapshotAcquisitionError(
+                "requested_capabilities must be an exact frozenset"
+            )
+        if not requested_capabilities:
+            raise AccountSnapshotAcquisitionError(
+                "requested_capabilities must not be empty"
+            )
+        for capability in requested_capabilities:
+            if type(capability) is not BookmakerCapability:
+                raise AccountSnapshotAcquisitionError(
+                    "requested_capabilities must contain exact BookmakerCapability values"
+                )
+        unsupported = requested_capabilities - _ALLOWED_ACCOUNT_CAPABILITIES
+        if unsupported:
+            names = ", ".join(
+                sorted(capability.value for capability in unsupported)
+            )
+            raise AccountSnapshotAcquisitionError(
+                "account snapshot acquisition does not authorize capability: "
+                + names
+            )
+
         acquisition_request_id_sha256 = _canonical_sha256(
             {
                 "schema": "autosport.account-snapshot-acquisition-request",

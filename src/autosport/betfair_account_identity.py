@@ -35,6 +35,7 @@ IDENTITY_SCHEMA = "autosport.betfair_authenticated_account_context"
 IDENTITY_SCHEMA_VERSION = 1
 _CONTEXT_PREFIX = "betfair-session-context:"
 _PROCESS_HMAC_KEY = token_bytes(32)
+_CANONICAL_NETWORK_POST = UrllibBetfairHttpTransport.post
 
 
 class BetfairAccountIdentityError(RuntimeError):
@@ -154,6 +155,25 @@ def _credential_binding(credentials: BetfairSessionCredentials) -> bytes:
     return hmac.digest(_PROCESS_HMAC_KEY, material, "sha256")
 
 
+def _canonical_network_transport(transport: object) -> bool:
+    """Accept only the unmodified built-in production HTTPS transport."""
+
+    if type(transport) is not UrllibBetfairHttpTransport:
+        return False
+    if type(transport).post is not _CANONICAL_NETWORK_POST:
+        return False
+    transport_dict = getattr(transport, "__dict__", None)
+    if type(transport_dict) is not dict:
+        return False
+    if set(transport_dict) != {"_max_response_bytes"}:
+        return False
+    max_response_bytes = transport_dict.get("_max_response_bytes")
+    return (
+        type(max_response_bytes) is int
+        and max_response_bytes > 0
+    )
+
+
 _CANONICAL_CLIENT_ORIGINS: WeakKeyDictionary = WeakKeyDictionary()
 
 
@@ -183,7 +203,7 @@ def build_betfair_authenticated_client(
     )
     if (
         type(client) is not BetfairReadOnlyClient
-        or type(client._transport) is not UrllibBetfairHttpTransport
+        or not _canonical_network_transport(client._transport)
         or client._credentials is not credentials
     ):
         raise BetfairAccountIdentityError(
@@ -339,7 +359,7 @@ def _origin_matches(origin: _CanonicalClientOrigin, client: BetfairReadOnlyClien
     try:
         if (
             type(client) is not BetfairReadOnlyClient
-            or type(client._transport) is not UrllibBetfairHttpTransport
+            or not _canonical_network_transport(client._transport)
             or client._transport is not origin.transport
             or client._clock is not origin.clock
             or client._credentials is not origin.credentials

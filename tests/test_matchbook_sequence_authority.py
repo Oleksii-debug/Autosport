@@ -8,6 +8,7 @@ from autosport.matchbook_provider import (
     MatchbookHttpJsonResponse,
     MatchbookReadOnlyProvider,
     MatchbookSequenceAuthorityError,
+    MatchbookTransportError,
 )
 
 
@@ -193,8 +194,6 @@ def test_transport_failure_does_not_consume_product_sequence() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            from autosport.matchbook_provider import MatchbookTransportError
-
             raise MatchbookTransportError("Matchbook HTTP 401", 401)
         return _response("2.10")
 
@@ -203,7 +202,7 @@ def test_transport_failure_does_not_consume_product_sequence() -> None:
         clock=lambda: "2026-09-22T03:40:00+00:00",
         sequence_allocator=authority,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(MatchbookTransportError):
         client.read_batch()
     assert authority.value == 500
 

@@ -121,7 +121,7 @@ def test_unknown_back_keeps_full_requested_capital_contingent(tmp_path) -> None:
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
-    assert evidence.truth is CapitalRiskTruth.EXACT
+    assert evidence.truth is CapitalRiskTruth.CONSERVATIVE_BOUND
     assert evidence.confirmed_open_capital == Decimal("0")
     assert evidence.contingent_unknown_capital == Decimal("10")
     assert evidence.confirmed_released_capital == Decimal("0")
@@ -259,7 +259,7 @@ def test_fully_accepted_lay_uses_exact_accepted_odds_liability(tmp_path) -> None
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
-    assert evidence.truth is CapitalRiskTruth.EXACT
+    assert evidence.truth is CapitalRiskTruth.CONSERVATIVE_BOUND
     assert evidence.confirmed_open_capital == Decimal("25")
     assert evidence.contingent_unknown_capital == Decimal("0")
     assert evidence.max_plausible_capital_at_risk == Decimal("25")

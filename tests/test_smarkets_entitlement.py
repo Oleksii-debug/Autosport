@@ -57,6 +57,7 @@ def _entitlement(
 
 def _evaluate(observation, **overrides):
     values = {
+        "account_scope": "acct-scope-1",
         "purpose": SmarketsPurpose.ORDER_EXECUTION,
         "event_id": "event-1",
         "market_id": "market-1",
@@ -96,6 +97,13 @@ def test_unapproved_purpose_fails_closed():
 def test_provider_prohibited_benchmarking_cannot_be_minted():
     with pytest.raises(SmarketsEntitlementError, match="provider terms prohibit"):
         _entitlement(purposes=(SmarketsPurpose.BENCHMARKING,))
+
+
+def test_account_scope_mismatch_fails_closed_and_decision_binds_source_scope():
+    result = _evaluate(_entitlement(), account_scope="other-account")
+    assert result.entitled is False
+    assert result.reason == "ACCOUNT_SCOPE_MISMATCH"
+    assert result.account_scope == "acct-scope-1"
 
 
 def test_event_scope_mismatch_fails_closed():
@@ -203,6 +211,15 @@ def test_in_place_mutation_revokes_issuance_even_on_same_object():
     result = _evaluate(issued)
     assert result.entitled is False
     assert result.reason == "UNISSUED_OR_MUTATED_EVIDENCE"
+
+
+def test_entitlement_scope_and_purposes_must_be_canonical_not_silently_normalized():
+    with pytest.raises(SmarketsEntitlementError, match="approved_purposes must be sorted and unique"):
+        _entitlement(purposes=(SmarketsPurpose.ORDER_EXECUTION, SmarketsPurpose.ACCOUNT_RECONCILIATION))
+    with pytest.raises(SmarketsEntitlementError, match="allowed_event_ids must be sorted and unique"):
+        _entitlement(events=("event-2", "event-1"))
+    with pytest.raises(SmarketsEntitlementError, match="allowed_market_ids must be sorted and unique"):
+        _entitlement(markets=("market-1", "market-1"))
 
 
 def test_rate_policy_must_be_explicit_and_positive():

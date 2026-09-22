@@ -167,6 +167,7 @@ class ProviderUsePurposeDecision:
     source_section_ref: str
     basis: ProviderUseDecisionBasis = ProviderUseDecisionBasis.DOCUMENTED_POLICY_TEXT
     reviewer_decision_ref: str | None = None
+    reviewer_decision_sha256: str | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -187,15 +188,24 @@ class ProviderUsePurposeDecision:
             self.reviewer_decision_ref,
             "reviewer_decision_ref",
         )
-        if basis is ProviderUseDecisionBasis.REVIEWER_DECISION and reviewer is None:
+        reviewer_sha256 = _optional_sha256(
+            self.reviewer_decision_sha256,
+            "reviewer_decision_sha256",
+        )
+        if basis is ProviderUseDecisionBasis.REVIEWER_DECISION and (
+            reviewer is None or reviewer_sha256 is None
+        ):
             raise ProviderUsePolicyError(
-                "reviewer basis requires reviewer_decision_ref"
+                "reviewer basis requires reviewer_decision_ref and reviewer_decision_sha256"
             )
-        if basis is ProviderUseDecisionBasis.DOCUMENTED_POLICY_TEXT and reviewer is not None:
+        if basis is ProviderUseDecisionBasis.DOCUMENTED_POLICY_TEXT and (
+            reviewer is not None or reviewer_sha256 is not None
+        ):
             raise ProviderUsePolicyError(
-                "documented-policy basis cannot carry reviewer_decision_ref"
+                "documented-policy basis cannot carry reviewer decision evidence"
             )
         object.__setattr__(self, "reviewer_decision_ref", reviewer)
+        object.__setattr__(self, "reviewer_decision_sha256", reviewer_sha256)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -204,6 +214,7 @@ class ProviderUsePurposeDecision:
             "source_section_ref": self.source_section_ref,
             "basis": self.basis.value,
             "reviewer_decision_ref": self.reviewer_decision_ref,
+            "reviewer_decision_sha256": self.reviewer_decision_sha256,
         }
 
 
@@ -638,7 +649,7 @@ def evaluate_provider_use(
             request=request,
             state=ProviderUseAuthorizationState.POLICY_NOT_EFFECTIVE,
         )
-    if use_at > _instant(policy.review_due_at_utc, "review_due_at_utc"):
+    if use_at >= _instant(policy.review_due_at_utc, "review_due_at_utc"):
         return _authorization(
             policy=policy,
             request=request,
@@ -710,7 +721,7 @@ def evaluate_provider_use(
         )
     if (
         written_permission.valid_until_utc is not None
-        and use_at > _instant(
+        and use_at >= _instant(
             written_permission.valid_until_utc,
             "permission.valid_until_utc",
         )

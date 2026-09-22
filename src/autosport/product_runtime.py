@@ -464,8 +464,8 @@ class AutonomousProductRuntime:
         return self.start()
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
-        self._require_runtime_authority()
         with self._decision_commit_lock:
+            self._require_runtime_authority()
             # STOP is also the explicit recovery action for a previously split
             # lifecycle graph, so do not preflight coherence here. Attempt both
             # durable STOP authorities even if either side reports an error.

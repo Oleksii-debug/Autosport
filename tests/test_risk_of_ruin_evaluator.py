@@ -229,12 +229,12 @@ def test_repeated_source_evidence_cannot_be_relabelled_as_independent_authority(
         replace(item, source_evidence_sha256=SHA_A)
         for item in observations
     )
-    request = _request(observations=observations, planned=100)
-    evaluator = _evaluator(tmp_path)
 
-    assert request.planned_independent_units == 100
-    with pytest.raises(RiskOfRuinIssuanceError):
-        evaluator.issue(request)
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="unique source evidence identity",
+    ):
+        _request(observations=observations, planned=100)
 
 
 @pytest.mark.parametrize(

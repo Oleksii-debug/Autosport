@@ -13,6 +13,7 @@ from autosport.research_multiplicity import (
     SequentialDecision,
     SequentialLookEvidence,
     SequentialMultiplicityEvidenceStore,
+    _exact_sum,
 )
 from autosport.scientific_registry import ResearchOutcome
 
@@ -565,3 +566,8 @@ def test_extreme_quantized_zero_is_canonical_without_expansion() -> None:
     member = plan.members[0]
     evidence = _look(plan, member, index=1, p="0E-1000000", bundle_char="4")
     assert evidence.to_payload()["observed_p_value"] == "0"
+
+
+def test_extreme_zero_exponent_cannot_amplify_exact_sum() -> None:
+    assert _exact_sum((Decimal("0E-1000000"), Decimal("0.005"))) == Decimal("0.005")
+    assert _exact_sum((Decimal("-0E+1000000"), Decimal("0.005"))) == Decimal("0.005")

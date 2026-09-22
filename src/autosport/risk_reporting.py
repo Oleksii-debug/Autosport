@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, localcontext
 
+from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
@@ -144,7 +145,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
             tuple(
                 ticket.stake
                 for ticket in book.tickets.values()
-                if ticket.status.value == "OPEN"
+                if ticket.status is TicketStatus.OPEN
             )
         )
         current_equity = PaperRiskPolicy._exact_positive_sum(

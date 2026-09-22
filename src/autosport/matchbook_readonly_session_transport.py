@@ -99,8 +99,9 @@ class _LiveSession:
     session_token: str = field(repr=False)
 
 
+QueryPairs = tuple[tuple[str, str], ...]
 LoginCallable = Callable[[], MatchbookLoginResponse]
-ReadCallable = Callable[[str, str], MatchbookReadResponse]
+ReadCallable = Callable[[str, str, QueryPairs], MatchbookReadResponse]
 LogoutCallable = Callable[[str], int]
 ClockNs = Callable[[], int]
 GenerationFactory = Callable[[], str]
@@ -132,6 +133,35 @@ def _validate_path(path: object) -> str:
     if path not in MATCHBOOK_READ_ONLY_PATHS:
         raise ValueError("path is not in the Matchbook read-only allowlist")
     return path
+
+
+def _validate_query_pairs(value: object) -> QueryPairs:
+    if type(value) is not tuple:
+        raise TypeError("query must be an exact tuple of string pairs")
+    output: list[tuple[str, str]] = []
+    forbidden_keys = {
+        "session-token",
+        "session_token",
+        "username",
+        "password",
+        "mfa",
+        "mfa-token",
+        "mfa_token",
+    }
+    for pair in value:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise TypeError("query entries must be exact two-item tuples")
+        key, item = pair
+        if not isinstance(key, str) or not key:
+            raise TypeError("query keys must be non-empty strings")
+        if not isinstance(item, str):
+            raise TypeError("query values must be strings")
+        if any(character in key or character in item for character in ("\r", "\n", "\x00")):
+            raise ValueError("query contains forbidden control characters")
+        if key.strip().lower() in forbidden_keys:
+            raise ValueError("credentials must not be carried in Matchbook query parameters")
+        output.append((key, item))
+    return tuple(output)
 
 
 def _default_generation_factory() -> str:
@@ -192,8 +222,14 @@ class MatchbookReadOnlySessionTransport:
                 return None
             return self._live_session.generation_id
 
-    def read(self, *, path: str) -> MatchbookCommittedRead:
+    def read(
+        self,
+        *,
+        path: str,
+        query: QueryPairs = (),
+    ) -> MatchbookCommittedRead:
         path = _validate_path(path)
+        query = _validate_query_pairs(query)
         recovered_after_401 = False
 
         while True:
@@ -221,7 +257,7 @@ class MatchbookReadOnlySessionTransport:
                 )
 
             try:
-                response = self._read(session.session_token, path)
+                response = self._read(session.session_token, path, query)
             except Exception:
                 self._invalidate_generation_after_network_failure(
                     session.generation_id

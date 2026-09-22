@@ -168,13 +168,21 @@ def test_current_operational_evidence_requires_expiry():
 def test_expired_evidence_does_not_renew_on_later_matrix_rebuild():
     p = profile()
     i = integration(p)
-    f = evidence(
-        p,
-        BookmakerCapability.BALANCE_READ,
-        ProviderCapabilityTruthGrade.CONFIGURED,
-        i=i,
-        expires=T3,
+    f = issue_provider_capability_evidence(
+        capability=BookmakerCapability.BALANCE_READ,
+        profile_state=p.state_of(BookmakerCapability.BALANCE_READ),
+        grade=ProviderCapabilityTruthGrade.CONFIGURED,
+        profile_id=p.profile_id,
+        integration_evidence_id=i.evidence_id,
+        environment="production",
+        application_mode="live-key-readonly",
+        observed_at=T2,
+        expires_at=T3,
+        evidence_ref="evidence://balance_read/configured-expiring",
+        evidence_sha256=H3,
+        endpoint_operation="op:balance_read",
     )
+    assert f.expires_at == T3
     m = build_provider_capability_evidence_matrix(
         p, i, environment="production", application_mode="live-key-readonly",
         matrix_version=1, as_of=T4, matrix_ref="restart", evidence=(f,)

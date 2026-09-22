@@ -69,6 +69,26 @@ class SessionAuditSnapshot:
             raise TypeError("clock_faulted must be bool")
 
 
+@dataclass(frozen=True, slots=True)
+class SessionReadGenerationTicket:
+    """One-shot process-local proof that a READ began under one active generation.
+
+    Field equality is intentionally insufficient for authority. A ticket is accepted
+    only when the exact object instance was issued by the same lifecycle object and
+    has not already been consumed or invalidated.
+    """
+
+    ticket_id: int
+    generation_id: str
+    issued_monotonic_ns: int
+
+    def __post_init__(self) -> None:
+        if type(self.ticket_id) is not int or self.ticket_id < 1:
+            raise ValueError("ticket_id must be a positive non-boolean int")
+        _validate_generation_id(self.generation_id)
+        _validate_monotonic_ns(self.issued_monotonic_ns, "issued_monotonic_ns")
+
+
 def _validate_generation_id(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("generation_id must be str")
@@ -116,6 +136,8 @@ class MatchbookSessionLifecycle:
         self._clock_faulted = False
         self._restart_requires_reauth = False
         self._terminal_generations: set[str] = set()
+        self._next_read_ticket_id = 1
+        self._issued_read_tickets: dict[int, SessionReadGenerationTicket] = {}
 
     @classmethod
     def from_audit_snapshot(
@@ -173,6 +195,7 @@ class MatchbookSessionLifecycle:
             raise SessionLifecycleError(
                 "login success must not reuse the current session generation"
             )
+        self._invalidate_read_tickets()
         if self._generation_id is not None:
             self._terminal_generations.add(self._generation_id)
         self._generation_id = generation_id
@@ -201,9 +224,14 @@ class MatchbookSessionLifecycle:
         if http_status == 200:
             self._state = SessionState.ACTIVE
         elif http_status == 401:
+            self._invalidate_read_tickets()
             self._state = SessionState.EXPIRED
             self._terminal_generations.add(generation_id)
         else:
+            # Ambiguous auth/provider state must invalidate in-flight positive
+            # response authority. A later explicit validation/login may create
+            # new tickets, but old response bytes cannot cross this uncertainty.
+            self._invalidate_read_tickets()
             self._state = SessionState.UNKNOWN
 
     def record_network_failure(
@@ -215,6 +243,7 @@ class MatchbookSessionLifecycle:
         self._observe_clock(monotonic_ns)
         if self._state in {SessionState.EXPIRED, SessionState.RESTART_REAUTH_REQUIRED}:
             return
+        self._invalidate_read_tickets()
         self._last_observation_monotonic_ns = monotonic_ns
         self._last_http_status = None
         self._state = SessionState.UNKNOWN
@@ -226,10 +255,69 @@ class MatchbookSessionLifecycle:
         monotonic_ns = _validate_monotonic_ns(monotonic_ns)
         self._require_current_runtime_generation(generation_id)
         self._observe_clock(monotonic_ns)
+        self._invalidate_read_tickets()
         self._last_observation_monotonic_ns = monotonic_ns
         self._last_http_status = 200
         self._state = SessionState.EXPIRED
         self._terminal_generations.add(generation_id)
+
+    def capture_read_generation(
+        self, *, monotonic_ns: int
+    ) -> SessionReadGenerationTicket:
+        """Capture exact active generation before an authenticated READ is emitted."""
+
+        monotonic_ns = _validate_monotonic_ns(monotonic_ns)
+        if self._generation_id is None or not self.is_active:
+            raise SessionLifecycleError(
+                "authenticated read requires an active session generation"
+            )
+        self._require_current_runtime_generation(self._generation_id)
+        self._observe_clock(monotonic_ns)
+        ticket = SessionReadGenerationTicket(
+            ticket_id=self._next_read_ticket_id,
+            generation_id=self._generation_id,
+            issued_monotonic_ns=monotonic_ns,
+        )
+        self._next_read_ticket_id += 1
+        self._issued_read_tickets[ticket.ticket_id] = ticket
+        return ticket
+
+    def authorize_read_response_commit(
+        self,
+        ticket: SessionReadGenerationTicket,
+        *,
+        monotonic_ns: int,
+    ) -> str:
+        """Authorize one positive READ response only for its still-current generation.
+
+        The exact product-issued ticket object is single-use. Generation/ticket
+        checks happen before the response timestamp participates in monotonic clock
+        authority, so a late predecessor response cannot clock-fault or mutate the
+        active successor generation.
+        """
+
+        if type(ticket) is not SessionReadGenerationTicket:
+            raise TypeError("ticket must be exact SessionReadGenerationTicket")
+        monotonic_ns = _validate_monotonic_ns(monotonic_ns)
+        issued = self._issued_read_tickets.get(ticket.ticket_id)
+        if issued is not ticket:
+            raise SessionLifecycleError(
+                "read generation ticket was not issued here or is no longer valid"
+            )
+        if self._generation_id != ticket.generation_id:
+            self._issued_read_tickets.pop(ticket.ticket_id, None)
+            raise SessionLifecycleError(
+                "read response belongs to a stale session generation"
+            )
+        if not self.is_active:
+            self._issued_read_tickets.pop(ticket.ticket_id, None)
+            raise SessionLifecycleError(
+                "positive read response requires a still-active session generation"
+            )
+        self._require_current_runtime_generation(ticket.generation_id)
+        self._observe_clock(monotonic_ns)
+        self._issued_read_tickets.pop(ticket.ticket_id, None)
+        return ticket.generation_id
 
     def session_age_hint_seconds(self, *, monotonic_ns: int) -> float | None:
         monotonic_ns = _validate_monotonic_ns(monotonic_ns)
@@ -281,6 +369,9 @@ class MatchbookSessionLifecycle:
                 "session lifecycle is permanently fail-closed after clock rollback"
             )
 
+    def _invalidate_read_tickets(self) -> None:
+        self._issued_read_tickets.clear()
+
     def _observe_clock(self, monotonic_ns: int) -> None:
         if self._clock_faulted:
             raise SessionClockRollbackError(
@@ -288,6 +379,7 @@ class MatchbookSessionLifecycle:
             )
         previous = self._last_observation_monotonic_ns
         if previous is not None and monotonic_ns < previous:
+            self._invalidate_read_tickets()
             self._clock_faulted = True
             self._state = SessionState.CLOCK_FAULT
             self._restart_requires_reauth = True

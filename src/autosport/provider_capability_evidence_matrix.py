@@ -434,6 +434,12 @@ class ProviderCapabilityEvidenceMatrix:
             and not _is_product_issued(fact)
         ):
             return False
+        # This query has no requested sport/market scope. A fact restricted to
+        # either axis cannot therefore be treated as provider-wide authority.
+        # Scoped consumers need an explicit scoped resolver instead of silently
+        # dropping the evidence restriction.
+        if fact.sport_scope or fact.market_scope:
+            return False
         if fact.grade is ProviderCapabilityTruthGrade.REVOKED_OR_UNAVAILABLE:
             return False
         return fact.grade in accepted_grades and fact.is_current(at_time)

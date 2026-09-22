@@ -243,3 +243,24 @@ def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_odds_ladder_response(return_status_extra)
 
+@pytest.mark.parametrize(
+    "return_status",
+    (
+        (
+            '<ReturnStatus Code="0" Description="Success" CallId="x1">'
+            'future-semantic-text'
+            '</ReturnStatus>'
+        ),
+        (
+            '<ReturnStatus Code="0" Description="Success" CallId="x1">'
+            '<FutureSemanticField />'
+            '</ReturnStatus>'
+        ),
+    ),
+)
+def test_return_status_child_content_fails_closed(return_status: str) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="child content"):
+        parse_get_odds_ladder_response(
+            _response(return_status=return_status)
+        )
+

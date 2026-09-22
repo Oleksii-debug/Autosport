@@ -476,6 +476,51 @@ class RealExecutionLedger:
             ) from exc
         self._path_durable = True
 
+    def _acquire_posix_ledger_lock(self) -> int | None:
+        """Serialize writers on the stable ledger inode when POSIX flock exists."""
+
+        if os.name == "nt":
+            return None
+
+        import fcntl
+
+        try:
+            data_fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger writer lock could not open ledger inode"
+            ) from exc
+        try:
+            fcntl.flock(data_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerBusyError(
+                "ledger inode is already held by another writer"
+            ) from exc
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger writer lock failed"
+            ) from exc
+
+        try:
+            descriptor_stat = os.fstat(data_fd)
+            path_stat = os.stat(self.path)
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path identity could not be verified"
+            ) from exc
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            path_stat.st_dev,
+            path_stat.st_ino,
+        ):
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path changed while acquiring writer lock"
+            )
+        return data_fd
+
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
             try:
@@ -486,9 +531,14 @@ class RealExecutionLedger:
                 raise ExecutionLedgerBusyError(
                     "writer lock exists; fail closed until writer/crash ownership is resolved"
                 ) from exc
+
+            data_fd: int | None = None
             try:
+                data_fd = self._acquire_posix_ledger_lock()
                 return operation()
             finally:
+                if data_fd is not None:
+                    os.close(data_fd)
                 os.close(fd)
                 try:
                     self._lock_path.unlink()

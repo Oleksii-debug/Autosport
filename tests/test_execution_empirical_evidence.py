@@ -10,6 +10,9 @@ from autosport.execution_empirical_evidence import (
     EmpiricalExecutionEvidenceError,
     EmpiricalExecutionEvidenceUnavailable,
     EmpiricalExecutionPopulationEvidence,
+    PROVIDER_OUTCOME_NOT_APPLICABLE,
+    PROVIDER_OUTCOME_UNVERIFIED_ABSENCE,
+    PROVIDER_OUTCOME_UNVERIFIED_ACK,
     SLIPPAGE_STATUS_KNOWN,
     SLIPPAGE_STATUS_NOT_APPLICABLE,
     SLIPPAGE_STATUS_UNKNOWN,
@@ -159,6 +162,11 @@ def test_terminal_accepted_record_keeps_provider_correlation_but_slippage_unknow
 
     assert evidence.attempt_state == "ACCEPTED"
     assert evidence.terminal is True
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+    )
     assert evidence.right_censored is False
     assert evidence.censor_reason is None
     assert evidence.censor_cutoff_recorded_at is None
@@ -192,6 +200,11 @@ def test_submitted_attempt_is_retained_as_right_censored_evidence(tmp_path):
 
     assert evidence.attempt_state == "SUBMITTED"
     assert evidence.terminal is False
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_NOT_APPLICABLE
+    )
     assert evidence.right_censored is True
     assert evidence.censor_reason == "SUBMITTED_NO_TERMINAL_ACK"
     assert evidence.censor_cutoff_event_count == evidence.source_event_count
@@ -211,6 +224,11 @@ def test_reserved_attempt_is_retained_in_population(tmp_path):
 
     assert evidence.attempt_state == "RESERVED"
     assert evidence.submitted_at is None
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_NOT_APPLICABLE
+    )
     assert evidence.right_censored is True
     assert evidence.censor_reason == "RESERVED_NOT_SUBMITTED"
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
@@ -230,6 +248,11 @@ def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
     )
 
     assert evidence.attempt_state == "UNKNOWN"
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_NOT_APPLICABLE
+    )
     assert evidence.right_censored is True
     assert evidence.censor_reason == "UNKNOWN_EXTERNAL_EFFECT"
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
@@ -266,7 +289,13 @@ def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_recor
     )
 
     assert evidence.attempt_state == "ACCEPTED"
+    assert evidence.terminal is True
     assert evidence.provider_evidence_id is None
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+    )
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.accepted_odds is None
     assert evidence.adverse_odds_delta is None
@@ -282,6 +311,11 @@ def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
 
     assert evidence.attempt_state == "RECONCILED_NOT_FOUND"
     assert evidence.terminal is False
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ABSENCE
+    )
     assert evidence.right_censored is True
     assert (
         evidence.censor_reason
@@ -365,6 +399,12 @@ def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
     )
 
     assert evidence.attempt_state == "PARTIAL"
+    assert evidence.terminal is True
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+    )
     assert evidence.acknowledgement_status == "PARTIAL"
     assert evidence.provider_evidence_id == EVIDENCE_ID
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
@@ -390,6 +430,12 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     )
 
     assert evidence.attempt_state == "REJECTED"
+    assert evidence.terminal is True
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+    )
     assert evidence.slippage_status == SLIPPAGE_STATUS_NOT_APPLICABLE
     assert evidence.accepted_odds is None
     assert evidence.adverse_odds_delta is None
@@ -428,6 +474,25 @@ def test_generic_provider_evidence_does_not_require_price_side_semantics(tmp_pat
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.accepted_odds is None
     assert evidence.adverse_odds_delta is None
+
+
+def test_caller_ack_cannot_upgrade_provider_outcome_authority(tmp_path):
+    evidence = _accepted_evidence(tmp_path)
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="cannot verify provider outcome provenance",
+    ):
+        replace(evidence, provider_outcome_verified=True)
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="verification reason mismatches durable attempt state",
+    ):
+        replace(
+            evidence,
+            provider_outcome_verification_reason=PROVIDER_OUTCOME_NOT_APPLICABLE,
+        )
 
 
 def test_wall_clock_cross_stage_inversion_is_not_reported_as_latency(tmp_path):
@@ -698,8 +763,13 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         "RECONCILED_NOT_FOUND": 1,
     }
     assert aggregate.terminal_count == 3
+    assert aggregate.provider_verified_terminal_count == 0
+    assert aggregate.unverified_ledger_terminal_count == 3
     assert aggregate.right_censored_count == 4
     assert aggregate.provider_evidence_count == 3
+    assert aggregate.provider_outcome_unverified_ack_count == 3
+    assert aggregate.provider_outcome_unverified_absence_count == 1
+    assert aggregate.provider_outcome_not_applicable_count == 3
     assert aggregate.slippage_known_count == 0
     assert aggregate.slippage_unknown_count == 6
     assert aggregate.slippage_not_applicable_count == 1
@@ -710,6 +780,23 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert payload["state_rates"]["ACCEPTED"] == {
         "numerator": 1,
         "denominator": 7,
+    }
+    assert payload["ledger_terminal_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["provider_verified_terminal_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["unverified_ledger_terminal_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["provider_outcome_verification_counts"] == {
+        PROVIDER_OUTCOME_UNVERIFIED_ACK: 3,
+        PROVIDER_OUTCOME_UNVERIFIED_ABSENCE: 1,
+        PROVIDER_OUTCOME_NOT_APPLICABLE: 3,
     }
     assert payload["right_censored_rate"] == {
         "numerator": 4,

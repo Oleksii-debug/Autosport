@@ -393,6 +393,34 @@ def test_foreign_or_missing_returned_customer_order_ref_cannot_become_absence(
         )
 
 
+def test_timeout_resolver_propagates_foreign_customer_order_ref_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _foreign_ref_provider_capture(
+        action,
+        provider_ref,
+        surface="current",
+        returned_ref="f" * 32,
+    )
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="current-order customerOrderRef conflicts with captured execution scope",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
+
+
 def test_complete_empty_before_visibility_horizon_stays_indeterminate(
     tmp_path, monkeypatch
 ) -> None:

@@ -543,18 +543,43 @@ class BetfairSettlementRevisionStore:
     @contextmanager
     def _writer_lock(self) -> Iterator[None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self._writer_lock_path.open("a+b")
         try:
-            fd = os.open(self._writer_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as exc:
-            raise BetfairSettlementBusyError("settlement writer lock exists; fail closed") from exc
-        try:
-            yield
-        finally:
-            os.close(fd)
+            # Keep a stable lock file across restarts. The byte is only a lock
+            # target on Windows; ownership lives in the OS advisory lock, so a
+            # process crash cannot leave a permanently "owned" sentinel.
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
             try:
-                self._writer_lock_path.unlink()
-            except FileNotFoundError:
-                pass
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(
+                        handle.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+            except OSError as exc:
+                raise BetfairSettlementBusyError(
+                    "settlement writer lock is held by another process"
+                ) from exc
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     def _reload(self) -> None:
         previous_revisions = self._revisions

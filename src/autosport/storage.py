@@ -955,74 +955,91 @@ class SQLiteMarketStore:
         canonical_as_of = _canonical_replay_cutoff(as_of)
         cutoff_id = _replay_cutoff_id(canonical_as_of)
         with self._connection_lock:
-            self.connection.execute("BEGIN IMMEDIATE")
-            try:
-                self._validate_causal_replay_state()
-                current_row = self.connection.execute(
-                    """SELECT as_of, max_append_generation
-                       FROM market_replay_cutoffs
-                       WHERE cutoff_id=?""",
-                    (cutoff_id,),
-                ).fetchone()
-                if current_row is None:
-                    generation_row = self.connection.execute(
-                        """SELECT COALESCE(MAX(append_generation), 0)
-                           FROM market_event_commit_order"""
-                    ).fetchone()
-                    if (
-                        generation_row is None
-                        or type(generation_row[0]) is not int
-                        or generation_row[0] < 0
-                    ):
-                        raise ValueError(
-                            "cannot freeze causal replay append generation"
-                        )
-                    max_generation = generation_row[0]
-                    self.connection.execute(
-                        """INSERT INTO market_replay_cutoffs
-                           (cutoff_id, as_of, max_append_generation)
-                           VALUES (?, ?, ?)""",
-                        (cutoff_id, canonical_as_of, max_generation),
-                    )
-                else:
-                    stored_as_of, max_generation = current_row
-                    if (
-                        stored_as_of != canonical_as_of
-                        or type(max_generation) is not int
-                        or max_generation < 0
-                        or cutoff_id != _replay_cutoff_id(str(stored_as_of))
-                    ):
-                        raise ValueError("causal replay cutoff authority is invalid")
-                    latest_row = self.connection.execute(
-                        """SELECT COALESCE(MAX(append_generation), 0)
-                           FROM market_event_commit_order"""
-                    ).fetchone()
-                    if (
-                        latest_row is None
-                        or type(latest_row[0]) is not int
-                        or max_generation > latest_row[0]
-                    ):
-                        raise ValueError(
-                            "causal replay cutoff references unavailable generation"
-                        )
+            current_row = self.connection.execute(
+                """SELECT as_of, max_append_generation
+                   FROM market_replay_cutoffs
+                   WHERE cutoff_id=?""",
+                (cutoff_id,),
+            ).fetchone()
 
-                qualified_columns = ",".join(
-                    f"m.{column}" for column in _HISTORY_COLUMNS
-                )
-                rows = self.connection.execute(
-                    f"""SELECT {qualified_columns}
-                        FROM market_events AS m
-                        JOIN market_event_commit_order AS c
-                          ON c.dedupe_key = m.dedupe_key
-                        WHERE c.append_generation <= ?""",
-                    (max_generation,),
-                ).fetchall()
-                events = [_event_from_history_row(row) for row in rows]
-            except Exception:
-                self.connection.rollback()
-                raise
+            if current_row is None:
+                # Serialize only cutoff issuance against canonical appends. The
+                # potentially large replay scan happens after this write
+                # transaction commits, so forward collection is not blocked by
+                # history decoding.
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._validate_causal_replay_state()
+                    current_row = self.connection.execute(
+                        """SELECT as_of, max_append_generation
+                           FROM market_replay_cutoffs
+                           WHERE cutoff_id=?""",
+                        (cutoff_id,),
+                    ).fetchone()
+                    if current_row is None:
+                        generation_row = self.connection.execute(
+                            """SELECT COALESCE(MAX(append_generation), 0)
+                               FROM market_event_commit_order"""
+                        ).fetchone()
+                        if (
+                            generation_row is None
+                            or type(generation_row[0]) is not int
+                            or generation_row[0] < 0
+                        ):
+                            raise ValueError(
+                                "cannot freeze causal replay append generation"
+                            )
+                        current_row = (canonical_as_of, generation_row[0])
+                        self.connection.execute(
+                            """INSERT INTO market_replay_cutoffs
+                               (cutoff_id, as_of, max_append_generation)
+                               VALUES (?, ?, ?)""",
+                            (cutoff_id, canonical_as_of, generation_row[0]),
+                        )
+                except Exception:
+                    self.connection.rollback()
+                    raise
+                else:
+                    self.connection.commit()
             else:
-                self.connection.commit()
+                self._validate_causal_replay_state()
+
+            if current_row is None:
+                raise RuntimeError("causal replay cutoff issuance disappeared")
+            stored_as_of, max_generation = current_row
+            if (
+                stored_as_of != canonical_as_of
+                or type(max_generation) is not int
+                or max_generation < 0
+                or cutoff_id != _replay_cutoff_id(str(stored_as_of))
+            ):
+                raise ValueError("causal replay cutoff authority is invalid")
+            latest_row = self.connection.execute(
+                """SELECT COALESCE(MAX(append_generation), 0)
+                   FROM market_event_commit_order"""
+            ).fetchone()
+            if (
+                latest_row is None
+                or type(latest_row[0]) is not int
+                or max_generation > latest_row[0]
+            ):
+                raise ValueError(
+                    "causal replay cutoff references unavailable generation"
+                )
+
+            qualified_columns = ",".join(
+                f"m.{column}" for column in _HISTORY_COLUMNS
+            )
+            rows = self.connection.execute(
+                f"""SELECT {qualified_columns}
+                    FROM market_events AS m
+                    JOIN market_event_commit_order AS c
+                      ON c.dedupe_key = m.dedupe_key
+                    WHERE c.append_generation <= ?""",
+                (max_generation,),
+            ).fetchall()
+
+        events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:

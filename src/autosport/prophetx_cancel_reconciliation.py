@@ -24,6 +24,24 @@ class CancelTransport(str, Enum):
     REST = "REST_DIRECT_LINK"
 
 
+class CancelScope(str, Enum):
+    WHOLE_REMAINDER = "WHOLE_REMAINDER"
+
+
+class RestTransportState(str, Enum):
+    TIMEOUT_AFTER_POSSIBLE_SEND = "TIMEOUT_AFTER_POSSIBLE_SEND"
+    HTTP_200_UNQUALIFIED = "HTTP_200_UNQUALIFIED"
+    HTTP_404_SAMPLE_AMBIGUOUS = "HTTP_404_SAMPLE_AMBIGUOUS"
+    MALFORMED_OR_UNQUALIFIED_RESPONSE = "MALFORMED_OR_UNQUALIFIED_RESPONSE"
+    NETWORK_ERROR_AFTER_POSSIBLE_SEND = "NETWORK_ERROR_AFTER_POSSIBLE_SEND"
+
+
+class CancelRejectReason(str, Enum):
+    TOO_LATE = "0"
+    UNKNOWN_ORDER = "1"
+    OTHER = "2"
+
+
 class OrderStatus(str, Enum):
     NEW = "NEW"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
@@ -134,9 +152,10 @@ class CancelRequest:
     side: str
     provider_order_id: str
     original_cl_ord_id: str
-    cancel_cl_ord_id: str
+    cancel_cl_ord_id: str | None
     requested_at: str
     transport: CancelTransport = CancelTransport.FIX
+    scope: CancelScope = CancelScope.WHOLE_REMAINDER
 
     def __post_init__(self) -> None:
         for n in (
@@ -147,15 +166,24 @@ class CancelRequest:
             "side",
             "provider_order_id",
             "original_cl_ord_id",
-            "cancel_cl_ord_id",
         ):
             _text(getattr(self, n), n)
-        if self.original_cl_ord_id == self.cancel_cl_ord_id:
-            raise ProphetXCancelError(
-                "cancel request ClOrdID must differ from original order ClOrdID"
-            )
         if not isinstance(self.transport, CancelTransport):
             raise ProphetXCancelError("invalid cancel transport")
+        if not isinstance(self.scope, CancelScope):
+            raise ProphetXCancelError("invalid cancel scope")
+        if self.scope is not CancelScope.WHOLE_REMAINDER:
+            raise ProphetXCancelError("unsupported cancel scope")
+        if self.transport is CancelTransport.FIX:
+            cancel_id = _text(self.cancel_cl_ord_id, "cancel_cl_ord_id")
+            if self.original_cl_ord_id == cancel_id:
+                raise ProphetXCancelError(
+                    "cancel request ClOrdID must differ from original order ClOrdID"
+                )
+        elif self.cancel_cl_ord_id is not None:
+            raise ProphetXCancelError(
+                "REST cancel has no FIX cancel ClOrdID; bind original external_id instead"
+            )
         _time(self.requested_at, "requested_at")
 
     @property
@@ -172,6 +200,7 @@ class CancelRequest:
                 "cancel_cl_ord_id": self.cancel_cl_ord_id,
                 "requested_at": self.requested_at,
                 "transport": self.transport.value,
+                "scope": self.scope.value,
             }
         )
 
@@ -429,7 +458,7 @@ class CancelReject:
     provider_order_id: str
     cancel_cl_ord_id: str
     orig_cl_ord_id: str
-    reason: str
+    reason: CancelRejectReason
     order_status: OrderStatus
     transact_time: str
     fix_session_id: str
@@ -445,10 +474,11 @@ class CancelReject:
             "provider_order_id",
             "cancel_cl_ord_id",
             "orig_cl_ord_id",
-            "reason",
             "fix_session_id",
         ):
             _text(getattr(self, n), n)
+        if not isinstance(self.reason, CancelRejectReason):
+            raise ProphetXCancelError("invalid CxlRejReason")
         if not isinstance(self.order_status, OrderStatus):
             raise ProphetXCancelError("invalid order_status")
         _time(self.transact_time, "transact_time")
@@ -469,7 +499,7 @@ class CancelReject:
             "provider_order_id": self.provider_order_id,
             "cancel_cl_ord_id": self.cancel_cl_ord_id,
             "orig_cl_ord_id": self.orig_cl_ord_id,
-            "reason": self.reason,
+            "reason": self.reason.value,
             "order_status": self.order_status.value,
             "transact_time": self.transact_time,
             "fix_session_id": self.fix_session_id,
@@ -484,7 +514,7 @@ class RestTransportObservation:
     account_id: str
     provider_order_id: str
     http_status: int | None
-    outcome_text: str
+    state: RestTransportState
     observed_at: str
 
     def __post_init__(self) -> None:
@@ -493,9 +523,10 @@ class RestTransportObservation:
             "environment",
             "account_id",
             "provider_order_id",
-            "outcome_text",
         ):
             _text(getattr(self, n), n)
+        if not isinstance(self.state, RestTransportState):
+            raise ProphetXCancelError("invalid REST transport state")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -518,7 +549,7 @@ class RestTransportObservation:
             "account_id": self.account_id,
             "provider_order_id": self.provider_order_id,
             "http_status": self.http_status,
-            "outcome_text": self.outcome_text,
+            "state": self.state.value,
             "observed_at": self.observed_at,
         }
 

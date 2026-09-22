@@ -174,6 +174,7 @@ def test_list_competitions_uses_conservative_documented_failure_policy():
         result = BetfairReadDegradation("listCompetitions", error_code)
         assert result.api_family == "BETTING"
         assert result.documented_for_api_family is True
+        assert result.documented_for_operation is True
         assert result.action is action
         assert result.automatic_repeat_allowed is (
             action is ReadRecoveryAction.RETRY_WITH_BACKOFF
@@ -187,7 +188,8 @@ def test_list_competitions_uses_conservative_documented_failure_policy():
 def test_list_competitions_does_not_inherit_unestablished_limit_actions(error_code):
     result = BetfairReadDegradation("listCompetitions", error_code)
     assert result.api_family == "BETTING"
-    assert result.documented_for_api_family is False
+    assert result.documented_for_api_family is True
+    assert result.documented_for_operation is False
     assert result.action is ReadRecoveryAction.DO_NOT_RETRY
     assert result.automatic_repeat_allowed is False
     assert result.request_must_change is False
@@ -196,6 +198,7 @@ def test_list_competitions_does_not_inherit_unestablished_limit_actions(error_co
 def test_list_competitions_rejects_accounts_only_error_semantics():
     result = BetfairReadDegradation("listCompetitions", "SUBSCRIPTION_EXPIRED")
     assert result.documented_for_api_family is False
+    assert result.documented_for_operation is False
     assert result.action is ReadRecoveryAction.DO_NOT_RETRY
     assert result.automatic_repeat_allowed is False
 

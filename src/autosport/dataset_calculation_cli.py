@@ -74,7 +74,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         choices=SUPPORTED_OPERATIONS,
         required=True,
         metavar="ОПЕРАЦІЯ",
-        help="операція обчислення; значення залишаються стабільними машинними токенами",
+        help=("операція обчислення: odds-conversion, implied-probability, "
+            "expected-return, paper-payout або fractional-kelly"),
     )
     parser.add_argument(
         "--probability",

@@ -237,14 +237,36 @@ def test_non_execution_data_uses_need_separate_explicit_approval() -> None:
     )
 
 
-def test_rate_limit_evidence_blocks_until_provider_reset() -> None:
+def test_rate_limit_evidence_blocks_for_provider_relative_reset_seconds() -> None:
     evidence = SmarketsRateLimitEvidence(
         observed_at="2026-09-22T12:00:00+00:00",
-        provider_reset_at="2026-09-22T12:00:10+00:00",
+        reset_after_seconds=10,
         source_payload_sha256="d" * 64,
     )
     assert not evidence.retry_allowed("2026-09-22T12:00:09.999999+00:00")
     assert evidence.retry_allowed("2026-09-22T12:00:10+00:00")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"reset_after_seconds": -1},
+        {"reset_after_seconds": True},
+        {"http_status": 200},
+        {"error_type": "SOMETHING_ELSE"},
+    ],
+)
+def test_rate_limit_evidence_requires_exact_429_contract(
+    changes: dict[str, object],
+) -> None:
+    values = dict(
+        observed_at="2026-09-22T12:00:00+00:00",
+        reset_after_seconds=10,
+        source_payload_sha256="d" * 64,
+    )
+    values.update(changes)
+    with pytest.raises(SmarketsReconciliationError):
+        SmarketsRateLimitEvidence(**values)
 
 
 def test_journal_is_restart_verifiable_and_exact_replay_is_idempotent(

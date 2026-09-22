@@ -369,6 +369,35 @@ class _WorkspaceBindingPublishLock(WorkspaceEconomicLock):
             ) from exc
 
 
+def _replace_windows_write_through(source: Path, destination: Path) -> None:
+    """Atomically publish a staged file and flush the Windows rename metadata."""
+
+    import ctypes
+
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    move_file_ex.restype = ctypes.c_int
+    if not move_file_ex(
+        str(source),
+        str(destination),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError()
+
+
+def _durable_replace_staged(source: Path, destination: Path) -> None:
+    """Publish one complete staged file with platform-appropriate metadata durability."""
+
+    if os.name == "nt":
+        _replace_windows_write_through(source, destination)
+        return
+
+    os.replace(source, destination)
+    _fsync_directory(destination.parent)
+
+
 def _durable_exclusive_json_create(
     path: Path, payload: dict[str, object], *, lineage_boundary: Path
 ) -> None:
@@ -417,9 +446,8 @@ def _durable_exclusive_json_create(
                 # pathname transition. The publication lock serializes cooperating
                 # Autosport creators; replacing a concurrently inserted symlink or
                 # hard-link pathname replaces that pathname itself, never its target.
-                os.replace(temporary, path)
+                _durable_replace_staged(temporary, path)
                 temporary = None
-                _fsync_directory(path.parent)
         except WorkspaceEconomicLockError as exc:
             raise WorkspaceBindingIntegrityError(
                 "cannot serialize workspace binding publication"

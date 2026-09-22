@@ -9,6 +9,7 @@ from enum import Enum
 
 _SQLITE_SEQUENCE_MIN = -(1 << 63)
 _SQLITE_SEQUENCE_MAX = (1 << 63) - 1
+_MAX_OPAQUE_SEQUENCE_UTF8_BYTES = 1024
 
 
 class ProviderTimeStatus(str, Enum):
@@ -42,12 +43,24 @@ def _monotonic_ns(value: object, field_name: str) -> int:
     return value
 
 
-def _sequence_id(value: object) -> int:
-    if type(value) is not int:
-        raise TypeError("sequence_id must be a non-boolean int")
-    if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
-        raise ValueError("sequence_id must fit signed 64-bit SQLite INTEGER")
-    return value
+def _sequence_id(value: object) -> int | str:
+    if type(value) is int:
+        if value < _SQLITE_SEQUENCE_MIN or value > _SQLITE_SEQUENCE_MAX:
+            raise ValueError("integer sequence_id must fit signed 64-bit SQLite INTEGER")
+        return value
+    if type(value) is str:
+        if not value or value != value.strip():
+            raise ValueError("opaque sequence_id must be a non-empty trimmed string")
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ValueError("opaque sequence_id must not contain control characters")
+        encoded = value.encode("utf-8", errors="strict")
+        if len(encoded) > _MAX_OPAQUE_SEQUENCE_UTF8_BYTES:
+            raise ValueError(
+                "opaque sequence_id must not exceed "
+                f"{_MAX_OPAQUE_SEQUENCE_UTF8_BYTES} UTF-8 bytes"
+            )
+        return value
+    raise TypeError("sequence_id must be a non-boolean int or canonical opaque string")
 
 
 def _non_negative_duration(value: object, field_name: str) -> timedelta:
@@ -68,20 +81,23 @@ def _decision_time(value: object) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class ProviderTimeEvidence:
-    """Exact provider/local timing evidence for one observed provider update.
+    """Exact provider/local timing evidence for one observed provider message.
 
     ``source_updated_at`` is provider-declared source/update wall time.
-    ``received_wall_at`` is the local wall-clock instant after the response/update was
+    ``received_wall_at`` is the local wall-clock instant after the response/message was
     received. The two monotonic values are a local acquisition interval and are never
-    inferred from wall-clock timestamps. ``sequence_id`` is bound as provider update
-    identity only; continuity/gap/resync semantics belong to a separate live contract.
+    inferred from wall-clock timestamps. ``sequence_id`` is an opaque provider message
+    identity: canonical signed integers remain supported, while providers with opaque
+    cursor/clock tokens can retain those tokens losslessly. No ordering, continuity,
+    gap, reconnect, heartbeat, feed-mode, or actionability semantics are inferred from
+    this value.
     """
 
     source_updated_at: str
     received_wall_at: str
     acquisition_started_monotonic_ns: int
     received_monotonic_ns: int
-    sequence_id: int
+    sequence_id: int | str
 
     def __post_init__(self) -> None:
         _aware_datetime(self.source_updated_at, "source_updated_at")
@@ -113,10 +129,10 @@ class ProviderTimeEvidence:
 
 @dataclass(frozen=True, slots=True)
 class ProviderFreshnessAssessment:
-    """A diagnostic result that grants no provider-write or execution authority."""
+    """Timing diagnostic only; it grants no live-market or execution authority."""
 
     evidence_id: str
-    sequence_id: int
+    sequence_id: int | str
     status: ProviderTimeStatus
     quote_age: timedelta
     source_to_receive_delay: timedelta
@@ -126,8 +142,14 @@ class ProviderFreshnessAssessment:
     max_source_clock_skew: timedelta
 
     @property
-    def eligible(self) -> bool:
+    def timing_fresh(self) -> bool:
+        """Whether the bounded timing checks alone classify this evidence as fresh."""
         return self.status is ProviderTimeStatus.FRESH
+
+    @property
+    def eligible(self) -> bool:
+        """Fail closed: timing alone never establishes actionable market eligibility."""
+        return False
 
 
 def assess_provider_time_freshness(
@@ -150,6 +172,11 @@ def assess_provider_time_freshness(
     age is measured from provider source/update time to ``decision_at`` only after the
     receipt and latency invariants are valid. No hidden offset or clock correction is
     applied.
+
+    A FRESH status is deliberately diagnostic. This contract does not carry message
+    kind, heartbeat/data distinction, delayed/conflated feed mode, continuity, market
+    status, coverage, or provider-health authority, so it cannot by itself authorize a
+    market decision.
     """
 
     if not isinstance(evidence, ProviderTimeEvidence):

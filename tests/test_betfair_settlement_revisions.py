@@ -380,9 +380,26 @@ def test_tampered_log_and_parallel_writer_lock_fail_closed(tmp_path) -> None:
 
     clean_path = tmp_path / "clean-settlement.jsonl"
     clean_store = BetfairSettlementRevisionStore(clean_path)
-    clean_store._writer_lock_path.write_text("occupied", encoding="utf-8")
-    with pytest.raises(BetfairSettlementBusyError, match="writer lock"):
-        _ingest(clean_store, ledger, plan, action, _capture(client, provider_ref))
+
+    # A hard-killed legacy writer may leave only the lock path behind. File
+    # existence is not ownership: restart must recover without manual cleanup.
+    clean_store._writer_lock_path.write_text(
+        "stale-from-crashed-process",
+        encoding="utf-8",
+    )
+    restarted = BetfairSettlementRevisionStore(clean_path)
+    capture = _capture(client, provider_ref)
+    recovered = _ingest(restarted, ledger, plan, action, capture)
+    assert recovered.created is True
+    assert restarted._writer_lock_path.exists()
+
+    # A genuinely live competing owner still fails closed immediately.
+    with restarted._writer_lock():
+        with pytest.raises(
+            BetfairSettlementBusyError,
+            match="writer lock is held by another process",
+        ):
+            _ingest(restarted, ledger, plan, action, capture)
 
 
 def test_complete_valid_tail_rollback_is_rejected_by_independent_authority(tmp_path) -> None:

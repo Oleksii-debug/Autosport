@@ -99,6 +99,7 @@ def _safe_exception_text(exc: BaseException) -> str:
         type(name) is not str
         or not name
         or len(name) > 64
+        or not name.isascii()
         or not name.replace("_", "a").isalnum()
         or not (name[0].isalpha() or name[0] == "_")
     ):

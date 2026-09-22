@@ -1042,6 +1042,43 @@ def test_partial_with_execution_complete_is_terminal_partial() -> None:
         )
 
 
+def test_failure_with_positive_match_is_unknown_not_rejected() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                execution_status="FAILURE",
+                instruction_status="FAILURE",
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                bet_id="bet-contradictory-match",
+                order_status="EXECUTION_COMPLETE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-contradictory-match",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
 def test_failure_with_executable_order_state_is_unknown_not_rejected() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

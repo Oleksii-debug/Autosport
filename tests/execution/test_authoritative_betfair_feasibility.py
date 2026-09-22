@@ -553,6 +553,45 @@ def test_module_urlopen_swap_invalidates_canonical_provider_origin(
 
 
 
+def test_urlopen_kwdefault_and_module_alias_substitution_cannot_mint_provider_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = MarketBookTransport()
+    harness = _CanonicalUrlOpenerHarness(transport)
+    substituted_urlopen = harness.open
+    canonical_post = betfair_account_readonly.UrllibBetfairHttpTransport.post
+    original_kwdefaults = canonical_post.__kwdefaults__ or {}
+    assert original_kwdefaults.get("_urlopen") is not None
+
+    mutated_kwdefaults = dict(original_kwdefaults)
+    mutated_kwdefaults["_urlopen"] = substituted_urlopen
+    monkeypatch.setattr(canonical_post, "__kwdefaults__", mutated_kwdefaults)
+    monkeypatch.setattr(
+        betfair_account_readonly,
+        "urlopen",
+        substituted_urlopen,
+    )
+
+    source = _canonical_client()
+    receipt = source.read_market_book_depth("1.234", 42)
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                decision_at=decision_at,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
 def test_market_book_authority_exposes_no_callable_mint_or_writable_registry() -> None:
     assert not hasattr(betfair_account_readonly, "_issue_market_book_depth")
     assert not hasattr(betfair_account_readonly, "_MARKET_BOOK_DEPTH_ISSUED")

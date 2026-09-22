@@ -280,6 +280,13 @@ def issue_provider_capability_evidence(
         market_scope=market_scope,
         quality_constraint=quality_constraint,
     )
+    if fact.grade is ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN or (
+        fact.grade is ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL
+        and fact.capability in _WRITE
+    ):
+        raise ProviderCapabilityEvidenceMatrixError(
+            "write-capability current authority requires sealed upstream provider verification"
+        )
     _ISSUED_EVIDENCE[id(fact)] = fact
     return fact
 

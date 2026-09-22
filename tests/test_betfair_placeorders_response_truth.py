@@ -244,6 +244,29 @@ def test_success_zero_fill_with_bet_id_is_known_placed_unmatched() -> None:
     assert report.instruction.order_status == "EXECUTABLE"
     assert _report_outcome(report, action) is PlaceOrdersOutcome.PLACED_UNMATCHED
 
+
+@pytest.mark.parametrize("order_status", (None, "EXECUTION_COMPLETE"))
+def test_success_zero_fill_with_bet_id_without_live_remainder_proof_is_unknown(
+    order_status: str | None,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=0,
+        average_price_matched=0,
+        bet_id="bet-zero-match",
+        order_status=order_status,
+    )
+
+    report = _parse(payload, action)
+
+    assert report.instruction.bet_id == "bet-zero-match"
+    assert report.instruction.size_matched == Decimal("0")
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
+
 @pytest.mark.parametrize(
     ("handicap", "persistence_type"),
     (

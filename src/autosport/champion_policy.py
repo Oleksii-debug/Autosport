@@ -149,6 +149,7 @@ def load_champion_policy(
     config_sha256: str,
     admissible_actions: frozenset[str],
     eligibility_decision: ChampionEligibilityDecision | None = None,
+    eligibility_as_of: str | None = None,
 ) -> BanditPolicyState:
     """Load the exact promoted policy for one compatible next episode."""
 
@@ -193,11 +194,20 @@ def load_champion_policy(
     if model is None:
         raise ChampionPolicyError("champion ModelVersion is missing")
     model_payload = model.payload
+    if eligibility_as_of is not None and eligibility_decision is None:
+        raise ChampionPolicyError(
+            "eligibility_as_of requires eligibility_decision"
+        )
     if eligibility_decision is not None:
+        eligibility_cutoff = (
+            as_of
+            if eligibility_as_of is None
+            else _text(eligibility_as_of, "eligibility_as_of")
+        )
         validate_activation_eligibility(
             registry,
             eligibility_decision,
-            as_of=as_of,
+            as_of=eligibility_cutoff,
             canonical_strategy_id=strategy_key,
             expected_strategy_version_id=champion_id,
             expected_model_version_id=model_id,

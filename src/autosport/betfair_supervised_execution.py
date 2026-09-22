@@ -861,6 +861,14 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "matched placeOrders report lacks positive average price"
         )
+    if (
+        instruction.size_matched > 0
+        and instruction.average_price_matched < action.requested_odds
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "matched placeOrders report average price is below requested "
+            "BACK LIMIT price"
+        )
     return BetfairPlaceExecutionReport(
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,

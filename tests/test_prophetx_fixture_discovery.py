@@ -322,6 +322,28 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         self.assertTrue(catalog.acquisitions)
         self.assertTrue(all(not item.provider_origin_verified for item in catalog.acquisitions))
 
+    def test_post_construction_transport_replacement_cannot_retain_verified_origin(self):
+        calls = []
+
+        def synthetic_transport(url, headers, timeout):
+            calls.append((url, dict(headers), timeout))
+            return _response(_tournaments([]))
+
+        discovery = ProphetXFixtureDiscovery(
+            "secret-token",
+            data_context_id="sandbox-aggregator-account-a",
+            transport=_default_transport,
+            clock=lambda: "2026-09-22T20:00:00Z",
+        )
+        discovery.transport = synthetic_transport
+
+        catalog = discovery.discover()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(catalog.acquisitions), 1)
+        self.assertFalse(catalog.acquisitions[0].provider_origin_verified)
+
+
     def test_injected_unavailability_detail_is_sanitized_before_durable_failure(self):
         discovery, _ = self._discovery(
             events_by_tournament={

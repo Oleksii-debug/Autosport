@@ -50,6 +50,7 @@ class BetdaqDiscoveryMarket:
     is_currently_in_running: bool
     in_running_delay_seconds: int
     event_classifier_id: int
+    race_grade: str | None
     place_payout: Decimal
 
 
@@ -151,6 +152,19 @@ def _parse_return_status(
     return True, code, description, call_id
 
 
+def _optional_provider_text(
+    element: ET.Element,
+    attribute: str,
+    field: str,
+) -> str | None:
+    raw = _optional_attr(element, attribute)
+    if raw is None:
+        return None
+    if not raw.strip():
+        return ""
+    return _safe_text(raw, field)
+
+
 def _parse_market(
     element: ET.Element,
     *,
@@ -232,6 +246,11 @@ def _parse_market(
             minimum=0,
         ),
         event_classifier_id=event_classifier_id,
+        race_grade=_optional_provider_text(
+            element,
+            "RaceGrade",
+            "market RaceGrade",
+        ),
         place_payout=_decimal(
             _required_attr(element, "PlacePayout"),
             "market PlacePayout",

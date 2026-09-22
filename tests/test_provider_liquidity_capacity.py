@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 
 import pytest
@@ -290,3 +290,49 @@ def test_projection_rejects_unknown_virtualise_semantics() -> None:
             rollup_settings=(),
             depth=3,
         )
+
+
+class _RepeatedHourTimezone(tzinfo):
+    """Deterministic fold-sensitive zone without relying on host tzdata."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        if dt is not None and dt.fold == 1:
+            return timedelta(hours=-5)
+        return timedelta(hours=-4)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "TEST-FOLD"
+
+
+def test_liquidity_freshness_uses_elapsed_instant_across_repeated_local_hour() -> None:
+    zone = _RepeatedHourTimezone()
+    captured_at = datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=0)
+    as_of = datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=1)
+
+    assert as_of - captured_at == timedelta(0)
+    assert (
+        as_of.astimezone(timezone.utc)
+        - captured_at.astimezone(timezone.utc)
+        == timedelta(hours=1)
+    )
+
+    result = assess_liquidity_capacity(
+        _snapshot(
+            captured_at=captured_at,
+            projection=_projection(OfferProjection.EX_ALL_OFFERS),
+            levels=(LiquidityLevel(Decimal("2.0"), Decimal("100")),),
+        ),
+        requested_size=Decimal("1"),
+        requested_currency="EUR",
+        limit_price=Decimal("2.0"),
+        as_of=as_of,
+        max_age=timedelta(minutes=30),
+    )
+
+    assert result.status is LiquidityEvidenceStatus.STALE_EVIDENCE
+    assert result.snapshot_age == timedelta(hours=1)
+    assert result.supports_requested_size is False
+    assert result.execution_guaranteed is False

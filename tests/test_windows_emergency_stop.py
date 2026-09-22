@@ -32,6 +32,31 @@ def test_execution_stop_path_is_bound_to_canonical_workspace(tmp_path) -> None:
     assert execution_stop_path(tmp_path) == tmp_path / EXECUTION_STOP_JOURNAL_FILENAME
 
 
+def test_windows_stop_mutates_provider_admission_authority_without_legacy_second_journal(
+    tmp_path,
+) -> None:
+    provider_authority = ExecutionStopAuthority(tmp_path / "execution-stop.jsonl")
+    stopped = provider_authority.initialize_stopped(
+        operator_id="provider-owner",
+        reason="safe initialization",
+        command_id="windows-provider-path-init",
+    )
+    provider_authority.arm(
+        operator_id="provider-owner",
+        reason="supervised execution explicitly armed",
+        confirmation_id="windows-provider-path-confirmation",
+        expected_revision=stopped.revision,
+        command_id="windows-provider-path-arm",
+    )
+    assert provider_authority.current().mode is ExecutionAuthorityMode.ARMED
+
+    result = WindowsEmergencyStopBridge.for_workspace(tmp_path).activate()
+
+    assert result.stopped is True
+    assert provider_authority.current().mode is ExecutionAuthorityMode.STOPPED
+    assert not (tmp_path / "execution-stop-authority.jsonl").exists()
+
+
 def test_bridge_initializes_missing_authority_directly_stopped(tmp_path) -> None:
     authority = ExecutionStopAuthority(execution_stop_path(tmp_path))
     bridge = WindowsEmergencyStopBridge(authority)

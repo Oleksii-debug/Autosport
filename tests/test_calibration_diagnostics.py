@@ -1,4 +1,6 @@
+import hashlib
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 
 from autosport.calibration_diagnostics import (
@@ -27,7 +29,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         training_cutoff: str = "2026-01-31T23:59:59+00:00",
     ) -> ForecastRecord:
         return ForecastRecord(
-            quote_key=f"event|winner|{forecast_id}",
+            quote_key=f"event-{forecast_id}|winner|selection-{forecast_id}",
             probability=Decimal(probability),
             model_id="calibration-baseline",
             model_version="1.0.0",
@@ -36,8 +38,12 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             input_cutoff_ts=input_cutoff,
             generated_at=generated_at,
             uncertainty=Decimal("0.05"),
-            evidence_hashes=("a" * 64,),
-            market_snapshot_hash="b" * 64,
+            evidence_hashes=(
+                hashlib.sha256(f"evidence:{forecast_id}".encode("utf-8")).hexdigest(),
+            ),
+            market_snapshot_hash=hashlib.sha256(
+                f"snapshot:{forecast_id}".encode("utf-8")
+            ).hexdigest(),
             provenance={"dataset": "causal-holdout"},
             forecast_id=forecast_id,
         )
@@ -382,6 +388,64 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "repeated quote_key"):
             self._evaluate(
                 repeated,
+                outcomes[:2],
+                self._window(),
+                bins=2,
+            )
+
+    def test_iid_diagnostic_rejects_distinct_quotes_from_same_event_cluster(self):
+        records, outcomes = self._cohort()
+        same_event = replace(
+            records[1],
+            quote_key="event-f-1|total|selection-f-2",
+            probability=Decimal("0.9"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "repeated canonical event cluster"):
+            self._evaluate(
+                (records[0], same_event),
+                outcomes[:2],
+                self._window(),
+                bins=2,
+            )
+
+    def test_iid_diagnostic_rejects_shared_market_snapshot(self):
+        records, outcomes = self._cohort()
+        shared_snapshot = replace(
+            records[1],
+            market_snapshot_hash=records[0].market_snapshot_hash,
+        )
+
+        with self.assertRaisesRegex(ValueError, "repeated market_snapshot_hash"):
+            self._evaluate(
+                (records[0], shared_snapshot),
+                outcomes[:2],
+                self._window(),
+                bins=2,
+            )
+
+    def test_iid_diagnostic_rejects_shared_source_evidence(self):
+        records, outcomes = self._cohort()
+        shared_evidence = replace(
+            records[1],
+            evidence_hashes=records[0].evidence_hashes,
+        )
+
+        with self.assertRaisesRegex(ValueError, "shared source evidence"):
+            self._evaluate(
+                (records[0], shared_evidence),
+                outcomes[:2],
+                self._window(),
+                bins=2,
+            )
+
+    def test_iid_diagnostic_rejects_noncanonical_quote_alias(self):
+        records, outcomes = self._cohort()
+        aliased = replace(records[1], quote_key="event-f-2-alias")
+
+        with self.assertRaisesRegex(ValueError, "canonical quote_key identity"):
+            self._evaluate(
+                (records[0], aliased),
                 outcomes[:2],
                 self._window(),
                 bins=2,

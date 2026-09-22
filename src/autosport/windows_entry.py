@@ -118,6 +118,23 @@ def _show_workspace_access_error(workspace: Path, exc: OSError) -> None:
     )
 
 
+def _show_startup_error(message: str) -> None:
+    """Show one native Windows failure message without starting the legacy Tk shell."""
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            message,
+            "Автоспорт — помилка запуску",
+            0x00000010,
+        )
+    except Exception:
+        # The windowed executable has no reliable console. A failed native dialog
+        # must not make the startup path fall back to the retired Tk operator shell.
+        pass
+
+
 def _run_interactive_gui() -> int:
     # Validate durable workspace identity before importing/constructing the GUI.
     # `default_workspace()` remains the canonical path resolver. This packaged
@@ -142,9 +159,17 @@ def _run_interactive_gui() -> int:
         _show_workspace_access_error(workspace, exc)
         return 2
 
-    from autosport.windows_gui import main as gui_main
+    from autosport.windows_webview_shell import WindowsWebViewUnavailable, main as gui_main
 
-    return gui_main()
+    try:
+        return gui_main()
+    except WindowsWebViewUnavailable as exc:
+        _show_startup_error(
+            "Автоспорт не може відкрити доступний інтерфейс WebView2. "
+            "Перевірте наявність Microsoft Edge WebView2 Runtime.\n\n"
+            + str(exc)
+        )
+        return 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,22 +183,16 @@ def main(argv: list[str] | None = None) -> int:
         if expected_arity is None or len(args) != expected_arity:
             return 2
 
-    # Install before importing any audit module or entering the normal GUI path.
-    # This guarantees that packaged release audits inspect the same compact
-    # layout that users receive rather than an audit-only geometry variant.
-    from autosport.windows_layout import install_compact_windows_layout
-
-    install_compact_windows_layout()
     if args and args[0] == "--diagnostic-output":
         from autosport.diagnostic import run_machine_diagnostic
 
         return run_machine_diagnostic(args[1])
     if args and args[0] == "--accessibility-audit-output":
-        from autosport.accessibility_audit import run_accessibility_audit
+        from autosport.windows_webview_audit import run_accessibility_audit
 
         return run_accessibility_audit(args[1])
     if args and args[0] == "--keyboard-audit-output":
-        from autosport.keyboard_audit import run_keyboard_audit
+        from autosport.windows_webview_audit import run_keyboard_audit
 
         return run_keyboard_audit(args[1])
     if args and args[0] == "--restart-recovery-audit-output":

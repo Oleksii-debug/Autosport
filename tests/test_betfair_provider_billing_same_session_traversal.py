@@ -97,7 +97,7 @@ def _template(offset: int):
     )
 
 
-def test_traversal_requires_one_exact_authenticated_session_capability(
+def test_traversal_requires_one_authenticated_session_without_retaining_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     templates = {0: _template(0), 1: _template(1)}
@@ -132,6 +132,20 @@ def test_traversal_requires_one_exact_authenticated_session_capability(
         )
         reconstructed_pages = (first, second_reconstructed_session)
         assert validate_traversal(reconstructed_pages) is reconstructed_pages
+
+        closure = dict(
+            zip(
+                validate_traversal.__code__.co_freevars,
+                (cell.cell_contents for cell in validate_traversal.__closure__ or ()),
+            )
+        )
+        registry = closure["issued"]
+        assert registry
+        assert all(
+            all(type(value) is not BetfairSessionCredentials for value in record)
+            for record in registry.values()
+        )
+        assert all(type(record[2]) is bytes for record in registry.values())
 
         session_b = BetfairSessionCredentials("product-app", "session-b")
         second_other_session = read(session_b, from_record=1, record_count=1)

@@ -38,7 +38,8 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         result = self.assess(evidence)
 
         self.assertEqual(result.status, ProviderTimeStatus.FRESH)
-        self.assertTrue(result.eligible)
+        self.assertTrue(result.timing_fresh)
+        self.assertFalse(result.eligible)
         self.assertEqual(result.sequence_id, 17)
         self.assertEqual(result.transport_elapsed_ns, 250_000_000)
         self.assertEqual(result.source_to_receive_delay, timedelta(milliseconds=250))
@@ -62,7 +63,10 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(exact.status, ProviderTimeStatus.FRESH)
+        self.assertTrue(exact.timing_fresh)
+        self.assertFalse(exact.eligible)
         self.assertEqual(late.status, ProviderTimeStatus.STALE)
+        self.assertFalse(late.timing_fresh)
         self.assertFalse(late.eligible)
 
     def test_negative_wall_latency_fails_even_inside_skew_diagnostic_boundary(self) -> None:
@@ -76,6 +80,7 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ProviderTimeStatus.NEGATIVE_WALL_LATENCY)
+        self.assertFalse(result.timing_fresh)
         self.assertFalse(result.eligible)
         self.assertEqual(result.source_to_receive_delay, timedelta(milliseconds=-50))
         self.assertEqual(result.source_clock_skew, timedelta(milliseconds=50))
@@ -91,6 +96,7 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ProviderTimeStatus.CLOCK_SKEW_EXCEEDED)
+        self.assertFalse(result.timing_fresh)
         self.assertFalse(result.eligible)
         self.assertEqual(result.source_to_receive_delay, timedelta(milliseconds=-250))
         self.assertEqual(result.source_clock_skew, timedelta(milliseconds=250))
@@ -105,6 +111,7 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
 
         self.assertEqual(result.status, ProviderTimeStatus.NEGATIVE_MONOTONIC_LATENCY)
         self.assertEqual(result.transport_elapsed_ns, -1)
+        self.assertFalse(result.timing_fresh)
         self.assertFalse(result.eligible)
 
     def test_future_receipt_cannot_be_used_for_earlier_decision(self) -> None:
@@ -118,9 +125,10 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ProviderTimeStatus.FUTURE_RECEIPT)
+        self.assertFalse(result.timing_fresh)
         self.assertFalse(result.eligible)
 
-    def test_timezone_equivalent_instants_compare_semantically_but_keep_exact_identity(self) -> None:
+    def test_timezone_equivalent_instants_keep_distinct_identity(self) -> None:
         utc_evidence = self.evidence()
         offset_evidence = replace(
             utc_evidence,
@@ -151,6 +159,23 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
 
         self.assertEqual(len({base.evidence_id, *(v.evidence_id for v in variants)}), 6)
 
+    def test_opaque_provider_cursor_round_trips_without_numeric_coercion(self) -> None:
+        evidence = self.evidence(sequence_id="xAeG-BetfairClk_01")
+        result = self.assess(evidence)
+
+        self.assertEqual(result.status, ProviderTimeStatus.FRESH)
+        self.assertTrue(result.timing_fresh)
+        self.assertFalse(result.eligible)
+        self.assertEqual(result.sequence_id, "xAeG-BetfairClk_01")
+
+    def test_numeric_and_opaque_sequence_identities_do_not_alias(self) -> None:
+        numeric = self.evidence(sequence_id=17)
+        opaque = self.evidence(sequence_id="17")
+
+        self.assertNotEqual(numeric.evidence_id, opaque.evidence_id)
+        self.assertEqual(self.assess(numeric).sequence_id, 17)
+        self.assertEqual(self.assess(opaque).sequence_id, "17")
+
     def test_rejects_naive_or_malformed_timestamps(self) -> None:
         for field, value in (
             ("source_updated_at", "2026-09-21T12:00:00"),
@@ -166,10 +191,20 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
             ("sequence_id", True),
             ("sequence_id", 1 << 63),
             ("sequence_id", -(1 << 63) - 1),
+            ("sequence_id", ""),
+            ("sequence_id", " clock\n"),
+            ("sequence_id", "a" * 1025),
         )
         for field, value in cases:
             with self.subTest(field=field, value=value), self.assertRaises((TypeError, ValueError)):
                 self.evidence(**{field: value})
+
+    def test_timing_freshness_never_mints_market_eligibility(self) -> None:
+        result = self.assess(self.evidence(sequence_id="opaque-heartbeat-clk"))
+
+        self.assertEqual(result.status, ProviderTimeStatus.FRESH)
+        self.assertTrue(result.timing_fresh)
+        self.assertFalse(result.eligible)
 
     def test_decision_and_policy_boundaries_must_be_explicit_and_valid(self) -> None:
         evidence = self.evidence()

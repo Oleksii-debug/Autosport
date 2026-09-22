@@ -52,6 +52,20 @@ def test_recovery_cannot_erase_historical_max_drawdown_contract() -> None:
     )
     assert max_amount != "current_drawdown_amount"
 
+    max_fraction = _require_semantic_field(
+        names,
+        candidates=(
+            "historical_max_drawdown_fraction",
+            "max_historical_drawdown_fraction",
+            "observed_max_drawdown_fraction",
+        ),
+        concept="observed maximum historical drawdown fraction",
+    )
+    assert max_fraction != "max_drawdown_fraction", (
+        "Observed historical drawdown fraction must remain distinct from "
+        "EconomicGoal.max_drawdown_fraction policy ceiling."
+    )
+
     _require_semantic_field(
         names,
         candidates=(
@@ -81,8 +95,17 @@ def test_max_drawdown_contract_is_not_satisfied_by_goal_limit_only() -> None:
         "max_historical_drawdown_amount",
         "max_drawdown_amount",
     }
+    observed_fraction_fields = {
+        "historical_max_drawdown_fraction",
+        "max_historical_drawdown_fraction",
+        "observed_max_drawdown_fraction",
+    }
     assert names & observed_amount_fields, (
         "A goal/policy max_drawdown_fraction or drawdown_loss_room is a limit, "
         "not evidence of the maximum drawdown actually observed over the frozen "
         "causal PAPER equity path required by #1253."
+    )
+    assert names & observed_fraction_fields, (
+        "The policy field max_drawdown_fraction cannot stand in for the "
+        "observed historical maximum drawdown fraction."
     )

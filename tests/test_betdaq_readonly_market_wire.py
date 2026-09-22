@@ -297,6 +297,26 @@ def test_naive_or_malformed_start_time_is_rejected() -> None:
         )
 
 
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement", "message"),
+    [
+        ('Name="Match Winner – Women"', 'Name="   "', "market Name"),
+        ('Name="Player A"', 'Name="\t "', "selection Name"),
+        ('Description="Success"', 'Description="   "', "ReturnStatus Description"),
+        ('CallId="call-123"', 'CallId="  "', "ReturnStatus CallId"),
+    ],
+)
+def test_whitespace_only_provider_text_fails_closed(
+    needle: str,
+    replacement: str,
+    message: str,
+) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match=message):
+        parse_get_prices_response(_response().replace(needle, replacement, 1))
+
+
 def test_dtd_and_entity_declarations_are_forbidden() -> None:
     payload = '<!DOCTYPE x [<!ENTITY boom "boom">]>' + _response()
     with pytest.raises(BetdaqSoapProtocolError, match="DTD/entity"):

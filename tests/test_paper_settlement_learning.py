@@ -1582,5 +1582,221 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             )
 
 
+    def test_acked_reward_rejects_later_conflicting_settlement_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            before = runtime.snapshot()
+            correction = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="corrected-result",
+                quote_outcomes={leg.quote_key: "loss"},
+                evidence_id="corrected-evidence",
+                evidence_sha256="f" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "successor settlement/reward generation required",
+            ):
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(correction,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:00+00:00",
+                )
+
+            after = runtime.snapshot()
+            self.assertEqual(after.transition_id, before.transition_id)
+            self.assertEqual(after.reward_id, before.reward_id)
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(durable["bindings"][ticket.ticket_id]["status"], "ACKED")
+            self.assertEqual(
+                durable["bindings"][ticket.ticket_id]["outbox"]["known_quote_outcomes"],
+                {leg.quote_key: "win"},
+            )
+
+    def test_acked_reward_accepts_later_confirmatory_settlement_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            before = runtime.snapshot()
+            confirmation = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="confirming-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="confirming-evidence",
+                evidence_sha256="e" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(confirmation,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:00+00:00",
+                ),
+                (),
+            )
+            after = runtime.snapshot()
+            self.assertEqual(after.transition_id, before.transition_id)
+            self.assertEqual(after.reward_id, before.reward_id)
+
+    def test_acked_loss_allows_later_evidence_for_previously_unknown_leg(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legs = (
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="event-2",
+                    market_id="winner",
+                    selection_id="away",
+                    locked_odds=Decimal("3.00"),
+                    sport="table_tennis",
+                ),
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=legs)
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={legs[0].quote_key: "loss"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            before = runtime.snapshot()
+            later_other_leg = SettlementResolution(
+                event_identity=f"provider-a:{legs[1].event_id}",
+                settlement_ref="later-other-leg-result",
+                quote_outcomes={legs[1].quote_key: "win"},
+                evidence_id="later-other-leg-evidence",
+                evidence_sha256="d" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(later_other_leg,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:00+00:00",
+                ),
+                (),
+            )
+            after = runtime.snapshot()
+            self.assertEqual(after.transition_id, before.transition_id)
+            self.assertEqual(after.reward_id, before.reward_id)
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                durable["bindings"][ticket.ticket_id]["outbox"]["known_quote_outcomes"],
+                {legs[0].quote_key: "loss"},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

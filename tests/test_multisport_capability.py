@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from autosport.multisport_capability import (
-    CapabilityAdmissionStatus,
+    CapabilityRecommendationStatus,
     MultiSportCapabilityError,
     SportCapabilityDecision,
     SportCapabilityTarget,
@@ -105,13 +105,13 @@ def test_two_sports_are_projected_independently():
     decisions = by_sport(snapshot)
     assert (
         decisions["football"].status
-        is CapabilityAdmissionStatus.ADMITTED_BASELINE
+        is CapabilityRecommendationStatus.RECOMMEND_BASELINE
     )
     assert (
         decisions["tennis"].status
-        is CapabilityAdmissionStatus.ADMITTED_SLOW_RESEARCH
+        is CapabilityRecommendationStatus.RECOMMEND_SLOW_RESEARCH
     )
-    assert {item.sport_id for item in snapshot.admitted_targets} == {
+    assert {item.sport_id for item in snapshot.recommended_targets} == {
         "football",
         "tennis",
     }
@@ -134,15 +134,15 @@ def test_simulated_one_sport_blocks_only_that_exact_target():
     )
 
     decisions = by_sport(snapshot)
-    assert decisions["football"].admitted is True
+    assert decisions["football"].recommended is True
     assert (
         decisions["tennis"].status
-        is CapabilityAdmissionStatus.BLOCKED
+        is CapabilityRecommendationStatus.BLOCKED
     )
     assert decisions["tennis"].observation_id == "tennis-sim"
 
 
-def test_future_evidence_is_not_disclosed_as_admission_evidence():
+def test_future_evidence_is_not_disclosed_as_recommendation_evidence():
     future = make_observation(
         observation_id="future",
         measured_until=T2,
@@ -157,7 +157,7 @@ def test_future_evidence_is_not_disclosed_as_admission_evidence():
 
     assert (
         decision.status
-        is CapabilityAdmissionStatus.INSUFFICIENT_EVIDENCE
+        is CapabilityRecommendationStatus.INSUFFICIENT_EVIDENCE
     )
     assert decision.observation_id is None
     assert decision.evidence_sha256 is None
@@ -187,7 +187,7 @@ def test_latest_causal_observation_controls_projection():
 
     assert (
         decision.status
-        is CapabilityAdmissionStatus.INSUFFICIENT_EVIDENCE
+        is CapabilityRecommendationStatus.INSUFFICIENT_EVIDENCE
     )
     assert decision.observation_id == "newer-missing"
     assert decision.evidence_sha256 == "b" * 64
@@ -209,7 +209,7 @@ def test_equally_current_evidence_blocks_iteration_order_winner():
         as_of=T1_PLUS_5,
     ).decisions[0]
 
-    assert decision.status is CapabilityAdmissionStatus.BLOCKED
+    assert decision.status is CapabilityRecommendationStatus.BLOCKED
     assert decision.observation_id is None
     assert decision.evidence_sha256 is None
     assert "ambiguous" in decision.reason
@@ -235,7 +235,7 @@ def test_stale_latest_evidence_blocks_without_falling_back():
         as_of=T1_PLUS_11,
     ).decisions[0]
 
-    assert decision.status is CapabilityAdmissionStatus.BLOCKED
+    assert decision.status is CapabilityRecommendationStatus.BLOCKED
     assert decision.observation_id == "latest-stale"
 
 
@@ -265,7 +265,7 @@ def test_exact_target_identity_isolation(override, requested):
 
     assert (
         decision.status
-        is CapabilityAdmissionStatus.INSUFFICIENT_EVIDENCE
+        is CapabilityRecommendationStatus.INSUFFICIENT_EVIDENCE
     )
     assert decision.observation_id is None
 
@@ -327,6 +327,27 @@ def test_duplicate_targets_and_bounded_inputs_fail_closed():
             as_of=T1_PLUS_5,
         )
 
+
+
+def test_caller_constructed_favorable_observation_stays_recommendation_only():
+    snapshot = project_multisport_capability(
+        [target()],
+        [make_observation(observation_id="caller-favorable")],
+        as_of=T1_PLUS_5,
+    )
+    decision = snapshot.decisions[0]
+
+    assert (
+        decision.status
+        is CapabilityRecommendationStatus.RECOMMEND_BASELINE
+    )
+    assert decision.recommended is True
+    assert not hasattr(decision, "admitted")
+    assert not hasattr(snapshot, "admitted_targets")
+    assert all(
+        "ADMIT" not in status.value
+        for status in CapabilityRecommendationStatus
+    )
 
 def test_projection_contract_cannot_expand_into_money_or_execution_authority():
     decision = project_multisport_capability(

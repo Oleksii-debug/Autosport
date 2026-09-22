@@ -65,49 +65,45 @@ def _policy() -> CommissionAllocationPolicyRef:
     )
 
 
-def test_market_net_is_available_without_fabricating_per_bet_net() -> None:
+def test_structural_bet_sum_is_available_but_exact_market_net_is_withheld() -> None:
     value = MarketCommissionAttribution(
         gross_bets=(_bet("bet-1", "10"), _bet("bet-2", "-4")),
         market_commission=_commission("1.5"),
     )
 
-    assert value.market_gross_profit == Decimal("6")
-    assert value.market_net_profit == Decimal("4.5")
+    assert value.supplied_gross_profit == Decimal("6")
     assert value.grants_provider_origin_authority is False
     with pytest.raises(
         BetfairCommissionAttributionError,
-        match="requires explicit versioned commission allocation",
+        match="complete market population authority",
+    ):
+        _ = value.market_gross_profit
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="complete market population authority",
+    ):
+        _ = value.market_net_profit
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="complete market population authority",
     ):
         value.per_bet_net()
 
 
-def test_explicit_allocation_conserves_market_commission_and_is_derived() -> None:
-    value = MarketCommissionAttribution(
-        gross_bets=(_bet("bet-1", "10"), _bet("bet-2", "-4")),
-        market_commission=_commission("1.5"),
-        allocations=(
-            BetCommissionAllocation("bet-1", Decimal("1.0")),
-            BetCommissionAllocation("bet-2", Decimal("0.5")),
-        ),
-        allocation_policy=_policy(),
-    )
-
-    per_bet = value.per_bet_net()
-    assert tuple(item.bet_id for item in per_bet) == ("bet-1", "bet-2")
-    assert tuple(item.derived_net_profit for item in per_bet) == (
-        Decimal("9"),
-        Decimal("-4.5"),
-    )
-    assert all(item.provider_exact is False for item in per_bet)
-    assert all(item.account_id == "account-a" for item in per_bet)
-    assert all(item.venue_id == "betfair" for item in per_bet)
-    for item in per_bet:
-        item.assert_derived_from(value)
-    assert (
-        sum((item.derived_net_profit for item in per_bet), Decimal("0"))
-        == value.market_net_profit
-    )
-
+def test_well_formed_allocation_stays_blocked_until_population_authority() -> None:
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="complete market population authority",
+    ):
+        MarketCommissionAttribution(
+            gross_bets=(_bet("bet-1", "10"), _bet("bet-2", "-4")),
+            market_commission=_commission("1.5"),
+            allocations=(
+                BetCommissionAllocation("bet-1", Decimal("1.0")),
+                BetCommissionAllocation("bet-2", Decimal("0.5")),
+            ),
+            allocation_policy=_policy(),
+        )
 
 def test_allocations_require_policy_identity() -> None:
     with pytest.raises(
@@ -202,12 +198,44 @@ def test_provider_account_market_and_currency_scope_must_match(
         )
 
 
-def test_negative_commission_models_credit_or_reversal_without_new_policy() -> None:
+def test_structural_subset_cannot_mint_exact_market_net() -> None:
+    value = MarketCommissionAttribution(
+        gross_bets=(_bet("visible-bet", "10"),),
+        market_commission=_commission("2"),
+    )
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="complete market population authority",
+    ):
+        _ = value.market_net_profit
+
+
+def test_structural_subset_cannot_allocate_whole_market_commission() -> None:
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="complete market population authority",
+    ):
+        MarketCommissionAttribution(
+            gross_bets=(_bet("visible-bet", "10"),),
+            market_commission=_commission("2"),
+            allocations=(
+                BetCommissionAllocation("visible-bet", Decimal("2")),
+            ),
+            allocation_policy=_policy(),
+        )
+
+
+def test_negative_commission_remains_structural_without_minting_exact_net() -> None:
     value = MarketCommissionAttribution(
         gross_bets=(_bet("bet-1", "6"),),
         market_commission=_commission("-1.25"),
     )
-    assert value.market_net_profit == Decimal("7.25")
+    assert value.market_commission.commission_charge == Decimal("-1.25")
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="complete market population authority",
+    ):
+        _ = value.market_net_profit
 
 
 def test_attribution_identity_is_order_invariant() -> None:
@@ -230,7 +258,7 @@ def test_attribution_identity_is_order_invariant() -> None:
 
 
 
-def test_market_economics_are_decimal_context_independent() -> None:
+def test_supplied_gross_is_decimal_context_independent() -> None:
     gross_one = "123456789012345678901234567890.12345"
     gross_two = "0.87655"
     commission = "0.11111"
@@ -240,25 +268,19 @@ def test_market_economics_are_decimal_context_independent() -> None:
             gross_bets=(_bet("bet-1", gross_one), _bet("bet-2", gross_two)),
             market_commission=_commission(commission),
         )
-        low_gross = low.market_gross_profit
-        low_net = low.market_net_profit
+        low_gross = low.supplied_gross_profit
     with localcontext() as context:
         context.prec = 60
         high = MarketCommissionAttribution(
             gross_bets=(_bet("bet-1", gross_one), _bet("bet-2", gross_two)),
             market_commission=_commission(commission),
         )
-        high_gross = high.market_gross_profit
-        high_net = high.market_net_profit
+        high_gross = high.supplied_gross_profit
     assert low_gross == high_gross == Decimal(
         "123456789012345678901234567891"
     )
-    assert low_net == high_net == Decimal(
-        "123456789012345678901234567890.88889"
-    )
 
-
-def test_allocation_conservation_is_decimal_context_independent() -> None:
+def test_valid_allocation_conservation_reaches_population_fence_in_any_context() -> None:
     allocations = (
         BetCommissionAllocation(
             "bet-1", Decimal("12345678901234567890.12345")
@@ -266,20 +288,19 @@ def test_allocation_conservation_is_decimal_context_independent() -> None:
         BetCommissionAllocation("bet-2", Decimal("0.87655")),
     )
     commission = _commission("12345678901234567891")
-    with localcontext() as context:
-        context.prec = 6
-        value = MarketCommissionAttribution(
-            gross_bets=(_bet("bet-1", "20"), _bet("bet-2", "30")),
-            market_commission=commission,
-            allocations=allocations,
-            allocation_policy=_policy(),
-        )
-        low = value.per_bet_net()
-    with localcontext() as context:
-        context.prec = 60
-        high = value.per_bet_net()
-    assert low == high
-
+    for precision in (6, 60):
+        with localcontext() as context:
+            context.prec = precision
+            with pytest.raises(
+                BetfairCommissionAttributionError,
+                match="complete market population authority",
+            ):
+                MarketCommissionAttribution(
+                    gross_bets=(_bet("bet-1", "20"), _bet("bet-2", "30")),
+                    market_commission=commission,
+                    allocations=allocations,
+                    allocation_policy=_policy(),
+                )
 
 def test_attribution_identity_is_decimal_context_independent() -> None:
     with localcontext() as context:
@@ -297,51 +318,12 @@ def test_attribution_identity_is_decimal_context_independent() -> None:
     assert low == high
 
 
-def test_per_bet_child_is_parent_and_policy_bound_and_copy_fails_closed() -> None:
-    value = MarketCommissionAttribution(
-        gross_bets=(_bet("bet-1", "10"),),
-        market_commission=_commission("1"),
-        allocations=(BetCommissionAllocation("bet-1", Decimal("1")),),
-        allocation_policy=_policy(),
-    )
-    child = value.per_bet_net()[0]
-
-    child.assert_derived_from(value)
-    assert child.attribution_id == value.attribution_id
-    assert child.allocation_policy_sha256 == value.allocation_policy.policy_sha256
-
-    copied = replace(child)
-    with pytest.raises(
-        BetfairCommissionAttributionError,
-        match="not issued",
-    ):
-        copied.assert_derived_from(value)
-
-    other_policy = CommissionAllocationPolicyRef(
-        policy_id=value.allocation_policy.policy_id,
-        policy_version=value.allocation_policy.policy_version,
-        policy_sha256="d" * 64,
-    )
-    other_parent = MarketCommissionAttribution(
-        gross_bets=value.gross_bets,
-        market_commission=value.market_commission,
-        allocations=value.allocations,
-        allocation_policy=other_policy,
-    )
-    with pytest.raises(
-        BetfairCommissionAttributionError,
-        match="not bound",
-    ):
-        child.assert_derived_from(other_parent)
-
-
 def test_direct_per_bet_child_cannot_mint_accepted_derivation() -> None:
     value = MarketCommissionAttribution(
         gross_bets=(_bet("bet-1", "10"),),
         market_commission=_commission("1"),
-        allocations=(BetCommissionAllocation("bet-1", Decimal("1")),),
-        allocation_policy=_policy(),
     )
+    policy = _policy()
     forged = BetAttributedNet(
         venue_id="betfair",
         account_id="account-a",
@@ -351,9 +333,9 @@ def test_direct_per_bet_child_cannot_mint_accepted_derivation() -> None:
         allocated_commission=Decimal("1"),
         derived_net_profit=Decimal("9"),
         attribution_id=value.attribution_id,
-        allocation_policy_id=value.allocation_policy.policy_id,
-        allocation_policy_version=value.allocation_policy.policy_version,
-        allocation_policy_sha256=value.allocation_policy.policy_sha256,
+        allocation_policy_id=policy.policy_id,
+        allocation_policy_version=policy.policy_version,
+        allocation_policy_sha256=policy.policy_sha256,
         provider_exact=False,
     )
     with pytest.raises(
@@ -361,6 +343,12 @@ def test_direct_per_bet_child_cannot_mint_accepted_derivation() -> None:
         match="not issued",
     ):
         forged.assert_derived_from(value)
+    copied = replace(forged)
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="not issued",
+    ):
+        copied.assert_derived_from(value)
 
 
 @pytest.mark.parametrize(

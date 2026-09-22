@@ -90,6 +90,7 @@ def _manifest_object(manifest_bytes: bytes) -> dict[str, Any]:
         text = manifest_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise LaunchIdentityError("active-generation manifest must be UTF-8 JSON") from exc
+
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         for key, value in pairs:

@@ -5,6 +5,8 @@ from dataclasses import replace
 import pytest
 
 from autosport.scientific_registry import (
+    AblationAuthorityEvidence,
+    AblationAuthorityKind,
     ConflictingScientificRecordError,
     DatasetSnapshot,
     DuplicateExperimentFingerprintError,
@@ -1533,3 +1535,209 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
     )
     with pytest.raises(PromotionEvidenceError, match="unconsumed confirmation holdout"):
         registry.record_promotion(decision)
+
+
+
+def _stored_scientific_ref(
+    registry: ScientificRegistry,
+    record_type: str,
+    record_id: str,
+) -> ScientificEvidenceRef:
+    stored = registry.get(record_type, record_id)
+    assert stored is not None
+    return ScientificEvidenceRef(record_type, record_id, stored.record_sha256)
+
+
+def _ablation_authority(
+    registry: ScientificRegistry,
+    foundation: dict[str, object],
+    *,
+    authority_id: str = "ablation-authority-1",
+    kind: AblationAuthorityKind = AblationAuthorityKind.FROZEN_REPLAY_COUNTERFACTUAL,
+    created_at: str = T3,
+    observation_evidence: ScientificEvidenceRef | None = None,
+    supporting_evidence: tuple[ScientificEvidenceRef, ...] = (),
+    execution_receipt_sha256: str | None = None,
+    assumptions: tuple[str, ...] = (),
+) -> AblationAuthorityEvidence:
+    protocol_entry = registry.get("ResearchProtocol", "protocol-1")
+    dataset_entry = registry.get("DatasetSnapshot", "dataset-1")
+    assert protocol_entry is not None
+    assert dataset_entry is not None
+    dataset = foundation["dataset"]
+    assert isinstance(dataset, DatasetSnapshot)
+    holdout_access_sha256 = promotion_holdout_access_id(
+        research_protocol_id="protocol-1",
+        dataset_manifest_sha256=dataset.manifest_sha256,
+        source_identity=dataset.source_identity,
+        license_identity=dataset.license_identity,
+        confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+    )
+    return AblationAuthorityEvidence(
+        ablation_authority_id=authority_id,
+        authority_kind=kind,
+        research_protocol_id="protocol-1",
+        protocol_sha256=foundation["protocol"].protocol_sha256,
+        research_protocol_record_sha256=protocol_entry.record_sha256,
+        scope_id="soccer:provider-a:h2h",
+        dataset_snapshot_id="dataset-1",
+        dataset_manifest_sha256=dataset.manifest_sha256,
+        dataset_snapshot_record_sha256=dataset_entry.record_sha256,
+        confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+        holdout_access_sha256=holdout_access_sha256,
+        causal_cutoff=T1,
+        observation_evidence=(
+            observation_evidence
+            or _stored_scientific_ref(registry, "EvaluationBundle", "eval-1")
+        ),
+        supporting_evidence=supporting_evidence,
+        execution_receipt_sha256=execution_receipt_sha256,
+        assumptions=assumptions,
+        created_at=created_at,
+    )
+
+
+def test_ablation_authority_requires_causal_recording_and_survives_restart(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    foundation = _foundation(registry)
+    record = _ablation_authority(registry, foundation)
+
+    with pytest.raises(ValueError, match="record_ablation_authority"):
+        registry.append(record)
+
+    digest = registry.record_ablation_authority(record)
+    stored = registry.get("AblationAuthorityEvidence", record.record_id)
+    assert stored is not None
+    assert stored.record_sha256 == digest
+    assert stored.payload["authority_kind"] == "FROZEN_REPLAY_COUNTERFACTUAL"
+    assert stored.payload["holdout_access_sha256"] == record.holdout_access_sha256
+
+    reopened = ScientificRegistry(path)
+    reopened_record = reopened.get("AblationAuthorityEvidence", record.record_id)
+    assert reopened_record is not None
+    assert reopened_record.record_sha256 == digest
+    assert reopened.record_ablation_authority(record) == digest
+
+
+@pytest.mark.parametrize(
+    "mutator, expected",
+    (
+        (
+            lambda value: replace(value, research_protocol_record_sha256=SHA_B),
+            "research protocol digest mismatch",
+        ),
+        (
+            lambda value: replace(value, dataset_snapshot_record_sha256=SHA_B),
+            "dataset snapshot digest mismatch",
+        ),
+        (
+            lambda value: replace(value, holdout_access_sha256=SHA_B),
+            "holdout identity mismatch",
+        ),
+        (
+            lambda value: replace(value, causal_cutoff=T0),
+            "causal cutoff mismatch",
+        ),
+        (
+            lambda value: replace(
+                value,
+                observation_evidence=replace(
+                    value.observation_evidence,
+                    record_sha256=SHA_B,
+                ),
+            ),
+            "observation evidence digest mismatch",
+        ),
+    ),
+)
+def test_ablation_authority_rejects_forged_durable_bindings(
+    tmp_path,
+    mutator,
+    expected,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    foundation = _foundation(registry)
+    record = mutator(_ablation_authority(registry, foundation))
+
+    with pytest.raises(ValueError, match=expected):
+        registry.record_ablation_authority(record)
+    assert registry.get("AblationAuthorityEvidence", record.record_id) is None
+
+
+def test_ablation_authority_rejects_future_evidence(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    foundation = _foundation(registry)
+    future_bundle = replace(
+        foundation["bundle"],
+        evaluation_bundle_id="eval-future",
+        bundle_sha256=SHA_A,
+        created_at="2026-01-05T00:00:00+00:00",
+    )
+    registry.append(future_bundle)
+    future_ref = _stored_scientific_ref(
+        registry,
+        "EvaluationBundle",
+        "eval-future",
+    )
+    record = _ablation_authority(
+        registry,
+        foundation,
+        created_at=T3,
+        observation_evidence=future_ref,
+    )
+
+    with pytest.raises(ValueError, match="observation evidence was not causally available"):
+        registry.record_ablation_authority(record)
+
+
+def test_ablation_authority_simulation_assumptions_are_kind_bound(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    foundation = _foundation(registry)
+
+    with pytest.raises(ValueError, match="requires explicit assumptions"):
+        _ablation_authority(
+            registry,
+            foundation,
+            kind=AblationAuthorityKind.SIMULATED_COUNTERFACTUAL,
+        )
+    with pytest.raises(ValueError, match="non-simulated"):
+        _ablation_authority(
+            registry,
+            foundation,
+            assumptions=("simulator=v1",),
+        )
+    simulated = _ablation_authority(
+        registry,
+        foundation,
+        authority_id="ablation-authority-simulated",
+        kind=AblationAuthorityKind.SIMULATED_COUNTERFACTUAL,
+        assumptions=("model=causal-v1", "seed=7"),
+    )
+    digest = registry.record_ablation_authority(simulated)
+    assert registry.get("AblationAuthorityEvidence", simulated.record_id).record_sha256 == digest
+
+
+def test_ablation_authority_rejects_recursive_registry_authority_reference(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    foundation = _foundation(registry)
+    recursive_ref = ScientificEvidenceRef(
+        "AblationAuthorityEvidence",
+        "other-ablation-authority",
+        SHA_A,
+    )
+
+    with pytest.raises(ValueError, match="another ablation authority|recursively"):
+        _ablation_authority(
+            registry,
+            foundation,
+            observation_evidence=recursive_ref,
+        )

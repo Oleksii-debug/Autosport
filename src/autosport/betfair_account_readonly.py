@@ -189,9 +189,6 @@ class BetfairMarketBookDepthObservation:
 # callers may instantiate BetfairReadOnlyClient with an injected transport/clock
 # for parsing or deterministic tests. Keep the exact issuing client origin beside
 # the receipt so positive consumers can require the direct production IO path.
-_MARKET_BOOK_DEPTH_ISSUED: dict[int, tuple[object, str, object]] = {}
-
-
 def _market_book_depth_fingerprint(
     observation: BetfairMarketBookDepthObservation,
 ) -> str:
@@ -244,54 +241,6 @@ def _market_book_source_origin_authoritative(source: object) -> bool:
         and canonical_urlopen is not None
         and urlopen is canonical_urlopen
     )
-
-
-def _issue_market_book_depth(
-    observation: BetfairMarketBookDepthObservation,
-    *,
-    source: object,
-) -> BetfairMarketBookDepthObservation:
-    fingerprint = _market_book_depth_fingerprint(observation)
-    observation_id = id(observation)
-
-    def forget(current: object, *, observation_id: int = observation_id) -> None:
-        existing = _MARKET_BOOK_DEPTH_ISSUED.get(observation_id)
-        if existing is not None and existing[0] is current:
-            _MARKET_BOOK_DEPTH_ISSUED.pop(observation_id, None)
-
-    reference = ref(observation, forget)
-    try:
-        source_reference = ref(source)
-    except TypeError:
-        source_reference = lambda: None
-    _MARKET_BOOK_DEPTH_ISSUED[observation_id] = (
-        reference,
-        fingerprint,
-        source_reference,
-    )
-    return observation
-
-
-def assert_market_book_depth_authoritative(
-    observation: BetfairMarketBookDepthObservation,
-) -> None:
-    """Reject receipts that lack exact direct provider-IO origin authority."""
-
-    if type(observation) is not BetfairMarketBookDepthObservation:
-        raise BetfairReadOnlyError(
-            "market-book depth authority requires exact BetfairMarketBookDepthObservation"
-        )
-    current = _MARKET_BOOK_DEPTH_ISSUED.get(id(observation))
-    source = None if current is None else current[2]()
-    if (
-        current is None
-        or current[0]() is not observation
-        or current[1] != _market_book_depth_fingerprint(observation)
-        or not _market_book_source_origin_authoritative(source)
-    ):
-        raise BetfairReadOnlyError(
-            "market-book depth observation lacks canonical direct Betfair provider IO origin"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,7 +793,7 @@ class BetfairReadOnlyClient:
             request_scope_sha256=_canonical_sha256(params),
             evidence=response.evidence,
         )
-        return _issue_market_book_depth(observation, source=self)
+        return observation
 
     def read_market_event(self, market_id: str) -> BetfairMarketEventObservation:
         market = _required_text(market_id, "market_id")
@@ -1402,6 +1351,65 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
             raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id")
         seen.add(bet_id)
         target.append(order)
+
+# Bind MarketBook depth authority to receipts actually emitted by the canonical
+# adapter. Keep both the issuance registry and registration path closure-local so
+# importing this module exposes no callable mint or writable authority registry for
+# caller-constructed depth DTOs.
+def _install_market_book_depth_authority():
+    issued: dict[int, tuple[object, str, object]] = {}
+    raw_read = BetfairReadOnlyClient.read_market_book_depth
+    fingerprint = _market_book_depth_fingerprint
+    source_origin_authoritative = _market_book_source_origin_authoritative
+
+    def authoritative_read(
+        self: BetfairReadOnlyClient,
+        market_id: str,
+        selection_id: int,
+    ) -> BetfairMarketBookDepthObservation:
+        observation = raw_read(self, market_id, selection_id)
+        observation_id = id(observation)
+
+        def forget(current: object, *, key: int = observation_id) -> None:
+            existing = issued.get(key)
+            if existing is not None and existing[0] is current:
+                issued.pop(key, None)
+
+        issued[observation_id] = (
+            ref(observation, forget),
+            fingerprint(observation),
+            ref(self),
+        )
+        return observation
+
+    def assert_authoritative(
+        observation: BetfairMarketBookDepthObservation,
+    ) -> None:
+        """Reject receipts lacking exact canonical direct-provider issuance."""
+
+        if type(observation) is not BetfairMarketBookDepthObservation:
+            raise BetfairReadOnlyError(
+                "market-book depth authority requires exact BetfairMarketBookDepthObservation"
+            )
+        current = issued.get(id(observation))
+        source = None if current is None else current[2]()
+        if (
+            current is None
+            or current[0]() is not observation
+            or current[1] != fingerprint(observation)
+            or not source_origin_authoritative(source)
+        ):
+            raise BetfairReadOnlyError(
+                "market-book depth observation lacks canonical direct Betfair provider IO origin"
+            )
+
+    BetfairReadOnlyClient.read_market_book_depth = authoritative_read
+    return assert_authoritative
+
+
+assert_market_book_depth_authoritative = _install_market_book_depth_authority()
+del _install_market_book_depth_authority
+
 
 # Bind execution-readback authority to captures actually emitted by the canonical
 # adapter.  The registration closure is deliberately not exported: importing this

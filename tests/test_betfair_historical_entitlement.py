@@ -33,7 +33,7 @@ from autosport.betfair_historical_entitlement import (
 NOW = datetime(2026, 9, 22, 0, 0, tzinfo=timezone.utc)
 PATH_A = "/data/xds/historic/BASIC/28139610/1.130129050.bz2"
 PATH_B = "/data/xds/historic/BASIC/28139610/1.130129060.bz2"
-RAW_A = b"BZh-test-historical-market-a"
+RAW_A = b"BZh9-test-historical-market-a"
 
 
 def _install_details_transport(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,6 +224,19 @@ def test_unlisted_path_cannot_be_downloaded(monkeypatch: pytest.MonkeyPatch) -> 
 
     with pytest.raises(BetfairHistoricalEntitlementError, match="not returned"):
         historical.download_file(snapshot, listing, PATH_B)
+
+
+def test_http_200_non_bzip2_download_cannot_mint_file_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, identity = _context(monkeypatch)
+    _install_historical_transport(monkeypatch, file_bytes=b"<html>error</html>")
+    historical = BetfairHistoricalEntitlementClient(client, identity)
+    snapshot = historical.get_entitlement_snapshot()
+    listing = historical.list_files(snapshot, _filter())
+
+    with pytest.raises(BetfairHistoricalEntitlementError, match="canonical bzip2"):
+        historical.download_file(snapshot, listing, PATH_A)
 
 
 def test_mutated_download_bytes_fail_authoritative_revalidation(

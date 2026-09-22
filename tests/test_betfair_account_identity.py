@@ -8,6 +8,7 @@ import pickle
 from pathlib import Path
 import subprocess
 import sys
+import urllib.request as _urllib_request
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -62,7 +63,7 @@ def _install_details_transport(
             assert limit >= len(self._payload)
             return self._payload
 
-    def urlopen(request, timeout: float):
+    def fake_open(request, timeout: float):
         assert request.full_url == ACCOUNT_JSON_RPC_ENDPOINT
         assert timeout > 0
         assert request.data is not None
@@ -89,7 +90,15 @@ def _install_details_transport(
         ).encode("utf-8")
         return Response(raw)
 
-    monkeypatch.setattr(_readonly, "urlopen", urlopen)
+    class Opener:
+        def open(self, request, data=None, timeout: float = 0):
+            assert data is None
+            return fake_open(request, timeout)
+
+    # Preserve the exact autosport.betfair_account_readonly.urlopen function that
+    # K07 treats as part of the canonical provider-origin dependency. Replace only
+    # stdlib's process opener below that function for deterministic unit I/O.
+    monkeypatch.setattr(_urllib_request, "_opener", Opener())
 
 
 def _client(

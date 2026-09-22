@@ -941,6 +941,16 @@ def _parse_place_orders_response(
         )
     if (
         instruction.status == "FAILURE"
+        and (
+            instruction.size_matched != 0
+            or instruction.average_price_matched != 0
+        )
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "failed placeOrders instruction contradicts matched execution economics"
+        )
+    if (
+        instruction.status == "FAILURE"
         and instruction.order_status == "EXECUTABLE"
     ):
         raise BetfairPlaceOrdersAmbiguous(

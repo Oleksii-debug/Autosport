@@ -331,8 +331,8 @@ def test_zero_residual_terminal_row_can_coexist_with_one_economic_row(
     tmp_path, monkeypatch
 ) -> None:
     source = _source(tmp_path)
-    receipt = _receipt()
-    _bind_source(monkeypatch, source, receipt)
+    receipt = _receipt(profit="5")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=1)
     calls = 0
 
     def read_page(**kwargs):

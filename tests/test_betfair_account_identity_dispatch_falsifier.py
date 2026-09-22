@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from autosport import betfair_account_identity as _identity
 from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
     BetfairAccountIdentityError,
@@ -107,3 +108,45 @@ def test_class_rpc_rebinding_cannot_mint_k07_authority(
 
     with pytest.raises(BetfairAccountIdentityError):
         resolve_betfair_authenticated_account_identity(client)
+
+
+def test_instance_support_dispatch_rebinding_cannot_mint_k07_authority() -> None:
+    for attribute, replacement in (
+        ("_next_request_id", lambda: 1),
+        ("_observed_at", lambda: datetime(2026, 9, 22, tzinfo=timezone.utc).isoformat()),
+    ):
+        client = _client()
+        setattr(client, attribute, replacement)
+        with pytest.raises(BetfairAccountIdentityError):
+            resolve_betfair_authenticated_account_identity(client)
+
+
+def test_readonly_urlopen_rebinding_revokes_k07_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client()
+    monkeypatch.setattr(
+        _readonly,
+        "urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("forged network dependency must never be called")
+        ),
+    )
+
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(client)
+
+
+def test_factory_origin_registry_and_binding_secret_are_not_module_writable() -> None:
+    # K07's issuance registry and credential-binding key live only inside the
+    # shared closure returned at module initialization. A caller cannot register
+    # an ordinary direct client by writing a module-level WeakKeyDictionary.
+    assert not hasattr(_identity, "_CANONICAL_CLIENT_ORIGINS")
+    assert not hasattr(_identity, "_PROCESS_HMAC_KEY")
+    assert not hasattr(_identity, "_credential_binding")
+
+    direct = BetfairReadOnlyClient(
+        BetfairSessionCredentials("test-app-key", "test-session-token")
+    )
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(direct)

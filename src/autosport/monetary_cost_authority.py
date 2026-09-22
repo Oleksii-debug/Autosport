@@ -29,6 +29,7 @@ _SOURCE_PREFIX = "economics.monetary-source.v2"
 _ALLOCATION_PREFIX = "economics.monetary-allocation.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
+_MAX_CANONICAL_DECIMAL_TEXT_CHARS = 4096
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
 _STORE_LOCK_LOCAL = threading.local()
@@ -943,10 +944,32 @@ def _utc(value: datetime, label: str) -> None:
         raise MonetaryAuthorityError(f"{label} must be UTC")
 
 
+def _fixed_decimal_text_size_upper_bound(value: Decimal) -> int:
+    """Return fixed-point text size without materializing exponent-distance zeros."""
+
+    decimal_tuple = value.as_tuple()
+    digit_count = len(decimal_tuple.digits)
+    exponent = int(decimal_tuple.exponent)
+    if exponent >= 0:
+        return digit_count + exponent
+
+    integer_digit_count = digit_count + exponent
+    if integer_digit_count > 0:
+        return digit_count + 1
+    return 2 - exponent
+
+
 def _decimal(value: Decimal) -> str:
     _amount(value, "decimal")
     if value == 0:
         return "0"
+    if (
+        _fixed_decimal_text_size_upper_bound(value)
+        > _MAX_CANONICAL_DECIMAL_TEXT_CHARS
+    ):
+        raise MonetaryAuthorityError(
+            "decimal fixed-point encoding exceeds canonical resource bound"
+        )
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 

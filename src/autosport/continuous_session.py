@@ -921,18 +921,46 @@ class ContinuousSessionCoordinator:
     def _settlement_handoff_snapshot(
         resolutions: tuple[SettlementResolution, ...],
     ) -> tuple[SettlementResolution, ...]:
+        """Detach one exact validated settlement snapshot from caller-owned state."""
+
         detached: list[SettlementResolution] = []
         for resolution in resolutions:
+            if not isinstance(resolution, SettlementResolution):
+                raise TypeError(
+                    "resolutions must contain SettlementResolution values"
+                )
             resolution.validate(as_of=resolution.available_at)
+            outcomes = resolution.quote_outcomes
+            if not isinstance(outcomes, _ValidatedQuoteOutcomes):
+                raise ContinuousSessionError(
+                    "validated settlement outcomes lost canonical seal"
+                )
+            validated_sha256 = outcomes.validated_sha256
+            copied_outcomes = dict(outcomes)
+            if (
+                _settlement_quote_outcomes_sha256(copied_outcomes)
+                != validated_sha256
+            ):
+                raise ContinuousSessionError(
+                    "settlement outcomes changed while creating canonical snapshot"
+                )
             snapshot = SettlementResolution(
                 event_identity=resolution.event_identity,
                 settlement_ref=resolution.settlement_ref,
-                quote_outcomes=dict(resolution.quote_outcomes),
+                quote_outcomes=copied_outcomes,
                 evidence_id=resolution.evidence_id,
                 evidence_sha256=resolution.evidence_sha256,
                 available_at=resolution.available_at,
             )
             snapshot.validate(as_of=snapshot.available_at)
+            snapshot_outcomes = snapshot.quote_outcomes
+            if (
+                not isinstance(snapshot_outcomes, _ValidatedQuoteOutcomes)
+                or snapshot_outcomes.validated_sha256 != validated_sha256
+            ):
+                raise ContinuousSessionError(
+                    "canonical settlement snapshot digest mismatch"
+                )
             detached.append(snapshot)
         return tuple(detached)
 
@@ -943,13 +971,12 @@ class ContinuousSessionCoordinator:
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
+        # Never carry a caller-reachable mutable SettlementResolution across the
+        # economic-lock boundary.  The private execution snapshot is detached only
+        # after its current content has been rebound to the exact validated digest.
+        execution_resolutions = self._settlement_handoff_snapshot(resolutions)
         unique: dict[str, SettlementResolution] = {}
-        for resolution in resolutions:
-            if not isinstance(resolution, SettlementResolution):
-                raise TypeError("resolutions must contain SettlementResolution values")
-            # Revalidate immediately before any PaperBook mutation. First validation
-            # detaches caller-owned aliases; later validation detects in-object drift.
-            resolution.validate(as_of=resolution.available_at)
+        for resolution in execution_resolutions:
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):
@@ -1072,12 +1099,18 @@ class ContinuousSessionCoordinator:
                 if input_id not in newly_registered:
                     newly_registered.append(input_id)
 
-            resolutions = self._settlement_resolutions(as_of=now)
+            authority_resolutions = self._settlement_resolutions(as_of=now)
+            # From this point onward, durable/economic truth uses only a private
+            # detached snapshot.  The outcome authority may retain and mutate the
+            # object it returned without rewriting this cycle's validated result.
+            resolutions = self._settlement_handoff_snapshot(authority_resolutions)
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
             handoff_resolutions: tuple[SettlementResolution, ...] | None = None
             if self.settlement_learning_handoff is not None:
+                # Learning gets a separate copy so callback mutation cannot affect
+                # settlement or the durable receipt published by this cycle.
                 handoff_resolutions = self._settlement_handoff_snapshot(resolutions)
                 prepare = getattr(
                     self.settlement_learning_handoff,

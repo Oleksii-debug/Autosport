@@ -209,7 +209,7 @@ def test_success_instruction_error_code_is_ambiguous(
 
     with pytest.raises(
         BetfairPlaceOrdersAmbiguous,
-        match="successful placeOrders instruction must not include errorCode",
+        match="placeOrders instruction report is internally inconsistent",
     ):
         _parse(payload, action)
 

@@ -45,25 +45,35 @@ class CollectorServiceStateConcurrentUpdateFalsifierTests(unittest.TestCase):
             path = Path(directory) / "collector_state.json"
             first, second = self._state_pair(path)
 
-            barrier = threading.Barrier(2)
+            first_snapshot_read = threading.Event()
+            second_snapshot_read = threading.Event()
             errors: list[BaseException] = []
 
-            def synchronize_first_read(state: _CollectorServiceState) -> None:
-                original_read = state._read
-                first_read = True
+            first_original_read = first._read
+            first_read_pending = True
 
-                def synchronized_read() -> dict[str, object]:
-                    nonlocal first_read
-                    snapshot = original_read()
-                    if first_read:
-                        first_read = False
-                        barrier.wait(timeout=5)
-                    return snapshot
+            def first_synchronized_read() -> dict[str, object]:
+                nonlocal first_read_pending
+                snapshot = first_original_read()
+                if first_read_pending:
+                    first_read_pending = False
+                    first_snapshot_read.set()
+                    second_snapshot_read.wait(timeout=2)
+                return snapshot
 
-                state._read = synchronized_read  # type: ignore[method-assign]
+            second_original_read = second._read
+            second_read_pending = True
 
-            synchronize_first_read(first)
-            synchronize_first_read(second)
+            def second_synchronized_read() -> dict[str, object]:
+                nonlocal second_read_pending
+                snapshot = second_original_read()
+                if second_read_pending:
+                    second_read_pending = False
+                    second_snapshot_read.set()
+                return snapshot
+
+            first._read = first_synchronized_read  # type: ignore[method-assign]
+            second._read = second_synchronized_read  # type: ignore[method-assign]
 
             def mutate(state: _CollectorServiceState) -> None:
                 try:
@@ -71,16 +81,21 @@ class CollectorServiceStateConcurrentUpdateFalsifierTests(unittest.TestCase):
                 except BaseException as exc:  # pragma: no cover - diagnostic capture
                     errors.append(exc)
 
-            threads = (
-                threading.Thread(target=mutate, args=(first,)),
-                threading.Thread(target=mutate, args=(second,)),
-            )
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=10)
+            first_thread = threading.Thread(target=mutate, args=(first,))
+            second_thread = threading.Thread(target=mutate, args=(second,))
 
-            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            first_thread.start()
+            self.assertTrue(
+                first_snapshot_read.wait(timeout=5),
+                "first mutation never reached its durable predecessor read",
+            )
+            second_thread.start()
+
+            first_thread.join(timeout=10)
+            second_thread.join(timeout=10)
+
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(second_thread.is_alive())
             self.assertEqual(errors, [])
 
             snapshot = first.snapshot()

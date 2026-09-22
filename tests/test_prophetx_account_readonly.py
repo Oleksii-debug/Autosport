@@ -82,6 +82,36 @@ def client_for(*responses: ProphetXHttpResponse):
     return client, transport
 
 
+def canonical_client_for(monkeypatch, *responses: ProphetXHttpResponse):
+    pending = list(responses)
+    calls: list[dict[str, object]] = []
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers,
+        timeout_seconds: float,
+    ) -> ProphetXHttpResponse:
+        calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if not pending:
+            raise AssertionError("unexpected canonical transport call")
+        return pending.pop(0)
+
+    monkeypatch.setattr(UrllibProphetXHttpTransport, "get", get)
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    return client, calls
+
+
 def test_wallet_read_is_fixed_origin_get_and_preserves_exact_provider_money():
     client, transport = client_for(http_response())
 
@@ -113,8 +143,10 @@ def test_wallet_read_is_fixed_origin_get_and_preserves_exact_provider_money():
     assert call["timeout_seconds"] == 10.0
 
 
-def test_snapshot_maps_only_cash_balance_and_does_not_promote_credit_or_locked_funds():
-    client, _ = client_for(http_response())
+def test_snapshot_maps_only_cash_balance_and_does_not_promote_credit_or_locked_funds(
+    monkeypatch,
+):
+    client, _ = canonical_client_for(monkeypatch, http_response())
 
     snapshot = client.read_account_snapshot(
         frozenset({BookmakerCapability.BALANCE_READ})
@@ -140,6 +172,51 @@ def test_snapshot_maps_only_cash_balance_and_does_not_promote_credit_or_locked_f
     )
     assert snapshot.open_positions == ()
     assert snapshot.settled_positions == ()
+
+
+def test_injected_transport_can_parse_wallet_but_cannot_mint_positive_authority():
+    client, transport = client_for(
+        http_response(),
+        http_response(),
+        http_response(),
+    )
+
+    assert client.read_wallet().balance == Decimal("1000.00")
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="requires product-owned transport",
+    ):
+        client.capability_profile()
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="requires product-owned transport",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert len(transport.calls) == 3
+
+
+def test_replacing_product_owned_transport_invalidates_positive_authority():
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    replacement = FakeTransport([http_response()])
+    client._transport = replacement  # type: ignore[assignment]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="requires product-owned transport",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert len(replacement.calls) == 1
 
 
 def test_failed_unmatched_balance_sync_is_preserved_but_cannot_mint_account_snapshot():
@@ -310,9 +387,11 @@ def test_wrong_capability_collection_type_is_rejected_before_network_call():
     assert transport.calls == []
 
 
-def test_secrets_are_redacted_from_reprs_and_not_persisted_in_snapshot():
+def test_secrets_are_redacted_from_reprs_and_not_persisted_in_snapshot(
+    monkeypatch,
+):
     session = ProphetXSessionToken("session-secret")
-    client, _ = client_for(http_response())
+    client, _ = canonical_client_for(monkeypatch, http_response())
 
     snapshot = client.read_account_snapshot(
         frozenset({BookmakerCapability.BALANCE_READ})

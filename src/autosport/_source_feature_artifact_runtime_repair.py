@@ -30,6 +30,17 @@ from .workspace_lock import WorkspaceEconomicLock as _WorkspaceEconomicLock
 _PROCESS_SOURCE_PUBLICATION_LOCK = threading.RLock()
 
 
+def _append_admitted_delta_with_feature_receipt(self, delta):
+    original = getattr(
+        type(self), "_autosport_source_feature_original_append_admitted_delta_v1"
+    )
+    return source_authority._append_with_source_ingestion_receipt(
+        service=self,
+        delta=delta,
+        original_append=original,
+    )
+
+
 def _source_feature_materializer(
     self,
     *,
@@ -73,12 +84,19 @@ class _SerializedSourceFeatureWorkspaceLock(_WorkspaceEconomicLock):
 def _install_source_runtime_surface() -> None:
     from . import collector_service as collector_service_module
 
-    # The writer capability is issued only by the canonical source runtime.  Keep
-    # collector_service.py itself untouched so unrelated collector repair lineages
-    # can reconverge independently.
-    collector_service_module.HeadlessCollectorService.source_feature_materializer = (
-        _source_feature_materializer
-    )
+    # Keep collector_service.py itself untouched so unrelated collector repair
+    # lineages can reconverge independently.  Install a durable per-delta receipt
+    # around the existing canonical admission method exactly once; reloads only
+    # reapply the public source-feature surface.
+    service_type = collector_service_module.HeadlessCollectorService
+    if not hasattr(
+        service_type, "_autosport_source_feature_original_append_admitted_delta_v1"
+    ):
+        service_type._autosport_source_feature_original_append_admitted_delta_v1 = (
+            service_type._append_admitted_delta
+        )
+    service_type._append_admitted_delta = _append_admitted_delta_with_feature_receipt
+    service_type.source_feature_materializer = _source_feature_materializer
 
     # SourceFeatureArtifactAuthority resolves this module global at lock use time.
     # Keep the durable cross-process lock implementation itself unchanged.

@@ -209,6 +209,12 @@ class ExecutionCapitalAtRiskEvidence:
             raise ExecutionCapitalAtRiskError(
                 "attempts must be exact AttemptCapitalAtRisk tuple"
             )
+        account_ids = {item.account_id for item in self.attempts}
+        if len(account_ids) > 1:
+            raise ExecutionCapitalAtRiskUnsupported(
+                "capital-at-risk evidence cannot aggregate multiple account scopes "
+                "without canonical common-denomination authority"
+            )
         if (
             self.execution_authority is not False
             or self.capital_release_authority is not False
@@ -572,6 +578,12 @@ def resolve_execution_capital_at_risk(
 
     view: VerifiedExecutionPlanView = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
     attempts = tuple(_attempt_risk(item) for item in view.attempts)
+    account_ids = {item.account_id for item in attempts}
+    if len(account_ids) > 1:
+        raise ExecutionCapitalAtRiskUnsupported(
+            "capital-at-risk evidence cannot aggregate multiple account scopes "
+            "without canonical common-denomination authority"
+        )
 
     confirmed = _sum_capital(
         tuple(item.confirmed_open_capital for item in attempts)

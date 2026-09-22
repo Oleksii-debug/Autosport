@@ -32,12 +32,14 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         selection_ids: tuple[str, ...] = ("away", "draw", "home"),
         *,
         status: str = "OPEN",
+        complete: object = True,
     ) -> dict[str, object]:
         return {
             "eventId": "event-1",
             "eventTypeId": "2593174",
             "marketType": "MATCH_ODDS",
             "status": status,
+            "complete": complete,
             "runners": [{"id": selection_id} for selection_id in selection_ids],
         }
 
@@ -182,6 +184,49 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             refused.refusal_reason,
             "market_type_has_no_supported_terminal_settlement_semantics",
         )
+
+    def test_betfair_adapter_requires_explicit_complete_runner_roster(self):
+        incomplete = assess_betfair_historical_market_definition_authority(
+            market_id="match_odds",
+            market_definition=self._market_definition(complete=False),
+            provider_publish_at="2026-09-18T15:00:00Z",
+            observed_at="2026-09-18T15:00:01Z",
+        )
+        self.assertEqual(incomplete.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertIsNone(incomplete.authority)
+        self.assertEqual(
+            incomplete.refusal_reason,
+            "betfair_market_definition_runner_roster_is_not_complete",
+        )
+
+        malformed_values: tuple[object, ...] = (None, 0, 1, "true")
+        for malformed in malformed_values:
+            with self.subTest(complete=malformed):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "marketDefinition.complete must be a boolean",
+                ):
+                    assess_betfair_historical_market_definition_authority(
+                        market_id="match_odds",
+                        market_definition=self._market_definition(
+                            complete=malformed,
+                        ),
+                        provider_publish_at="2026-09-18T15:00:00Z",
+                        observed_at="2026-09-18T15:00:01Z",
+                    )
+
+        missing = self._market_definition()
+        del missing["complete"]
+        with self.assertRaisesRegex(
+            ValueError,
+            "marketDefinition.complete must be a boolean",
+        ):
+            assess_betfair_historical_market_definition_authority(
+                market_id="match_odds",
+                market_definition=missing,
+                provider_publish_at="2026-09-18T15:00:00Z",
+                observed_at="2026-09-18T15:00:01Z",
+            )
 
     def test_durable_roundtrip_requires_source_reverification_and_rejects_tamper(self):
         authority = self._authority()

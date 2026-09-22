@@ -278,6 +278,48 @@ class LivePortfolioScenarioEvidence:
     grants_settlement_authority: bool
     evidence_sha256: str
 
+    def __post_init__(self) -> None:
+        _text(self.scenario_id, "scenario_id")
+        _text(self.batch_id, "batch_id")
+        _sha256(self.portfolio_state_sha256, "portfolio_state_sha256")
+        _positive_int(self.generation, "generation")
+        _nonnegative_int(self.position_count, "position_count")
+        total_capital = _money(
+            self.total_capital_at_risk,
+            "total_capital_at_risk",
+        )
+        conservative_loss = _money(
+            self.conservative_componentwise_loss_upper_bound,
+            "conservative_componentwise_loss_upper_bound",
+        )
+        if conservative_loss > total_capital:
+            raise LivePortfolioScenarioError(
+                "conservative componentwise loss cannot exceed total capital at risk"
+            )
+        _nonnegative_int(
+            self.observation_skew_microseconds,
+            "observation_skew_microseconds",
+        )
+        if self.structural_vector_complete is not True:
+            raise LivePortfolioScenarioError(
+                "structural_vector_complete must be exact True"
+            )
+        for field_name in (
+            "source_authority_proven",
+            "portfolio_universe_authoritative",
+            "cross_provider_atomicity_proven",
+            "terminal_outcome_exactness_proven",
+            "grants_sizing_authority",
+            "grants_execution_authority",
+            "grants_settlement_authority",
+        ):
+            value = getattr(self, field_name)
+            if value is not False:
+                raise LivePortfolioScenarioError(
+                    f"{field_name} must remain exact False on structural evidence"
+                )
+        _sha256(self.evidence_sha256, "evidence_sha256")
+
 
 def evaluate_live_portfolio_scenario(
     spec: FrozenLiveScenarioSpec,

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from hashlib import sha256
 import json
 from typing import Any, Mapping
@@ -116,6 +117,26 @@ class ClearedMarketPageWitness:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ClearedMarketRollupWitness:
+    bet_count: int
+    profit: Decimal
+    commission: Decimal
+    settled_date: str
+    response_sha256: str
+    observed_at: str
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "bet_count": self.bet_count,
+            "profit": _decimal_text(self.profit),
+            "commission": _decimal_text(self.commission),
+            "settled_date": self.settled_date,
+            "response_sha256": self.response_sha256,
+            "observed_at": self.observed_at,
+        }
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairClearedMarketPopulation:
     source_family: str
@@ -135,12 +156,14 @@ class BetfairClearedMarketPopulation:
     rows: tuple[ClearedMarketBetRow, ...]
     first_pass_pages: tuple[ClearedMarketPageWitness, ...]
     second_pass_pages: tuple[ClearedMarketPageWitness, ...]
+    market_rollup_witness: ClearedMarketRollupWitness
     source_interval_start: str
     source_interval_end: str
     request_scope_sha256: str
     population_sha256: str
     evidence_sha256: str
     bounded_revalidation_proven: bool = True
+    economic_scope_coextensive_proven: bool = True
     cross_call_atomicity_proven: bool = False
     permanent_finality_proven: bool = False
     grants_execution_authority: bool = False
@@ -152,7 +175,7 @@ class BetfairClearedMarketPopulation:
     def payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.betfair_cleared_market_population",
-            "schema_version": 1,
+            "schema_version": 2,
             "source_family": self.source_family,
             "venue_id": self.venue_id,
             "account_id": self.account_id,
@@ -170,11 +193,13 @@ class BetfairClearedMarketPopulation:
             "rows": [row.payload() for row in self.rows],
             "first_pass_pages": [page.payload() for page in self.first_pass_pages],
             "second_pass_pages": [page.payload() for page in self.second_pass_pages],
+            "market_rollup_witness": self.market_rollup_witness.payload(),
             "source_interval_start": self.source_interval_start,
             "source_interval_end": self.source_interval_end,
             "request_scope_sha256": self.request_scope_sha256,
             "population_sha256": self.population_sha256,
             "bounded_revalidation_proven": self.bounded_revalidation_proven,
+            "economic_scope_coextensive_proven": self.economic_scope_coextensive_proven,
             "cross_call_atomicity_proven": self.cross_call_atomicity_proven,
             "permanent_finality_proven": self.permanent_finality_proven,
             "grants_execution_authority": self.grants_execution_authority,
@@ -208,11 +233,13 @@ class BetfairClearedMarketPopulation:
             "rows",
             "first_pass_pages",
             "second_pass_pages",
+            "market_rollup_witness",
             "source_interval_start",
             "source_interval_end",
             "request_scope_sha256",
             "population_sha256",
             "bounded_revalidation_proven",
+            "economic_scope_coextensive_proven",
             "cross_call_atomicity_proven",
             "permanent_finality_proven",
             "grants_execution_authority",
@@ -221,7 +248,7 @@ class BetfairClearedMarketPopulation:
         _exact_keys(raw, expected, "population")
         if raw["schema"] != "autosport.betfair_cleared_market_population":
             raise BetfairClearedMarketPopulationError("unsupported population schema")
-        if raw["schema_version"] != 1:
+        if raw["schema_version"] != 2:
             raise BetfairClearedMarketPopulationError("unsupported population schema version")
         statuses_raw = _json_list(raw["statuses"], "statuses")
         rows_raw = _json_list(raw["rows"], "rows")
@@ -256,6 +283,9 @@ class BetfairClearedMarketPopulation:
             second_pass_pages=tuple(
                 _page_from_payload(item) for item in second_pages_raw
             ),
+            market_rollup_witness=_market_rollup_from_payload(
+                raw["market_rollup_witness"]
+            ),
             source_interval_start=_required_text(
                 raw["source_interval_start"], "source_interval_start"
             ),
@@ -271,6 +301,10 @@ class BetfairClearedMarketPopulation:
             evidence_sha256=_required_text(raw["evidence_sha256"], "evidence_sha256"),
             bounded_revalidation_proven=_json_bool(
                 raw["bounded_revalidation_proven"], "bounded_revalidation_proven"
+            ),
+            economic_scope_coextensive_proven=_json_bool(
+                raw["economic_scope_coextensive_proven"],
+                "economic_scope_coextensive_proven",
             ),
             cross_call_atomicity_proven=_json_bool(
                 raw["cross_call_atomicity_proven"], "cross_call_atomicity_proven"
@@ -380,6 +414,35 @@ class BetfairClearedMarketPopulationAuthority:
                 "whole-market cleared BET population changed during bounded revalidation"
             )
 
+        market_rollup_witness = _read_market_rollup(
+            client=client,
+            market_id=receipt.market_id,
+            date_range=date_range,
+        )
+        if (
+            market_rollup_witness.profit != receipt.profit
+            or market_rollup_witness.commission != receipt.commission
+            or _parse_instant(market_rollup_witness.settled_date)
+            != receipt.settled_at
+        ):
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET rollup economic revision changed from target commission receipt"
+            )
+        settled_rows = tuple(
+            row for row in first_rows if row.bet_status == "SETTLED"
+        )
+        if market_rollup_witness.bet_count != len(settled_rows):
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET betCount proves BET settlement-range population is not coextensive"
+            )
+        if not _exact_decimal_sum_equals(
+            (row.profit for row in settled_rows),
+            market_rollup_witness.profit,
+        ):
+            raise BetfairClearedMarketPopulationError(
+                "complete SETTLED BET gross profit does not conserve fresh MARKET profit"
+            )
+
         # Re-resolve the exact commission at the end. If the source learned a
         # superseding commission receipt during acquisition, this old pairing is
         # no longer current and must fail closed rather than mixing revisions.
@@ -404,25 +467,30 @@ class BetfairClearedMarketPopulationAuthority:
             raise BetfairClearedMarketPopulationError(
                 "population acquisition produced no page evidence"
             )
-        observed = tuple(_parse_instant(page.observed_at) for page in all_pages)
+        observed = (
+            *tuple(_parse_instant(page.observed_at) for page in all_pages),
+            _parse_instant(market_rollup_witness.observed_at),
+        )
         source_interval_start = _instant_text(min(observed))
         source_interval_end = _instant_text(max(observed))
         population_sha256 = _digest(
             {
                 "schema": "autosport.betfair_cleared_market_population.semantic",
-                "schema_version": 1,
+                "schema_version": 2,
                 "request_scope_sha256": request_scope_sha256,
                 "rows": [row.payload() for row in first_rows],
+                "market_rollup": market_rollup_witness.payload(),
             }
         )
         evidence_sha256 = _digest(
             {
                 "schema": "autosport.betfair_cleared_market_population.evidence",
-                "schema_version": 1,
+                "schema_version": 2,
                 "request_scope_sha256": request_scope_sha256,
                 "population_sha256": population_sha256,
                 "first_pass_pages": [page.payload() for page in first_pages],
                 "second_pass_pages": [page.payload() for page in second_pages],
+                "market_rollup_witness": market_rollup_witness.payload(),
                 "source_interval_start": source_interval_start,
                 "source_interval_end": source_interval_end,
             }
@@ -445,6 +513,7 @@ class BetfairClearedMarketPopulationAuthority:
             rows=first_rows,
             first_pass_pages=first_pages,
             second_pass_pages=second_pages,
+            market_rollup_witness=market_rollup_witness,
             source_interval_start=source_interval_start,
             source_interval_end=source_interval_end,
             request_scope_sha256=request_scope_sha256,
@@ -605,6 +674,72 @@ def _read_page(
         ) from exc
 
 
+def _read_market_rollup(
+    *,
+    client: BetfairReadOnlyClient,
+    market_id: str,
+    date_range: Mapping[str, str],
+) -> ClearedMarketRollupWitness:
+    """Fresh MARKET reread used only to prove BET-population scope/economics."""
+
+    if type(client) is not BetfairReadOnlyClient:
+        raise BetfairClearedMarketPopulationError(
+            "MARKET revalidation requires canonical BetfairReadOnlyClient"
+        )
+    params: dict[str, object] = {
+        "betStatus": "SETTLED",
+        "groupBy": "MARKET",
+        "marketIds": [market_id],
+        "fromRecord": 0,
+        "recordCount": 1000,
+    }
+    if date_range:
+        params["settledDateRange"] = dict(date_range)
+    try:
+        response = client._rpc(_betfair._LIST_CLEARED_ORDERS, params)
+        report = _betfair._mapping(response.result, "listClearedOrders MARKET result")
+        if _betfair._provider_bool(report, "moreAvailable"):
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET rollup revalidation is incomplete"
+            )
+        rows = _betfair._sequence(
+            report.get("clearedOrders"), "MARKET clearedOrders"
+        )
+        if len(rows) != 1:
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET rollup must contain exactly one market"
+            )
+        row = _betfair._mapping(rows[0], "MARKET clearedOrders[0]")
+        returned_market = _required_text(row.get("marketId"), "MARKET marketId")
+        if returned_market != market_id:
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET rollup returned a different market"
+            )
+        bet_count = _provider_nonnegative_int(row.get("betCount"), "MARKET betCount")
+        profit = _provider_decimal(row.get("profit"), "MARKET profit")
+        commission = _provider_decimal(row.get("commission"), "MARKET commission")
+        if commission < 0:
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET commission cannot be negative"
+            )
+        settled_date = _provider_time_text(
+            _required_text(row.get("settledDate"), "MARKET settledDate"),
+            "MARKET settledDate",
+        )
+        return ClearedMarketRollupWitness(
+            bet_count=bet_count,
+            profit=profit,
+            commission=commission,
+            settled_date=settled_date,
+            response_sha256=response.evidence.source_payload_sha256,
+            observed_at=response.evidence.observed_at,
+        )
+    except BetfairReadOnlyError as exc:
+        raise BetfairClearedMarketPopulationError(
+            "fresh MARKET rollup acquisition failed"
+        ) from exc
+
+
 def _assert_commission_scope_matches(
     receipt: BetfairMarketCommissionReceipt,
     date_range: Mapping[str, str],
@@ -636,7 +771,7 @@ def _population_request_scope(
 ) -> dict[str, object]:
     return {
         "schema": "autosport.betfair_cleared_market_population.request",
-        "schema_version": 1,
+        "schema_version": 2,
         "source_family": SOURCE_FAMILY,
         "venue_id": receipt.venue_id,
         "account_id": receipt.account_id,
@@ -692,6 +827,7 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
         raise BetfairClearedMarketPopulationError("population status coverage incomplete")
     if (
         value.bounded_revalidation_proven is not True
+        or value.economic_scope_coextensive_proven is not True
         or value.cross_call_atomicity_proven is not False
         or value.permanent_finality_proven is not False
         or value.grants_execution_authority is not False
@@ -720,6 +856,19 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
     for row in value.rows:
         _validate_row_against_scope(row, value.market_id)
     _validate_cross_status_rows(value.rows)
+    _validate_market_rollup_witness(value.market_rollup_witness)
+    settled_rows = tuple(row for row in value.rows if row.bet_status == "SETTLED")
+    if value.market_rollup_witness.bet_count != len(settled_rows):
+        raise BetfairClearedMarketPopulationError(
+            "population MARKET betCount is not coextensive with SETTLED BET rows"
+        )
+    if not _exact_decimal_sum_equals(
+        (row.profit for row in settled_rows),
+        value.market_rollup_witness.profit,
+    ):
+        raise BetfairClearedMarketPopulationError(
+            "population SETTLED BET gross profit does not conserve MARKET profit"
+        )
     _validate_page_witnesses(
         value.first_pass_pages,
         rows=value.rows,
@@ -733,7 +882,10 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
         page_size=value.page_size,
     )
     all_pages = (*value.first_pass_pages, *value.second_pass_pages)
-    observed = tuple(_parse_instant(page.observed_at) for page in all_pages)
+    observed = (
+        *tuple(_parse_instant(page.observed_at) for page in all_pages),
+        _parse_instant(value.market_rollup_witness.observed_at),
+    )
     if (
         not observed
         or value.source_interval_start != _instant_text(min(observed))
@@ -744,7 +896,7 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
         )
     request_scope = {
         "schema": "autosport.betfair_cleared_market_population.request",
-        "schema_version": 1,
+        "schema_version": 2,
         "source_family": SOURCE_FAMILY,
         "venue_id": value.venue_id,
         "account_id": value.account_id,
@@ -772,9 +924,10 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
     expected_population = _digest(
         {
             "schema": "autosport.betfair_cleared_market_population.semantic",
-            "schema_version": 1,
+            "schema_version": 2,
             "request_scope_sha256": value.request_scope_sha256,
             "rows": [row.payload() for row in value.rows],
+            "market_rollup": value.market_rollup_witness.payload(),
         }
     )
     if expected_population != value.population_sha256:
@@ -782,11 +935,12 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
     expected_evidence = _digest(
         {
             "schema": "autosport.betfair_cleared_market_population.evidence",
-            "schema_version": 1,
+            "schema_version": 2,
             "request_scope_sha256": value.request_scope_sha256,
             "population_sha256": value.population_sha256,
             "first_pass_pages": [page.payload() for page in value.first_pass_pages],
             "second_pass_pages": [page.payload() for page in value.second_pass_pages],
+            "market_rollup_witness": value.market_rollup_witness.payload(),
             "source_interval_start": value.source_interval_start,
             "source_interval_end": value.source_interval_end,
         }
@@ -912,6 +1066,28 @@ def _validate_page_witnesses(
         )
 
 
+def _validate_market_rollup_witness(
+    value: ClearedMarketRollupWitness,
+) -> None:
+    if type(value) is not ClearedMarketRollupWitness:
+        raise BetfairClearedMarketPopulationError(
+            "MARKET rollup witness must be canonical"
+        )
+    if type(value.bet_count) is not int or value.bet_count < 0:
+        raise BetfairClearedMarketPopulationError(
+            "MARKET bet_count must be a non-negative integer"
+        )
+    _decimal_text(value.profit)
+    _decimal_text(value.commission)
+    if value.commission < 0:
+        raise BetfairClearedMarketPopulationError(
+            "MARKET commission cannot be negative"
+        )
+    _provider_time_text(value.settled_date, "MARKET settled_date")
+    _sha256_hex(value.response_sha256, "MARKET response_sha256")
+    _parse_instant(value.observed_at)
+
+
 def _row_from_payload(value: object) -> ClearedMarketBetRow:
     raw = _json_mapping(value, "row")
     _exact_keys(
@@ -982,6 +1158,32 @@ def _page_from_payload(value: object) -> ClearedMarketPageWitness:
     )
 
 
+def _market_rollup_from_payload(value: object) -> ClearedMarketRollupWitness:
+    raw = _json_mapping(value, "MARKET rollup witness")
+    _exact_keys(
+        raw,
+        {
+            "bet_count",
+            "profit",
+            "commission",
+            "settled_date",
+            "response_sha256",
+            "observed_at",
+        },
+        "MARKET rollup witness",
+    )
+    return ClearedMarketRollupWitness(
+        bet_count=_json_int(raw["bet_count"], "MARKET bet_count"),
+        profit=_decimal_from_text(raw["profit"], "MARKET profit"),
+        commission=_decimal_from_text(raw["commission"], "MARKET commission"),
+        settled_date=_required_text(raw["settled_date"], "MARKET settled_date"),
+        response_sha256=_required_text(
+            raw["response_sha256"], "MARKET response_sha256"
+        ),
+        observed_at=_required_text(raw["observed_at"], "MARKET observed_at"),
+    )
+
+
 def _json_mapping(value: object, label: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise BetfairClearedMarketPopulationError(f"{label} must be a JSON object")
@@ -1038,6 +1240,40 @@ def _decimal_from_text(value: object, label: str) -> Decimal:
             f"{label} must be canonical finite Decimal text"
         )
     return parsed
+
+
+def _provider_nonnegative_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise BetfairClearedMarketPopulationError(
+            f"{label} must be a non-negative provider integer"
+        )
+    return value
+
+
+def _provider_decimal(value: object, label: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        raise BetfairClearedMarketPopulationError(
+            f"{label} must be provider numeric data"
+        )
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+    except InvalidOperation as exc:
+        raise BetfairClearedMarketPopulationError(f"{label} is invalid") from exc
+    if not parsed.is_finite():
+        raise BetfairClearedMarketPopulationError(f"{label} must be finite")
+    return parsed
+
+
+def _exact_decimal_sum_equals(values, expected: Decimal) -> bool:
+    target = Fraction(*expected.as_integer_ratio())
+    total = Fraction(0, 1)
+    for value in values:
+        if type(value) is not Decimal or not value.is_finite():
+            raise BetfairClearedMarketPopulationError(
+                "gross-profit conservation requires finite Decimal values"
+            )
+        total += Fraction(*value.as_integer_ratio())
+    return total == target
 
 
 def _canonical_date_range(

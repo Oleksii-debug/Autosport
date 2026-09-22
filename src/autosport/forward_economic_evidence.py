@@ -36,6 +36,20 @@ def _sha256(value: object, name: str) -> str:
     return text
 
 
+def _currency_code(value: object, name: str) -> str:
+    text = _text(value, name)
+    if (
+        len(text) != 3
+        or not text.isascii()
+        or not text.isalpha()
+        or text != text.upper()
+    ):
+        raise ForwardEconomicEvidenceError(
+            f"{name} must be a canonical uppercase three-letter currency code"
+        )
+    return text
+
+
 def _instant(value: object, name: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ForwardEconomicEvidenceError(f"{name} must be a timezone-aware datetime")
@@ -168,6 +182,8 @@ class ForwardEconomicProtocol:
     universe_id: str
     universe_sha256: str
     authority_binding_sha256: str
+    currency_code: str | None
+    denomination_authority_sha256: str | None
     alpha_registry_sha256: str
     challenger_alpha: Decimal
     minimum_events: int
@@ -197,6 +213,8 @@ class ForwardEconomicProtocol:
         paired_lambda: Decimal,
         start_sequence: int,
         frozen_at: datetime,
+        currency_code: str | None = None,
+        denomination_authority_sha256: str | None = None,
     ) -> None:
         if type(alpha_registry) is not FamilywiseAlphaRegistry:
             raise ForwardEconomicEvidenceError("alpha_registry must be an exact FamilywiseAlphaRegistry")
@@ -208,6 +226,16 @@ class ForwardEconomicProtocol:
         authority_binding_sha256 = _sha256(
             authority_binding_sha256, "authority_binding_sha256"
         )
+        if (currency_code is None) != (denomination_authority_sha256 is None):
+            raise ForwardEconomicEvidenceError(
+                "currency_code and denomination_authority_sha256 must be bound together"
+            )
+        if currency_code is not None:
+            currency_code = _currency_code(currency_code, "currency_code")
+            denomination_authority_sha256 = _sha256(
+                denomination_authority_sha256,
+                "denomination_authority_sha256",
+            )
         if challenger_id == champion_id:
             raise ForwardEconomicEvidenceError("challenger and champion must be distinct")
         alpha = alpha_registry.allocation_for(challenger_id)
@@ -234,6 +262,8 @@ class ForwardEconomicProtocol:
             ("universe_id", universe_id),
             ("universe_sha256", universe_sha256),
             ("authority_binding_sha256", authority_binding_sha256),
+            ("currency_code", currency_code),
+            ("denomination_authority_sha256", denomination_authority_sha256),
             ("alpha_registry_sha256", alpha_registry.identity_sha256),
             ("challenger_alpha", alpha),
             ("minimum_events", minimum_events),
@@ -249,13 +279,15 @@ class ForwardEconomicProtocol:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "protocol_id": self.protocol_id,
             "challenger_id": self.challenger_id,
             "champion_id": self.champion_id,
             "universe_id": self.universe_id,
             "universe_sha256": self.universe_sha256,
             "authority_binding_sha256": self.authority_binding_sha256,
+            "currency_code": self.currency_code,
+            "denomination_authority_sha256": self.denomination_authority_sha256,
             "alpha_registry_sha256": self.alpha_registry_sha256,
             "challenger_alpha": _decimal_text(self.challenger_alpha),
             "minimum_events": self.minimum_events,
@@ -309,6 +341,8 @@ class ResolvedPolicyOutcome:
     execution_accepted_at: datetime | None
     settlement_evidence_sha256: str | None
     settlement_available_at: datetime | None
+    currency_code: str | None = None
+    denomination_authority_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.policy_id, "policy_id")
@@ -320,6 +354,18 @@ class ResolvedPolicyOutcome:
         if type(self.side) is not BetSide:
             raise ForwardEconomicEvidenceError("side must be an exact BetSide")
         pnl = _decimal(self.net_pnl_currency, "net_pnl_currency")
+        if (self.currency_code is None) != (
+            self.denomination_authority_sha256 is None
+        ):
+            raise ForwardEconomicEvidenceError(
+                "resolved currency_code and denomination authority must be bound together"
+            )
+        if self.currency_code is not None:
+            _currency_code(self.currency_code, "currency_code")
+            _sha256(
+                self.denomination_authority_sha256,
+                "denomination_authority_sha256",
+            )
         if self.side is BetSide.NONE:
             if self.accepted_odds is not None or self.accepted_stake is not None:
                 raise ForwardEconomicEvidenceError("NONE cannot carry accepted odds or stake")
@@ -384,6 +430,8 @@ class ForwardEconomicStep:
     champion_side: BetSide
     challenger_net_pnl_currency: Decimal
     champion_net_pnl_currency: Decimal
+    currency_code: str | None
+    denomination_authority_sha256: str | None
     challenger_normalized_pnl: Decimal
     paired_normalized_pnl: Decimal
     absolute_low: Decimal
@@ -411,6 +459,8 @@ class ForwardEconomicStep:
             "champion_side": self.champion_side.value,
             "challenger_net_pnl_currency": _decimal_text(self.challenger_net_pnl_currency),
             "champion_net_pnl_currency": _decimal_text(self.champion_net_pnl_currency),
+            "currency_code": self.currency_code,
+            "denomination_authority_sha256": self.denomination_authority_sha256,
             "challenger_normalized_pnl": _decimal_text(self.challenger_normalized_pnl),
             "paired_normalized_pnl": _decimal_text(self.paired_normalized_pnl),
             "absolute_low": _decimal_text(self.absolute_low),
@@ -449,6 +499,9 @@ class ForwardEconomicStep:
 @dataclass(frozen=True, slots=True)
 class ForwardEconomicEvidenceSummary:
     protocol_sha256: str
+    currency_code: str | None
+    denomination_authority_sha256: str | None
+    denomination_bound: bool
     observed_events: int
     next_sequence: int
     challenger_total_pnl_currency: Decimal
@@ -471,6 +524,9 @@ class ForwardEconomicEvidenceSummary:
         return {
             "schema_version": 1,
             "protocol_sha256": self.protocol_sha256,
+            "currency_code": self.currency_code,
+            "denomination_authority_sha256": self.denomination_authority_sha256,
+            "denomination_bound": self.denomination_bound,
             "observed_events": self.observed_events,
             "next_sequence": self.next_sequence,
             "challenger_total_pnl_currency": _decimal_text(self.challenger_total_pnl_currency),
@@ -563,9 +619,33 @@ class ForwardEconomicEvidenceAccumulator:
             raise ForwardEconomicEvidenceError("resolved universe event mismatch")
         if outcome.decision_sha256 != decision_sha256:
             raise ForwardEconomicEvidenceError("resolved decision digest mismatch")
-        if outcome.decision_committed_at < self.protocol.frozen_at:
+        protocol = self._validated_protocol()
+        if outcome.decision_committed_at < protocol.frozen_at:
             raise ForwardEconomicEvidenceError("decision predates frozen prospective protocol")
-        if outcome.side is not BetSide.NONE and outcome.accepted_odds > self.protocol.maximum_accepted_odds:
+        if protocol.currency_code is None:
+            if (
+                outcome.currency_code is not None
+                or outcome.denomination_authority_sha256 is not None
+            ):
+                raise ForwardEconomicEvidenceError(
+                    "resolved denomination cannot exceed the frozen protocol binding"
+                )
+        else:
+            if outcome.currency_code != protocol.currency_code:
+                raise ForwardEconomicEvidenceError(
+                    "resolved currency does not match the frozen protocol denomination"
+                )
+            if (
+                outcome.denomination_authority_sha256
+                != protocol.denomination_authority_sha256
+            ):
+                raise ForwardEconomicEvidenceError(
+                    "resolved denomination authority does not match the frozen protocol"
+                )
+        if (
+            outcome.side is not BetSide.NONE
+            and outcome.accepted_odds > protocol.maximum_accepted_odds
+        ):
             raise ForwardEconomicEvidenceError("accepted odds exceed frozen protocol maximum")
         return outcome
 
@@ -674,6 +754,10 @@ class ForwardEconomicEvidenceAccumulator:
             champion_side=champion.side,
             challenger_net_pnl_currency=challenger.net_pnl_currency,
             champion_net_pnl_currency=champion.net_pnl_currency,
+            currency_code=self.protocol.currency_code,
+            denomination_authority_sha256=(
+                self.protocol.denomination_authority_sha256
+            ),
             challenger_normalized_pnl=challenger_x,
             paired_normalized_pnl=paired_x,
             absolute_low=challenger_low,
@@ -765,6 +849,10 @@ class ForwardEconomicEvidenceAccumulator:
         # decision -> accepted execution -> terminal settlement -> net-PnL
         # chain from canonical durable/provider authorities.
         positive_authority_verified = False
+        denomination_bound = (
+            protocol.currency_code is not None
+            and protocol.denomination_authority_sha256 is not None
+        )
 
         evidence_payload = {
             "schema_version": 1,
@@ -774,6 +862,9 @@ class ForwardEconomicEvidenceAccumulator:
         evidence_sha256 = _canonical_digest(evidence_payload)
         return ForwardEconomicEvidenceSummary(
             protocol_sha256=self._protocol_sha256,
+            currency_code=protocol.currency_code,
+            denomination_authority_sha256=protocol.denomination_authority_sha256,
+            denomination_bound=denomination_bound,
             observed_events=len(self._steps),
             next_sequence=self.next_sequence,
             challenger_total_pnl_currency=self._challenger_total,
@@ -790,6 +881,7 @@ class ForwardEconomicEvidenceAccumulator:
             positive_authority_verified=positive_authority_verified,
             scientific_promotion_gate_passed=(
                 positive_authority_verified
+                and denomination_bound
                 and minimum_events_satisfied
                 and absolute_crossed
                 and paired_crossed

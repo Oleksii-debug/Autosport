@@ -869,6 +869,11 @@ class DesktopDeltaConsumer:
         page_size = 1000
 
         for source_id in sorted({delta.source_id for delta in available}):
+            source_expected_ids = {
+                delta.delta_id
+                for delta in available
+                if delta.source_id == source_id
+            }
             after_delta_id: str | None = None
             hidden_epoch_rows: set[str] = set()
 
@@ -896,6 +901,9 @@ class DesktopDeltaConsumer:
                         continue
                     if selected is not None:
                         ordered.append(selected)
+
+                if source_expected_ids.issubset(accounted_ids):
+                    break
 
                 after_delta_id = page[-1].delta_id
                 if len(page) < page_size:

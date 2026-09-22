@@ -947,13 +947,6 @@ def _parse_place_orders_response(
             "placeOrders execution/instruction statuses conflict"
         )
     if (
-        instruction.status == "SUCCESS"
-        and instruction.error_code is not None
-    ):
-        raise BetfairPlaceOrdersAmbiguous(
-            "successful placeOrders instruction must not include errorCode"
-        )
-    if (
         instruction.status == "FAILURE"
         and (
             instruction.size_matched != 0

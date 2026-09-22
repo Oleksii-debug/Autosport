@@ -253,6 +253,7 @@ class ScheduledSourceUniverseTests(unittest.TestCase):
 
             self.assertTrue(resolution.scheduled_start_coverage_complete)
             self.assertEqual(resolution.late_start_count, 1)
+            self.assertFalse(resolution.scheduled_provider_observation_complete)
 
     def test_manual_cycle_between_scheduled_slots_prevents_exact_bijection(self):
         with tempfile.TemporaryDirectory() as tmp:

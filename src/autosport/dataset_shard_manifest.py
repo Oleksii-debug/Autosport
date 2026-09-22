@@ -387,7 +387,16 @@ def _require_registered_manifest(
     snapshot_id: str,
     manifest: DatasetShardManifest,
 ) -> "DatasetSnapshotLineageRecord":
-    record = authority.record(_text(snapshot_id, "snapshot_id"))
+    from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
+
+    if type(authority) is not DatasetSnapshotLineageAuthority:
+        raise DatasetShardManifestError(
+            "canonical DatasetSnapshotLineageAuthority is required"
+        )
+    record = DatasetSnapshotLineageAuthority.record(
+        authority,
+        _text(snapshot_id, "snapshot_id"),
+    )
     if record is None:
         raise DatasetShardManifestError("DatasetSnapshot has no canonical lineage proof")
     if tuple(record.member_sha256) != manifest.member_sha256:

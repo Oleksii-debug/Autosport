@@ -13,6 +13,7 @@ from autosport.provider_health_authority import (
     ProviderHealthOutcome,
     ProviderHealthPolicy,
     ProviderHealthStatus,
+    ProviderWriteBinding,
 )
 
 
@@ -179,42 +180,44 @@ def test_write_binding_requires_healthy_provider() -> None:
         authority.bind_write_decision(provider_id="betfair", decision_id="d1")
 
 
-def test_write_binding_is_current_while_health_epoch_is_unchanged() -> None:
+def test_healthy_advisory_state_cannot_mint_provider_write_authority() -> None:
     authority = ProviderHealthAuthority()
     healthy(authority)
-    binding = authority.bind_write_decision(provider_id="betfair", decision_id="d1")
     authority.apply(event(2, ProviderHealthOutcome.SUCCESS))
-    assert authority.write_binding_is_current(binding)
+    with pytest.raises(ProviderHealthError, match="provider-origin authority"):
+        authority.bind_write_decision(provider_id="betfair", decision_id="d1")
 
 
-def test_degradation_between_decision_and_submit_invalidates_binding() -> None:
+def test_caller_constructed_matching_epoch_binding_is_never_current() -> None:
     authority = ProviderHealthAuthority()
-    healthy(authority)
-    binding = authority.bind_write_decision(provider_id="betfair", decision_id="d1")
+    state = healthy(authority)
+    forged = ProviderWriteBinding("betfair", state.health_epoch, "d1")
+    assert not authority.write_binding_is_current(forged)
     authority.apply(event(2, ProviderHealthOutcome.TIMEOUT))
-    assert not authority.write_binding_is_current(binding)
+    assert not authority.write_binding_is_current(forged)
 
 
-def test_recovery_creates_new_epoch_and_requires_fresh_decision() -> None:
+def test_recovery_rotates_epoch_but_still_cannot_mint_write_authority() -> None:
     authority = ProviderHealthAuthority(ProviderHealthPolicy(consecutive_successes_to_recover=2))
     first = healthy(authority)
-    binding = authority.bind_write_decision(provider_id="betfair", decision_id="d1")
+    forged = ProviderWriteBinding("betfair", first.health_epoch, "d1")
     authority.apply(event(2, ProviderHealthOutcome.AUTH_FAILURE))
     authority.apply(event(3, ProviderHealthOutcome.SUCCESS))
     recovered = authority.apply(event(4, ProviderHealthOutcome.SUCCESS))
     assert recovered.status is ProviderHealthStatus.HEALTHY
     assert recovered.health_epoch > first.health_epoch
-    assert not authority.write_binding_is_current(binding)
-    fresh = authority.bind_write_decision(provider_id="betfair", decision_id="d2")
-    assert authority.write_binding_is_current(fresh)
+    assert not authority.write_binding_is_current(forged)
+    with pytest.raises(ProviderHealthError, match="provider-origin authority"):
+        authority.bind_write_decision(provider_id="betfair", decision_id="d2")
 
 
-def test_healthy_fallback_provider_cannot_substitute_for_bound_provider() -> None:
+def test_caller_binding_cannot_use_healthy_fallback_or_original_provider() -> None:
     authority = ProviderHealthAuthority()
-    healthy(authority, "book-a")
+    state_a = healthy(authority, "book-a")
     healthy(authority, "book-b")
-    binding = authority.bind_write_decision(provider_id="book-a", decision_id="d1")
-    assert not authority.write_binding_is_current(binding, target_provider_id="book-b")
+    forged = ProviderWriteBinding("book-a", state_a.health_epoch, "d1")
+    assert not authority.write_binding_is_current(forged)
+    assert not authority.write_binding_is_current(forged, target_provider_id="book-b")
 
 
 def test_fallback_read_evidence_is_always_advisory_and_non_authorizing() -> None:
@@ -341,3 +344,23 @@ def test_large_healthy_stream_keeps_epoch_stable() -> None:
     assert final.status is ProviderHealthStatus.HEALTHY
     assert final.health_epoch == initial.health_epoch
     assert final.last_sequence == 2001
+
+
+def test_caller_success_event_cannot_mint_provider_write_authority() -> None:
+    """Regression absorbed from dependent expected-RED PR #1607."""
+    authority = ProviderHealthAuthority()
+    fabricated_success = ProviderHealthEvent(
+        provider_id="betfair",
+        sequence=1,
+        event_id="caller-invented-success",
+        occurred_at=datetime(2026, 9, 22, 14, 35, tzinfo=timezone.utc),
+        outcome=ProviderHealthOutcome.SUCCESS,
+    )
+
+    authority.apply(fabricated_success)
+
+    with pytest.raises(ProviderHealthError, match="provider-origin authority"):
+        authority.bind_write_decision(
+            provider_id="betfair",
+            decision_id="decision-that-must-not-gain-write-authority",
+        )

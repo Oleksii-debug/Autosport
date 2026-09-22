@@ -94,6 +94,7 @@ class BetfairEvidence:
 class BetfairMarketPnlCoverageBatch:
     """Coverage-only evidence for one listMarketProfitAndLoss request."""
 
+    account_id_hash: str
     requested_market_ids: tuple[str, ...]
     returned_market_ids: tuple[str, ...]
     include_settled_bets: bool
@@ -102,6 +103,7 @@ class BetfairMarketPnlCoverageBatch:
     evidence: BetfairEvidence
 
     def __post_init__(self) -> None:
+        _sha256_hex(self.account_id_hash, "account_id_hash")
         requested = _canonical_text_tuple(self.requested_market_ids, "requested_market_ids")
         if len(requested) > 50:
             raise BetfairReadOnlyError("listMarketProfitAndLoss cannot exceed 50 market IDs")
@@ -120,6 +122,7 @@ class BetfairMarketPnlCoverageBatch:
 
     def _authority_fingerprint(self) -> tuple[object, ...]:
         return (
+            self.account_id_hash,
             self.requested_market_ids,
             self.returned_market_ids,
             self.include_settled_bets,
@@ -139,6 +142,7 @@ class BetfairMarketPnlCoverageBatch:
 class BetfairClearedMarketPnlCoveragePage:
     """Coverage-only SETTLED/MARKET listClearedOrders page evidence."""
 
+    account_id_hash: str
     requested_market_ids: tuple[str, ...]
     returned_market_ids: tuple[str, ...]
     from_record: int
@@ -147,6 +151,7 @@ class BetfairClearedMarketPnlCoveragePage:
     evidence: BetfairEvidence
 
     def __post_init__(self) -> None:
+        _sha256_hex(self.account_id_hash, "account_id_hash")
         _canonical_text_tuple(self.requested_market_ids, "requested_market_ids")
         if not isinstance(self.returned_market_ids, tuple):
             raise BetfairReadOnlyError("returned_market_ids must be a tuple")
@@ -175,6 +180,7 @@ class BetfairClearedMarketPnlCoveragePage:
 
     def _authority_fingerprint(self) -> tuple[object, ...]:
         return (
+            self.account_id_hash,
             self.requested_market_ids,
             self.returned_market_ids,
             self.from_record,
@@ -630,6 +636,7 @@ class BetfairReadOnlyClient:
             for index, row in enumerate(rows)
         )
         return BetfairMarketPnlCoverageBatch(
+            sha256(self._account_id.encode("utf-8")).hexdigest(),
             requested,
             returned,
             include_settled_bets,
@@ -677,6 +684,7 @@ class BetfairReadOnlyClient:
             for index, row in enumerate(rows)
         )
         return BetfairClearedMarketPnlCoveragePage(
+            sha256(self._account_id.encode("utf-8")).hexdigest(),
             requested,
             returned,
             from_record,

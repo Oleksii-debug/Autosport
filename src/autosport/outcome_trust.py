@@ -418,7 +418,11 @@ def bind_outcome_lineage_availability(
             raise OutcomeLineageTrustError(
                 "trusted outcome lineage has incomplete product availability evidence"
             )
-        if trusted_times and trusted_times[-1] is not None:
+        if (
+            len(incoming.revisions) > len(trusted.revisions)
+            and trusted_times
+            and trusted_times[-1] is not None
+        ):
             assert trusted_times[-1] is not None
             if accepted_dt < _parse_timestamp(trusted_times[-1]):
                 raise OutcomeLineageTrustError(

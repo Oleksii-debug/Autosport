@@ -12,7 +12,7 @@ from .execution_stop_authority import (
 )
 
 
-EXECUTION_STOP_JOURNAL_FILENAME = "execution-stop-authority.jsonl"
+EXECUTION_STOP_JOURNAL_FILENAME = "execution-stop.jsonl"
 WINDOWS_EMERGENCY_STOP_OPERATOR_ID = "windows-operator"
 WINDOWS_EMERGENCY_STOP_REASON = "windows-emergency-stop"
 

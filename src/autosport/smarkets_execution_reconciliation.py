@@ -444,6 +444,7 @@ class VerifiedSmarketsOrderEffect:
     status: AcknowledgementStatus
     accepted_odds: Decimal | None
     accepted_stake: Decimal
+    accepted_liability: Decimal
     executed_quantity_units: int
     executed_avg_price_units: int | None
     observed_at: str
@@ -458,6 +459,7 @@ class VerifiedSmarketsOrderEffect:
                 None if self.accepted_odds is None else _decimal_text(self.accepted_odds)
             ),
             "accepted_stake": _decimal_text(self.accepted_stake),
+            "accepted_liability": _decimal_text(self.accepted_liability),
             "action_id": self.action_id,
             "authority_id": self.authority_id,
             "evidence_id": self.evidence_id,
@@ -570,6 +572,7 @@ def verify_smarkets_order_readback(
         status = AcknowledgementStatus.REJECTED
         accepted_odds = None
         accepted_stake = Decimal("0")
+        accepted_liability = Decimal("0")
     else:
         executed_price_units = readback.executed_avg_price_units
         if executed_price_units is None:
@@ -590,11 +593,24 @@ def verify_smarkets_order_readback(
             * Decimal(executed_price_units)
             / _STAKE_SCALE
         )
-        if accepted_stake > action.requested_stake:
-            raise SmarketsReconciliationError(
-                "provider execution stake exceeds canonical requested stake"
-            )
         accepted_odds = _decimal_odds_from_price_units(executed_price_units)
+        executed_payout = (
+            Decimal(readback.executed_quantity_units) / Decimal(_QUANTITY_SCALE)
+        )
+        accepted_liability = (
+            accepted_stake
+            if action.side == "BACK"
+            else executed_payout - accepted_stake
+        )
+        requested_liability = (
+            action.requested_stake
+            if action.side == "BACK"
+            else action.requested_stake * (action.requested_odds - Decimal("1"))
+        )
+        if accepted_liability > requested_liability:
+            raise SmarketsReconciliationError(
+                "provider execution liability exceeds canonical requested liability"
+            )
         status = (
             AcknowledgementStatus.ACCEPTED
             if readback.executed_quantity_units == readback.requested_quantity_units
@@ -619,6 +635,7 @@ def verify_smarkets_order_readback(
             None if accepted_odds is None else _decimal_text(accepted_odds)
         ),
         "accepted_stake": _decimal_text(accepted_stake),
+        "accepted_liability": _decimal_text(accepted_liability),
     }
     evidence_id = _digest(payload)
     return VerifiedSmarketsOrderEffect(
@@ -628,6 +645,7 @@ def verify_smarkets_order_readback(
         status=status,
         accepted_odds=accepted_odds,
         accepted_stake=accepted_stake,
+        accepted_liability=accepted_liability,
         executed_quantity_units=readback.executed_quantity_units,
         executed_avg_price_units=readback.executed_avg_price_units,
         observed_at=readback.observed_at,
@@ -677,6 +695,7 @@ class SmarketsRateLimitEvidence:
 _EFFECT_RECORD_KEYS = {
     "accepted_odds",
     "accepted_stake",
+    "accepted_liability",
     "action_id",
     "authority_id",
     "evidence_id",
@@ -726,6 +745,9 @@ def _validated_effect_record(
             "record.status must be canonical acknowledgement status"
         ) from exc
     stake = _nonnegative_decimal(record["accepted_stake"], "record.accepted_stake")
+    liability = _nonnegative_decimal(
+        record["accepted_liability"], "record.accepted_liability"
+    )
     odds_raw = record["accepted_odds"]
     odds = (
         None
@@ -735,6 +757,7 @@ def _validated_effect_record(
     if status is AcknowledgementStatus.REJECTED:
         if (
             stake != 0
+            or liability != 0
             or odds is not None
             or executed_quantity_units != 0
             or executed_avg_price_units is not None
@@ -744,6 +767,7 @@ def _validated_effect_record(
             )
     elif (
         stake <= 0
+        or liability < 0
         or odds is None
         or executed_quantity_units <= 0
         or executed_avg_price_units is None

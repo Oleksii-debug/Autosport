@@ -211,7 +211,7 @@ def test_expired_or_out_of_scope_authority_fails_closed() -> None:
         _verify(
             _action(),
             _profile(),
-            _authority(expires_at="2026-09-22T12:14:59+00:00"),
+            _authority(expires_at="2026-09-22T12:09:59+00:00"),
             _readback(),
         )
     with pytest.raises(SmarketsReconciliationError, match="event"):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -12,7 +13,7 @@ from typing import Any, Iterable
 from urllib.parse import urlencode
 
 from .domain import MarketEvent
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -45,6 +46,21 @@ class HistoricalSnapshotCapture:
         return self.quote_count > 0
 
 
+def _ordered_publication_paths(output: Path, evidence: Path) -> tuple[Path, Path]:
+    keyed_paths: list[tuple[str, Path]] = []
+    for path in (output, evidence):
+        try:
+            key = os.path.normcase(str(path.resolve(strict=False)))
+        except OSError as exc:
+            raise ValueError("cannot resolve historical snapshot publication path") from exc
+        keyed_paths.append((key, path))
+
+    if keyed_paths[0][0] == keyed_paths[1][0]:
+        raise ValueError("historical snapshot output and evidence paths must be distinct")
+    keyed_paths.sort(key=lambda item: item[0])
+    return keyed_paths[0][1], keyed_paths[1][1]
+
+
 def capture_historical_snapshot(
     provider: ParlayApiTableTennisProvider,
     *,
@@ -67,6 +83,10 @@ def capture_historical_snapshot(
 
     if provider.public_preview or not provider.api_key:
         raise ValueError("historical snapshot capture requires an authenticated API key")
+
+    output = Path(output_path)
+    evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
+    publication_paths = _ordered_publication_paths(output, evidence)
 
     requested_dt = _parse_timestamp(requested_at, field="requested_at")
     query = urlencode(
@@ -129,10 +149,6 @@ def capture_historical_snapshot(
             events.append(event)
 
     events.sort(key=lambda item: (item.observed_ts, item.sequence, item.event_id, item.market_id, item.selection_id))
-    output = Path(output_path)
-    evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
-    _atomic_write_jsonl(output, (event.to_dict() for event in events))
-    market_sha256 = _sha256(output)
     canonical_response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     response_sha256 = hashlib.sha256(canonical_response.encode("utf-8")).hexdigest()
     market_types = tuple(sorted({event.market_type.value for event in events}))
@@ -156,7 +172,6 @@ def capture_historical_snapshot(
         "previous_snapshot_at": previous_snapshot_at,
         "next_snapshot_at": next_snapshot_at,
         "response_sha256": response_sha256,
-        "market_sha256": market_sha256,
         "quote_count": len(events),
         "has_data": bool(events),
         "market_types": list(market_types),
@@ -189,7 +204,13 @@ def capture_historical_snapshot(
         "human_tested": False,
         "nvda_verified": False,
     }
-    atomic_write_json(evidence, evidence_payload)
+    with ExitStack() as publication_locks:
+        for publication_path in publication_paths:
+            publication_locks.enter_context(durable_path_lock(publication_path))
+        _atomic_write_jsonl(output, (event.to_dict() for event in events))
+        market_sha256 = _sha256(output)
+        evidence_payload["market_sha256"] = market_sha256
+        atomic_write_json(evidence, evidence_payload)
 
     return HistoricalSnapshotCapture(
         requested_at=requested_at,

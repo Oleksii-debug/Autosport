@@ -137,6 +137,43 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("access%5Ftoken=" + REDACTED, redacted)
         self.assertIn("market=match", redacted)
 
+    def test_quoted_sensitive_keys_with_literal_separators_are_redacted(self) -> None:
+        cases = (
+            ('{"api key":"space-secret-804"}', "space-secret-804", '"api key"'),
+            (
+                '{"client/secret":"slash-secret-804"}',
+                "slash-secret-804",
+                '"client/secret"',
+            ),
+            (
+                "{'session token':'token-secret-804'}",
+                "token-secret-804",
+                "'session token'",
+            ),
+        )
+
+        for source, secret, key_spelling in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertNotIn(secret, redacted)
+                self.assertIn(key_spelling, redacted)
+                self.assertIn(REDACTED, redacted)
+
+    def test_safe_exception_text_redacts_quoted_separator_sensitive_key(self) -> None:
+        secret = "quoted-separator-exception-secret-804"
+        rendered = safe_exception_text(
+            RuntimeError('{"api key":"' + secret + '","market name":"winner"}')
+        )
+
+        self.assertNotIn(secret, rendered)
+        self.assertIn('"api key":"' + REDACTED + '"', rendered)
+        self.assertIn('"market name":"winner"', rendered)
+
+    def test_non_sensitive_quoted_key_with_literal_separator_is_preserved(self) -> None:
+        source = '{"market name":"winner","league/name":"open"}'
+
+        self.assertEqual(redact_operator_text(source), source)
+
     def test_text_redacts_escaped_sensitive_serialized_keys(self) -> None:
         cases = (
             (r'{"api\u005fkey":"alpha123"}', "alpha123", r"api\u005fkey"),

@@ -1086,6 +1086,14 @@ class BetfairReplaceSagaStore:
                     "replace saga has invalid PREPARED multiplicity/schema"
                 )
             intent = _intent_from_dict(prepared[0]["payload"]["intent"])
+            if prepared[0]["saga_id"] != intent.saga_id:
+                raise BetfairReplaceSagaIntegrityError(
+                    "PREPARED event saga_id mismatches immutable intent"
+                )
+            if _timestamp(prepared[0]["recorded_at"], "recorded_at") != intent.prepared_at:
+                raise BetfairReplaceSagaIntegrityError(
+                    "PREPARED recorded_at mismatches intent prepared_at"
+                )
             submitted_events = [e for e in saga_events if e["event_type"] == EventType.SUBMITTED.value]
             if len(submitted_events) > 1:
                 raise BetfairReplaceSagaIntegrityError("replace saga has multiple SUBMITTED events")
@@ -1103,6 +1111,10 @@ class BetfairReplaceSagaStore:
                     raise BetfairReplaceSagaIntegrityError("replace SUBMITTED payload invalid") from exc
                 if request_sha != intent.request_sha256:
                     raise BetfairReplaceSagaIntegrityError("submitted request digest mismatches prepared intent")
+                if _timestamp(event["recorded_at"], "recorded_at") != submitted_at:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "SUBMITTED recorded_at mismatches submitted_at"
+                    )
                 if _time(submitted_at) < _time(intent.prepared_at):
                     raise BetfairReplaceSagaIntegrityError("replace submission precedes PREPARED")
             unknown_events = [e for e in saga_events if e["event_type"] == EventType.UNKNOWN.value]
@@ -1117,6 +1129,10 @@ class BetfairReplaceSagaStore:
                     observed = _timestamp(event["payload"]["observed_at"], "observed_at")
                 except ValueError as exc:
                     raise BetfairReplaceSagaIntegrityError("replace UNKNOWN payload invalid") from exc
+                if _timestamp(event["recorded_at"], "recorded_at") != observed:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "UNKNOWN recorded_at mismatches observed_at"
+                    )
                 if submitted_at is None or submitted_index is None:
                     raise BetfairReplaceSagaIntegrityError(
                         "replace UNKNOWN requires prior SUBMITTED boundary"
@@ -1137,6 +1153,10 @@ class BetfairReplaceSagaStore:
                 if set(event["payload"]) != {"evidence"}:
                     raise BetfairReplaceSagaIntegrityError("replace PROVIDER_RESULT schema invalid")
                 evidence = _provider_evidence_from_dict(event["payload"]["evidence"])
+                if _timestamp(event["recorded_at"], "recorded_at") != evidence.observed_at:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "PROVIDER_RESULT recorded_at mismatches evidence observed_at"
+                    )
                 if not _same_id_set(intent, evidence.results, attr="bet_id"):
                     raise BetfairReplaceSagaIntegrityError("provider result does not cover exact prepared bet ids")
                 if submitted_at is None or submitted_index is None:
@@ -1152,11 +1172,26 @@ class BetfairReplaceSagaStore:
                         "provider result precedes replace causal boundary"
                     )
             reconciliation_events = [e for e in saga_events if e["event_type"] == EventType.RECONCILIATION.value]
+            if unknown_events:
+                unknown_index = saga_events.index(unknown_events[0])
+                if provider_events and unknown_index > saga_events.index(provider_events[0]):
+                    raise BetfairReplaceSagaIntegrityError(
+                        "replace UNKNOWN cannot follow durable provider result"
+                    )
+                if reconciliation_events and unknown_index > saga_events.index(reconciliation_events[0]):
+                    raise BetfairReplaceSagaIntegrityError(
+                        "replace UNKNOWN cannot follow durable reconciliation"
+                    )
             seen_evidence: dict[str, dict[str, object]] = {}
+            previous_reconciliation_at: str | None = None
             for event in reconciliation_events:
                 if set(event["payload"]) != {"evidence"}:
                     raise BetfairReplaceSagaIntegrityError("replace RECONCILIATION schema invalid")
                 evidence = _reconciliation_from_dict(event["payload"]["evidence"])
+                if _timestamp(event["recorded_at"], "recorded_at") != evidence.observed_at:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "RECONCILIATION recorded_at mismatches evidence observed_at"
+                    )
                 if not _same_id_set(intent, evidence.results, attr="bet_id"):
                     raise BetfairReplaceSagaIntegrityError("reconciliation does not cover exact prepared bet ids")
                 if submitted_at is None or submitted_index is None:
@@ -1171,6 +1206,14 @@ class BetfairReplaceSagaStore:
                     raise BetfairReplaceSagaIntegrityError(
                         "reconciliation must be newer than replace external boundary"
                     )
+                if (
+                    previous_reconciliation_at is not None
+                    and _time(evidence.observed_at) <= _time(previous_reconciliation_at)
+                ):
+                    raise BetfairReplaceSagaIntegrityError(
+                        "reconciliation observed_at must strictly advance in journal order"
+                    )
+                previous_reconciliation_at = evidence.observed_at
                 prior = seen_evidence.get(evidence.evidence_id)
                 if prior is not None and prior != evidence.to_dict():
                     raise BetfairReplaceSagaIntegrityError(
@@ -1224,9 +1267,9 @@ class BetfairReplaceSagaStore:
             events = self._events()
             intent = self._intent_from_events(events, saga)
             facts = self._facts(events, saga)
-            if facts.provider is not None:
+            if facts.provider is not None or facts.reconciliation is not None:
                 raise BetfairReplaceSagaStateError(
-                    "provider result is already durable; ambiguity cannot replace it"
+                    "provider/reconciliation evidence is already durable; ambiguity cannot replace it"
                 )
             if facts.submitted_at is None:
                 raise BetfairReplaceSagaStateError(

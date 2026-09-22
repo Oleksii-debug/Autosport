@@ -31,6 +31,14 @@ def _int(value: object, field: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _optional_int32(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < -(2**31) or value > (2**31 - 1):
+        raise ValueError(f"{field} must be a signed int32 or null")
+    return value
+
+
 def _optional_stream_interval(
     value: object,
     field: str,
@@ -390,6 +398,7 @@ class BetfairMarketChangeFrame:
     frame_sha256: str
     conflate_ms: int | None = None
     heartbeat_ms: int | None = None
+    request_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +427,7 @@ class BetfairStreamApplyResult:
     image_replaced_markets: tuple[str, ...]
     conflate_ms: int | None = None
     heartbeat_ms: int | None = None
+    request_id: int | None = None
 
 
 def _frame_hash(raw: dict[str, Any]) -> str:
@@ -539,6 +549,7 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
     initial = _clock(raw.get("initialClk"), "initialClk")
     clk = _clock(raw.get("clk"), "clk")
     provider_health = _provider_stream_health(raw.get("status"))
+    request_id = _optional_int32(raw.get("id"), "id")
     conflate_ms = _optional_stream_interval(raw.get("conflateMs"), "conflateMs")
     heartbeat_ms = _optional_stream_interval(
         raw.get("heartbeatMs"),
@@ -574,6 +585,7 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
         _frame_hash(raw),
         conflate_ms,
         heartbeat_ms,
+        request_id,
     )
 
 
@@ -700,6 +712,7 @@ class BetfairMarketStreamState:
                     (),
                     frame.conflate_ms,
                     frame.heartbeat_ms,
+                    frame.request_id,
                 )
             raise ValueError("same Betfair clk arrived with different frame content")
 
@@ -724,6 +737,7 @@ class BetfairMarketStreamState:
                 (),
                 frame.conflate_ms,
                 frame.heartbeat_ms,
+                frame.request_id,
             )
 
         reset_removed: list[BetfairQuoteIdentity] = []
@@ -780,4 +794,5 @@ class BetfairMarketStreamState:
             tuple(images),
             frame.conflate_ms,
             frame.heartbeat_ms,
+            frame.request_id,
         )

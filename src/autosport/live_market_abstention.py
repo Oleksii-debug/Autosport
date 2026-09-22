@@ -118,7 +118,37 @@ class LiveMarketEligibilityDecision:
     status: LiveMarketEligibility
     reasons: tuple[AbstentionReason, ...]
     quote_age: timedelta
-    execution_authorized: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not LiveMarketEligibility:
+            raise LiveMarketAbstentionError(
+                "status must be exact LiveMarketEligibility"
+            )
+        if type(self.reasons) is not tuple or any(
+            type(reason) is not AbstentionReason for reason in self.reasons
+        ):
+            raise LiveMarketAbstentionError(
+                "reasons must be a tuple of exact AbstentionReason values"
+            )
+        if not isinstance(self.quote_age, timedelta):
+            raise LiveMarketAbstentionError("quote_age must be timedelta")
+        if self.status is LiveMarketEligibility.WAIT and not self.reasons:
+            raise LiveMarketAbstentionError("WAIT decision requires abstention reasons")
+        if (
+            self.status is LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION
+            and self.reasons
+        ):
+            raise LiveMarketAbstentionError(
+                "ELIGIBLE decision cannot contain abstention reasons"
+            )
+
+    @property
+    def execution_authorized(self) -> bool:
+        return False
+
+    @property
+    def provider_authorities_bound(self) -> bool:
+        return False
 
     @property
     def eligible_for_downstream_evaluation(self) -> bool:

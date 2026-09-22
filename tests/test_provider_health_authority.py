@@ -247,6 +247,21 @@ def test_stale_fallback_read_remains_non_authorizing() -> None:
     assert evidence.write_authorized is False
 
 
+def test_fallback_freshness_uses_half_open_expiry_boundary() -> None:
+    evidence = FallbackReadEvidence(
+        requested_provider_id="book-a",
+        fallback_provider_id="book-b",
+        observed_at=BASE,
+        expires_at=BASE + timedelta(seconds=30),
+        provenance_sha256="a" * 64,
+        payload_sha256="b" * 64,
+    )
+    assert not evidence.is_fresh(as_of=BASE - timedelta(microseconds=1))
+    assert evidence.is_fresh(as_of=BASE)
+    assert evidence.is_fresh(as_of=BASE + timedelta(seconds=30) - timedelta(microseconds=1))
+    assert not evidence.is_fresh(as_of=BASE + timedelta(seconds=30))
+
+
 def test_fallback_evidence_rejects_same_provider_alias() -> None:
     with pytest.raises(ProviderHealthError, match="must differ"):
         FallbackReadEvidence(

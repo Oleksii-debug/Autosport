@@ -408,6 +408,20 @@ def _market_type(market_key: str) -> MarketType:
     return MarketType.OTHER
 
 
+_IMPLICIT_RESPONSE_MARKET_PAIRS = (
+    ("h2h", "h2h_lay"),
+    ("outrights", "outrights_lay"),
+)
+
+
+def _response_market_scope(requested_markets: tuple[str, ...]) -> frozenset[str]:
+    scope = set(requested_markets)
+    for requested, implicit in _IMPLICIT_RESPONSE_MARKET_PAIRS:
+        if requested in scope:
+            scope.add(implicit)
+    return frozenset(scope)
+
+
 class TheOddsApiProvider:
     """Observation-only adapter for The Odds API v4 current and historical odds."""
 
@@ -766,6 +780,7 @@ class TheOddsApiProvider:
     ) -> tuple[ProviderQuote, ...]:
         quotes: list[ProviderQuote] = []
         seen: set[tuple[object, ...]] = set()
+        response_market_scope = _response_market_scope(evidence.markets)
         for event_index, raw_event in enumerate(events):
             if not isinstance(raw_event, dict):
                 raise TheOddsApiPayloadError(
@@ -842,7 +857,7 @@ class TheOddsApiProvider:
                 market_key = _canonical_component(
                     raw_market.get("key"), "market.key"
                 )
-                if market_key not in evidence.markets:
+                if market_key not in response_market_scope:
                     raise TheOddsApiPayloadError(
                         "response contains market outside requested markets scope"
                     )

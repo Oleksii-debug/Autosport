@@ -59,14 +59,18 @@ def _decimal(value: object, name: str) -> Decimal:
     # Preserve the existing canonical text/hash representation for ordinary
     # evidence while rejecting attacker-sized coefficient/exponent shapes
     # before _decimal_text() or exact arithmetic can allocate in proportion
-    # to an unbounded Decimal representation. Numerical zero is canonicalized
-    # to "0" independently of sign/exponent and therefore needs no expansion.
-    if not parsed.is_zero():
-        _, digits, exponent = parsed.as_tuple()
-        if len(digits) > _MAX_DECIMAL_COEFFICIENT_DIGITS:
-            raise ValueError(f"{name} Decimal coefficient exceeds evidence limit")
-        if not isinstance(exponent, int) or abs(exponent) > _MAX_DECIMAL_ABS_EXPONENT:
-            raise ValueError(f"{name} Decimal exponent exceeds evidence limit")
+    # to an unbounded Decimal representation. Collapse every numerical zero
+    # to exponent 0 so an extreme zero exponent cannot amplify _exact_sum().
+    if parsed.is_zero():
+        return Decimal("0")
+    _, digits, exponent = parsed.as_tuple()
+    if len(digits) > _MAX_DECIMAL_COEFFICIENT_DIGITS:
+        raise ValueError(f"{name} Decimal coefficient exceeds evidence limit")
+    if (
+        not isinstance(exponent, int)
+        or abs(exponent) > _MAX_DECIMAL_ABS_EXPONENT
+    ):
+        raise ValueError(f"{name} Decimal exponent exceeds evidence limit")
     return parsed
 
 

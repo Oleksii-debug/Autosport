@@ -19,7 +19,9 @@ from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
 
-RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v3"
+RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v4"
+RISK_REPORT_SCOPE_PAPER_ONLY = "PAPER_ONLY"
+DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
 _INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
 
@@ -49,6 +51,10 @@ class PaperRiskReport:
     """
 
     schema: str
+    scope: str
+    drawdown_metric_class: str
+    includes_live_execution_exposure: bool
+    live_execution_headroom_authoritative: bool
     portfolio_risk_state_sha256: str
     goal_id: str
     goal_revision: int
@@ -256,6 +262,10 @@ def build_paper_risk_report(
 
     return PaperRiskReport(
         schema=RISK_REPORT_SCHEMA,
+        scope=RISK_REPORT_SCOPE_PAPER_ONLY,
+        drawdown_metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+        includes_live_execution_exposure=False,
+        live_execution_headroom_authoritative=False,
         portfolio_risk_state_sha256=after_sha256,
         goal_id=goal.goal_id,
         goal_revision=goal.revision,

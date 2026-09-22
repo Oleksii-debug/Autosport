@@ -73,6 +73,8 @@ Transport = Callable[[str, Mapping[str, str], float], HttpJsonResponse]
 Clock = Callable[[], str]
 Sleeper = Callable[[float], None]
 
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
 
 def _finite_runtime_float(value: object, *, field: str, allow_zero: bool) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -151,7 +153,9 @@ def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> 
     try:
         opener = build_opener(_RejectAuthenticatedRedirects())
         with opener.open(request, timeout=timeout) as response:  # nosec B310 - caller pins HTTPS provider URL
-            raw = response.read()
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_RESPONSE_BYTES:
+                raise ProviderTransportError("provider response exceeded the size limit")
             exact_decimals = urlsplit(url).path.rstrip("/").endswith("/odds")
             payload = _decode_provider_json(raw, exact_decimals=exact_decimals)
             return HttpJsonResponse(payload, int(response.status), dict(response.headers.items()))

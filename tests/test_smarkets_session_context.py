@@ -596,6 +596,44 @@ def test_account_activity_read_rejects_redirect(monkeypatch) -> None:
         session.acquire_account_activity()
 
 
+def test_account_activity_requires_json_media_type(monkeypatch) -> None:
+    _install_accounts(monkeypatch, _FakeResponse())
+    _install_identity(monkeypatch, times=("2026-09-22T18:00:00+00:00",))
+    session = open_smarkets_authenticated_session("token-A")
+
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: _FakeResponse(
+            b"<html>not activity json</html>",
+            url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            content_type="text/html",
+        ),
+    )
+
+    with pytest.raises(SmarketsSessionContextError, match="application/json"):
+        session.acquire_account_activity()
+
+
+def test_account_activity_incomplete_body_fails_closed(monkeypatch) -> None:
+    _install_accounts(monkeypatch, _FakeResponse())
+    _install_identity(monkeypatch, times=("2026-09-22T18:00:00+00:00",))
+    session = open_smarkets_authenticated_session("token-A")
+    response = _FakeResponse(
+        b'{"activity":[]}',
+        url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+    )
+    response.headers.replace_header("Content-Length", str(len(response.payload) + 5))
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: response,
+    )
+
+    with pytest.raises(SmarketsSessionContextError, match="framing"):
+        session.acquire_account_activity()
+
+
 def test_account_activity_http_error_does_not_leak_session_secret(monkeypatch) -> None:
     secret = "activity-secret-sentinel"
     _install_accounts(monkeypatch, _FakeResponse())

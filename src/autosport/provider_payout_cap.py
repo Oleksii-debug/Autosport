@@ -520,13 +520,26 @@ def _fingerprint(evidence: ProviderPayoutCapEvidence) -> str:
 
 
 def _decimal_text(value: Decimal) -> str:
+    """Context-independent canonical decimal text."""
+
     _nonnegative_decimal(value, "decimal")
     if value == 0:
         return "0"
-    normalized = value.normalize()
-    text = format(normalized, "f")
-    if "." in text:
+
+    sign, digits, exponent = value.as_tuple()
+    coefficient = "".join(str(digit) for digit in digits) or "0"
+    if exponent >= 0:
+        text = coefficient + ("0" * exponent)
+    else:
+        point = len(coefficient) + exponent
+        if point <= 0:
+            text = "0." + ("0" * (-point)) + coefficient
+        else:
+            text = coefficient[:point] + "." + coefficient[point:]
         text = text.rstrip("0").rstrip(".")
+
+    if sign:
+        text = "-" + text
     return text
 
 

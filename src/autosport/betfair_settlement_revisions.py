@@ -261,7 +261,11 @@ class BetfairSettlementRevisionStore:
         self._revisions: list[BetfairSettlementRevision] = []
         self._by_bet: dict[tuple[str, str, str], list[BetfairSettlementRevision]] = {}
         self._last_record_sha256: str | None = None
-        self._reload()
+        # Startup reload may resolve a pending monotonic PREPARE to ABORT/COMMIT.
+        # Serialize that recovery with the same OS writer lock used by ingest so
+        # a concurrent opener cannot terminate another process's active append.
+        with self._writer_lock():
+            self._reload()
 
     @staticmethod
     def _monotonic_key(path: Path) -> str:

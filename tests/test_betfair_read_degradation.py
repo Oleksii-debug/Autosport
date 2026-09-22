@@ -122,6 +122,7 @@ def test_non_read_operations_are_rejected(operation):
     "operation",
     [
         "listEventTypes",
+        "listCompetitions",
         "listEvents",
         "listMarketTypes",
         "listMarketCatalogue",
@@ -155,6 +156,48 @@ def test_multisport_discovery_reads_share_betting_degradation_policy():
         assert malformed_request.request_must_change is True
         assert account_only.documented_for_api_family is False
         assert account_only.action is ReadRecoveryAction.DO_NOT_RETRY
+
+
+def test_list_competitions_uses_conservative_documented_failure_policy():
+    expected = {
+        "INVALID_SESSION_INFORMATION": ReadRecoveryAction.REAUTHENTICATE,
+        "NO_SESSION": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+        "NO_APP_KEY": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+        "INVALID_APP_KEY": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+        "INVALID_INPUT_DATA": ReadRecoveryAction.REPAIR_REQUEST,
+        "SERVICE_BUSY": ReadRecoveryAction.RETRY_WITH_BACKOFF,
+        "TIMEOUT_ERROR": ReadRecoveryAction.RETRY_WITH_BACKOFF,
+        "UNEXPECTED_ERROR": ReadRecoveryAction.RETRY_WITH_BACKOFF,
+        "ACCESS_DENIED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+    }
+    for error_code, action in expected.items():
+        result = BetfairReadDegradation("listCompetitions", error_code)
+        assert result.api_family == "BETTING"
+        assert result.documented_for_api_family is True
+        assert result.action is action
+        assert result.automatic_repeat_allowed is (
+            action is ReadRecoveryAction.RETRY_WITH_BACKOFF
+        )
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["TOO_MUCH_DATA", "REQUEST_SIZE_EXCEEDS_LIMIT", "TOO_MANY_REQUESTS"],
+)
+def test_list_competitions_does_not_inherit_unestablished_limit_actions(error_code):
+    result = BetfairReadDegradation("listCompetitions", error_code)
+    assert result.api_family == "BETTING"
+    assert result.documented_for_api_family is False
+    assert result.action is ReadRecoveryAction.DO_NOT_RETRY
+    assert result.automatic_repeat_allowed is False
+    assert result.request_must_change is False
+
+
+def test_list_competitions_rejects_accounts_only_error_semantics():
+    result = BetfairReadDegradation("listCompetitions", "SUBSCRIPTION_EXPIRED")
+    assert result.documented_for_api_family is False
+    assert result.action is ReadRecoveryAction.DO_NOT_RETRY
+    assert result.automatic_repeat_allowed is False
 
 
 def test_error_code_must_be_canonical_uppercase_without_whitespace():
@@ -202,13 +245,13 @@ def test_error_classification_never_claims_success_response_completeness():
 
 def test_all_common_temporary_errors_are_repeatable_only_for_supported_reads():
     temporary = (
-        "TOO_MANY_REQUESTS",
         "SERVICE_BUSY",
         "TIMEOUT_ERROR",
         "UNEXPECTED_ERROR",
     )
     operations = (
         "listEventTypes",
+        "listCompetitions",
         "listEvents",
         "listMarketTypes",
         "listMarketCatalogue",

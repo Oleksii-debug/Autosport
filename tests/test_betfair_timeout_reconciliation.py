@@ -11,6 +11,7 @@ import autosport.betfair_timeout_reconciliation as timeout_resolution
 import autosport.real_execution_ledger as ledger_module
 import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
+    BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
 )
@@ -1230,6 +1231,32 @@ def test_provider_verifier_rejects_capability_profile_method_rebind(
             profile,
             expected_profile_sha256=profile.profile_id,
             readback=capture,
+            expected_provider_order_ref=provider_ref,
+        )
+
+def test_provider_verifier_rejects_readback_subclass_override(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+
+    class ForgedReadback(BetfairExecutionReadbackEnvelope):
+        __slots__ = ()
+
+        def assert_authoritative(self) -> None:
+            return None
+
+    forged = object.__new__(ForgedReadback)
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="exact canonical action-scoped readback envelope",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=forged,
             expected_provider_order_ref=provider_ref,
         )
 

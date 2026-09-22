@@ -95,6 +95,7 @@ def test_simple_existing_allocation_semantics_remain_unchanged() -> None:
         ("campaign-b", Decimal("0.75")),
     )
 
+
 @pytest.mark.parametrize(
     "shares",
     (

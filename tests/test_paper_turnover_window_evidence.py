@@ -115,6 +115,22 @@ class PaperTurnoverWindowEvidenceTests(unittest.TestCase):
             "economic goal turnover limit exceeded",
         )
 
+    def test_unanchored_measurement_window_cannot_narrow_turnover_history(self) -> None:
+        book = PaperBook("100")
+        self._open_and_void(
+            book,
+            self._leg("prior-unanchored"),
+            "50",
+            "2026-09-16T12:00:00+00:00",
+        )
+        policy = self._policy("0.05")
+        unanchored = replace(self._context(), proposal_ts=None)
+
+        blocked = policy.evaluate(book, Decimal("0.01"), context=unanchored)
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(blocked.reason, "economic goal turnover limit exceeded")
+
     def test_turnover_window_boundaries_are_inclusive_by_ticket_placed_at(self) -> None:
         book = PaperBook("100")
         self._open_and_void(

@@ -20,7 +20,13 @@ SCHEMA_VERSION = 1
 TIMING_SCOPE = "transport_round_trip"
 PRODUCTION_CLOCK_SOURCE = "PROCESS_PERF_COUNTER_NS"
 TEST_CLOCK_SOURCE = "INJECTED_TEST_CLOCK"
-MAX_ELAPSED_NS = (1 << 63) - 1\n\n_WITNESS_ISSUANCE: ContextVar[bool] = ContextVar(\n    "autosport_transport_timing_witness_issuance",\n    default=False,\n)\n
+MAX_ELAPSED_NS = (1 << 63) - 1
+
+_WITNESS_ISSUANCE: ContextVar[bool] = ContextVar(
+    "autosport_transport_timing_witness_issuance",
+    default=False,
+)
+
 
 class TransportTimingEvidenceError(RuntimeError):
     """Transport timing evidence is malformed or cannot be measured safely."""
@@ -99,7 +105,13 @@ class TransportRoundTripWitness:
     external_effect_proven: bool = False
     evidence_sha256: str = field(init=False)
 
-    def __post_init__(self) -> None:\n        if not _WITNESS_ISSUANCE.get():\n            raise TransportTimingEvidenceError(\n                "transport timing witness must be product-issued"\n            )\n        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:\n            raise TransportTimingEvidenceError(
+    def __post_init__(self) -> None:
+        if not _WITNESS_ISSUANCE.get():
+            raise TransportTimingEvidenceError(
+                "transport timing witness must be product-issued"
+            )
+        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
+            raise TransportTimingEvidenceError(
                 f"schema_version must be exactly {SCHEMA_VERSION}"
             )
         for name in ("attempt_id", "action_id", "provider_id", "account_id"):

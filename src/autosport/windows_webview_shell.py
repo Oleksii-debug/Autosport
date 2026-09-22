@@ -506,7 +506,18 @@ class AutosportWebController:
                     "" if self.research_plan_path is None else str(self.research_plan_path)
                 ),
                 "research_plan_summary": (
-                    text("ui.status.research_plan.baseline")
+                    (
+                        text("ui.status.research_plan.required_missing")
+                        if spec.requires_research_plan
+                        else (
+                            text("ui.status.research_plan.baseline")
+                            if self.strategy_id == "baseline-v1"
+                            else text(
+                                "ui.status.research_plan.not_required",
+                                strategy_id=self.strategy_id,
+                            )
+                        )
+                    )
                     if self.research_plan is None
                     else text(
                         "ui.status.research_plan.selected",
@@ -595,9 +606,17 @@ class AutosportWebController:
             self.research_plan_path = None
         self._owner_review = None
         self.owner_review_lines = []
-        self._refresh_economic_projection()
+        # Selecting a research strategy before binding its required causal plan is
+        # a normal configuration state, not evidence of economic corruption.
+        # Keep the last proven economic projection visible until the plan is bound;
+        # do not quarantine or open the research workspace prematurely.
+        if not spec.requires_research_plan or self.research_plan is not None:
+            self._refresh_economic_projection()
         self._refresh_owner_projection()
-        return self._ok(text("ui.status.strategy.selected", strategy_id=self.strategy_id), focus_id="106")
+        return self._ok(
+            text("ui.status.strategy.selected", strategy_id=self.strategy_id),
+            focus_id="106",
+        )
 
     def _action_research_plan_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():

@@ -516,8 +516,20 @@ def test_caller_constructed_self_hashed_record_is_not_authority(
         sut.verify_smarkets_execution_approval(forged, bound, approval)
 
 
-def test_canonical_confirmation_path_is_product_workspace_scoped(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(tmp_path.resolve()))
+def test_canonical_confirmation_path_is_product_workspace_scoped_and_frozen(
+    tmp_path, monkeypatch
+):
+    first_workspace = (tmp_path / "workspace-a").resolve()
+    second_workspace = (tmp_path / "workspace-b").resolve()
+    monkeypatch.setattr(sut, "_CANONICAL_CONFIRMATION_PATH", None)
+    monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(first_workspace))
     assert sut.canonical_supervised_confirmation_path() == (
-        tmp_path.resolve() / "supervised-confirmation.jsonl"
+        first_workspace / "supervised-confirmation.jsonl"
     )
+
+    monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(second_workspace))
+    with pytest.raises(
+        sut.SmarketsExecutionApprovalError,
+        match="workspace changed after approval authority initialization",
+    ):
+        sut.canonical_supervised_confirmation_path()

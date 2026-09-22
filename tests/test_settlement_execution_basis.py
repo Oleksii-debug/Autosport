@@ -88,7 +88,7 @@ class SettlementExecutionBasisTests(unittest.TestCase):
             self.assertFalse(basis.to_dict()["settlement_outcome_authorized"])
             self.assertEqual(verify_settlement_execution_basis(ledger, basis), basis)
 
-    def test_partial_fill_preserves_actual_accepted_stake(self) -> None:
+    def test_unfinalized_partial_fill_has_no_settlement_basis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = _ledger(
                 Path(directory) / "execution.jsonl",
@@ -96,10 +96,14 @@ class SettlementExecutionBasisTests(unittest.TestCase):
                 accepted_odds="1.95",
                 accepted_stake="3.25",
             )
-            basis = derive_settlement_execution_basis(ledger, attempt_id="attempt-1")
-            self.assertEqual(basis.accepted_odds, Decimal("1.95"))
-            self.assertEqual(basis.accepted_stake, Decimal("3.25"))
-            self.assertEqual(basis.acknowledgement_status, AcknowledgementStatus.PARTIAL)
+            with self.assertRaisesRegex(
+                SettlementExecutionBasisError,
+                "PARTIAL execution requires provider-finalized realization",
+            ):
+                derive_settlement_execution_basis(
+                    ledger,
+                    attempt_id="attempt-1",
+                )
 
     def test_rejected_attempt_has_no_settlement_basis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

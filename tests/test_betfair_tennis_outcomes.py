@@ -7,7 +7,7 @@ from decimal import Decimal
 from autosport.betfair_tennis_outcomes import (
     assess_betfair_tennis_historical_market_definition_authority,
 )
-from autosport.domain import TicketLeg
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.market_outcomes import (
     MarketSettlementOutcomeAuthority,
     OutcomeAuthorityStatus,
@@ -92,6 +92,25 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
             tennis.verification_protocol_sha256,
             table_tennis.verification_protocol_sha256,
         )
+
+    def test_same_provider_local_quote_identity_is_sport_bound_and_round_trips(self):
+        base = {
+            "event_id": "same-provider-event",
+            "market_id": "same-provider-market",
+            "selection_id": "player-a",
+            "decimal_odds": "2",
+            "observed_ts": "2026-09-22T10:00:00Z",
+            "source_id": self.SOURCE_ID,
+            "sequence": 1,
+            "market_type": "winner",
+        }
+        tennis = MarketEvent.from_dict({**base, "sport": "tennis"})
+        table_tennis = MarketEvent.from_dict({**base, "sport": "table_tennis"})
+
+        self.assertNotEqual(tennis.quote_key, table_tennis.quote_key)
+        self.assertNotEqual(tennis.dedupe_key, table_tennis.dedupe_key)
+        self.assertEqual(MarketEvent.from_dict(tennis.to_dict()), tennis)
+        self.assertEqual(MarketEvent.from_dict(table_tennis.to_dict()), table_tennis)
 
     def test_tennis_terminal_cover_preserves_each_runner_as_a_selection(self):
         tennis = self._tennis()

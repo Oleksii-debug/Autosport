@@ -39,6 +39,13 @@ from .workspace_lock import WorkspaceEconomicLock
 SCHEMA = "autosport.research_scheduler"
 SCHEMA_VERSION = 3
 _HEX = frozenset("0123456789abcdef")
+_HISTORY_SCHEMA = "autosport.research_scheduler.occurrence_history_chunk"
+_HISTORY_SCHEMA_VERSION = 1
+_HISTORY_CHUNK_SIZE = 256
+_HISTORY_ZERO_SHA256 = "0" * 64
+_HISTORY_FIELDS = frozenset(
+    {"occurrence_history_count", "occurrence_history_tail_sha256"}
+)
 
 
 class ResearchSchedulerError(RuntimeError):
@@ -448,7 +455,11 @@ class ResearchScheduler:
         self.trigger_sink = trigger_sink
         self.source_registry = source_registry
         try:
-            self._validate(self._read())
+            with WorkspaceEconomicLock(self.path.parent):
+                state = self._read()
+                self._validate(state, check_history_tail=False)
+                state = self._prepare_occurrence_history_locked(state)
+                self._validate(state)
         except FileNotFoundError as exc:
             raise ResearchSchedulerError("research scheduler state is missing") from exc
 
@@ -473,6 +484,8 @@ class ResearchScheduler:
                     "schedules": {},
                     "occurrences": {},
                     "curriculum_wakes": {},
+                    "occurrence_history_count": 0,
+                    "occurrence_history_tail_sha256": _HISTORY_ZERO_SHA256,
                 }
                 atomic_write_json(target, {**body, "state_sha256": _digest(body)})
         return cls(target, trigger_sink, source_registry=source_registry)
@@ -492,6 +505,435 @@ class ResearchScheduler:
     def _write(self, state: dict[str, Any]) -> None:
         body = {key: value for key, value in state.items() if key != "state_sha256"}
         atomic_write_json(self.path, {**body, "state_sha256": _digest(body)})
+
+    @property
+    def _occurrence_history_dir(self) -> Path:
+        return self.path.with_name(f".{self.path.name}.occurrence-history")
+
+    def _occurrence_history_chunk_path(self, chunk_index: int) -> Path:
+        _nonnegative_int(chunk_index, "occurrence history chunk_index")
+        return self._occurrence_history_dir / f"{chunk_index:08d}.json"
+
+    @staticmethod
+    def _occurrence_history_anchor(
+        state: dict[str, Any],
+    ) -> tuple[int, str] | None:
+        has_count = "occurrence_history_count" in state
+        has_tail = "occurrence_history_tail_sha256" in state
+        if has_count != has_tail:
+            raise ResearchSchedulerError("occurrence history anchor is incomplete")
+        if not has_count:
+            return None
+        count = _nonnegative_int(
+            state["occurrence_history_count"],
+            "occurrence_history_count",
+        )
+        tail = _sha(
+            state["occurrence_history_tail_sha256"],
+            "occurrence_history_tail_sha256",
+        )
+        if count == 0 and tail != _HISTORY_ZERO_SHA256:
+            raise ResearchSchedulerError("empty occurrence history has non-empty tail")
+        if count > 0 and tail == _HISTORY_ZERO_SHA256:
+            raise ResearchSchedulerError("non-empty occurrence history has empty tail")
+        return count, tail
+
+    @staticmethod
+    def _occurrence_history_entry(
+        *,
+        sequence: int,
+        previous_entry_sha256: str,
+        occurrence_id: str,
+        occurrence: dict[str, Any],
+    ) -> dict[str, Any]:
+        body = {
+            "sequence": _positive_int(sequence, "history sequence"),
+            "previous_entry_sha256": _sha(
+                previous_entry_sha256,
+                "history previous_entry_sha256",
+            ),
+            "occurrence_id": _sha(occurrence_id, "history occurrence_id"),
+            "occurrence": occurrence,
+        }
+        return {**body, "entry_sha256": _digest(body)}
+
+    def _read_occurrence_history_chunk_raw(
+        self,
+        chunk_index: int,
+    ) -> dict[str, Any]:
+        path = self._occurrence_history_chunk_path(chunk_index)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResearchSchedulerError(
+                "research scheduler occurrence history chunk is unreadable"
+            ) from exc
+        if type(raw) is not dict or set(raw) != {
+            "schema",
+            "schema_version",
+            "chunk_index",
+            "start_sequence",
+            "previous_tail_sha256",
+            "entries",
+            "chunk_sha256",
+        }:
+            raise ResearchSchedulerError("occurrence history chunk fields mismatch")
+        if (
+            raw["schema"] != _HISTORY_SCHEMA
+            or raw["schema_version"] != _HISTORY_SCHEMA_VERSION
+        ):
+            raise ResearchSchedulerError("occurrence history chunk schema mismatch")
+        if raw["chunk_index"] != chunk_index:
+            raise ResearchSchedulerError("occurrence history chunk index mismatch")
+        expected_start = chunk_index * _HISTORY_CHUNK_SIZE + 1
+        if raw["start_sequence"] != expected_start:
+            raise ResearchSchedulerError(
+                "occurrence history chunk start sequence mismatch"
+            )
+        _sha(raw["previous_tail_sha256"], "history previous_tail_sha256")
+        if type(raw["entries"]) is not list or not raw["entries"]:
+            raise ResearchSchedulerError("occurrence history chunk entries are invalid")
+        if len(raw["entries"]) > _HISTORY_CHUNK_SIZE:
+            raise ResearchSchedulerError("occurrence history chunk exceeds bound")
+        body = {key: value for key, value in raw.items() if key != "chunk_sha256"}
+        if _sha(raw["chunk_sha256"], "history chunk_sha256") != _digest(body):
+            raise ResearchSchedulerError("occurrence history chunk digest mismatch")
+        return raw
+
+    def _validate_occurrence_history_entry(
+        self,
+        raw: object,
+        *,
+        expected_sequence: int,
+        expected_previous: str,
+        schedules: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], str]:
+        if type(raw) is not dict or set(raw) != {
+            "sequence",
+            "previous_entry_sha256",
+            "occurrence_id",
+            "occurrence",
+            "entry_sha256",
+        }:
+            raise ResearchSchedulerError("occurrence history entry fields mismatch")
+        if _positive_int(raw["sequence"], "history sequence") != expected_sequence:
+            raise ResearchSchedulerError("occurrence history sequence mismatch")
+        previous = _sha(
+            raw["previous_entry_sha256"],
+            "history previous_entry_sha256",
+        )
+        if previous != expected_previous:
+            raise ResearchSchedulerError("occurrence history chain mismatch")
+        occurrence_id = _sha(raw["occurrence_id"], "history occurrence_id")
+        occurrence = raw["occurrence"]
+        self._validate_occurrence(occurrence_id, occurrence, schedules)
+        if occurrence["status"] not in {"ACCEPTED", "SKIPPED"}:
+            raise ResearchSchedulerError(
+                "occurrence history may contain only completed occurrences"
+            )
+        body = {
+            "sequence": raw["sequence"],
+            "previous_entry_sha256": previous,
+            "occurrence_id": occurrence_id,
+            "occurrence": occurrence,
+        }
+        entry_sha256 = _sha(raw["entry_sha256"], "history entry_sha256")
+        if entry_sha256 != _digest(body):
+            raise ResearchSchedulerError("occurrence history entry digest mismatch")
+        return occurrence_id, occurrence, entry_sha256
+
+    def _occurrence_history_chunk_indices(self) -> tuple[int, ...]:
+        directory = self._occurrence_history_dir
+        if not directory.exists():
+            return ()
+        if not directory.is_dir():
+            raise ResearchSchedulerError(
+                "research scheduler occurrence history path is not a directory"
+            )
+        indices: list[int] = []
+        for path in directory.glob("*.json"):
+            stem = path.stem
+            if len(stem) != 8 or not stem.isdigit():
+                raise ResearchSchedulerError(
+                    "occurrence history chunk filename is invalid"
+                )
+            indices.append(int(stem))
+        indices.sort()
+        if indices and indices != list(range(indices[-1] + 1)):
+            raise ResearchSchedulerError("occurrence history chunk sequence has gaps")
+        return tuple(indices)
+
+    def _read_occurrence_history_records(
+        self,
+        schedules: dict[str, Any],
+    ) -> list[tuple[str, dict[str, Any], str]]:
+        records: list[tuple[str, dict[str, Any], str]] = []
+        previous = _HISTORY_ZERO_SHA256
+        expected_sequence = 1
+        indices = self._occurrence_history_chunk_indices()
+        seen: set[str] = set()
+        for position, chunk_index in enumerate(indices):
+            chunk = self._read_occurrence_history_chunk_raw(chunk_index)
+            if chunk["previous_tail_sha256"] != previous:
+                raise ResearchSchedulerError(
+                    "occurrence history chunk predecessor mismatch"
+                )
+            entries = chunk["entries"]
+            if position < len(indices) - 1 and len(entries) != _HISTORY_CHUNK_SIZE:
+                raise ResearchSchedulerError(
+                    "non-final occurrence history chunk is not sealed"
+                )
+            for raw in entries:
+                occurrence_id, occurrence, entry_sha256 = (
+                    self._validate_occurrence_history_entry(
+                        raw,
+                        expected_sequence=expected_sequence,
+                        expected_previous=previous,
+                        schedules=schedules,
+                    )
+                )
+                if occurrence_id in seen:
+                    raise ResearchSchedulerError(
+                        "duplicate occurrence identity in history"
+                    )
+                seen.add(occurrence_id)
+                records.append((occurrence_id, occurrence, entry_sha256))
+                previous = entry_sha256
+                expected_sequence += 1
+        return records
+
+    def _validate_occurrence_history_tail(self, state: dict[str, Any]) -> None:
+        anchor = self._occurrence_history_anchor(state)
+        if anchor is None:
+            return
+        count, tail = anchor
+        if count == 0:
+            if self._occurrence_history_chunk_indices():
+                raise ResearchSchedulerError(
+                    "occurrence history exists beyond empty state anchor"
+                )
+            return
+        chunk_index = (count - 1) // _HISTORY_CHUNK_SIZE
+        expected_entries = ((count - 1) % _HISTORY_CHUNK_SIZE) + 1
+        try:
+            chunk = self._read_occurrence_history_chunk_raw(chunk_index)
+        except FileNotFoundError as exc:
+            raise ResearchSchedulerError(
+                "occurrence history tail chunk is missing"
+            ) from exc
+        if len(chunk["entries"]) != expected_entries:
+            raise ResearchSchedulerError(
+                "occurrence history tail cardinality mismatches state anchor"
+            )
+        last = chunk["entries"][-1]
+        if type(last) is not dict or set(last) != {
+            "sequence",
+            "previous_entry_sha256",
+            "occurrence_id",
+            "occurrence",
+            "entry_sha256",
+        }:
+            raise ResearchSchedulerError("occurrence history tail entry is invalid")
+        if last["sequence"] != count:
+            raise ResearchSchedulerError("occurrence history tail sequence mismatch")
+        if _sha(last["entry_sha256"], "history tail entry_sha256") != tail:
+            raise ResearchSchedulerError("occurrence history tail digest mismatch")
+        if self._occurrence_history_chunk_path(chunk_index + 1).exists():
+            raise ResearchSchedulerError(
+                "occurrence history extends beyond state anchor"
+            )
+
+    def _ensure_occurrence_history_anchor_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._occurrence_history_anchor(state) is not None:
+            return state
+        if self._occurrence_history_chunk_indices():
+            raise ResearchSchedulerError(
+                "legacy scheduler state has detached occurrence history"
+            )
+        state["occurrence_history_count"] = 0
+        state["occurrence_history_tail_sha256"] = _HISTORY_ZERO_SHA256
+        state["state_version"] += 1
+        self._write(state)
+        migrated = self._read()
+        self._validate(migrated, check_history_tail=False)
+        return migrated
+
+    def _recover_occurrence_history_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        anchor = self._occurrence_history_anchor(state)
+        if anchor is None:
+            raise ResearchSchedulerError("occurrence history anchor is missing")
+        count, tail = anchor
+        records = self._read_occurrence_history_records(state["schedules"])
+        if len(records) < count:
+            raise ResearchSchedulerError("occurrence history was truncated")
+        if count == 0:
+            if tail != _HISTORY_ZERO_SHA256:
+                raise ResearchSchedulerError("empty occurrence history tail mismatch")
+        elif records[count - 1][2] != tail:
+            raise ResearchSchedulerError(
+                "occurrence history does not match durable state anchor"
+            )
+
+        changed = False
+        anchored: dict[str, dict[str, Any]] = {}
+        for occurrence_id, occurrence, _ in records[:count]:
+            anchored[occurrence_id] = occurrence
+            hot = state["occurrences"].get(occurrence_id)
+            if hot is not None:
+                if hot != occurrence:
+                    raise ResearchSchedulerError(
+                        "hot occurrence conflicts with archived evidence"
+                    )
+                del state["occurrences"][occurrence_id]
+                changed = True
+
+        if len(records) > count:
+            for occurrence_id, occurrence, _ in records[count:]:
+                hot = state["occurrences"].get(occurrence_id)
+                if hot != occurrence:
+                    raise ResearchSchedulerError(
+                        "unanchored occurrence history cannot be recovered"
+                    )
+                del state["occurrences"][occurrence_id]
+                anchored[occurrence_id] = occurrence
+            state["occurrence_history_count"] = len(records)
+            state["occurrence_history_tail_sha256"] = records[-1][2]
+            changed = True
+
+        if changed:
+            state["state_version"] += 1
+            self._write(state)
+            recovered = self._read()
+            self._validate(recovered)
+            return recovered
+        self._validate_occurrence_history_tail(state)
+        return state
+
+    def _append_occurrence_history_locked(
+        self,
+        state: dict[str, Any],
+        occurrence_id: str,
+        occurrence: dict[str, Any],
+    ) -> None:
+        anchor = self._occurrence_history_anchor(state)
+        if anchor is None:
+            raise ResearchSchedulerError("occurrence history anchor is missing")
+        count, tail = anchor
+        chunk_index = count // _HISTORY_CHUNK_SIZE
+        offset = count % _HISTORY_CHUNK_SIZE
+        chunk_path = self._occurrence_history_chunk_path(chunk_index)
+        if offset == 0:
+            if chunk_path.exists():
+                raise ResearchSchedulerError(
+                    "unanchored occurrence history chunk already exists"
+                )
+            entries: list[dict[str, Any]] = []
+            previous_tail = tail
+        else:
+            try:
+                chunk = self._read_occurrence_history_chunk_raw(chunk_index)
+            except FileNotFoundError as exc:
+                raise ResearchSchedulerError(
+                    "occurrence history append chunk is missing"
+                ) from exc
+            entries = list(chunk["entries"])
+            if len(entries) != offset:
+                raise ResearchSchedulerError(
+                    "occurrence history append offset mismatch"
+                )
+            if _sha(entries[-1]["entry_sha256"], "history entry_sha256") != tail:
+                raise ResearchSchedulerError(
+                    "occurrence history append tail mismatch"
+                )
+            previous_tail = chunk["previous_tail_sha256"]
+
+        entry = self._occurrence_history_entry(
+            sequence=count + 1,
+            previous_entry_sha256=tail,
+            occurrence_id=occurrence_id,
+            occurrence=occurrence,
+        )
+        entries.append(entry)
+        body = {
+            "schema": _HISTORY_SCHEMA,
+            "schema_version": _HISTORY_SCHEMA_VERSION,
+            "chunk_index": chunk_index,
+            "start_sequence": chunk_index * _HISTORY_CHUNK_SIZE + 1,
+            "previous_tail_sha256": previous_tail,
+            "entries": entries,
+        }
+        self._occurrence_history_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            chunk_path,
+            {**body, "chunk_sha256": _digest(body)},
+        )
+        state["occurrence_history_count"] = count + 1
+        state["occurrence_history_tail_sha256"] = entry["entry_sha256"]
+
+    def _archive_completed_occurrences_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        completed = sorted(
+            (
+                (occurrence_id, raw)
+                for occurrence_id, raw in state["occurrences"].items()
+                if raw["status"] in {"ACCEPTED", "SKIPPED"}
+            ),
+            key=lambda item: (
+                item[1]["scheduled_for"],
+                item[1]["schedule_id"],
+                item[0],
+            ),
+        )
+        if not completed:
+            return state
+        for occurrence_id, raw in completed:
+            self._validate_occurrence(
+                occurrence_id,
+                raw,
+                state["schedules"],
+            )
+            self._append_occurrence_history_locked(
+                state,
+                occurrence_id,
+                raw,
+            )
+            del state["occurrences"][occurrence_id]
+        state["state_version"] += 1
+        self._write(state)
+        archived = self._read()
+        self._validate(archived)
+        return archived
+
+    def _prepare_occurrence_history_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = self._ensure_occurrence_history_anchor_locked(state)
+        state = self._recover_occurrence_history_locked(state)
+        state = self._archive_completed_occurrences_locked(state)
+        records = self._read_occurrence_history_records(state["schedules"])
+        anchor = self._occurrence_history_anchor(state)
+        assert anchor is not None
+        count, tail = anchor
+        if len(records) != count:
+            raise ResearchSchedulerError(
+                "occurrence history cardinality mismatch after recovery"
+            )
+        if count and records[-1][2] != tail:
+            raise ResearchSchedulerError(
+                "occurrence history tail mismatch after recovery"
+            )
+        return state
 
     @staticmethod
     def _event_from_payload(raw: object) -> ExternalResearchTrigger:
@@ -543,7 +985,12 @@ class ResearchScheduler:
             }
         )
 
-    def _validate(self, state: object) -> None:
+    def _validate(
+        self,
+        state: object,
+        *,
+        check_history_tail: bool = True,
+    ) -> None:
         if type(state) is not dict:
             raise ResearchSchedulerError("research scheduler state must be an object")
         required = {
@@ -557,8 +1004,10 @@ class ResearchScheduler:
             "curriculum_wakes",
             "state_sha256",
         }
-        if set(state) != required:
+        fields = set(state)
+        if fields not in {frozenset(required), frozenset(required) | _HISTORY_FIELDS}:
             raise ResearchSchedulerError("research scheduler state fields mismatch")
+        self._occurrence_history_anchor(state)
         if state["schema"] != SCHEMA or state["schema_version"] != SCHEMA_VERSION:
             raise ResearchSchedulerError("research scheduler schema mismatch")
         try:
@@ -612,6 +1061,8 @@ class ResearchScheduler:
             self._validate_occurrence(occurrence_id, raw, state["schedules"])
         for wake_id, raw in state["curriculum_wakes"].items():
             self._validate_curriculum_wake(wake_id, raw)
+        if check_history_tail:
+            self._validate_occurrence_history_tail(state)
 
     def _validate_schedule_authority(self, schedule: ResearchSchedule) -> None:
         if schedule.wake_source is WakeSource.SCHEDULED_QUESTION:
@@ -1089,9 +1540,10 @@ class ResearchScheduler:
 
     @property
     def status(self) -> SchedulerStatus:
-        state = self._read()
-        self._validate(state)
-        return SchedulerStatus(state["status"])
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            return SchedulerStatus(state["status"])
 
     def pause(self) -> None:
         self._set_status(SchedulerStatus.PAUSED)
@@ -1124,9 +1576,39 @@ class ResearchScheduler:
             self._write(state)
 
     def snapshot(self) -> dict[str, Any]:
-        state = self._read()
-        self._validate(state)
-        return json.loads(_canonical_json(state))
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            frozen = json.loads(_canonical_json(state))
+        anchor = self._occurrence_history_anchor(frozen)
+        assert anchor is not None
+        count, tail = anchor
+        records = self._read_occurrence_history_records(frozen["schedules"])
+        if len(records) < count:
+            raise ResearchSchedulerError("occurrence history was truncated")
+        if count and records[count - 1][2] != tail:
+            raise ResearchSchedulerError(
+                "occurrence history does not match snapshot anchor"
+            )
+        merged = {
+            occurrence_id: occurrence
+            for occurrence_id, occurrence, _ in records[:count]
+        }
+        for occurrence_id, occurrence in frozen["occurrences"].items():
+            prior = merged.get(occurrence_id)
+            if prior is not None and prior != occurrence:
+                raise ResearchSchedulerError(
+                    "hot occurrence conflicts with snapshot history"
+                )
+            merged[occurrence_id] = occurrence
+        frozen["occurrences"] = dict(sorted(merged.items()))
+        body = {
+            key: value
+            for key, value in frozen.items()
+            if key != "state_sha256"
+        }
+        frozen["state_sha256"] = _digest(body)
+        return frozen
 
     @staticmethod
     def _oldest_pending(
@@ -1231,6 +1713,9 @@ class ResearchScheduler:
                 }
                 state["state_version"] += 1
                 self._write(state)
+                state = self._read()
+                self._validate(state)
+                self._archive_completed_occurrences_locked(state)
                 return TickResult(
                     TickAction.SKIPPED,
                     schedule_id=schedule_id,
@@ -1275,6 +1760,7 @@ class ResearchScheduler:
             raw = state["occurrences"].get(occurrence_id)
             if raw is None:
                 raise ResearchSchedulerError("pending occurrence disappeared")
+            schedule_id = raw["schedule_id"]
             expected_event = self._event_from_payload(raw["event"])
             if expected_event.source_event_sha256 != event.source_event_sha256:
                 raise ResearchSchedulerError("pending occurrence changed during delivery")
@@ -1286,11 +1772,14 @@ class ResearchScheduler:
                 raw["receipt"] = accepted_receipt
                 state["state_version"] += 1
                 self._write(state)
+                state = self._read()
+                self._validate(state)
             else:
                 raise ResearchSchedulerError("pending occurrence status changed")
+            self._archive_completed_occurrences_locked(state)
             return TickResult(
                 TickAction.DELIVERED,
-                schedule_id=raw["schedule_id"],
+                schedule_id=schedule_id,
                 occurrence_id=occurrence_id,
                 receipt=receipt,
             )

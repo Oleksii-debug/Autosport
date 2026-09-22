@@ -14,7 +14,7 @@ from .windows_emergency_stop import EmergencyStopResult, WindowsEmergencyStopBri
 
 
 WINDOWS_BANKROLL_AUTOMATION_ID = 205
-WINDOWS_EMERGENCY_STOP_AUTOMATION_ID = 206
+WINDOWS_EMERGENCY_STOP_AUTOMATION_ID = 209
 WINDOWS_EMERGENCY_STOP_HOTKEY = "<Control-Shift-s>"
 WINDOWS_EMERGENCY_STOP_LABEL = "Аварійний STOP виконання / Emergency execution STOP (Ctrl+Shift+S)"
 WINDOWS_EMERGENCY_STOP_DESCRIPTION = (

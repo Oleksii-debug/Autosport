@@ -16,6 +16,10 @@ from pathlib import Path
 import sqlite3
 from weakref import ref
 
+from ._campaign_provider_scope_devapp_identity import (
+    _read_developer_account_identity,
+)
+from . import campaign_provider_scope_authority as _provider_scope
 from .betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     ADAPTER_ID,
@@ -52,7 +56,7 @@ _ALLOWED_ACCOUNT_CAPABILITIES = frozenset(
         BookmakerCapability.SETTLED_POSITIONS_READ,
     }
 )
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _INTEGRATION_SOURCE_REF = "autosport://betfair-account-readonly/official-api-v1"
 
 
@@ -152,6 +156,8 @@ class AccountSnapshotAcquisitionReceipt:
     source_observation_id: str
     venue_id: str
     account_id: str
+    authenticated_account_identity_sha256: str
+    account_identity_observed_at: str
     adapter_id: str
     adapter_version: str
     integration_evidence_id: str
@@ -173,6 +179,7 @@ class AccountSnapshotAcquisitionReceipt:
             "acquisition_id",
             "acquisition_request_id_sha256",
             "source_observation_id",
+            "authenticated_account_identity_sha256",
             "integration_evidence_id",
             "snapshot_sha256",
             "snapshot_content_sha256",
@@ -201,6 +208,7 @@ class AccountSnapshotAcquisitionReceipt:
             )
         for capability in self.requested_capabilities:
             _text(capability, "requested_capabilities item")
+        _timestamp(self.account_identity_observed_at, "account_identity_observed_at")
         _timestamp(self.acquired_at, "acquired_at")
         if self.provider_observed_at is not None:
             _timestamp(self.provider_observed_at, "provider_observed_at")
@@ -208,8 +216,11 @@ class AccountSnapshotAcquisitionReceipt:
             raise AccountSnapshotAcquisitionError(
                 "durable source_authority_proven must be exactly false"
             )
+        if self.provider_account_identity_proven is not True:
+            raise AccountSnapshotAcquisitionError(
+                "provider_account_identity_proven must be exactly true"
+            )
         for field in (
-            "provider_account_identity_proven",
             "grants_execution_authority",
             "grants_settlement_authority",
         ):
@@ -427,6 +438,8 @@ class _AccountSnapshotStore:
         requested_capabilities: frozenset[BookmakerCapability],
         *,
         acquisition_request_id_sha256: str,
+        authenticated_account_identity_sha256: str,
+        account_identity_observed_at: str,
     ) -> AuthoritativeAccountSnapshot:
         if type(snapshot) is not BookmakerAccountSnapshot:
             raise AccountSnapshotAcquisitionError(
@@ -441,6 +454,11 @@ class _AccountSnapshotStore:
             acquisition_request_id_sha256,
             "acquisition_request_id_sha256",
         )
+        authenticated_account_identity_sha256 = _sha256_hex(
+            authenticated_account_identity_sha256,
+            "authenticated_account_identity_sha256",
+        )
+        _timestamp(account_identity_observed_at, "account_identity_observed_at")
 
         requested = tuple(sorted(capability.value for capability in requested_capabilities))
         snapshot_payload = _snapshot_payload(snapshot, include_local_times=True)
@@ -453,6 +471,7 @@ class _AccountSnapshotStore:
                 "schema_version": 1,
                 "venue_id": snapshot.profile.venue_id,
                 "account_id": snapshot.profile.account_id,
+                "authenticated_account_identity_sha256": authenticated_account_identity_sha256,
                 "adapter_id": snapshot.profile.adapter_id,
                 "adapter_version": snapshot.profile.adapter_version,
                 "integration_kind": integration.integration_kind.value,
@@ -466,6 +485,8 @@ class _AccountSnapshotStore:
             "source_observation_id": source_observation_id,
             "venue_id": snapshot.profile.venue_id,
             "account_id": snapshot.profile.account_id,
+            "authenticated_account_identity_sha256": authenticated_account_identity_sha256,
+            "account_identity_observed_at": account_identity_observed_at,
             "adapter_id": snapshot.profile.adapter_id,
             "adapter_version": snapshot.profile.adapter_version,
             "integration_evidence": integration.to_canonical_dict(),
@@ -481,7 +502,7 @@ class _AccountSnapshotStore:
             # origin is an ephemeral exact-object capability issued below.
             "source_authority_proven": False,
             # Betfair account-details does not expose a first-party immutable account id.
-            "provider_account_identity_proven": False,
+            "provider_account_identity_proven": True,
             "grants_execution_authority": False,
             "grants_settlement_authority": False,
         }
@@ -614,6 +635,8 @@ class _AccountSnapshotStore:
             "acquisition_id",
             "venue_id",
             "account_id",
+            "authenticated_account_identity_sha256",
+            "account_identity_observed_at",
             "adapter_id",
             "adapter_version",
             "integration_evidence",
@@ -738,6 +761,7 @@ class _AccountSnapshotStore:
                 "schema_version": 1,
                 "venue_id": snapshot.profile.venue_id,
                 "account_id": snapshot.profile.account_id,
+                "authenticated_account_identity_sha256": record["authenticated_account_identity_sha256"],
                 "adapter_id": snapshot.profile.adapter_id,
                 "adapter_version": snapshot.profile.adapter_version,
                 "integration_kind": integration.integration_kind.value,
@@ -760,6 +784,14 @@ class _AccountSnapshotStore:
             source_observation_id=source_observation_id,
             venue_id=_text(record["venue_id"], "venue_id"),
             account_id=_text(record["account_id"], "account_id"),
+            authenticated_account_identity_sha256=_sha256_hex(
+                record["authenticated_account_identity_sha256"],
+                "authenticated_account_identity_sha256",
+            ),
+            account_identity_observed_at=_text(
+                record["account_identity_observed_at"],
+                "account_identity_observed_at",
+            ),
             adapter_id=_text(record["adapter_id"], "adapter_id"),
             adapter_version=_text(record["adapter_version"], "adapter_version"),
             integration_evidence_id=_sha256_hex(
@@ -1320,6 +1352,13 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 "use a new acquisition_id for a new provider read"
             )
 
+        try:
+            account_identity = _read_developer_account_identity(client)
+        except _provider_scope.CampaignProviderScopeError as exc:
+            raise AccountSnapshotAcquisitionError(
+                "authenticated Betfair account identity is unavailable"
+            ) from exc
+
         snapshot, integration = raw_read(
             self,
             client,
@@ -1333,6 +1372,8 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 integration,
                 requested_capabilities,
                 acquisition_request_id_sha256=acquisition_request_id_sha256,
+                authenticated_account_identity_sha256=account_identity.account_identity_sha256,
+                account_identity_observed_at=account_identity.observed_at,
             )
         )
 

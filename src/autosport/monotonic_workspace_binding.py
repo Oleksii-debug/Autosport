@@ -147,34 +147,69 @@ def _absolute_machine_state_base(name: str, value: str | Path) -> Path:
     return path
 
 
+def _native_machine_state_base() -> Path:
+    """Resolve account-owned application state without process path configuration.
+
+    The pre-selection registry is itself a trust anchor.  Using LOCALAPPDATA,
+    XDG_STATE_HOME, HOME, or another process environment value here would let a
+    supported restart select a fresh receipt namespace before surviving machine
+    authority can be consulted.
+
+    Tests may monkeypatch this private helper.  Same-interpreter monkeypatching is a
+    trusted-test/extension capability and is not a supported runtime configuration
+    surface.
+    """
+
+    if os.name == "nt":
+        # CSIDL_LOCAL_APPDATA resolved by the Windows shell is account-owned OS
+        # state, unlike the process LOCALAPPDATA environment variable.
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            status = ctypes.windll.shell32.SHGetFolderPathW(
+                None,
+                0x001C,  # CSIDL_LOCAL_APPDATA
+                None,
+                0,  # SHGFP_TYPE_CURRENT
+                buffer,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise WorkspaceBindingIntegrityError(
+                "Windows Local AppData could not be resolved through the native shell"
+            ) from exc
+        if status != 0 or not buffer.value:
+            raise WorkspaceBindingIntegrityError(
+                "Windows Local AppData native shell lookup failed"
+            )
+        return _absolute_machine_state_base(
+            "native Windows Local AppData",
+            buffer.value,
+        )
+
+    try:
+        import pwd
+
+        account_home = pwd.getpwuid(os.getuid()).pw_dir
+    except (AttributeError, ImportError, KeyError, OSError) as exc:
+        raise WorkspaceBindingIntegrityError(
+            "OS account home could not be resolved for monotonic root binding"
+        ) from exc
+    return _absolute_machine_state_base("OS account home", account_home)
+
+
 def _machine_binding_root(*, workspace: Path, authority_root: Path) -> Path:
     """Return a non-configurable registry root consulted before authority-root selection.
 
-    `AUTOSPORT_MONOTONIC_AUTHORITY_ROOT` intentionally does not influence this path.
-    Otherwise changing that supported setting could select both a fresh journal and a
-    fresh receipt namespace, recreating the rollback/rebind defect this registry closes.
+    Neither AUTOSPORT_MONOTONIC_AUTHORITY_ROOT nor process path-environment
+    overrides influence this locator.  Otherwise one restart could select both a
+    fresh journal and a fresh pre-selection receipt namespace.
     """
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        base = _absolute_machine_state_base("LOCALAPPDATA", local_app_data)
+    base = _native_machine_state_base()
+    if os.name == "nt":
         root = base / "Autosport" / "application-state" / "monotonic-root-bindings-v1"
     else:
-        xdg_state_home = os.environ.get("XDG_STATE_HOME")
-        if xdg_state_home:
-            base = _absolute_machine_state_base("XDG_STATE_HOME", xdg_state_home)
-            root = base / "autosport" / "monotonic-root-bindings-v1"
-        else:
-            try:
-                home = Path.home()
-            except RuntimeError as exc:
-                raise WorkspaceBindingIntegrityError(
-                    "home directory could not be resolved for monotonic root binding"
-                ) from exc
-            if not home.is_absolute():
-                raise WorkspaceBindingIntegrityError(
-                    "home directory must be absolute for monotonic root binding"
-                )
-            root = home / ".local" / "state" / "autosport" / "monotonic-root-bindings-v1"
+        root = base / ".local" / "state" / "autosport" / "monotonic-root-bindings-v1"
 
     try:
         resolved_root = root.resolve(strict=False)

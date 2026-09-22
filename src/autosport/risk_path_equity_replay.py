@@ -49,6 +49,48 @@ _IMMUTABLE_TICKET_FIELDS = (
     "legs",
 )
 
+# Keep evidence rendering bounded before fixed-point allocation. 512 matches the
+# adjacent risk-evidence canonical text boundary while leaving PaperBook's own
+# semantic Decimal domain unchanged.
+_MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+
+
+def _fixed_point_materialization_length(value: Decimal) -> int:
+    """Return format(value, "f") size without materializing that string."""
+
+    if type(value) is not Decimal or not value.is_finite():
+        raise RiskPathEquityReplayError(
+            "risk-path evidence Decimal must be a finite exact Decimal"
+        )
+    sign, digits, exponent = value.as_tuple()
+    if type(exponent) is not int:
+        raise RiskPathEquityReplayError(
+            "risk-path evidence Decimal exponent must be an integer"
+        )
+    sign_length = 1 if sign else 0
+    digit_count = len(digits)
+
+    # format(..., "f") keeps negative zero scale but collapses nonnegative
+    # zero exponents. Account for both forms without allocating the output.
+    if value.is_zero():
+        if exponent >= 0:
+            return sign_length + 1
+        return sign_length + 2 - exponent
+    if exponent >= 0:
+        return sign_length + digit_count + exponent
+    if digit_count + exponent > 0:
+        return sign_length + digit_count + 1
+    return sign_length + 2 - exponent
+
+
+def _decimal_evidence_text(value: Decimal, *, label: str) -> str:
+    materialized_length = _fixed_point_materialization_length(value)
+    if materialized_length > _MAX_FIXED_POINT_MATERIALIZATION_LENGTH:
+        raise RiskPathEquityReplayError(
+            f"{label} fixed-point representation exceeds supported evidence size"
+        )
+    return format(value, "f")
+
 
 def _strict_json(payload: bytes, *, label: str) -> dict[str, Any]:
     if type(payload) is not bytes:
@@ -332,7 +374,10 @@ def replay_paper_book_equity_path(
             "index": index,
             "action": action,
             "ticket_id": ticket_id,
-            "balance": format(balance, "f"),
+            "balance": _decimal_evidence_text(
+                balance,
+                label="transition balance",
+            ),
             "observed_at": observed_at,
             "entry": entry,
             "ticket": _immutable_ticket_projection(ticket),
@@ -378,9 +423,18 @@ def replay_paper_book_equity_path(
         "final_snapshot_sha256": final_sha,
         "paper_book_schema_version": base_schema_version,
         "expected_changed_ticket_ids": sorted(expected_changed_ticket_ids),
-        "start_balance": format(base_book.balance, "f"),
-        "final_balance": format(final_book.balance, "f"),
-        "minimum_equity": format(minimum, "f"),
+        "start_balance": _decimal_evidence_text(
+            base_book.balance,
+            label="start balance",
+        ),
+        "final_balance": _decimal_evidence_text(
+            final_book.balance,
+            label="final balance",
+        ),
+        "minimum_equity": _decimal_evidence_text(
+            minimum,
+            label="minimum equity",
+        ),
         "transition_evidence_sha256": [
             transition.evidence_sha256 for transition in transitions
         ],

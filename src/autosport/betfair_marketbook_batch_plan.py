@@ -94,6 +94,8 @@ class MarketBookReadPlan:
     market_status: str
     price_data: tuple[str, ...] = ()
     best_prices_depth: int | None = None
+    virtualise: bool | None = None
+    rollover_stakes: bool | None = None
     order_projection: str | None = None
     match_projection: str | None = None
     include_overall_position: bool | None = None
@@ -105,8 +107,6 @@ class MarketBookReadPlan:
     locale: str | None = None
     rollup_model: str | None = None
     rollup_limit: int | None = None
-    rollup_liability_threshold: str | None = None
-    rollup_liability_factor: int | None = None
     provider_scope_id: str = "BETFAIR"
     policy_version: str = PLAN_POLICY_VERSION
 
@@ -129,6 +129,21 @@ class MarketBookReadPlan:
             )
         except MarketBookBudgetError as exc:
             raise MarketBookBatchPlanError(str(exc)) from exc
+        effective_price_data = set(probe.effective_price_data)
+        virtualise = _bool(self.virtualise, "virtualise")
+        rollover_stakes = _bool(self.rollover_stakes, "rollover_stakes")
+        if (virtualise is not None or rollover_stakes is not None) and not effective_price_data.intersection({"EX_BEST_OFFERS", "EX_ALL_OFFERS"}):
+            raise MarketBookBatchPlanError("price projection flags require an exchange-offers price projection")
+        rollup_model = _token(self.rollup_model, "rollup_model")
+        rollup_limit = _positive_int(self.rollup_limit, "rollup_limit")
+        if rollup_model is not None and rollup_model not in {"STAKE", "PAYOUT", "NONE"}:
+            raise MarketBookBatchPlanError("unsupported rollup_model")
+        if rollup_model is not None and rollup_limit is None:
+            raise MarketBookBatchPlanError("rollup_limit is required when rollup_model is specified")
+        if rollup_model is None and rollup_limit is not None:
+            raise MarketBookBatchPlanError("rollup_limit without rollup_model is ignored by Betfair")
+        if (rollup_model is not None or rollup_limit is not None) and "EX_BEST_OFFERS" not in effective_price_data:
+            raise MarketBookBatchPlanError("rollup overrides require effective EX_BEST_OFFERS")
         order = _token(self.order_projection, "order_projection")
         match = _token(self.match_projection, "match_projection")
         if order is not None and order not in _ORDER:
@@ -145,6 +160,8 @@ class MarketBookReadPlan:
             "market_status": status,
             "price_data": probe.price_data,
             "best_prices_depth": self.best_prices_depth,
+            "virtualise": virtualise,
+            "rollover_stakes": rollover_stakes,
             "order_projection": order,
             "match_projection": match,
             "include_overall_position": _bool(self.include_overall_position, "include_overall_position"),
@@ -156,14 +173,8 @@ class MarketBookReadPlan:
             "bet_ids": bet_ids,
             "currency_code": _token(self.currency_code, "currency_code"),
             "locale": _token(self.locale, "locale"),
-            "rollup_model": _token(self.rollup_model, "rollup_model"),
-            "rollup_limit": _positive_int(self.rollup_limit, "rollup_limit"),
-            "rollup_liability_threshold": _token(
-                self.rollup_liability_threshold, "rollup_liability_threshold"
-            ),
-            "rollup_liability_factor": _positive_int(
-                self.rollup_liability_factor, "rollup_liability_factor"
-            ),
+            "rollup_model": rollup_model,
+            "rollup_limit": rollup_limit,
             "provider_scope_id": _token(self.provider_scope_id, "provider_scope_id", optional=False),
             "policy_version": _token(self.policy_version, "policy_version", optional=False),
         }
@@ -178,6 +189,8 @@ class MarketBookReadPlan:
             "market_ids": list(s["market_ids"]),
             "price_data": list(s["price_data"]),
             "best_prices_depth": s["best_prices_depth"],
+            "virtualise": s["virtualise"],
+            "rollover_stakes": s["rollover_stakes"],
             "order_projection": s["order_projection"],
             "match_projection": s["match_projection"],
             "include_overall_position": s["include_overall_position"],
@@ -190,8 +203,6 @@ class MarketBookReadPlan:
             "ex_best_offers_overrides": {
                 "rollup_model": s["rollup_model"],
                 "rollup_limit": s["rollup_limit"],
-                "rollup_liability_threshold": s["rollup_liability_threshold"],
-                "rollup_liability_factor": s["rollup_liability_factor"],
             },
             "provider_scope_id": s["provider_scope_id"],
             "policy_version": s["policy_version"],
@@ -299,14 +310,25 @@ class MarketBookReadPlan:
             raise MarketBookBatchPlanError("encoded plan has invalid best-offer overrides")
         try:
             restored = cls(
-                tuple(c.get("market_ids", ())), c.get("market_status"),
-                tuple(c.get("price_data", ())), c.get("best_prices_depth"),
-                c.get("order_projection"), c.get("match_projection"),
-                c.get("include_overall_position"), c.get("partition_matched_by_strategy_ref"),
-                tuple(c.get("customer_strategy_refs", ())), c.get("matched_since"),
-                tuple(c.get("bet_ids", ())), c.get("currency_code"), c.get("locale"),
-                o.get("rollup_model"), o.get("rollup_limit"), o.get("rollup_liability_threshold"),
-                o.get("rollup_liability_factor"), c.get("provider_scope_id"), c.get("policy_version"),
+                market_ids=tuple(c.get("market_ids", ())),
+                market_status=c.get("market_status"),
+                price_data=tuple(c.get("price_data", ())),
+                best_prices_depth=c.get("best_prices_depth"),
+                virtualise=c.get("virtualise"),
+                rollover_stakes=c.get("rollover_stakes"),
+                order_projection=c.get("order_projection"),
+                match_projection=c.get("match_projection"),
+                include_overall_position=c.get("include_overall_position"),
+                partition_matched_by_strategy_ref=c.get("partition_matched_by_strategy_ref"),
+                customer_strategy_refs=tuple(c.get("customer_strategy_refs", ())),
+                matched_since=c.get("matched_since"),
+                bet_ids=tuple(c.get("bet_ids", ())),
+                currency_code=c.get("currency_code"),
+                locale=c.get("locale"),
+                rollup_model=o.get("rollup_model"),
+                rollup_limit=o.get("rollup_limit"),
+                provider_scope_id=c.get("provider_scope_id"),
+                policy_version=c.get("policy_version"),
             )
         except (TypeError, MarketBookBatchPlanError) as exc:
             raise MarketBookBatchPlanError("encoded plan request contract is invalid") from exc

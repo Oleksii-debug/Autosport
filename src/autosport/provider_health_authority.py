@@ -234,9 +234,20 @@ class ProviderHealthAuthority:
 
     def bind_write_decision(self, *, provider_id: str, decision_id: str) -> ProviderWriteBinding:
         state = self.state(provider_id)
+        _trimmed("decision_id", decision_id)
         if state.status is not ProviderHealthStatus.HEALTHY:
             raise ProviderHealthError("provider must be HEALTHY before binding a write decision")
-        return ProviderWriteBinding(state.provider_id, state.health_epoch, decision_id)
+        # ProviderHealthEvent is intentionally a public structural/advisory DTO.
+        # Its sequence, timestamp and fingerprint prove consistency only; they do
+        # not prove that a provider/transport operation actually occurred.
+        #
+        # Until this authority is composed with a product-owned origin witness,
+        # fail closed instead of turning caller-authored HEALTHY state into write
+        # admission.  A later composition must re-resolve canonical origin
+        # evidence; it must not accept a caller-provided digest or boolean.
+        raise ProviderHealthError(
+            "provider-origin authority is required before binding a write decision"
+        )
 
     def write_binding_is_current(
         self,
@@ -249,8 +260,11 @@ class ProviderHealthAuthority:
         target = binding.provider_id if target_provider_id is None else _trimmed("target_provider_id", target_provider_id)
         if target != binding.provider_id:
             return False
-        state = self.state(target)
-        return state.status is ProviderHealthStatus.HEALTHY and state.health_epoch == binding.health_epoch
+        # ProviderWriteBinding is a public value type.  Matching a caller-chosen
+        # provider/epoch therefore cannot be positive authority either.  Keep
+        # this predicate fail-closed until a product-issued origin-bound binding
+        # exists; negative invalidation remains safe and deterministic.
+        return False
 
     def _transition(self, previous: ProviderHealthState, event: ProviderHealthEvent) -> ProviderHealthState:
         status = previous.status

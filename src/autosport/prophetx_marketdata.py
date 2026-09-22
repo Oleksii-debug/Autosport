@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError

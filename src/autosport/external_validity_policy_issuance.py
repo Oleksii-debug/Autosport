@@ -112,10 +112,15 @@ _REGISTRY_TYPE = ScientificRegistry
 _STORE_TYPE = FactoryArtifactStore
 _REGISTRY_GET = _REGISTRY_TYPE.get
 _REGISTRY_APPEND = _REGISTRY_TYPE.append
+_REGISTRY_READ = _REGISTRY_TYPE._read
+_REGISTRY_VALIDATE_ENTRY = _REGISTRY_TYPE._validate_entry
 _STORE_READ = _STORE_TYPE.read
 _STORE_SHA256 = _STORE_TYPE.sha256
 _STORE_MATERIALIZE = _STORE_TYPE.materialize
 _STORE_RECEIPT = _STORE_TYPE.materialization_receipt
+_STORE_STABLE_SNAPSHOT = _STORE_TYPE._stable_snapshot
+_STORE_DECODE_SNAPSHOT = _STORE_TYPE._decode_snapshot
+_STORE_PATH = _STORE_TYPE._path
 
 
 def _text(value: object, field: str) -> str:
@@ -204,6 +209,8 @@ def _require_registry(registry: object) -> ScientificRegistry:
     if (
         _REGISTRY_TYPE.get is not _REGISTRY_GET
         or _REGISTRY_TYPE.append is not _REGISTRY_APPEND
+        or _REGISTRY_TYPE._read is not _REGISTRY_READ
+        or _REGISTRY_TYPE._validate_entry is not _REGISTRY_VALIDATE_ENTRY
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "ScientificRegistry executable authority was rebound"
@@ -225,6 +232,9 @@ def _require_store(store: object) -> FactoryArtifactStore:
         or _STORE_TYPE.sha256 is not _STORE_SHA256
         or _STORE_TYPE.materialize is not _STORE_MATERIALIZE
         or _STORE_TYPE.materialization_receipt is not _STORE_RECEIPT
+        or _STORE_TYPE._stable_snapshot is not _STORE_STABLE_SNAPSHOT
+        or _STORE_TYPE._decode_snapshot is not _STORE_DECODE_SNAPSHOT
+        or _STORE_TYPE._path is not _STORE_PATH
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "FactoryArtifactStore executable authority was rebound"

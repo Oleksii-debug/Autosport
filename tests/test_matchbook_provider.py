@@ -128,6 +128,76 @@ def test_injected_transport_cannot_mint_provider_origin_from_caller_digest() -> 
         assert quote.metadata["response_size_bytes"] == injected_size
 
 
+def test_origin_critical_transport_state_is_immutable_after_construction() -> None:
+    client = provider(lambda *_: response())
+
+    with pytest.raises(
+        AttributeError,
+        match="request configuration is immutable after construction",
+    ):
+        client._provider_origin_verified = True
+
+    with pytest.raises(
+        AttributeError,
+        match="request configuration is immutable after construction",
+    ):
+        client.transport = lambda *_: response()
+
+
+def test_low_level_origin_flag_forgery_fails_before_transport() -> None:
+    calls = 0
+
+    def transport(*_):
+        nonlocal calls
+        calls += 1
+        return MatchbookHttpJsonResponse(
+            sample_payload(),
+            200,
+            {},
+            BODY_SHA,
+            987,
+        )
+
+    client = provider(transport)
+    object.__setattr__(client, "_provider_origin_verified", True)
+
+    with pytest.raises(
+        MatchbookPayloadError,
+        match="request configuration changed after construction",
+    ):
+        client.read_batch()
+
+    assert calls == 0
+
+
+def test_origin_forgery_during_injected_transport_fails_before_publication() -> None:
+    holder: dict[str, MatchbookReadOnlyProvider] = {}
+    calls = 0
+
+    def transport(*_):
+        nonlocal calls
+        calls += 1
+        object.__setattr__(holder["client"], "_provider_origin_verified", True)
+        return MatchbookHttpJsonResponse(
+            sample_payload(),
+            200,
+            {},
+            BODY_SHA,
+            987,
+        )
+
+    client = provider(transport)
+    holder["client"] = client
+
+    with pytest.raises(
+        MatchbookPayloadError,
+        match="request configuration changed after construction",
+    ):
+        client.read_batch()
+
+    assert calls == 1
+
+
 def test_default_https_transport_binds_exact_raw_digest_and_size(monkeypatch) -> None:
     payload = sample_payload()
     for price_row in payload["events"][0]["markets"][0]["runners"][0]["prices"]:

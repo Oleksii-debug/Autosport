@@ -32,8 +32,8 @@ class RiskPathEquityReplay:
     final_balance: Decimal
     minimum_equity: Decimal
     transitions: tuple[EquityTransition, ...]
-    causal_available_at: str | None
-    causal_complete: bool
+    latest_observed_at: str | None
+    observed_timestamps_complete: bool
     source_evidence_sha256: str
 
 
@@ -151,14 +151,15 @@ def replay_paper_book_equity_path(
     final_snapshot: bytes,
     *,
     expected_changed_ticket_ids: frozenset[str],
-    require_causal_timestamps: bool = False,
+    require_complete_observed_timestamps: bool = False,
 ) -> RiskPathEquityReplay:
     """Re-derive conservative balance/equity from one exact PaperBook suffix.
 
     This helper is assertion-only. It does not establish product-owned run,
     execution, settlement, membership, IID, or risk-result authority. A future
     risk-path producer must derive expected_changed_ticket_ids from canonical
-    product evidence and separately verify those authorities.
+    product evidence and separately verify those authorities. PaperBook timestamps
+    remain observational here: this helper never promotes them into causal authority.
 
     PaperBook debits stake at OPEN and credits only deterministic settlement payout,
     so its cash balance is the conservative equity floor for unresolved stake.
@@ -173,8 +174,8 @@ def replay_paper_book_equity_path(
             raise ValueError(
                 "expected_changed_ticket_ids must contain canonical non-empty strings"
             )
-    if type(require_causal_timestamps) is not bool:
-        raise TypeError("require_causal_timestamps must be bool")
+    if type(require_complete_observed_timestamps) is not bool:
+        raise TypeError("require_complete_observed_timestamps must be bool")
 
     try:
         base_book = PaperBook.load_bytes(base_snapshot)
@@ -226,8 +227,8 @@ def replay_paper_book_equity_path(
     balance = base_book.balance
     minimum = balance
     transitions: list[EquityTransition] = []
-    causal_times: list[tuple[datetime, str]] = []
-    causal_complete = True
+    observed_times: list[tuple[datetime, str]] = []
+    observed_timestamps_complete = True
 
     for index, entry in enumerate(suffix):
         action = entry.get("action")
@@ -294,8 +295,8 @@ def replay_paper_book_equity_path(
             balance = new_balance
             observed_at = entry.get("settled_at")
             if observed_at is None:
-                causal_complete = False
-                if require_causal_timestamps:
+                observed_timestamps_complete = False
+                if require_complete_observed_timestamps:
                     raise RiskPathEquityReplayError(
                         f"ticket {ticket_id} settlement lacks causal timestamp"
                     )
@@ -318,7 +319,7 @@ def replay_paper_book_equity_path(
                 observed_at,
                 label=f"transition {index} observed_at",
             )
-            causal_times.append((parsed_time, observed_at))
+            observed_times.append((parsed_time, observed_at))
 
         evidence_payload = {
             "schema": "AUTOSPORT_RISK_PATH_EQUITY_TRANSITION_V1",
@@ -353,12 +354,12 @@ def replay_paper_book_equity_path(
             "replayed lifecycle balance does not equal final PaperBook balance"
         )
 
-    causal_available_at = (
-        max(causal_times, key=lambda item: item[0])[1] if causal_times else None
+    latest_observed_at = (
+        max(observed_times, key=lambda item: item[0])[1] if observed_times else None
     )
     if not suffix:
-        causal_complete = False
-        if require_causal_timestamps:
+        observed_timestamps_complete = False
+        if require_complete_observed_timestamps:
             raise RiskPathEquityReplayError(
                 "empty lifecycle suffix has no product-owned causal availability"
             )
@@ -376,10 +377,11 @@ def replay_paper_book_equity_path(
         "transition_evidence_sha256": [
             transition.evidence_sha256 for transition in transitions
         ],
-        "causal_available_at": causal_available_at,
-        "causal_complete": causal_complete,
+        "latest_observed_at": latest_observed_at,
+        "observed_timestamps_complete": observed_timestamps_complete,
         "execution_authorized": False,
         "risk_result_authorized": False,
+        "causal_authorized": False,
     }
 
     return RiskPathEquityReplay(
@@ -389,7 +391,7 @@ def replay_paper_book_equity_path(
         final_balance=final_book.balance,
         minimum_equity=minimum,
         transitions=tuple(transitions),
-        causal_available_at=causal_available_at,
-        causal_complete=causal_complete,
+        latest_observed_at=latest_observed_at,
+        observed_timestamps_complete=observed_timestamps_complete,
         source_evidence_sha256=_sha256(_canonical_bytes(source_payload)),
     )

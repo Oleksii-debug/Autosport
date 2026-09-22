@@ -465,6 +465,67 @@ class ChampionEligibilityDecision:
         )
 
 
+def _reject_later_contradictory_drift(
+    registry: ScientificRegistry,
+    decision: ChampionEligibilityDecision,
+    *,
+    as_of: str,
+) -> None:
+    """Reject an old positive lease after newer causal drift in the same exact scope.
+
+    The decision's own finding set remains immutable historical evidence. Activation
+    additionally inspects canonical findings that are causally visible at as_of so
+    a later degraded window cannot be hidden simply by replaying the older decision.
+    This is invalidation only: later NO_DRIFT evidence never extends valid_until.
+    """
+
+    decision_scope = (
+        decision.sport,
+        decision.league,
+        decision.regime,
+    )
+    evidence_end = _instant(decision.window_end, "decision.window_end")
+    monitor = DriftMonitor(registry)
+
+    for candidate in registry.causal_records("DriftFinding", as_of=as_of):
+        if candidate.record_id in decision.finding_ids:
+            continue
+        payload = candidate.payload
+        if (
+            payload.get("strategy_version_id") != decision.strategy_version_id
+            or payload.get("model_version_id") != decision.model_version_id
+        ):
+            continue
+        try:
+            finding, _reference, observation = monitor.require_canonical_finding(
+                candidate.record_id,
+                as_of=as_of,
+            )
+            state = DriftState(finding.payload.get("state"))
+            observation_end = _instant(
+                observation.payload.get("window_end"),
+                "later DriftObservation.window_end",
+            )
+            scope_values = tuple(
+                _text(observation.payload.get(name), f"later DriftObservation.{name}")
+                for name in ("sport", "league", "regime")
+            )
+        except (DriftControlError, ChampionEligibilityError, TypeError, ValueError):
+            # Only independently canonical drift evidence may invalidate activation.
+            # A caller-authored/malformed registry record is not deployment authority.
+            continue
+
+        if scope_values != decision_scope:
+            continue
+        if observation_end <= evidence_end:
+            continue
+        if state is DriftState.DRIFT_DETECTED:
+            raise ChampionEligibilityError(
+                "later canonical drift invalidates champion eligibility; "
+                "explicit re-authorization is required"
+            )
+
+
 def _rederive_decision(
     registry: ScientificRegistry,
     decision: ChampionEligibilityDecision,
@@ -596,6 +657,11 @@ def validate_activation_eligibility(
     }
     if entry.record_sha256 != _digest(expected_entry):
         raise ChampionEligibilityError("eligibility decision record identity mismatch")
+    _reject_later_contradictory_drift(
+        registry,
+        decision,
+        as_of=as_of,
+    )
     if type(admissible_actions) is not frozenset or not admissible_actions:
         raise ChampionEligibilityError("admissible_actions must be a non-empty frozenset")
     if not frozenset(admissible_actions).issubset(frozenset(decision.admissible_actions)):

@@ -498,10 +498,12 @@ class PaperAbstentionLearningRuntime:
     ) -> PaperAbstentionFinalizationReceipt:
         """Learn from delayed abstention evidence and checkpoint exactly once.
 
-        ``reward`` is mandatory evidence, not a value calculated here.  Negative,
-        zero and positive rewards are all preserved exactly; positive abstention
-        reward therefore exists only when an upstream evidence producer explicitly
-        supplies and identifies it.  OBSERVED/SIMULATED truth is likewise preserved.
+        ``reward`` is mandatory evidence, not a value calculated here. Newly
+        admitted OBSERVED WAIT/NO_BET reward must be exactly zero because abstention
+        has no external financial effect. Non-zero missed-edge/opportunity-cost reward
+        is counterfactual and must be SIMULATED. An exact retry of a transition already
+        resolved under the legacy contract remains idempotent; no new legacy-shaped
+        evidence is admitted.
         """
 
         if not isinstance(observation, Observation):
@@ -530,12 +532,6 @@ class PaperAbstentionLearningRuntime:
             raise PaperAbstentionLearningError(
                 "abstention outcome/reward simulation models differ"
             )
-        if reward.truth is EvidenceTruth.OBSERVED and reward.reward != 0:
-            raise PaperAbstentionLearningError(
-                "observed abstention reward must be zero; non-zero opportunity-cost "
-                "reward is counterfactual and must be SIMULATED"
-            )
-
         snapshot = self.agent_loop.snapshot()
         if snapshot.action_id != action.action_id:
             raise PaperAbstentionLearningError(
@@ -660,6 +656,16 @@ class PaperAbstentionLearningRuntime:
             reward_truth=reward.truth,
         )
 
+    @staticmethod
+    def _require_new_reward_admissible(reward: RewardEvidence) -> None:
+        """Reject new observed abstention reward that would manufacture financial effect."""
+
+        if reward.truth is EvidenceTruth.OBSERVED and reward.reward != 0:
+            raise PaperAbstentionLearningError(
+                "observed abstention reward must be zero; non-zero opportunity-cost "
+                "reward is counterfactual and must be SIMULATED"
+            )
+
     def _materialize_transition(
         self,
         *,
@@ -711,6 +717,7 @@ class PaperAbstentionLearningRuntime:
                 raise PaperAbstentionLearningError(
                     "environment checkpoint drifted from AgentLoop recovery boundary"
                 )
+            self._require_new_reward_admissible(reward)
             try:
                 replayed = self.environment.act(
                     observation,
@@ -726,6 +733,8 @@ class PaperAbstentionLearningRuntime:
                 raise PaperAbstentionLearningError(
                     "replayed abstention action identity changed"
                 )
+        else:
+            self._require_new_reward_admissible(reward)
 
         try:
             transition = self.environment.resolve(

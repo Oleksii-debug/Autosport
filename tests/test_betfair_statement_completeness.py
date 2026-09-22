@@ -147,6 +147,7 @@ def test_structural_derivation_proves_only_terminal_pagination_traversal() -> No
     assert len(result.ordered_rows_sha256) == 64
     assert len(result.evidence_sha256) == 64
 
+    assert result.same_authenticated_session_proven is True
     assert result.coherent_snapshot_proven is False
     assert result.stable_account_identity_proven is False
     assert result.temporal_finality_attested is False
@@ -357,7 +358,7 @@ def test_public_resolver_rejects_structural_but_unissued_provider_page() -> None
     forged = _complete_two_page_scan()[0]
     with pytest.raises(
         BetfairStatementCompletenessError,
-        match="lacks canonical provider issuance",
+        match="one canonical authenticated-session traversal",
     ):
         resolve_betfair_statement_pagination_completeness((forged,))
 
@@ -385,6 +386,7 @@ def test_evidence_schema_cannot_mint_finality_or_cost_authority() -> None:
     assert {
         "pagination_complete",
         "provider_origin_verified",
+        "same_authenticated_session_proven",
         "coherent_snapshot_proven",
         "stable_account_identity_proven",
         "temporal_finality_attested",

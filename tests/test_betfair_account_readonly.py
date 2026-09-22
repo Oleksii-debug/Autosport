@@ -248,6 +248,10 @@ def test_cleared_orders_use_settled_filter_and_parse_profit_as_signed_decimal():
                     "priceMatched": 1.90,
                     "sizeSettled": 10.00,
                     "profit": -10.00,
+                    "eventId": "event-42",
+                    "betOutcome": "LOST",
+                    "voidedDate": "2026-09-17T10:01:00+00:00",
+                    "handicap": -1.5,
                 }
             ],
             "moreAvailable": False,
@@ -265,10 +269,75 @@ def test_cleared_orders_use_settled_filter_and_parse_profit_as_signed_decimal():
     assert orders[0].bet_status == "SETTLED"
     assert orders[0].profit == Decimal("-10.0")
     assert orders[0].price_matched == Decimal("1.9")
+    assert orders[0].event_id == "event-42"
+    assert orders[0].bet_outcome == "LOST"
+    assert orders[0].voided_date == "2026-09-17T10:01:00+00:00"
+    assert orders[0].handicap == Decimal("-1.5")
     params = json.loads(transport.calls[0]["body"])["params"]
     assert params["betStatus"] == "SETTLED"
     assert params["groupBy"] == "BET"
     assert params["settledDateRange"] == {"from": "2026-09-01T00:00:00+00:00"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("betOutcome", " LOST ", "bet_outcome"),
+        ("voidedDate", "not-a-time", "voided_date"),
+        ("handicap", "not-a-number", "handicap must be a JSON number"),
+    ),
+)
+def test_cleared_order_correction_fields_fail_closed_when_malformed(field, value, match):
+    row = {
+        "betId": "settled-1",
+        "marketId": "1.999",
+        "selectionId": 42,
+        "side": "BACK",
+        "placedDate": "2026-09-16T10:00:00+00:00",
+        "settledDate": "2026-09-17T10:00:00+00:00",
+        "priceRequested": 1.91,
+        "priceMatched": 1.90,
+        "sizeSettled": 10.00,
+        "profit": -10.00,
+        field: value,
+    }
+    client, _ = client_for(
+        response({"clearedOrders": [row], "moreAvailable": False}, 1)
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match=match):
+        client.read_all_cleared_orders(page_size=1000)
+
+
+def test_cleared_order_correction_fields_remain_optional_for_legacy_rows():
+    client, _ = client_for(
+        response(
+            {
+                "clearedOrders": [
+                    {
+                        "betId": "settled-legacy",
+                        "marketId": "1.999",
+                        "selectionId": 42,
+                        "side": "BACK",
+                        "placedDate": "2026-09-16T10:00:00+00:00",
+                        "settledDate": "2026-09-17T10:00:00+00:00",
+                        "priceRequested": 1.91,
+                        "priceMatched": 1.90,
+                        "sizeSettled": 10.00,
+                        "profit": 9.10,
+                    }
+                ],
+                "moreAvailable": False,
+            },
+            1,
+        )
+    )
+
+    order = client.read_all_cleared_orders(page_size=1000)[0]
+    assert order.event_id is None
+    assert order.bet_outcome is None
+    assert order.voided_date is None
+    assert order.handicap is None
 
 
 def test_rpc_error_mismatched_id_malformed_json_and_missing_result_fail_closed():
@@ -505,26 +574,17 @@ def test_execution_readback_fails_closed_when_market_event_identity_is_unavailab
     assert len(transport.calls) == 6
 
 
-def test_bet_readback_capability_is_advertised_only_by_real_readonly_adapter():
+def test_bet_readback_capability_requires_action_bound_execution_readback():
     from autosport.bookmaker_capability import BookmakerCapability
 
-    client, _ = client_for(
-        response(
-            {
-                "currencyCode": "GBP",
-                "localeCode": "en",
-                "region": "GBR",
-                "timezone": "Europe/London",
-            },
-            1,
+    client, transport = client_for()
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="action-bound read_execution_readback evidence",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BET_READBACK})
         )
-    )
 
-    snapshot = client.read_account_snapshot(
-        frozenset({BookmakerCapability.BET_READBACK})
-    )
-
-    assert snapshot.observed_capabilities == frozenset(
-        {BookmakerCapability.BET_READBACK}
-    )
-    snapshot.profile.require(BookmakerCapability.BET_READBACK)
+    assert transport.calls == []

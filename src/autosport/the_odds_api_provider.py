@@ -792,6 +792,7 @@ class TheOddsApiProvider:
                     observed_at,
                     evidence,
                     seen,
+                    response_market_scope,
                     historical_snapshot_at=historical_snapshot_at,
                 )
             )
@@ -803,6 +804,7 @@ class TheOddsApiProvider:
         observed_at: str,
         evidence: TheOddsApiRequestEvidence,
         seen: set[tuple[object, ...]],
+        response_market_scope: frozenset[str],
         *,
         historical_snapshot_at: str | None,
     ) -> Iterator[ProviderQuote]:

@@ -1061,6 +1061,9 @@ class ScientificRegistry:
                         "repeat provenance requires prior non-positive experiment history"
                     )
                 fingerprints.add(fingerprint)
+        for raw_entry in records:
+            if raw_entry["record_type"] == "PromotionDecision":
+                self._validate_persisted_promotion_decision(records, raw_entry)
         return state
 
     @staticmethod
@@ -1082,6 +1085,145 @@ class ScientificRegistry:
                             "payload": raw_entry["payload"]})
         if _sha256(raw_entry["record_sha256"], "record_sha256") != expected:
             raise ValueError("scientific registry record digest mismatch")
+
+    @staticmethod
+    def _validate_persisted_promotion_decision(
+        records: list[dict[str, Any]],
+        raw_entry: Mapping[str, Any],
+    ) -> None:
+        payload = raw_entry["payload"]
+        expected_fields = {
+            "promotion_decision_id",
+            "action",
+            "candidate_strategy_version_id",
+            "candidate_model_version_id",
+            "research_protocol_id",
+            "protocol_sha256",
+            "evaluation_bundle_id",
+            "evaluation_bundle_sha256",
+            "predecessor_strategy_version_id",
+            "rollback_to_strategy_version_id",
+            "promotion_evidence_id",
+            "reason",
+            "decided_at",
+        }
+        if type(payload) is not dict or set(payload) != expected_fields:
+            raise PromotionEvidenceError(
+                "persisted promotion decision payload fields mismatch"
+            )
+        try:
+            decision = PromotionDecision(
+                promotion_decision_id=payload["promotion_decision_id"],
+                action=PromotionAction(payload["action"]),
+                candidate_strategy_version_id=payload[
+                    "candidate_strategy_version_id"
+                ],
+                research_protocol_id=payload["research_protocol_id"],
+                protocol_sha256=payload["protocol_sha256"],
+                evaluation_bundle_id=payload["evaluation_bundle_id"],
+                evaluation_bundle_sha256=payload["evaluation_bundle_sha256"],
+                decided_at=payload["decided_at"],
+                predecessor_strategy_version_id=payload[
+                    "predecessor_strategy_version_id"
+                ],
+                rollback_to_strategy_version_id=payload[
+                    "rollback_to_strategy_version_id"
+                ],
+                candidate_model_version_id=payload["candidate_model_version_id"],
+                promotion_evidence_id=payload["promotion_evidence_id"],
+                reason=payload["reason"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PromotionEvidenceError(
+                "persisted promotion decision is not canonical"
+            ) from exc
+        if (
+            raw_entry["record_id"] != decision.record_id
+            or raw_entry["available_at"] != decision.available_at
+            or ScientificRegistry._entry(decision) != raw_entry
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision envelope does not match its payload"
+            )
+
+        entries = {
+            (raw["record_type"], raw["record_id"]): raw
+            for raw in records
+        }
+        decision_at = _instant(decision.decided_at, "PromotionDecision.decided_at")
+
+        def require(kind: str, identity: str) -> Mapping[str, Any]:
+            value = entries.get((kind, identity))
+            if value is None:
+                raise PromotionEvidenceError(
+                    f"persisted promotion decision references missing {kind}:{identity}"
+                )
+            if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
+                raise PromotionEvidenceError(
+                    f"persisted promotion decision references future {kind}:{identity}"
+                )
+            reveal = value["payload"].get("outcome_reveal_after")
+            if (
+                isinstance(reveal, str)
+                and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at
+            ):
+                raise PromotionEvidenceError(
+                    f"persisted promotion decision references unrevealed {kind}:{identity}"
+                )
+            return value
+
+        strategy = require("StrategyVersion", decision.candidate_strategy_version_id)
+        protocol = require("ResearchProtocol", decision.research_protocol_id)
+        bundle = require("EvaluationBundle", decision.evaluation_bundle_id)
+        if protocol["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
+            raise PromotionEvidenceError(
+                "persisted promotion decision protocol binding mismatch"
+            )
+        if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation bundle digest mismatch"
+            )
+        if bundle["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation protocol mismatch"
+            )
+        if (
+            bundle["payload"].get("evaluated_strategy_version_id")
+            != decision.candidate_strategy_version_id
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation strategy mismatch"
+            )
+        if (
+            bundle["payload"].get("evaluated_model_version_id")
+            != decision.candidate_model_version_id
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation model mismatch"
+            )
+        if (
+            strategy["payload"].get("model_version_id")
+            != decision.candidate_model_version_id
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision strategy/model mismatch"
+            )
+
+        if decision.promotion_evidence_id is not None:
+            evidence = require("PromotionEvidence", decision.promotion_evidence_id)
+            evidence_payload = evidence["payload"]
+            expected_bindings = {
+                "research_protocol_id": decision.research_protocol_id,
+                "candidate_strategy_version_id": decision.candidate_strategy_version_id,
+                "candidate_model_version_id": decision.candidate_model_version_id,
+                "evaluation_bundle_id": decision.evaluation_bundle_id,
+                "evaluation_bundle_sha256": decision.evaluation_bundle_sha256.lower(),
+            }
+            for field, expected in expected_bindings.items():
+                if evidence_payload.get(field) != expected:
+                    raise PromotionEvidenceError(
+                        f"persisted promotion decision evidence {field} mismatch"
+                    )
 
     @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:

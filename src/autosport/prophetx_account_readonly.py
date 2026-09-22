@@ -205,6 +205,11 @@ class ProphetXReadOnlyClient:
 
     The caller supplies an already-issued bearer session token. Login/session renewal is a
     separate credential-plane concern and is intentionally outside this source slice.
+
+    Caller-supplied transports remain useful for deterministic structural parsing tests, but
+    they cannot mint canonical provider/account authority. Positive BALANCE_READ authority is
+    reserved for the exact fixed-origin transport instance constructed internally by this
+    client and is invalidated if that transport is replaced after construction.
     """
 
     def __init__(
@@ -227,7 +232,15 @@ class ProphetXReadOnlyClient:
         ):
             raise ValueError("timeout_seconds must be positive and finite")
         self._session = session
-        self._transport = transport or UrllibProphetXHttpTransport()
+        if transport is None:
+            canonical_transport = UrllibProphetXHttpTransport()
+            self._transport: ProphetXHttpTransport = canonical_transport
+            self._provider_origin_transport: UrllibProphetXHttpTransport | None = (
+                canonical_transport
+            )
+        else:
+            self._transport = transport
+            self._provider_origin_transport = None
         self._timeout_seconds = float(timeout_seconds)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._venue_id = _required_text(venue_id, "venue_id")
@@ -289,6 +302,7 @@ class ProphetXReadOnlyClient:
     def capability_profile(self) -> BookmakerCapabilityProfile:
         wallet = self.read_wallet()
         self._require_synchronized_wallet(wallet)
+        self._require_provider_origin_authority()
         return self._profile_for(wallet)
 
     def read_account_snapshot(
@@ -309,6 +323,7 @@ class ProphetXReadOnlyClient:
 
         wallet = self.read_wallet()
         self._require_synchronized_wallet(wallet)
+        self._require_provider_origin_authority()
         profile = self._profile_for(wallet)
         balance = BookmakerBalanceObservation(
             venue_id=self._venue_id,
@@ -351,6 +366,17 @@ class ProphetXReadOnlyClient:
             source_ref=f"prophetx://sandbox/wallet/{digest}",
             source_payload_sha256=digest,
         )
+
+    def _require_provider_origin_authority(self) -> None:
+        authority_transport = self._provider_origin_transport
+        if (
+            authority_transport is None
+            or type(authority_transport) is not UrllibProphetXHttpTransport
+            or self._transport is not authority_transport
+        ):
+            raise ProphetXReadOnlyError(
+                "canonical ProphetX account authority requires product-owned transport"
+            )
 
     @staticmethod
     def _require_synchronized_wallet(wallet: ProphetXWalletObservation) -> None:

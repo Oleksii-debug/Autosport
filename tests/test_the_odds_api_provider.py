@@ -102,6 +102,31 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIn("apiKey=secret", calls[0][0])
         self.assertNotIn("secret", repr(quote.metadata))
 
+    def test_current_observed_at_is_sampled_after_response_returns(self):
+        response_returned = {"value": False}
+
+        def transport(url, timeout):
+            response_returned["value"] = True
+            return HttpJsonResponse([event()], 200, {})
+
+        def clock():
+            self.assertTrue(response_returned["value"])
+            return "2026-09-22T14:00:01+00:00"
+
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            transport=transport,
+            clock=clock,
+        )
+        quote = provider.read_batch().quotes[0]
+
+        self.assertEqual(quote.observed_ts, "2026-09-22T14:00:01+00:00")
+        self.assertEqual(
+            quote.metadata["request"]["observed_at"],
+            "2026-09-22T14:00:01+00:00",
+        )
+
     def test_bookmakers_take_request_precedence_and_can_omit_regions(self):
         seen = {}
 
@@ -309,6 +334,42 @@ class TheOddsApiProviderTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.request_evidence.quota_last, 10)
         self.assertIn("date=2026-09-22T12%3A42%3A00Z", seen["url"])
+
+    def test_historical_observed_at_is_sampled_after_response_returns(self):
+        response_returned = {"value": False}
+        payload = {
+            "timestamp": "2026-09-22T12:40:00Z",
+            "previous_timestamp": None,
+            "next_timestamp": None,
+            "data": [event(market_last_update="2026-09-22T12:39:00Z")],
+        }
+
+        def transport(url, timeout):
+            response_returned["value"] = True
+            return HttpJsonResponse(payload, 200, {})
+
+        def clock():
+            self.assertTrue(response_returned["value"])
+            return "2026-09-22T14:00:01+00:00"
+
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            transport=transport,
+            clock=clock,
+        )
+        snapshot = provider.read_historical_snapshot(
+            "2026-09-22T12:42:00Z"
+        )
+
+        self.assertEqual(
+            snapshot.batch.quotes[0].observed_ts,
+            "2026-09-22T14:00:01+00:00",
+        )
+        self.assertEqual(
+            snapshot.request_evidence.observed_at,
+            "2026-09-22T14:00:01+00:00",
+        )
 
     def test_historical_market_update_after_actual_snapshot_fails_closed(self):
         payload = {

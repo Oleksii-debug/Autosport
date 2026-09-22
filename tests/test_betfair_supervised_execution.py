@@ -885,6 +885,41 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert ledger.verify_integrity() > 0
 
 
+def test_matched_price_below_exact_back_limit_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        worse_price = action.requested_odds - Decimal("0.0001")
+        assert f"{worse_price:.2f}" == f"{action.requested_odds:.2f}"
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=worse_price,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-worse-accepted-price",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
 def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

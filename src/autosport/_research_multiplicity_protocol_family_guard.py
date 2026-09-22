@@ -74,6 +74,12 @@ def _install_protocol_family_guard() -> None:
         workspace: Path,
         plan: _rm.ExperimentFamilyPlan,
     ) -> dict[str, Any]:
+        # Preserve the canonical enrollment validator as the first authority.  Besides
+        # computing the next journal state, it owns established fail-closed semantics
+        # for duplicate members and deleted enrolled stores.  The cross-protocol guard
+        # is additive and must not mask those earlier integrity failures.
+        next_enrollments = original_next_enrollment(target, workspace, plan)
+
         enrollments = cls._read_workspace_enrollments(workspace)
         expected = cls._expected_enrollment(target, workspace, plan)
         protocol_sha256 = plan.protocol_sha256.lower()
@@ -97,7 +103,7 @@ def _install_protocol_family_guard() -> None:
                     "a new ResearchProtocol id or digest cannot reset that capacity"
                 )
 
-        return original_next_enrollment(target, workspace, plan)
+        return next_enrollments
 
     _rm.SequentialMultiplicityEvidenceStore._next_workspace_enrollment_state = classmethod(
         next_workspace_enrollment_state_with_protocol_freeze

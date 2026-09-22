@@ -578,6 +578,10 @@ class ResearchSupervisor:
         protocol_id = bindings.get("research_protocol_id")
         if protocol_id is None:
             return
+        if hypothesis is None:
+            raise ResearchSupervisorError(
+                "research protocol requires explicit supervisor hypothesis binding"
+            )
 
         protocol = self.scientific_registry.get("ResearchProtocol", protocol_id)
         if protocol is None:
@@ -620,7 +624,7 @@ class ResearchSupervisor:
             raise ResearchSupervisorError(
                 "research protocol hypothesis digest does not match canonical hypothesis"
             )
-        if hypothesis is not None and protocol_hypothesis_id != hypothesis.record_id:
+        if protocol_hypothesis_id != hypothesis.record_id:
             raise ResearchSupervisorError(
                 "research protocol hypothesis does not match supervisor binding"
             )

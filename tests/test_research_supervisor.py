@@ -356,6 +356,113 @@ def test_hypothesis_binding_must_belong_to_run_question(tmp_path):
         )
 
 
+def test_protocol_binding_requires_explicit_supervisor_hypothesis(tmp_path):
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    registry.append(_protocol(question, hypothesis, protocol_id="protocol-1"))
+
+    started = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol requires explicit supervisor hypothesis binding",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.HYPOTHESIS,
+            at="2026-09-17T12:10:00Z",
+            bindings=(("research_protocol_id", "protocol-1"),),
+        )
+
+
+def test_restart_rejects_protocol_without_explicit_supervisor_hypothesis(tmp_path):
+    import hashlib
+
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    registry.append(_protocol(question, hypothesis, protocol_id="protocol-1"))
+
+    started = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", "hypothesis-1"),),
+    )
+    supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", "protocol-1"),),
+    )
+
+    payload = json.loads(supervisor.path.read_text(encoding="utf-8"))
+    run = payload["runs"][0]
+    del run["bindings"]["hypothesis_id"]
+
+    def digest(value):
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    run["run_sha256"] = digest(
+        {key: value for key, value in run.items() if key != "run_sha256"}
+    )
+    payload["state_sha256"] = digest(
+        {key: value for key, value in payload.items() if key != "state_sha256"}
+    )
+    supervisor.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol requires explicit supervisor hypothesis binding",
+    ):
+        ResearchSupervisor(supervisor.path, registry)
+
+
 def test_protocol_binding_must_match_run_question_hypothesis_and_payload_digests(tmp_path):
     registry, supervisor = _workspace(tmp_path)
     question_1 = ResearchQuestion(

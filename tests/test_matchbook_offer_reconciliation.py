@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
+import pickle
 
 import pytest
 
@@ -182,6 +183,21 @@ def test_copy_or_reconstruction_does_not_inherit_provider_origin():
             )
             is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
         )
+
+
+def test_serialized_restart_does_not_restore_provider_origin():
+    issued = offer(88, issued=True)
+    restored = pickle.loads(pickle.dumps(issued))
+    assert issued.provider_origin_authoritative
+    assert not restored.provider_origin_authoritative
+    assert (
+        retry_disposition(
+            observed_offer=restored,
+            expected_account_context_id=restored.account_context_id,
+            expected_offer_id=restored.offer_id,
+        )
+        is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+    )
 
 
 def test_aggregated_ids_are_not_singular_identity():

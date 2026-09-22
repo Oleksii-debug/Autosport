@@ -316,6 +316,30 @@ class ExecutionStopAuthority:
             key=self._monotonic_key(absolute),
         )
 
+    def _stable_serialization_lock_path(self) -> Path:
+        """Return the machine-root lock shared by every STOP authority instance."""
+
+        authority = self._monotonic_authority()
+        return (
+            authority.authority_root
+            / "consumer-locks"
+            / authority.namespace_sha256[:2]
+            / f"{authority.namespace_sha256}.execution-stop.lock"
+        )
+
+    @contextmanager
+    def _authority_operation_lock(self) -> Iterator[None]:
+        """Serialize STOP operations outside replaceable workspace pathnames."""
+
+        with self._thread_lock:
+            stable_lock_path = self._stable_serialization_lock_path()
+            with _exclusive_file_lock(stable_lock_path):
+                with _exclusive_file_lock(
+                    self._lock_path,
+                    guard_path=self.path,
+                ):
+                    yield
+
     def _monotonic_binding(self) -> str:
         return _digest(
             {
@@ -1007,7 +1031,7 @@ class ExecutionStopAuthority:
         anchored prefix and is never promoted automatically.
         """
 
-        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
+        with self._authority_operation_lock():
             records = self._read_journal_unlocked(
                 require_anchor_match=False,
                 allow_missing_anchor=True,
@@ -1112,7 +1136,7 @@ class ExecutionStopAuthority:
         return self._state_from_record(records[-1])
 
     def current(self) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
+        with self._authority_operation_lock():
             return self._current_unlocked()
 
     @contextmanager
@@ -1125,7 +1149,7 @@ class ExecutionStopAuthority:
         the positive ARMED check and the protected provider-write boundary.
         """
 
-        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
+        with self._authority_operation_lock():
             state = self._current_unlocked()
             if state.mode is not ExecutionAuthorityMode.ARMED:
                 raise ExecutionStoppedError(
@@ -1141,7 +1165,7 @@ class ExecutionStopAuthority:
         reason: str,
         command_id: str | None = None,
     ) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
+        with self._authority_operation_lock():
             if self.path.exists() or self._anchor_path.exists():
                 records = self._read_journal_unlocked()
                 if records:
@@ -1165,7 +1189,7 @@ class ExecutionStopAuthority:
         expected_revision: int | None = None,
         command_id: str | None = None,
     ) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
+        with self._authority_operation_lock():
             records = self._read_journal_unlocked()
             actual_revision = 0 if not records else records[-1]["revision"]
             expected = actual_revision if expected_revision is None else expected_revision
@@ -1187,7 +1211,7 @@ class ExecutionStopAuthority:
         expected_revision: int,
         command_id: str | None = None,
     ) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
+        with self._authority_operation_lock():
             return self._append_unlocked(
                 mode=ExecutionAuthorityMode.ARMED,
                 operator_id=operator_id,

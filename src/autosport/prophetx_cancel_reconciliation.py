@@ -535,6 +535,31 @@ class RestTransportObservation:
             raise ProphetXCancelError(
                 "http_status must be a valid non-boolean HTTP status"
             )
+        if (
+            self.state
+            in {
+                RestTransportState.TIMEOUT_AFTER_POSSIBLE_SEND,
+                RestTransportState.NETWORK_ERROR_AFTER_POSSIBLE_SEND,
+            }
+            and self.http_status is not None
+        ):
+            raise ProphetXCancelError(
+                "network/timeout state cannot carry an HTTP status"
+            )
+        if (
+            self.state is RestTransportState.HTTP_200_UNQUALIFIED
+            and self.http_status != 200
+        ):
+            raise ProphetXCancelError(
+                "HTTP_200_UNQUALIFIED requires http_status=200"
+            )
+        if (
+            self.state is RestTransportState.HTTP_404_SAMPLE_AMBIGUOUS
+            and self.http_status != 404
+        ):
+            raise ProphetXCancelError(
+                "HTTP_404_SAMPLE_AMBIGUOUS requires http_status=404"
+            )
         _time(self.observed_at, "observed_at")
 
     @property
@@ -688,6 +713,10 @@ def reconcile_cancel(
         for x in by_id.values()
         if isinstance(x, RestTransportObservation)
     ]
+    if len(rest_events) > 1:
+        raise ProphetXCancelConflict(
+            "multiple distinct REST transport observations imply an unmodeled retry"
+        )
     if rest_events and (
         request is None
         or request.transport is not CancelTransport.REST
@@ -751,6 +780,17 @@ def reconcile_cancel(
             raise ProphetXCancelConflict(
                 "REST transport evidence identity mismatch"
             )
+        if request is not None:
+            observed_dt = datetime.fromisoformat(
+                item.observed_at.replace("Z", "+00:00")
+            )
+            request_dt = datetime.fromisoformat(
+                request.requested_at.replace("Z", "+00:00")
+            )
+            if observed_dt < request_dt:
+                raise ProphetXCancelConflict(
+                    "REST transport observation cannot predate cancel request"
+                )
 
     filled = working.cumulative_filled
     avg = working.average_fill_price
@@ -765,6 +805,7 @@ def reconcile_cancel(
     cause = CancelCause.NONE
     readback = False
     terminal_seen = False
+    reject_seen = False
 
     # REST transport semantics are intentionally weak. HTTP 200/404,
     # timeout and malformed response all require provider-origin state
@@ -854,6 +895,11 @@ def reconcile_cancel(
             continue
 
         assert isinstance(item, CancelReject)
+        if reject_seen:
+            raise ProphetXCancelConflict(
+                "multiple distinct CancelReject reports for one cancel request"
+            )
+        reject_seen = True
         if request is None:
             raise ProphetXCancelConflict(
                 "CancelReject cannot exist without a local cancel request"
@@ -861,6 +907,16 @@ def reconcile_cancel(
         if request.transport is not CancelTransport.FIX:
             raise ProphetXCancelConflict(
                 "FIX CancelReject cannot reconcile a REST cancel request"
+            )
+        reject_dt = datetime.fromisoformat(
+            item.transact_time.replace("Z", "+00:00")
+        )
+        request_dt = datetime.fromisoformat(
+            request.requested_at.replace("Z", "+00:00")
+        )
+        if reject_dt < request_dt:
+            raise ProphetXCancelConflict(
+                "CancelReject cannot predate cancel request"
             )
         if (
             item.cancel_cl_ord_id != request.cancel_cl_ord_id

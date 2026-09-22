@@ -346,23 +346,6 @@ class EmpiricalExecutionEvidence:
                     raise EmpiricalExecutionEvidenceError(
                         "acknowledged terminal attempt cannot claim not-found reconciliation"
                     )
-            elif state is AttemptState.RECONCILED_NOT_FOUND:
-                if (
-                    self.acknowledgement_status is not None
-                    or self.acknowledged_at is not None
-                    or self.external_receipt_id is not None
-                ):
-                    raise EmpiricalExecutionEvidenceError(
-                        "RECONCILED_NOT_FOUND cannot claim terminal acknowledgement"
-                    )
-                if not reconciliation_present:
-                    raise EmpiricalExecutionEvidenceError(
-                        "RECONCILED_NOT_FOUND requires durable reconciliation identity"
-                    )
-                if self.reconciliation_external_effect_found is not False:
-                    raise EmpiricalExecutionEvidenceError(
-                        "RECONCILED_NOT_FOUND requires external_effect_found=false"
-                    )
         else:
             expected_reason = _CENSOR_REASON_BY_STATE.get(state)
             if expected_reason is None:
@@ -507,9 +490,14 @@ class EmpiricalExecutionEvidence:
 
     def assert_projection_issued(self) -> None:
         issued = _ISSUED_EMPIRICAL_EVIDENCE.get(id(self))
-        current_fingerprint = _digest(
-            self.to_dict(include_evidence_sha256=False)
-        )
+        try:
+            current_fingerprint = _digest(
+                self.to_dict(include_evidence_sha256=False)
+            )
+        except Exception as exc:
+            raise EmpiricalExecutionEvidenceError(
+                "empirical execution evidence is no longer canonical"
+            ) from exc
         if (
             issued is None
             or issued[0]() is not self
@@ -621,11 +609,13 @@ def build_empirical_execution_evidence(
     timing metric remains explicitly UNKNOWN until a monotonic witness exists.
 
     Unresolved attempts are evidence too. RESERVED/SUBMITTED/UNKNOWN attempts are
-    explicit right-censored observations. RECONCILED_NOT_FOUND is different: the
-    canonical ledger has durably resolved that no external effect exists, so it is a
-    terminal empirical outcome with reconciliation provenance and UNKNOWN slippage.
-    This function remains read-only and grants no provider-write, retry, settlement,
-    profitability, real-money, or readiness authority.
+    explicit right-censored observations. Legacy RECONCILED_NOT_FOUND is also
+    right-censored here: the durable event remains correlation evidence, but current
+    ledger semantics do not prove that provider absence came from a product-issued
+    complete readback authority. A future typed upstream authority may qualify that
+    state without rewriting this legacy evidence. This function remains read-only
+    and grants no provider-write, retry, settlement, profitability, real-money, or
+    readiness authority.
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be canonical RealExecutionLedger")
@@ -912,7 +902,10 @@ class EmpiricalExecutionPopulationEvidence:
     _evidence_sha256: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != POPULATION_SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != POPULATION_SCHEMA_VERSION
+        ):
             raise EmpiricalExecutionEvidenceError(
                 "unsupported empirical population evidence schema"
             )
@@ -1050,9 +1043,14 @@ class EmpiricalExecutionPopulationEvidence:
 
     def assert_projection_issued(self) -> None:
         issued = _ISSUED_EMPIRICAL_POPULATIONS.get(id(self))
-        current_fingerprint = _digest(
-            self.to_dict(include_evidence_sha256=False)
-        )
+        try:
+            current_fingerprint = _digest(
+                self.to_dict(include_evidence_sha256=False)
+            )
+        except Exception as exc:
+            raise EmpiricalExecutionEvidenceError(
+                "empirical execution population is no longer canonical"
+            ) from exc
         if (
             issued is None
             or issued[0]() is not self

@@ -501,6 +501,60 @@ class SmarketsRateLimitEvidence:
         )
 
 
+_EFFECT_RECORD_KEYS = {
+    "accepted_odds",
+    "accepted_stake",
+    "action_id",
+    "authority_id",
+    "evidence_id",
+    "observed_at",
+    "profile_id",
+    "provider_order_id",
+    "source_payload_sha256",
+    "status",
+}
+
+
+def _validated_effect_record(
+    record: object,
+) -> tuple[AcknowledgementStatus, Decimal, Decimal | None, datetime]:
+    if type(record) is not dict or set(record) != _EFFECT_RECORD_KEYS:
+        raise SmarketsReconciliationError("invalid Smarkets effect record shape")
+    _text(record["action_id"], "record.action_id")
+    _text(record["provider_order_id"], "record.provider_order_id")
+    for name in (
+        "authority_id",
+        "evidence_id",
+        "profile_id",
+        "source_payload_sha256",
+    ):
+        _sha256(record[name], f"record.{name}")
+    observed = _timestamp(record["observed_at"], "record.observed_at")
+    try:
+        status = AcknowledgementStatus(record["status"])
+    except (TypeError, ValueError) as exc:
+        raise SmarketsReconciliationError(
+            "record.status must be canonical acknowledgement status"
+        ) from exc
+    stake = _nonnegative_decimal(record["accepted_stake"], "record.accepted_stake")
+    odds_raw = record["accepted_odds"]
+    odds = (
+        None
+        if odds_raw is None
+        else _positive_decimal(odds_raw, "record.accepted_odds")
+    )
+    if status is AcknowledgementStatus.REJECTED:
+        if stake != 0 or odds is not None:
+            raise SmarketsReconciliationError(
+                "REJECTED record cannot carry accepted execution economics"
+            )
+    elif stake <= 0 or odds is None:
+        raise SmarketsReconciliationError(
+            "accepted/partial record requires positive execution economics"
+        )
+    return status, stake, odds, observed
+
+
 class SmarketsReconciliationJournal:
     """Small append-only hash-chain for restart-safe verified readback evidence."""
 
@@ -567,6 +621,7 @@ class SmarketsReconciliationJournal:
                 raise SmarketsReconciliationError(
                     f"Smarkets journal digest mismatch at record {index}"
                 )
+            _validated_effect_record(row["record"])
             previous = row["record_sha256"]
             rows.append(row)
         return rows
@@ -581,22 +636,56 @@ class SmarketsReconciliationJournal:
             )
         rows = self._load_rows()
         records = [row["record"] for row in rows]
+        effect_record = effect.to_canonical_dict()
+        new_status, new_stake, new_odds, new_observed = _validated_effect_record(
+            effect_record
+        )
         for record in records:
             if record.get("evidence_id") == effect.evidence_id:
-                if record == effect.to_canonical_dict():
+                if record == effect_record:
                     return
                 raise SmarketsReconciliationError(
                     "evidence_id was reused with conflicting journal payload"
                 )
-            if (
-                record.get("provider_order_id") == effect.provider_order_id
-                and record.get("action_id") != effect.action_id
-            ):
+            if record.get("provider_order_id") != effect.provider_order_id:
+                continue
+            if record.get("action_id") != effect.action_id:
                 raise SmarketsReconciliationError(
                     "provider_order_id conflicts with prior action"
                 )
+            old_status, old_stake, old_odds, old_observed = _validated_effect_record(
+                record
+            )
+            if new_observed < old_observed:
+                raise SmarketsReconciliationError(
+                    "provider order readback time regressed"
+                )
+            if new_stake < old_stake:
+                raise SmarketsReconciliationError(
+                    "provider order matched stake regressed"
+                )
+            if new_stake == old_stake and new_odds != old_odds:
+                raise SmarketsReconciliationError(
+                    "provider order average odds changed without a new fill"
+                )
+            if old_status is AcknowledgementStatus.ACCEPTED and (
+                new_status is not AcknowledgementStatus.ACCEPTED
+                or new_stake != old_stake
+                or new_odds != old_odds
+            ):
+                raise SmarketsReconciliationError(
+                    "fully accepted provider order cannot regress"
+                )
+            if old_status is AcknowledgementStatus.REJECTED and (
+                new_status is not AcknowledgementStatus.REJECTED
+                or new_stake != 0
+                or new_odds is not None
+            ):
+                raise SmarketsReconciliationError(
+                    "rejected provider order cannot later mint a fill"
+                )
         previous = rows[-1]["record_sha256"] if rows else "0" * 64
-        record = effect.to_canonical_dict()
+        record = effect_record
         row = {
             "prev_sha256": previous,
             "record": record,

@@ -139,6 +139,44 @@ def test_ascii_control_failure_is_inconclusive_not_path_failure(tmp_path: Path) 
     assert report.matrix_status == "INCONCLUSIVE_CONTROL_FAILED"
 
 
+
+def test_output_capture_is_opt_in(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    quiet_out = tmp_path / "quiet"
+    quiet = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=quiet_out,
+        arguments=(),
+        launcher=(sys.executable,),
+        mode="exit-zero",
+        startup_seconds=0.01,
+        timeout_seconds=2,
+        keep_copies=False,
+    )
+    assert quiet.matrix_status == "PASS"
+    assert all(not row.output_captured for row in quiet.scenarios)
+    assert not (quiet_out / "logs").exists()
+
+    captured_out = tmp_path / "captured"
+    captured = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=captured_out,
+        arguments=(),
+        launcher=(sys.executable,),
+        mode="exit-zero",
+        startup_seconds=0.01,
+        timeout_seconds=2,
+        keep_copies=False,
+        capture_output=True,
+    )
+    assert captured.matrix_status == "PASS"
+    assert all(row.output_captured for row in captured.scenarios)
+    assert (captured_out / "logs" / "ascii_control.log").is_file()
+
+
+
 def test_no_raw_arguments_are_serialized_in_report(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     secret_marker = "DO_NOT_PERSIST_ME"

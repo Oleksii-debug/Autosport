@@ -29,6 +29,25 @@ class ProductEntrypointDefaultWorkspaceTests(unittest.TestCase):
                 self.assertEqual(observed, default_workspace())
                 self.assertTrue(observed.is_absolute())
 
+    def test_explicit_workspace_wins_even_if_environment_default_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            explicit = (Path(directory) / "explicit-workspace").resolve()
+            with patch.dict(
+                os.environ,
+                {"AUTOSPORT_WORKSPACE": "relative-invalid-default"},
+                clear=True,
+            ):
+                observed = _parser().parse_args(
+                    [
+                        "--workspace",
+                        str(explicit),
+                        "--source-factory",
+                        "autosport_example_source:make_source",
+                    ]
+                ).workspace
+
+            self.assertEqual(observed, explicit)
+
     def test_default_workspace_reuses_localappdata_and_is_cwd_independent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

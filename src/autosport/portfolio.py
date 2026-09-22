@@ -46,33 +46,64 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
+def _analysis_ticket_fingerprint(ticket: PaperTicket) -> tuple[object, ...]:
+    """Return exactly the mutable ticket fields consumed by scenario analysis."""
+
+    return (
+        ticket.ticket_id,
+        ticket.stake,
+        ticket.legs,
+        ticket.placed_at,
+        ticket.status,
+    )
+
+
 def _snapshot_open_tickets_for_analysis(
     tickets: list[PaperTicket],
 ) -> list[PaperTicket]:
-    """Detach mutable ticket economics before a multi-scenario analysis run.
+    """Detach one causally coherent cut of mutable ticket economics.
 
-    ``PaperTicket`` is intentionally mutable because settlement updates its status,
-    payout and timestamps in place.  A portfolio analysis can enumerate or sample
-    many scenarios, so retaining aliases to caller-owned tickets would allow a live
-    settlement/update between scenarios to change which tickets contribute after
-    the state space was already derived.  Snapshot only the economics consumed by
-    this engine; ticket legs are frozen values and Decimal/string values are
-    immutable.
+    ``PaperTicket`` is intentionally mutable because settlement updates it in
+    place.  Merely copying tickets one-by-one is not enough: a settlement between
+    two copies could otherwise create a mixed OPEN-ticket set that never existed at
+    a single instant.  Capture the fields consumed by this engine, then revalidate
+    the source identities and those fields before publishing the detached cut.
     """
 
+    source_tickets = tuple(tickets)
+    captured: list[tuple[object, ...]] = []
     snapshots: list[PaperTicket] = []
-    for ticket in tickets:
-        if ticket.status is not TicketStatus.OPEN:
+
+    for ticket in source_tickets:
+        fingerprint = _analysis_ticket_fingerprint(ticket)
+        captured.append(fingerprint)
+        ticket_id, stake, legs, placed_at, status = fingerprint
+        if status is not TicketStatus.OPEN:
             continue
         snapshots.append(
             PaperTicket(
-                ticket_id=ticket.ticket_id,
-                stake=ticket.stake,
-                legs=tuple(ticket.legs),
-                placed_at=ticket.placed_at,
+                ticket_id=ticket_id,
+                stake=stake,
+                legs=tuple(legs),
+                placed_at=placed_at,
                 status=TicketStatus.OPEN,
             )
         )
+
+    current_tickets = tuple(tickets)
+    if (
+        len(current_tickets) != len(source_tickets)
+        or any(
+            current is not source
+            for current, source in zip(current_tickets, source_tickets)
+        )
+    ):
+        raise ValueError("portfolio ticket set changed during snapshot")
+
+    for ticket, fingerprint in zip(source_tickets, captured):
+        if _analysis_ticket_fingerprint(ticket) != fingerprint:
+            raise ValueError("portfolio ticket changed during snapshot")
+
     return snapshots
 
 

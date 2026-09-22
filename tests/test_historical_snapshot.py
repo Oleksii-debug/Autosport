@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -229,11 +230,11 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     with errors_lock:
                         errors.append(exc)
 
-            with unittest.mock.patch.object(
+            with mock.patch.object(
                 historical_snapshot,
                 "_atomic_write_jsonl",
                 side_effect=controlled_writer,
-            ), unittest.mock.patch.object(
+            ), mock.patch.object(
                 historical_snapshot,
                 "durable_path_lock",
                 side_effect=observed_lock,

@@ -70,6 +70,26 @@ class MatchbookReadResponse:
         _validate_status(self.status_code)
 
 
+@dataclass(frozen=True, slots=True)
+class MatchbookCommittedRead:
+    status_code: int
+    payload: object
+    generation_id: str
+
+    def __post_init__(self) -> None:
+        _validate_status(self.status_code)
+        if self.status_code < 200 or self.status_code >= 300:
+            raise ValueError("committed Matchbook read must carry a 2xx status")
+        if not isinstance(self.generation_id, str):
+            raise TypeError("generation_id must be str")
+        if (
+            not self.generation_id
+            or self.generation_id != self.generation_id.strip()
+            or any(character.isspace() for character in self.generation_id)
+        ):
+            raise ValueError("generation_id must be non-empty, trimmed and whitespace-free")
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class _LiveSession:
     generation_id: str
@@ -169,7 +189,7 @@ class MatchbookReadOnlySessionTransport:
                 return None
             return self._live_session.generation_id
 
-    def read(self, *, path: str) -> MatchbookReadResponse:
+    def read(self, *, path: str) -> MatchbookCommittedRead:
         path = _validate_path(path)
         recovered_after_401 = False
 
@@ -209,8 +229,12 @@ class MatchbookReadOnlySessionTransport:
 
             status = response.status_code
             if 200 <= status < 300:
-                self._authorize_response_ticket(ticket)
-                return response
+                committed_generation = self._authorize_response_ticket(ticket)
+                return MatchbookCommittedRead(
+                    status_code=response.status_code,
+                    payload=response.payload,
+                    generation_id=committed_generation,
+                )
 
             if status == 401:
                 self._invalidate_generation_after_401(session.generation_id)
@@ -279,14 +303,14 @@ class MatchbookReadOnlySessionTransport:
 
     def _authorize_response_ticket(
         self, ticket: SessionReadGenerationTicket
-    ) -> None:
+    ) -> str:
         try:
             commit_ns = self._clock()
         except SessionLifecycleError:
             self._clear_matching_live_session(ticket.generation_id)
             raise
         try:
-            self._lifecycle.authorize_read_response_commit(
+            return self._lifecycle.authorize_read_response_commit(
                 ticket,
                 monotonic_ns=commit_ns,
             )

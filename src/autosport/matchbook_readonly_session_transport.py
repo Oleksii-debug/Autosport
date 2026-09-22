@@ -8,6 +8,8 @@ from threading import Condition, RLock
 
 from .matchbook_session_lifecycle import (
     MatchbookSessionLifecycle,
+    RequestKind,
+    RetryDisposition,
     SessionLifecycleError,
     SessionReadGenerationTicket,
 )
@@ -238,6 +240,16 @@ class MatchbookReadOnlySessionTransport:
 
             if status == 401:
                 self._invalidate_generation_after_401(session.generation_id)
+                disposition = self._lifecycle.retry_disposition_after_401(
+                    request_kind=RequestKind.READ
+                )
+                if (
+                    disposition
+                    is not RetryDisposition.REAUTH_THEN_SINGLE_READ_RETRY
+                ):
+                    raise MatchbookAuthenticationUnavailable(
+                        "Matchbook lifecycle does not permit read re-authentication"
+                    )
                 if recovered_after_401:
                     raise MatchbookAuthenticationUnavailable(
                         "Matchbook authentication remained unavailable after one re-login"

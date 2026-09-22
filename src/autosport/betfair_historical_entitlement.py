@@ -2,9 +2,11 @@
 
 Consumes the canonical K07 authenticated session context and records the exact
 GetMyData purchase snapshot, DownloadListOfFiles result, and DownloadFile bytes.
-The captured values preserve purchase/list/file structure and exact byte identities,
-but this lineage does not mechanically prove provider acquisition origin or current
-usage rights.  PERSONAL_NONCOMMERCIAL is a dated reference classification only;
+The captured DTO values preserve purchase/list/file structure and exact byte identities
+without self-attesting provider origin. A separate process-local capability can prove
+that one exact file traversed the still-live canonical authenticated transport chain;
+current usage rights remain separately unverified. PERSONAL_NONCOMMERCIAL is a dated
+reference classification only;
 rights must be revalidated by a separate authority.  This module does not prove stable
 cross-session account identity, commercial/redistribution rights, live freshness,
 execution, settlement, or real-money truth.
@@ -465,18 +467,24 @@ _CANONICAL_HISTORICAL_POST_JSON = UrllibBetfairHistoricalTransport.post_json
 _CANONICAL_HISTORICAL_GET_FILE = UrllibBetfairHistoricalTransport.get_file
 _CANONICAL_HISTORICAL_REQUEST = UrllibBetfairHistoricalTransport._request
 _CANONICAL_QUOTE = quote
-_HISTORICAL_TRANSPORT_CONTRACT_SHA256 = _digest(
-    {
-        "schema": "autosport.betfair_historical_transport_contract",
-        "schema_version": 1,
-        "api_base": HISTORICAL_API_BASE,
-        "transport": "urllib_verified_https",
-        "redirect_policy": "same_origin_only",
-        "download_payload_fence": "bzip2_header",
-        "canonical_clock": "datetime.now(timezone.utc)",
-        "secrets_persisted": False,
-    }
-)
+_HISTORICAL_TRANSPORT_CONTRACT_SHA256 = sha256(
+    json.dumps(
+        {
+            "schema": "autosport.betfair_historical_transport_contract",
+            "schema_version": 1,
+            "api_base": HISTORICAL_API_BASE,
+            "transport": "urllib_verified_https",
+            "redirect_policy": "same_origin_only",
+            "download_payload_fence": "bzip2_header",
+            "canonical_clock": "datetime.now(timezone.utc)",
+            "secrets_persisted": False,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
 
 
 def _canonical_historical_network_transport(

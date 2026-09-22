@@ -303,6 +303,10 @@ def project_betdaq_get_prices(
     if any(not isinstance(market, BetdaqMarketPrices) for market in markets):
         raise BetdaqProjectionError("response contains invalid market evidence")
     market_ids = [market.market_id for market in markets]
+    if not market_ids:
+        raise BetdaqProjectionError(
+            "empty GetPrices scope cannot establish current market absence"
+        )
     if len(set(market_ids)) != len(market_ids):
         raise BetdaqProjectionError("response contains duplicate market_id")
 
@@ -319,6 +323,13 @@ def project_betdaq_get_prices(
             )
 
     source_ts = _provider_source_ts(response)
+    if source_ts is not None:
+        observed_time = datetime.fromisoformat(observed_ts.replace("Z", "+00:00"))
+        source_time = datetime.fromisoformat(source_ts.replace("Z", "+00:00"))
+        if source_time > observed_time:
+            raise BetdaqProjectionError(
+                "provider source time cannot postdate product observation time"
+            )
     quotes: list[ProviderQuote] = []
     for market in markets:
         context = market_context[market.market_id]

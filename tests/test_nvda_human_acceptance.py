@@ -274,6 +274,11 @@ def test_structural_result_rejects_noncanonical_digest() -> None:
         NvdaHumanAcceptanceStructuralResult(transcript_sha256="C" * 64)
 
 
+def test_structural_result_cannot_be_minted_by_direct_construction() -> None:
+    with pytest.raises(NvdaHumanAcceptanceError):
+        NvdaHumanAcceptanceStructuralResult(transcript_sha256="c" * 64)
+
+
 def test_custom_container_types_do_not_cross_canonical_boundary() -> None:
     transcript = _valid_transcript()
     with pytest.raises(NvdaHumanAcceptanceError):

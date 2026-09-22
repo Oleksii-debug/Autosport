@@ -406,9 +406,13 @@ class CapabilityEvidenceJournal:
             key=lambda item: (_time(item[1].committed_at, "committed_at"), item[0]),
         )
         availability = self._latest_availability(evidence_id, decision_at)
+        # AVAILABLE is a positive runtime observation. The public DTO records the
+        # assertion for audit/restart, but cannot mint provider-health authority by
+        # itself. Conservative negative/degraded states remain usable immediately.
         state = (
             CapabilityAvailabilityState.UNKNOWN
             if availability is None
+            or availability.state is CapabilityAvailabilityState.AVAILABLE
             else availability.state
         )
         profile = profiles.get(evidence.profile_id)
@@ -619,6 +623,11 @@ def _evaluate(
         )
     if evidence.strength < requirement.minimum_strength:
         return deny(CapabilityLifecycleState.CURRENT, "evidence strength is too weak")
+    if evidence.strength >= CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED:
+        return deny(
+            CapabilityLifecycleState.REVALIDATION_REQUIRED,
+            "authenticated/account observation requires product-owned upstream authority",
+        )
     if requirement.require_available:
         if availability is not CapabilityAvailabilityState.AVAILABLE:
             return deny(CapabilityLifecycleState.CURRENT, "provider is not AVAILABLE")

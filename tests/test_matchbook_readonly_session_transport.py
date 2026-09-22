@@ -696,3 +696,30 @@ def test_committed_read_keeps_exact_generation_provenance_after_later_rotation()
     assert first.generation_id == "gen-1"
     assert transport.generation_id == "gen-2"
     assert lifecycle.state is SessionState.ACTIVE
+
+
+def test_provider_error_payload_and_committed_payload_are_not_projected_by_repr() -> None:
+    secret_payload = {
+        "username": "operator@example.invalid",
+        "password": "hunter2",
+        "session-token": "raw-token-secret",
+    }
+    raw = MatchbookReadResponse(503, secret_payload)
+    assert "hunter2" not in repr(raw)
+    assert "raw-token-secret" not in repr(raw)
+
+    transport, _, _, _ = build_transport(
+        read=lambda token, path: raw,
+    )
+    with pytest.raises(MatchbookReadUnavailable) as exc_info:
+        transport.read(path="/edge/rest/events")
+    assert "hunter2" not in str(exc_info.value)
+    assert "raw-token-secret" not in str(exc_info.value)
+
+    committed = MatchbookCommittedRead(
+        status_code=200,
+        payload=secret_payload,
+        generation_id="gen-1",
+    )
+    assert "hunter2" not in repr(committed)
+    assert "raw-token-secret" not in repr(committed)

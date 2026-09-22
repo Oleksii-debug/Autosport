@@ -533,11 +533,23 @@ def parse_get_prices_response(
         _tag(EXTERNAL_API_NS, "GetPricesResult"),
         "GetPricesResult",
     )
+    if result.attrib:
+        raise BetdaqSoapProtocolError(
+            "GetPricesResult must not contain attributes"
+        )
     return_status = _one_child(
         result,
         _tag(EXTERNAL_API_NS, "ReturnStatus"),
         "ReturnStatus",
     )
+    unexpected_status_attributes = sorted(
+        set(return_status.attrib) - {"Code", "Description", "CallId"}
+    )
+    if unexpected_status_attributes:
+        raise BetdaqSoapProtocolError(
+            "ReturnStatus contains unexpected attribute(s): "
+            + ", ".join(unexpected_status_attributes)
+        )
     return_code = _integer(
         _required_attr(return_status, "Code"),
         "ReturnStatus Code",

@@ -102,20 +102,6 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _decimal_text(value: object, *, label: str) -> Decimal:
-    if type(value) is not str or not value or value.strip() != value:
-        raise RiskPathEquityReplayError(
-            f"{label} must be a canonical non-empty Decimal string"
-        )
-    try:
-        parsed = Decimal(value)
-    except Exception as exc:
-        raise RiskPathEquityReplayError(f"{label} is not a valid Decimal") from exc
-    if not parsed.is_finite():
-        raise RiskPathEquityReplayError(f"{label} must be finite")
-    return parsed
-
-
 def _ticket_map(raw: dict[str, Any], *, label: str) -> dict[str, dict[str, Any]]:
     tickets = raw.get("tickets")
     if type(tickets) is not list:
@@ -255,7 +241,8 @@ def replay_paper_book_equity_path(
             )
 
         ticket = final_tickets.get(ticket_id)
-        if ticket is None:
+        canonical_ticket = final_book.tickets.get(ticket_id)
+        if ticket is None or canonical_ticket is None:
             raise RiskPathEquityReplayError(
                 f"lifecycle suffix references unknown ticket {ticket_id}"
             )
@@ -266,16 +253,45 @@ def replay_paper_book_equity_path(
                 raise RiskPathEquityReplayError(
                     f"lifecycle suffix re-opens BASE ticket {ticket_id}"
                 )
-            stake = _decimal_text(ticket.get("stake"), label=f"ticket {ticket_id} stake")
-            balance -= stake
+            try:
+                balance = PaperBook._debit_balance(balance, canonical_ticket.stake)
+            except ValueError as exc:
+                raise RiskPathEquityReplayError(
+                    f"ticket {ticket_id} OPEN arithmetic is not canonical"
+                ) from exc
             observed_at = ticket.get("placed_at")
             if type(observed_at) is not str:
                 raise RiskPathEquityReplayError(
                     f"ticket {ticket_id} open lacks placed_at"
                 )
         elif action == "settle":
-            payout = _decimal_text(ticket.get("payout"), label=f"ticket {ticket_id} payout")
-            balance += payout
+            winning_quote_keys = entry.get("winning_quote_keys")
+            void_quote_keys = entry.get("void_quote_keys")
+            if type(winning_quote_keys) is not list or type(void_quote_keys) is not list:
+                raise RiskPathEquityReplayError(
+                    f"ticket {ticket_id} settlement evidence is not canonical"
+                )
+            try:
+                computed_status, computed_payout, new_balance = (
+                    PaperBook._settlement_result(
+                        canonical_ticket,
+                        balance,
+                        set(winning_quote_keys),
+                        set(void_quote_keys),
+                    )
+                )
+            except ValueError as exc:
+                raise RiskPathEquityReplayError(
+                    f"ticket {ticket_id} SETTLE arithmetic is not canonical"
+                ) from exc
+            if (
+                canonical_ticket.status is not computed_status
+                or canonical_ticket.payout != computed_payout
+            ):
+                raise RiskPathEquityReplayError(
+                    f"ticket {ticket_id} persisted settlement economics mismatch"
+                )
+            balance = new_balance
             observed_at = entry.get("settled_at")
             if observed_at is None:
                 causal_complete = False

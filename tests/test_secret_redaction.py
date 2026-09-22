@@ -58,6 +58,20 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("https://" + REDACTED + "@example.test/path", redacted)
         self.assertIn("market=match", redacted)
 
+    def test_authorization_auth_scheme_credentials_are_fully_redacted(self) -> None:
+        cases = (
+            ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+            ("Authorization: Token opaque-token-804", "opaque-token-804"),
+            ("Authorization: Negotiate YIIB-wrapped-token", "YIIB-wrapped-token"),
+        )
+
+        for source, secret in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertEqual(redacted, "Authorization: " + REDACTED)
+                self.assertNotIn(secret, redacted)
+
+
     def test_text_redacts_percent_encoded_sensitive_query_keys(self) -> None:
         source = (
             "https://example.test/path?"

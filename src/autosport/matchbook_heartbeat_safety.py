@@ -505,6 +505,18 @@ class MatchbookHeartbeatCancellationObservation:
         return self.cancellation_reason is MatchbookCancellationReason.HEARTBEAT_EXPIRY
 
     @property
+    def provider_origin_proven(self) -> bool:
+        """Detached structural evidence never proves authenticated provider origin."""
+
+        return False
+
+    @property
+    def offers_cancelled_proven(self) -> bool:
+        """Cancellation labels alone never prove provider-side offer cancellation."""
+
+        return False
+
+    @property
     def evidence_id(self) -> str:
         return _digest(self.to_dict())
 

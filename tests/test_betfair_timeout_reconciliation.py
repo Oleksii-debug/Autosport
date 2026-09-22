@@ -266,9 +266,9 @@ def _foreign_ref_provider_capture(
     provider_ref: str,
     *,
     surface: str,
+    returned_ref: str | None,
 ):
-    foreign_ref = "f" * 32
-    assert foreign_ref != provider_ref
+    assert returned_ref != provider_ref
     current_orders: list[dict[str, object]] = []
     cleared_by_status: dict[str, list[dict[str, object]]] = {
         "SETTLED": [],
@@ -289,7 +289,11 @@ def _foreign_ref_provider_capture(
                 "averagePriceMatched": 0,
                 "sizeMatched": 0,
                 "sizeRemaining": 10.0,
-                "customerOrderRef": foreign_ref,
+                **(
+                    {"customerOrderRef": returned_ref}
+                    if returned_ref is not None
+                    else {}
+                ),
             }
         )
     elif surface == "cleared":
@@ -305,7 +309,11 @@ def _foreign_ref_provider_capture(
                 "priceMatched": 2.0,
                 "sizeSettled": 10.0,
                 "profit": 10.0,
-                "customerOrderRef": foreign_ref,
+                **(
+                    {"customerOrderRef": returned_ref}
+                    if returned_ref is not None
+                    else {}
+                ),
                 "eventId": action.event_id,
             }
         )
@@ -349,9 +357,18 @@ def _foreign_ref_provider_capture(
     )
 
 
-@pytest.mark.parametrize("surface", ("current", "cleared"))
-def test_foreign_returned_customer_order_ref_cannot_become_absence(
+@pytest.mark.parametrize(
+    ("surface", "returned_ref"),
+    (
+        ("current", "f" * 32),
+        ("current", None),
+        ("cleared", "f" * 32),
+        ("cleared", None),
+    ),
+)
+def test_foreign_or_missing_returned_customer_order_ref_cannot_become_absence(
     surface: str,
+    returned_ref: str | None,
 ) -> None:
     action = _action()
     profile = _profile()
@@ -360,6 +377,7 @@ def test_foreign_returned_customer_order_ref_cannot_become_absence(
         action,
         provider_ref,
         surface=surface,
+        returned_ref=returned_ref,
     )
 
     with pytest.raises(

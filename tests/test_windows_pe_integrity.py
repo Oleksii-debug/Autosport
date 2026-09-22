@@ -186,6 +186,7 @@ def test_core_header_falsifiers():
         (mutate_u16(blob, coff + 18, 0x2022), "DLL image"),
         (mutate_u16(blob, coff + 18, 0x1022), "system image"),
         (mutate_u16(blob, opt + 68, 1), "unsupported subsystem"),
+        (mutate_u32(blob, opt + 52, 1), "Win32VersionValue"),
         (mutate_u32(blob, opt + 104, 1), "LoaderFlags"),
         (mutate_u64(blob, opt + 24, 0x140000001), "ImageBase"),
     ]
@@ -316,12 +317,15 @@ def test_raw_data_order_must_follow_section_order():
     assert_rejected(candidate, "raw-data pointers|overlapping ranges")
 
 
-def test_non_ascii_section_name_is_diagnostic_only_not_rejected():
+def test_utf8_section_name_is_accepted_and_invalid_utf8_rejected():
     blob = bytearray(build_valid_pe())
     _, _, _, sec = offsets(blob)
-    blob[sec : sec + 8] = b"\xfftext\x00\x00\x00"
+    blob[sec : sec + 8] = "étext".encode("utf-8").ljust(8, b"\0")
     info = validate_pe32plus_amd64(bytes(blob))
-    assert info.sections[0].name.startswith("\\xff")
+    assert info.sections[0].name == "étext"
+
+    blob[sec : sec + 8] = b"\xfftext\x00\x00\x00"
+    assert_rejected(bytes(blob), "valid UTF-8")
 
 
 def test_zero_data_directory_count_is_valid():
@@ -350,3 +354,39 @@ def test_certificate_directory_may_not_overlap_raw_section():
     _, _, opt, _ = offsets(blob)
     struct.pack_into("<II", blob, opt + 112 + 4 * 8, 0x200, 0x100)
     assert_rejected(bytes(blob), "certificate table overlaps")
+
+
+
+def test_size_of_headers_must_equal_rounded_header_extent():
+    blob = build_valid_pe()
+    _, _, opt, _ = offsets(blob)
+    candidate = mutate_u32(blob + b"\0" * 0x200, opt + 60, 0x400)
+    assert_rejected(candidate, "rounded header extent")
+
+
+def test_section_virtual_addresses_must_be_adjacent():
+    blob = build_valid_pe(two_sections=True)
+    _, _, _, sec = offsets(blob)
+    sec2 = sec + 40
+    candidate = bytearray(blob + b"\0" * 0x1000)
+    struct.pack_into("<I", candidate, sec2 + 12, 0x3000)
+    _, _, opt, _ = offsets(candidate)
+    struct.pack_into("<I", candidate, opt + 56, 0x4000)
+    assert_rejected(bytes(candidate), "not adjacent")
+
+
+def test_reserved_and_global_ptr_data_directories():
+    blob = bytearray(build_valid_pe())
+    _, _, opt, _ = offsets(blob)
+    struct.pack_into("<II", blob, opt + 112 + 7 * 8, 0x1000, 0x20)
+    assert_rejected(bytes(blob), "reserved and must be zero")
+
+    blob = bytearray(build_valid_pe())
+    struct.pack_into("<II", blob, opt + 112 + 8 * 8, 0x1000, 0)
+    validate_pe32plus_amd64(bytes(blob))
+    struct.pack_into("<II", blob, opt + 112 + 8 * 8, 0x1000, 1)
+    assert_rejected(bytes(blob), "Global Ptr.*size must be zero")
+
+    blob = bytearray(build_valid_pe())
+    struct.pack_into("<II", blob, opt + 112 + 15 * 8, 0x1000, 0x20)
+    assert_rejected(bytes(blob), "reserved and must be zero")

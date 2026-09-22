@@ -22,6 +22,7 @@ from .scientific_registry import ScientificRegistry
 _SCHEMA: Final = "autosport.model_lifecycle_revision"
 _SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
+_ELIGIBILITY_CONSTRUCTION_TOKEN: Final = object()
 _RECORD_KEYS: Final = frozenset(
     {
         "schema",
@@ -354,9 +355,9 @@ def _reason_tuple(reasons: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reasons))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ModelEligibility:
-    """Deterministic lifecycle prerequisite result; not deployment authority."""
+    """Derived lifecycle prerequisite report; never independent authority."""
 
     model_version_id: str
     model_artifact_sha256: str
@@ -365,6 +366,59 @@ class ModelEligibility:
     evaluated_at: str
     eligible: bool
     reasons: tuple[str, ...]
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError(
+            "ModelEligibility is derived; use evaluate_model_eligibility()"
+        )
+
+    @classmethod
+    def _from_evaluation(
+        cls,
+        *,
+        model_version_id: str,
+        model_artifact_sha256: str,
+        lifecycle_revision: int,
+        lifecycle_fingerprint_sha256: str,
+        evaluated_at: str,
+        reasons: tuple[str, ...],
+        _construction_token: object,
+    ) -> "ModelEligibility":
+        if _construction_token is not _ELIGIBILITY_CONSTRUCTION_TOKEN:
+            raise ModelLifecycleError(
+                "ModelEligibility may only be issued by the canonical evaluator"
+            )
+        _canonical_text("model_version_id", model_version_id, maximum_bytes=256)
+        _canonical_sha256("model_artifact_sha256", model_artifact_sha256)
+        _positive_int("lifecycle_revision", lifecycle_revision)
+        _canonical_sha256(
+            "lifecycle_fingerprint_sha256", lifecycle_fingerprint_sha256
+        )
+        evaluated_text, _ = _canonical_utc("evaluated_at", evaluated_at)
+        if type(reasons) is not tuple:
+            raise ModelLifecycleError("eligibility reasons must be a tuple")
+        validated_reasons = tuple(
+            _canonical_text("eligibility_reason", reason, maximum_bytes=160)
+            for reason in reasons
+        )
+        if len(set(validated_reasons)) != len(validated_reasons):
+            raise ModelLifecycleError("eligibility reasons must be unique")
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "model_version_id", model_version_id)
+        object.__setattr__(
+            instance, "model_artifact_sha256", model_artifact_sha256
+        )
+        object.__setattr__(instance, "lifecycle_revision", lifecycle_revision)
+        object.__setattr__(
+            instance,
+            "lifecycle_fingerprint_sha256",
+            lifecycle_fingerprint_sha256,
+        )
+        object.__setattr__(instance, "evaluated_at", evaluated_text)
+        object.__setattr__(instance, "eligible", not validated_reasons)
+        object.__setattr__(instance, "reasons", validated_reasons)
+        return instance
 
 
 def _registry_instant(value: object, name: str) -> datetime:
@@ -493,12 +547,12 @@ def evaluate_model_eligibility(
         )
 
     normalized = _reason_tuple(reasons)
-    return ModelEligibility(
+    return ModelEligibility._from_evaluation(
         model_version_id=revision.model_version_id,
         model_artifact_sha256=revision.model_artifact_sha256,
         lifecycle_revision=revision.revision,
         lifecycle_fingerprint_sha256=revision.fingerprint_sha256,
         evaluated_at=evaluated_text,
-        eligible=not normalized,
         reasons=normalized,
+        _construction_token=_ELIGIBILITY_CONSTRUCTION_TOKEN,
     )

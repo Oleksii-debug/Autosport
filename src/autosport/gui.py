@@ -91,7 +91,11 @@ def strategy_id_from_display(display: str) -> str:
 def _safe_exception_text(exc: BaseException) -> str:
     """Describe a caught failure through the canonical operator-redaction boundary."""
 
-    return safe_exception_text(exc)
+    unavailable_detail = text(
+        "ui.error.exception.message_unavailable",
+        exception_type="",
+    ).removeprefix(": ")
+    return safe_exception_text(exc, unavailable_detail=unavailable_detail)
 
 
 class AutosportApp(tk.Tk):

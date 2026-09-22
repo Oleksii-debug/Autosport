@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -469,3 +469,67 @@ def test_post_issuance_quality_mutation_invalidates_issuance(tmp_path):
     with pytest.raises(ExecutionQualityEvidenceError):
         validate_paper_execution_quality_report(report)
 
+
+
+def test_quality_decimal_arithmetic_and_identity_ignore_ambient_context(tmp_path):
+    row = _row("decimal-context")
+    frozen = _universe(tmp_path, (row,))
+    ledger, _ = _ledger_with_outcome(
+        tmp_path,
+        frozen,
+        row,
+        _attempt(
+            row,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            execution_odds=Decimal("2.000000000000000000000000000123456789"),
+            execution_stake=Decimal("10"),
+        ),
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        low_precision = build_paper_execution_quality_report(ledger)
+    with localcontext() as context:
+        context.prec = 80
+        high_precision = build_paper_execution_quality_report(ledger)
+
+    expected_delta = Decimal("0.000000000000000000000000000123456789")
+    assert low_precision.samples[0].signed_price_delta == expected_delta
+    assert high_precision.samples[0].signed_price_delta == expected_delta
+    assert low_precision.samples[0].sample_sha256 == high_precision.samples[0].sample_sha256
+    assert low_precision.report_sha256 == high_precision.report_sha256
+
+
+def test_distinct_high_precision_execution_odds_do_not_alias_under_low_precision(
+    tmp_path,
+):
+    def project(path, execution_odds):
+        row = _row("decimal-distinct")
+        frozen = _universe(path, (row,))
+        ledger, _ = _ledger_with_outcome(
+            path,
+            frozen,
+            row,
+            _attempt(
+                row,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                execution_odds=execution_odds,
+                execution_stake=Decimal("10"),
+            ),
+        )
+        with localcontext() as context:
+            context.prec = 6
+            return build_paper_execution_quality_report(ledger).samples[0]
+
+    first = project(
+        tmp_path / "first",
+        Decimal("2.000000000000000000000000000123456781"),
+    )
+    second = project(
+        tmp_path / "second",
+        Decimal("2.000000000000000000000000000123456782"),
+    )
+
+    assert first.execution_odds != second.execution_odds
+    assert first.signed_price_delta != second.signed_price_delta
+    assert first.sample_sha256 != second.sample_sha256

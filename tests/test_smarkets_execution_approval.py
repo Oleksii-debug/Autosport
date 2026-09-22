@@ -159,7 +159,7 @@ def _confirmed(
     action = bound.execution_plan.actions[0]
     review = authority.prepare_review(
         review_id="review-1",
-        decision_id=bound.execution_plan.decision_id,
+        decision_id=bound.execution_plan.plan_id,
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,
         decision_sha256=decision_sha256 or bound.execution_plan.fingerprint,
@@ -287,7 +287,7 @@ def test_misleading_operator_review_payload_fails_before_receipt_consumption(
     action = bound.execution_plan.actions[0]
     review = authority.prepare_review(
         review_id="review-1",
-        decision_id=bound.execution_plan.decision_id,
+        decision_id=bound.execution_plan.plan_id,
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,
         decision_sha256=bound.execution_plan.fingerprint,

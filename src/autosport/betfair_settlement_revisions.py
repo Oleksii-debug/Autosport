@@ -491,6 +491,17 @@ class BetfairSettlementRevisionStore:
                     raise BetfairSettlementRevisionError("external bet is bound to a different execution attempt")
                 if previous.content_sha256 == content_sha:
                     return SettlementIngestResult(previous, False)
+                if any(item.content_sha256 == content_sha for item in chain[:-1]):
+                    raise BetfairSettlementRevisionError(
+                        "settlement evidence regressed to a superseded semantic revision"
+                    )
+                if _time(order.settled_date, "settled_date") <= _time(
+                    previous.settled_date,
+                    "previous settled_date",
+                ):
+                    raise BetfairSettlementRevisionError(
+                        "changed settlement content requires a later provider settled_date"
+                    )
                 if _time(capture.observed_at, "observed_at") <= _time(previous.available_at, "available_at"):
                     raise BetfairSettlementRevisionError("changed settlement evidence is not causally later")
             revision_number = 1 if previous is None else previous.revision_number + 1

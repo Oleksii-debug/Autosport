@@ -74,13 +74,13 @@ class SecretRedactionTests(unittest.TestCase):
 
     def test_text_redacts_escaped_sensitive_serialized_keys(self) -> None:
         cases = (
-            (r'{"api\\u005fkey":"alpha123"}', "alpha123", r"api\\u005fkey"),
+            (r'{"api\u005fkey":"alpha123"}', "alpha123", r"api\u005fkey"),
             (
-                r"{'session\\x5ftoken':'bravo456'}",
+                r"{'session\x5ftoken':'bravo456'}",
                 "bravo456",
-                r"session\\x5ftoken",
+                r"session\x5ftoken",
             ),
-            (r'{"\\u0061pi_key":"charlie789"}', "charlie789", r"\\u0061pi_key"),
+            (r'{"\u0061pi_key":"charlie789"}', "charlie789", r"\u0061pi_key"),
         )
 
         for source, secret, escaped_key in cases:
@@ -92,16 +92,16 @@ class SecretRedactionTests(unittest.TestCase):
 
     def test_safe_exception_text_redacts_escaped_serialized_credential_key(self) -> None:
         secret = "serialized-secret-804"
-        source = r'{"session\\u005ftoken":"' + secret + '"}'
+        source = r'{"session\u005ftoken":"' + secret + '"}'
 
         rendered = safe_exception_text(RuntimeError(source))
 
         self.assertNotIn(secret, rendered)
-        self.assertIn(r"session\\u005ftoken", rendered)
+        self.assertIn(r"session\u005ftoken", rendered)
         self.assertIn(REDACTED, rendered)
 
     def test_non_sensitive_escaped_serialized_key_is_preserved(self) -> None:
-        source = r'{"market\\u005fname":"winner"}'
+        source = r'{"market\u005fname":"winner"}'
 
         self.assertEqual(redact_operator_text(source), source)
 

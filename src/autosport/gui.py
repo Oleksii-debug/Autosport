@@ -101,30 +101,6 @@ def _safe_exception_text(exc: BaseException) -> str:
     return f"{name}: {detail}" if detail else name
 
 
-def _safe_worker_error_detail(raw_error: object, *, fallback_type: str) -> str:
-    """Project internal worker diagnostics into bounded operator-safe detail."""
-
-    safe_error_type = fallback_type
-    if type(raw_error) is str:
-        candidate = raw_error.partition(":")[0].strip()
-        candidate_body = candidate.replace("_", "")
-        if (
-            candidate
-            and candidate.isascii()
-            and candidate_body.isalnum()
-            and (
-                candidate.endswith("Error")
-                or candidate.endswith("Exception")
-                or candidate in {"SystemExit", "KeyboardInterrupt"}
-            )
-        ):
-            safe_error_type = candidate
-    return text(
-        "ui.error.exception.message_unavailable",
-        exception_type=safe_error_type,
-    )
-
-
 class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -574,11 +550,13 @@ class AutosportApp(tk.Tk):
         self._pending_dataset_path = None
         self._set_replay_controls_busy(False)
         if message.error is not None:
+            # DatasetValidationMessage.error is internal diagnostic evidence.
+            # Operator copy must be product-owned and byte-independent of that raw value.
             message_text = text(
                 "ui.error.dataset.rejected",
-                detail=_safe_worker_error_detail(
-                    message.error,
-                    fallback_type="DatasetValidationError",
+                detail=text(
+                    "ui.error.exception.message_unavailable",
+                    exception_type="DATASET_VALIDATION_FAILURE",
                 ),
             )
             self.status.set(text("ui.status.dataset.validation_failed"))
@@ -662,11 +640,13 @@ class AutosportApp(tk.Tk):
             return
         self.live_refresh_button.state(["!disabled"])
         if message.error is not None:
+            # ObservationWorkerMessage.error is internal diagnostic evidence.
+            # Never derive operator copy, identifiers or hashes from raw provider detail.
             message_text = text(
                 "ui.error.live.snapshot",
-                detail=_safe_worker_error_detail(
-                    message.error,
-                    fallback_type="LiveObservationError",
+                detail=text(
+                    "ui.error.exception.message_unavailable",
+                    exception_type="LIVE_OBSERVATION_FAILURE",
                 ),
             )
             self.live_status.set(message_text)

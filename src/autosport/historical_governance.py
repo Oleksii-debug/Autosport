@@ -420,7 +420,7 @@ def _print_governance_fail_closed(machine_status: str, exc: Exception) -> None:
     """Emit Ukrainian-first operator guidance without changing the machine diagnostic."""
 
     print(
-        "Не вдалося перевірити права або строки зберігання для історичного корпусу. "
+        "Не вдалося завершити операцію з історичним корпусом. "
         "Операцію безпечно зупинено."
     )
     print(f"{machine_status} error={exc}")

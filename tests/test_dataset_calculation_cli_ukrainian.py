@@ -26,6 +26,17 @@ def test_dataset_calculation_help_is_ukrainian_first() -> None:
     assert "формат виводу" in help_text
     assert "calculate one exact selected quote from a verified sealed dataset" not in help_text
 
+    for operation in (
+        "odds-conversion",
+        "implied-probability",
+        "expected-return",
+        "paper-payout",
+        "fractional-kelly",
+    ):
+        assert operation in help_text
+    assert "text" in help_text
+    assert "json" in help_text
+
 
 def test_dataset_calculation_help_preserves_machine_cli_contract() -> None:
     help_text = _subcommand_help()

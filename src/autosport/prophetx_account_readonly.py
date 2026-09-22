@@ -12,6 +12,7 @@ from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException
 import json
+import math
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -221,9 +222,10 @@ class ProphetXReadOnlyClient:
         if (
             not isinstance(timeout_seconds, (int, float))
             or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
             or timeout_seconds <= 0
         ):
-            raise ValueError("timeout_seconds must be positive")
+            raise ValueError("timeout_seconds must be positive and finite")
         self._session = session
         self._transport = transport or UrllibProphetXHttpTransport()
         self._timeout_seconds = float(timeout_seconds)
@@ -248,11 +250,14 @@ class ProphetXReadOnlyClient:
             timeout_seconds=self._timeout_seconds,
         )
         self._validate_http_response(response)
-        observed_at = self._observed_at()
         payload_sha256 = sha256(response.body).hexdigest()
         decoded = _decode_json(response.body)
         envelope = _mapping(decoded, "ProphetX balance response")
         data = _mapping(envelope.get("data"), "ProphetX balance response.data")
+        balance = _provider_money(data, "balance")
+        gec_balance = _provider_money(data, "gec_balance")
+        matched_order_balance = _provider_money(data, "matched_order_balance")
+        unmatched_order_balance = _provider_money(data, "unmatched_order_balance")
         status = _provider_text(
             data,
             "unmatched_order_balance_status",
@@ -266,11 +271,16 @@ class ProphetXReadOnlyClient:
             )
         else:
             last_synced = None
+
+        # This is product availability time, not a provider-native timestamp.
+        # Capture it only after complete-body, representation and field parsing
+        # have succeeded so accepted evidence cannot be backdated by parse time.
+        observed_at = self._observed_at()
         return ProphetXWalletObservation(
-            balance=_provider_money(data, "balance"),
-            gec_balance=_provider_money(data, "gec_balance"),
-            matched_order_balance=_provider_money(data, "matched_order_balance"),
-            unmatched_order_balance=_provider_money(data, "unmatched_order_balance"),
+            balance=balance,
+            gec_balance=gec_balance,
+            matched_order_balance=matched_order_balance,
+            unmatched_order_balance=unmatched_order_balance,
             unmatched_order_balance_status=status,
             unmatched_order_last_synced_at=last_synced,
             evidence=ProphetXEvidence(observed_at, payload_sha256),

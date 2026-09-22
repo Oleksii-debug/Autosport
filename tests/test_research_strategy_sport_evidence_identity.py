@@ -34,20 +34,34 @@ def test_research_event_evidence_hash_binds_sport_identity() -> None:
     football = _event(sport="football")
     tennis = replace(football, sport="tennis")
 
-    assert football.quote_key == tennis.quote_key
+    assert (
+        football.event_id,
+        football.market_id,
+        football.selection_id,
+        football.decimal_odds,
+    ) == (
+        tennis.event_id,
+        tennis.market_id,
+        tennis.selection_id,
+        tennis.decimal_odds,
+    )
     assert football.sport != tennis.sport
+    assert football.quote_key != tennis.quote_key
     assert market_event_evidence_hash(football) != market_event_evidence_hash(tennis)
 
 
-def test_research_market_snapshot_hash_binds_sport_identity() -> None:
+def test_research_market_snapshot_hash_binds_sport_inside_projection() -> None:
     football = _event(sport="football")
     tennis = replace(football, sport="tennis")
-    quote_key = football.quote_key
+    lookup_key = "fixed-research-slot"
 
+    # Canonical quote identity already binds sport. Hold the caller lookup key
+    # constant here to prove the research event projection independently does too.
+    assert football.quote_key != tennis.quote_key
     assert research_market_snapshot_hash(
-        {quote_key: football},
-        (quote_key,),
+        {lookup_key: football},
+        (lookup_key,),
     ) != research_market_snapshot_hash(
-        {quote_key: tennis},
-        (quote_key,),
+        {lookup_key: tennis},
+        (lookup_key,),
     )

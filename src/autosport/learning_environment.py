@@ -120,6 +120,15 @@ def _canonical_decimal_text(name: str, value: object) -> str:
         digits.pop()
         exponent += 1
     normalized = Decimal((parts.sign, tuple(digits), exponent))
+
+    if exponent >= 0:
+        fixed_length = len(digits) + exponent + parts.sign
+    elif -exponent < len(digits):
+        fixed_length = len(digits) + 1 + parts.sign
+    else:
+        fixed_length = -exponent + 2 + parts.sign
+    if fixed_length <= 256:
+        return format(normalized, "f")
     return str(normalized)
 
 

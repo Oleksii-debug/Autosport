@@ -1,0 +1,446 @@
+"""Product-owned supervised execution approval for Smarkets.
+
+This module composes the generic durable supervised-confirmation authority with
+one exact canonical Smarkets execution action. It does not place an order,
+access Smarkets, prove provider readback, or enable real-money execution.
+
+Positive authority is never accepted from a caller-created receipt DTO. The
+receipt and review are re-resolved from the canonical Autosport workspace and
+the receipt is consumed once under a deterministic action identity. After a
+restart the same approval may be reconstructed only from that durable consumed
+receipt and only for the exact same bound execution plan/action.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
+from typing import Final
+
+from .paths import default_workspace
+from .real_execution_ledger import ExecutionAction
+from .supervised_confirmation import (
+    SupervisedConfirmationAuthority,
+    SupervisedConfirmationBinding,
+    SupervisedConfirmationError,
+)
+from .supervised_execution import (
+    BoundSupervisedExecutionPlan,
+    SupervisedApproval,
+    SupervisedExecutionError,
+)
+
+
+_CONFIRMATION_FILENAME: Final = "supervised-confirmation.jsonl"
+_WITNESS_SEAL: Final = object()
+
+
+class SmarketsExecutionApprovalError(RuntimeError):
+    """Product-owned supervised approval could not be proven for a Smarkets action."""
+
+
+def canonical_supervised_confirmation_path() -> Path:
+    """Return the one product workspace path consumed by this approval boundary."""
+
+    return default_workspace() / _CONFIRMATION_FILENAME
+
+
+def _open_confirmation_authority() -> SupervisedConfirmationAuthority:
+    return SupervisedConfirmationAuthority(canonical_supervised_confirmation_path())
+
+
+def _text(value: object, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise SmarketsExecutionApprovalError(f"{name} must be non-empty canonical text")
+    return value
+
+
+def _sha256(value: object, name: str) -> str:
+    text = _text(value, name)
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise SmarketsExecutionApprovalError(f"{name} must be lowercase SHA-256 hex")
+    return text
+
+
+def _instant(value: object, name: str) -> datetime:
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SmarketsExecutionApprovalError(f"{name} must be timezone-aware ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise SmarketsExecutionApprovalError(f"{name} must be timezone-aware ISO-8601")
+    return parsed
+
+
+def _digest(value: object) -> str:
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise SmarketsExecutionApprovalError(
+            "Smarkets execution approval evidence is not canonical JSON"
+        ) from exc
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _consumer_key(
+    bound: BoundSupervisedExecutionPlan,
+    action: ExecutionAction,
+    review_sha256: str,
+) -> str:
+    return (
+        "smarkets-execution-approval:v1:"
+        f"{bound.execution_plan.plan_id}:{action.action_id}:{review_sha256}"
+    )
+
+
+def _require_bound_action(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    action_id: str,
+) -> ExecutionAction:
+    if type(bound) is not BoundSupervisedExecutionPlan:
+        raise SmarketsExecutionApprovalError(
+            "bound must be canonical BoundSupervisedExecutionPlan"
+        )
+    if type(approval) is not SupervisedApproval:
+        raise SmarketsExecutionApprovalError("approval must be canonical SupervisedApproval")
+    action_id = _text(action_id, "action_id")
+    try:
+        bound.verify_binding()
+        action = bound.action_for(action_id)
+    except (SupervisedExecutionError, ValueError) as exc:
+        raise SmarketsExecutionApprovalError(
+            "bound supervised execution plan is not authoritative"
+        ) from exc
+
+    if action.bookmaker_id.lower() != "smarkets":
+        raise SmarketsExecutionApprovalError("execution action bookmaker is not Smarkets")
+    if (
+        approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
+        or approval.intent_id != bound.intent_id
+        or approval.fingerprint != bound.approval_fingerprint
+        or approval.ledger_identity != bound.execution_plan.approval_id
+    ):
+        raise SmarketsExecutionApprovalError(
+            "SupervisedApproval does not bind the exact supervised execution plan"
+        )
+    return action
+
+
+def _require_confirmation_binding(
+    binding: SupervisedConfirmationBinding,
+    *,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    action: ExecutionAction,
+) -> None:
+    if type(binding) is not SupervisedConfirmationBinding:
+        raise SmarketsExecutionApprovalError(
+            "confirmation binding must come from canonical durable authority"
+        )
+    review = binding.review
+    receipt = binding.receipt
+    plan = bound.execution_plan
+    expected_decision_sha256 = plan.fingerprint
+
+    if review.decision_id != plan.decision_id:
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation decision_id does not match execution plan"
+        )
+    if review.decision_sha256 != expected_decision_sha256:
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation does not bind exact execution plan bytes"
+        )
+    if (
+        review.bookmaker_id != action.bookmaker_id
+        or review.account_id != action.account_id
+    ):
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation bookmaker/account does not match execution action"
+        )
+    matching_actions = tuple(
+        item
+        for item in plan.actions
+        if (item.bookmaker_id, item.account_id)
+        == (review.bookmaker_id, review.account_id)
+    )
+    if matching_actions != (action,):
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation does not identify one unique action for bookmaker/account"
+        )
+    if review.approval_evidence_sha256 != approval.evidence_sha256:
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation approval evidence does not match SupervisedApproval"
+        )
+    try:
+        approval.require_active(review.reviewed_at)
+    except SupervisedExecutionError as exc:
+        raise SmarketsExecutionApprovalError(
+            "SupervisedApproval was not active when operator review was created"
+        ) from exc
+    if _instant(review.expires_at, "review.expires_at") > _instant(
+        approval.expires_at, "approval.expires_at"
+    ):
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation lifetime exceeds underlying SupervisedApproval"
+        )
+    if (
+        receipt.review_id != review.review_id
+        or receipt.review_sha256 != review.review_sha256
+        or receipt.decision_id != review.decision_id
+        or receipt.bookmaker_id != review.bookmaker_id
+        or receipt.account_id != review.account_id
+    ):
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation receipt/review identity is inconsistent"
+        )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class SmarketsExecutionApprovalWitness:
+    """Sealed product approval evidence for one exact Smarkets execution action."""
+
+    execution_plan_id: str
+    action_id: str
+    bookmaker_id: str
+    account_id: str
+    decision_id: str
+    decision_sha256: str
+    approval_fingerprint: str
+    approval_evidence_sha256: str
+    risk_evidence_sha256: str
+    review_payload_sha256: str
+    review_id: str
+    review_sha256: str
+    receipt_id: str
+    receipt_sha256: str
+    confirmed_at: str
+    consumed_at: str
+    consumer_key: str
+    evidence_id: str
+
+    def __init__(
+        self,
+        *,
+        execution_plan_id: str,
+        action_id: str,
+        bookmaker_id: str,
+        account_id: str,
+        decision_id: str,
+        decision_sha256: str,
+        approval_fingerprint: str,
+        approval_evidence_sha256: str,
+        risk_evidence_sha256: str,
+        review_payload_sha256: str,
+        review_id: str,
+        review_sha256: str,
+        receipt_id: str,
+        receipt_sha256: str,
+        confirmed_at: str,
+        consumed_at: str,
+        consumer_key: str,
+        evidence_id: str,
+        _seal: object | None = None,
+    ) -> None:
+        if _seal is not _WITNESS_SEAL:
+            raise TypeError(
+                "SmarketsExecutionApprovalWitness is issued only by product approval authority"
+            )
+        for name, value in (
+            ("execution_plan_id", execution_plan_id),
+            ("action_id", action_id),
+            ("bookmaker_id", bookmaker_id),
+            ("account_id", account_id),
+            ("decision_id", decision_id),
+            ("review_id", review_id),
+            ("consumer_key", consumer_key),
+        ):
+            _text(value, name)
+        for name, value in (
+            ("decision_sha256", decision_sha256),
+            ("approval_fingerprint", approval_fingerprint),
+            ("approval_evidence_sha256", approval_evidence_sha256),
+            ("risk_evidence_sha256", risk_evidence_sha256),
+            ("review_payload_sha256", review_payload_sha256),
+            ("review_sha256", review_sha256),
+            ("receipt_id", receipt_id),
+            ("receipt_sha256", receipt_sha256),
+            ("evidence_id", evidence_id),
+        ):
+            _sha256(value, name)
+        _instant(confirmed_at, "confirmed_at")
+        _instant(consumed_at, "consumed_at")
+        object.__setattr__(self, "execution_plan_id", execution_plan_id)
+        object.__setattr__(self, "action_id", action_id)
+        object.__setattr__(self, "bookmaker_id", bookmaker_id)
+        object.__setattr__(self, "account_id", account_id)
+        object.__setattr__(self, "decision_id", decision_id)
+        object.__setattr__(self, "decision_sha256", decision_sha256)
+        object.__setattr__(self, "approval_fingerprint", approval_fingerprint)
+        object.__setattr__(self, "approval_evidence_sha256", approval_evidence_sha256)
+        object.__setattr__(self, "risk_evidence_sha256", risk_evidence_sha256)
+        object.__setattr__(self, "review_payload_sha256", review_payload_sha256)
+        object.__setattr__(self, "review_id", review_id)
+        object.__setattr__(self, "review_sha256", review_sha256)
+        object.__setattr__(self, "receipt_id", receipt_id)
+        object.__setattr__(self, "receipt_sha256", receipt_sha256)
+        object.__setattr__(self, "confirmed_at", confirmed_at)
+        object.__setattr__(self, "consumed_at", consumed_at)
+        object.__setattr__(self, "consumer_key", consumer_key)
+        object.__setattr__(self, "evidence_id", evidence_id)
+
+    def __reduce__(self):
+        raise TypeError(
+            "SmarketsExecutionApprovalWitness is non-serializable; "
+            "re-resolve durable confirmation after restart"
+        )
+
+
+def _issue_witness(
+    binding: SupervisedConfirmationBinding,
+    *,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    action: ExecutionAction,
+) -> SmarketsExecutionApprovalWitness:
+    receipt = binding.receipt
+    review = binding.review
+    if receipt.consumed_by is None or receipt.consumed_at is None:
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation receipt is not durably consumed"
+        )
+    consumer_key = _consumer_key(bound, action, review.review_sha256)
+    if receipt.consumed_by != consumer_key:
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation receipt was consumed by another execution identity"
+        )
+    witness_payload = {
+        "execution_plan_id": bound.execution_plan.plan_id,
+        "action_id": action.action_id,
+        "bookmaker_id": action.bookmaker_id,
+        "account_id": action.account_id,
+        "decision_id": review.decision_id,
+        "decision_sha256": review.decision_sha256,
+        "approval_fingerprint": approval.fingerprint,
+        "approval_evidence_sha256": review.approval_evidence_sha256,
+        "risk_evidence_sha256": review.risk_evidence_sha256,
+        "review_payload_sha256": review.review_payload_sha256,
+        "review_id": review.review_id,
+        "review_sha256": review.review_sha256,
+        "receipt_id": receipt.receipt_id,
+        "receipt_sha256": receipt.receipt_sha256,
+        "confirmed_at": receipt.confirmed_at,
+        "consumed_at": receipt.consumed_at,
+        "consumer_key": consumer_key,
+    }
+    evidence_payload = {
+        "schema": "autosport.smarkets_execution_approval",
+        "schema_version": 1,
+        **witness_payload,
+    }
+    return SmarketsExecutionApprovalWitness(
+        **witness_payload,
+        evidence_id=_digest(evidence_payload),
+        _seal=_WITNESS_SEAL,
+    )
+
+
+def consume_smarkets_execution_approval(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action_id: str,
+    receipt_id: str,
+    expected_review_sha256: str,
+) -> SmarketsExecutionApprovalWitness:
+    """Consume one durable operator receipt for one exact Smarkets action.
+
+    This is the one-shot transition intended to precede an irreversible provider
+    mutation. It performs no provider I/O itself.
+    """
+
+    action = _require_bound_action(bound, approval, action_id)
+    receipt_id = _sha256(receipt_id, "receipt_id")
+    expected_review_sha256 = _sha256(
+        expected_review_sha256, "expected_review_sha256"
+    )
+    authority = _open_confirmation_authority()
+    try:
+        before = authority.resolve_receipt_binding(
+            receipt_id=receipt_id,
+            expected_review_sha256=expected_review_sha256,
+            require_unconsumed=True,
+        )
+        _require_confirmation_binding(
+            before,
+            bound=bound,
+            approval=approval,
+            action=action,
+        )
+        consumer_key = _consumer_key(bound, action, before.review.review_sha256)
+        authority.consume_receipt(
+            receipt_id=receipt_id,
+            expected_review_sha256=expected_review_sha256,
+            consumer_key=consumer_key,
+        )
+        after = authority.resolve_receipt_binding(
+            receipt_id=receipt_id,
+            expected_review_sha256=expected_review_sha256,
+            require_unconsumed=False,
+        )
+    except SupervisedConfirmationError as exc:
+        raise SmarketsExecutionApprovalError(
+            "durable operator confirmation could not be consumed"
+        ) from exc
+    _require_confirmation_binding(
+        after,
+        bound=bound,
+        approval=approval,
+        action=action,
+    )
+    return _issue_witness(after, bound=bound, approval=approval, action=action)
+
+
+def resolve_consumed_smarkets_execution_approval(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action_id: str,
+    receipt_id: str,
+    expected_review_sha256: str,
+) -> SmarketsExecutionApprovalWitness:
+    """Re-resolve a previously consumed exact Smarkets approval after restart."""
+
+    action = _require_bound_action(bound, approval, action_id)
+    receipt_id = _sha256(receipt_id, "receipt_id")
+    expected_review_sha256 = _sha256(
+        expected_review_sha256, "expected_review_sha256"
+    )
+    authority = _open_confirmation_authority()
+    try:
+        binding = authority.resolve_receipt_binding(
+            receipt_id=receipt_id,
+            expected_review_sha256=expected_review_sha256,
+            require_unconsumed=False,
+        )
+    except SupervisedConfirmationError as exc:
+        raise SmarketsExecutionApprovalError(
+            "durable operator confirmation could not be re-resolved"
+        ) from exc
+    _require_confirmation_binding(
+        binding,
+        bound=bound,
+        approval=approval,
+        action=action,
+    )
+    return _issue_witness(binding, bound=bound, approval=approval, action=action)

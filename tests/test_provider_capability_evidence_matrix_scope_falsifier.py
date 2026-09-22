@@ -44,20 +44,20 @@ def _profile() -> BookmakerCapabilityProfile:
     )
 
 
-def _positive_write_fact(profile, integration, *, environment, application_mode):
+def _positive_scoped_fact(profile, integration, *, environment, application_mode):
     return issue_provider_capability_evidence(
         capability=BookmakerCapability.PLACE_BET,
         profile_state=BookmakerCapabilityState.SUPPORTED,
-        grade=ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN,
+        grade=ProviderCapabilityTruthGrade.CONFIGURED,
         profile_id=profile.profile_id,
         integration_evidence_id=integration.evidence_id,
         environment=environment,
         application_mode=application_mode,
         observed_at=T2,
         expires_at=T4,
-        evidence_ref="evidence://write-permission/provider-a/acct-a",
+        evidence_ref="evidence://configured/provider-a/acct-a",
         evidence_sha256="c" * 64,
-        endpoint_operation="place_bet",
+        endpoint_operation="configured-place-bet-adapter",
     )
 
 
@@ -95,7 +95,7 @@ def test_positive_capability_fact_cannot_qualify_across_matrix_scope(
         source_ref="integration://provider-a/acct-a",
         source_payload_sha256="b" * 64,
     )
-    fact = _positive_write_fact(
+    fact = _positive_scoped_fact(
         profile,
         integration,
         environment=first_environment,
@@ -123,7 +123,7 @@ def test_positive_capability_fact_cannot_qualify_across_matrix_scope(
             ref="second-scope",
         )
 
-    accepted = frozenset({ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN})
+    accepted = frozenset({ProviderCapabilityTruthGrade.CONFIGURED})
     assert first.qualifies(
         BookmakerCapability.PLACE_BET,
         accepted_grades=accepted,

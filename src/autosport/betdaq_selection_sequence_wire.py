@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import re
 import xml.etree.ElementTree as ET
 
 from .betdaq_readonly_market_wire import (
@@ -54,6 +55,12 @@ _SETTLEMENT_INFORMATION_ATTRIBUTES = frozenset(
         "RightSideFactor",
         "SettlementResultString",
     }
+)
+
+
+_XSD_DATETIME_LEXICAL = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z"
 )
 
 
@@ -112,8 +119,14 @@ class BetdaqSelectionsChangedWireResponse:
 
 def _wire_timestamp(value: str, field: str) -> BetdaqWireTimestamp:
     raw = value.strip()
-    if not raw or raw != value or "T" not in raw:
-        raise BetdaqSoapProtocolError(f"{field} must be a trimmed ISO-8601 dateTime")
+    if (
+        not raw
+        or raw != value
+        or _XSD_DATETIME_LEXICAL.fullmatch(raw) is None
+    ):
+        raise BetdaqSoapProtocolError(
+            f"{field} must be a trimmed ISO-8601/XSD dateTime"
+        )
     candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
     try:
         parsed = datetime.fromisoformat(candidate)

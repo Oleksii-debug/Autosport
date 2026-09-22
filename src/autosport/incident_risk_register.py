@@ -429,6 +429,8 @@ class IncidentRiskEntry:
                 model_version_ids=tuple_field("model_version_ids"),
                 requires_operator_action=raw["requires_operator_action"],
             )
+        except IncidentRiskRegisterError:
+            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise IncidentRiskRegisterError(
                 "incident/model-risk entry contains invalid enum/value data"

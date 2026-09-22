@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from autosport.dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
+from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
+
 # Focused handoff packets may omit the pre-existing lineage module. In the real
 # repository it must be imported normally so this test never replaces canonical
 # production code in sys.modules or changes later test behavior.
@@ -78,13 +81,55 @@ class _Record:
         self.causal_cutoff = causal_cutoff
 
 
-class _Authority:
+class _ForgedAuthority:
     def __init__(self, record: _Record | None) -> None:
         self._record = record
 
     def record(self, snapshot_id: str) -> _Record | None:
         assert snapshot_id == "snapshot-1"
         return self._record
+
+
+def _canonical_authority(
+    tmp_path: Path,
+    manifest: object,
+    *,
+    causal_cutoff: str = "2026-09-01T00:59:59Z",
+) -> tuple[DatasetSnapshotLineageAuthority, object]:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id="snapshot-1",
+            manifest_sha256=manifest.membership_manifest_sha256(),
+            source_identity="provider:test-shards",
+            license_identity="license:test-v1",
+            causal_cutoff=causal_cutoff,
+            available_at_utc="2026-09-02T00:00:00Z",
+        )
+    )
+    authority = DatasetSnapshotLineageAuthority.initialize_pristine(
+        tmp_path / "dataset-snapshot-lineage.json",
+        registry,
+        authority_root=tmp_path / "dataset-lineage-machine-state",
+    )
+    record = authority.register(
+        snapshot_id="snapshot-1",
+        member_sha256=manifest.member_sha256,
+    )
+    return authority, record
+
+
+def _empty_canonical_authority(tmp_path: Path) -> DatasetSnapshotLineageAuthority:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    return DatasetSnapshotLineageAuthority.initialize_pristine(
+        tmp_path / "dataset-snapshot-lineage.json",
+        registry,
+        authority_root=tmp_path / "dataset-lineage-machine-state",
+    )
 
 
 def test_order_is_canonical_and_descriptor_metadata_is_committed(tmp_path: Path) -> None:
@@ -206,8 +251,7 @@ def test_canonical_lineage_binding_rejects_changed_descriptor_or_bytes(tmp_path:
     (tmp_path / "s.bin").write_bytes(payload)
     descriptor = _descriptor(0, "s0", "s.bin", payload)
     manifest = verify_shard_files(tmp_path, (descriptor,))
-    record = _Record(manifest.member_sha256, manifest.membership_manifest_sha256())
-    authority = _Authority(record)
+    authority, record = _canonical_authority(tmp_path, manifest)
 
     assert verify_registered_dataset_shards(
         authority,
@@ -254,7 +298,7 @@ def test_missing_canonical_lineage_record_fails_closed(tmp_path: Path) -> None:
     descriptor = _descriptor(0, "s0", "s.bin", payload)
     with pytest.raises(DatasetShardManifestError, match="no canonical lineage"):
         verify_registered_dataset_shards(
-            _Authority(None),
+            _empty_canonical_authority(tmp_path),
             snapshot_id="snapshot-1",
             shard_root=tmp_path,
             shards=(descriptor,),
@@ -298,15 +342,15 @@ def test_matching_manifest_rejects_shard_ending_after_causal_cutoff(
         end="2026-09-01T01:00:01Z",
     )
     manifest = verify_shard_files(tmp_path, (descriptor,))
-    record = _Record(
-        manifest.member_sha256,
-        manifest.membership_manifest_sha256(),
+    authority, _ = _canonical_authority(
+        tmp_path,
+        manifest,
         causal_cutoff="2026-09-01T01:00:00Z",
     )
 
     with pytest.raises(DatasetShardManifestError, match="causal cutoff"):
         verify_registered_dataset_shards(
-            _Authority(record),
+            authority,
             snapshot_id="snapshot-1",
             shard_root=tmp_path,
             shards=(descriptor,),
@@ -338,15 +382,15 @@ def test_read_rejects_future_sibling_even_when_requested_shard_is_causal(
         tmp_path,
         (current_descriptor, future_descriptor),
     )
-    record = _Record(
-        manifest.member_sha256,
-        manifest.membership_manifest_sha256(),
+    authority, _ = _canonical_authority(
+        tmp_path,
+        manifest,
         causal_cutoff="2026-09-01T01:00:00Z",
     )
 
     with pytest.raises(DatasetShardManifestError, match="causal cutoff"):
         read_registered_shard_bytes(
-            _Authority(record),
+            authority,
             snapshot_id="snapshot-1",
             shard_root=tmp_path,
             shards=(current_descriptor, future_descriptor),
@@ -365,12 +409,11 @@ def test_shard_ending_exactly_at_causal_cutoff_is_accepted(tmp_path: Path) -> No
         end="2026-09-01T01:00:00Z",
     )
     manifest = verify_shard_files(tmp_path, (descriptor,))
-    record = _Record(
-        manifest.member_sha256,
-        manifest.membership_manifest_sha256(),
+    authority, record = _canonical_authority(
+        tmp_path,
+        manifest,
         causal_cutoff="2026-09-01T01:00:00Z",
     )
-    authority = _Authority(record)
 
     assert verify_registered_dataset_shards(
         authority,
@@ -387,6 +430,30 @@ def test_shard_ending_exactly_at_causal_cutoff_is_accepted(tmp_path: Path) -> No
     ) == payload
 
 
+def test_caller_defined_record_authority_cannot_mint_positive_lineage(
+    tmp_path: Path,
+) -> None:
+    payload = b"forged-authority"
+    (tmp_path / "s.bin").write_bytes(payload)
+    descriptor = _descriptor(0, "s0", "s.bin", payload)
+    manifest = verify_shard_files(tmp_path, (descriptor,))
+    forged_record = _Record(
+        manifest.member_sha256,
+        manifest.membership_manifest_sha256(),
+    )
+
+    with pytest.raises(
+        DatasetShardManifestError,
+        match="canonical DatasetSnapshotLineageAuthority",
+    ):
+        verify_registered_dataset_shards(
+            _ForgedAuthority(forged_record),
+            snapshot_id="snapshot-1",
+            shard_root=tmp_path,
+            shards=(descriptor,),
+        )
+
+
 def test_read_revalidates_target_after_authority_lookup_to_close_toctou(
     tmp_path: Path,
 ) -> None:
@@ -396,17 +463,26 @@ def test_read_revalidates_target_after_authority_lookup_to_close_toctou(
     path.write_bytes(payload)
     descriptor = _descriptor(0, "s0", "s.bin", payload)
     manifest = verify_shard_files(tmp_path, (descriptor,))
-    record = _Record(manifest.member_sha256, manifest.membership_manifest_sha256())
+    authority, _ = _canonical_authority(tmp_path, manifest)
+    canonical_record = DatasetSnapshotLineageAuthority.record
 
-    class _MutatingAuthority(_Authority):
-        def record(self, snapshot_id: str) -> _Record | None:
-            result = super().record(snapshot_id)
-            path.write_bytes(rewritten)
-            return result
+    def _mutating_record(
+        self: DatasetSnapshotLineageAuthority,
+        snapshot_id: str,
+    ) -> object:
+        result = canonical_record(self, snapshot_id)
+        path.write_bytes(rewritten)
+        return result
+
+    monkeypatch.setattr(
+        DatasetSnapshotLineageAuthority,
+        "record",
+        _mutating_record,
+    )
 
     with pytest.raises(DatasetShardManifestError, match="SHA-256"):
         read_registered_shard_bytes(
-            _MutatingAuthority(record),
+            authority,
             snapshot_id="snapshot-1",
             shard_root=tmp_path,
             shards=(descriptor,),

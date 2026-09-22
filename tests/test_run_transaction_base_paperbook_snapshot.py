@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
+from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction, RunTransactionError
 
 
@@ -18,12 +19,35 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
         return book_path, payload, sha256_file(book_path)
 
     @staticmethod
-    def _start(root: Path, *, run_id: str = "base-snapshot-run") -> RunTransaction:
-        book_path, _payload, book_sha = RunTransactionBasePaperBookSnapshotTests._prepare_book(root)
+    def _begin_registry(
+        root: Path,
+        *,
+        run_id: str,
+        base_book_sha256: str,
+        base_ledger_sha256: str = "c" * 64,
+    ) -> str:
+        registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+        return registry.begin(
+            "a" * 64,
+            "b" * 64,
+            "baseline-v1",
+            run_id,
+            base_paper_book_sha256=base_book_sha256,
+            base_decision_ledger_sha256=base_ledger_sha256,
+        )
+
+    @classmethod
+    def _start(cls, root: Path, *, run_id: str = "base-snapshot-run") -> RunTransaction:
+        _book_path, _payload, book_sha = cls._prepare_book(root)
+        experiment_key = cls._begin_registry(
+            root,
+            run_id=run_id,
+            base_book_sha256=book_sha,
+        )
         return RunTransaction.start(
             root,
             run_id=run_id,
-            experiment_key="experiment",
+            experiment_key=experiment_key,
             market_sha256="a" * 64,
             results_sha256="b" * 64,
             strategy_id="baseline-v1",
@@ -35,10 +59,15 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             book_path, expected_payload, expected_sha = self._prepare_book(root)
+            experiment_key = self._begin_registry(
+                root,
+                run_id="retained-after-advance",
+                base_book_sha256=expected_sha,
+            )
             tx = RunTransaction.start(
                 root,
                 run_id="retained-after-advance",
-                experiment_key="experiment",
+                experiment_key=experiment_key,
                 market_sha256="a" * 64,
                 results_sha256="b" * 64,
                 strategy_id="baseline-v1",
@@ -62,6 +91,11 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._prepare_book(root)
+            experiment_key = self._begin_registry(
+                root,
+                run_id="stale-base",
+                base_book_sha256="0" * 64,
+            )
 
             with self.assertRaisesRegex(
                 RunTransactionError,
@@ -70,7 +104,7 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
                 RunTransaction.start(
                     root,
                     run_id="stale-base",
-                    experiment_key="experiment",
+                    experiment_key=experiment_key,
                     market_sha256="a" * 64,
                     results_sha256="b" * 64,
                     strategy_id="baseline-v1",
@@ -79,6 +113,27 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
                 )
 
             self.assertFalse((root / RunTransaction.ROOT_NAME / "stale-base").exists())
+
+    def test_manifest_and_sidecar_rebinding_cannot_override_registry_base_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx = self._start(root, run_id="registry-bound-base")
+
+            PaperBook("7777").save(tx.base_book_snapshot_path)
+            rebound_sha = sha256_file(tx.base_book_snapshot_path)
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest["base"]["paper_book_sha256"] = rebound_sha
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            detached = RunTransaction(root, "registry-bound-base")
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "immutable identity mismatch: base.paper_book_sha256",
+            ):
+                detached.verified_base_paper_book_snapshot()
 
     def test_retained_snapshot_tamper_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +171,11 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _book_path, _payload, book_sha = self._prepare_book(root)
+            experiment_key = self._begin_registry(
+                root,
+                run_id="retention-failure",
+                base_book_sha256=book_sha,
+            )
 
             with patch.object(
                 RunTransaction,
@@ -126,7 +186,7 @@ class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
                     RunTransaction.start(
                         root,
                         run_id="retention-failure",
-                        experiment_key="experiment",
+                        experiment_key=experiment_key,
                         market_sha256="a" * 64,
                         results_sha256="b" * 64,
                         strategy_id="baseline-v1",

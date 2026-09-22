@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -237,3 +237,26 @@ def test_same_exact_snapshots_rederive_same_occurrence_digest(tmp_path) -> None:
     assert first.source_evidence_sha256 == second.source_evidence_sha256
     assert first.source_evidence_sha256 != first.base_snapshot_sha256
     assert first.source_evidence_sha256 != first.final_snapshot_sha256
+
+
+def test_replay_is_independent_of_ambient_decimal_context(tmp_path) -> None:
+    book = PaperBook("100")
+    base = _snapshot(book, tmp_path / "base.json")
+    ticket = book.open_ticket(
+        [_leg()],
+        Decimal("12.345678"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    final = _snapshot(book, tmp_path / "final.json")
+    expected_final = book.balance
+
+    with localcontext() as context:
+        context.prec = 3
+        replay = replay_paper_book_equity_path(
+            base,
+            final,
+            expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
+        )
+
+    assert replay.minimum_equity == expected_final
+    assert replay.final_balance == expected_final

@@ -523,7 +523,7 @@ class VerifiedSmarketsOrderEffect:
         }
 
 
-def verify_smarkets_order_readback(
+def _assess_smarkets_order_readback_structure(
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
     authority: SmarketsExecutionAuthority,
@@ -531,12 +531,11 @@ def verify_smarkets_order_readback(
     *,
     expected_reference_id: str,
 ) -> VerifiedSmarketsOrderEffect:
-    """Promote exact provider readback into bounded canonical execution evidence.
+    """Structurally reconcile one caller-supplied Smarkets-shaped readback.
 
-    Smarkets' order quantity is payout/return (stake * odds) in 1e-4 units.
-    Consequently a best-price fill can execute the full provider quantity while
-    using less conventional stake. Provider fixed-point fields remain embedded
-    in the evidence digest; HTTP success alone never creates this effect.
+    This helper validates identity and provider-native economics for deterministic
+    reconciliation/journal mechanics. Its return value is structural evidence only:
+    caller-supplied DTOs and hashes do not prove provider origin or product approval.
     """
 
     if type(action) is not ExecutionAction:
@@ -707,6 +706,34 @@ def verify_smarkets_order_readback(
         profile_id=profile_id,
         source_payload_sha256=readback.source_payload_sha256,
         evidence_id=evidence_id,
+    )
+
+
+def verify_smarkets_order_readback(
+    action: ExecutionAction,
+    profile: BookmakerCapabilityProfile,
+    authority: SmarketsExecutionAuthority,
+    readback: SmarketsOrderReadback,
+    *,
+    expected_reference_id: str,
+) -> VerifiedSmarketsOrderEffect:
+    """Fail closed until product-owned Smarkets approval and readback origin compose.
+
+    Structural agreement between caller-created objects is not execution authority.
+    A future positive path must re-resolve product-owned supervised approval and an
+    authenticated account/session-bound provider acquisition at this boundary.
+    """
+
+    _assess_smarkets_order_readback_structure(
+        action,
+        profile,
+        authority,
+        readback,
+        expected_reference_id=expected_reference_id,
+    )
+    raise SmarketsReconciliationPending(
+        "positive Smarkets execution readback requires product-owned approval "
+        "and authenticated account/session-bound provider evidence"
     )
 
 

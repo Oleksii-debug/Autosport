@@ -37,10 +37,10 @@ class _OneMessageWorker:
 
 
 class _DatasetPollHarness:
-    def __init__(self) -> None:
+    def __init__(self, error: str) -> None:
         self._closing = False
         self.dataset_worker = _OneMessageWorker(
-            DatasetValidationMessage(error=_DATASET_SECRET)
+            DatasetValidationMessage(error=error)
         )
         self._pending_dataset_path = Path("dataset-root")
         self.status = _ValueSink()
@@ -55,10 +55,10 @@ class _DatasetPollHarness:
 
 
 class _LivePollHarness:
-    def __init__(self) -> None:
+    def __init__(self, error: str) -> None:
         self._closing = False
         self.live_worker = _OneMessageWorker(
-            ObservationWorkerMessage(error=_LIVE_SECRET)
+            ObservationWorkerMessage(error=error)
         )
         self.live_refresh_button = _Button()
         self.live_status = _ValueSink()
@@ -69,6 +69,22 @@ class _LivePollHarness:
         self.log.append(value)
 
 
+def _dataset_render(
+    app: _DatasetPollHarness,
+    dialogs: list[tuple[str, str]],
+) -> str:
+    return "\n".join(
+        app.log
+        + app.status.values
+        + [title for title, _message in dialogs]
+        + [message for _title, message in dialogs]
+    )
+
+
+def _live_render(app: _LivePollHarness) -> str:
+    return "\n".join(app.log + app.live_status.values + app.status.values)
+
+
 def test_dataset_worker_raw_secret_never_reaches_operator_surfaces(monkeypatch) -> None:
     dialogs: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -76,40 +92,52 @@ def test_dataset_worker_raw_secret_never_reaches_operator_surfaces(monkeypatch) 
         "showerror",
         lambda title, message: dialogs.append((title, message)),
     )
-    app = _DatasetPollHarness()
+    app = _DatasetPollHarness(_DATASET_SECRET)
 
     AutosportApp._poll_dataset_worker(app)
 
     assert app._pending_dataset_path is None
     assert app.busy_transitions == [False]
     assert dialogs
-    rendered = "\n".join(
-        app.log
-        + app.status.values
-        + [title for title, _message in dialogs]
-        + [message for _title, message in dialogs]
-    )
+    rendered = _dataset_render(app, dialogs)
     for forbidden in (
         "AUTOSPORT-DATASET-SECRET-SENTINEL",
         "Authorization",
         "Bearer",
     ):
         assert forbidden not in rendered
-    assert "DatasetValidationError" in rendered
+    assert "DATASET_VALIDATION_FAILURE" in rendered
     assert "Набір даних відхилено" in rendered
+
+    dialogs.clear()
+    other = _DatasetPollHarness("password=DIFFERENT-DATASET-DIAGNOSTIC")
+    AutosportApp._poll_dataset_worker(other)
+    rendered_other = _dataset_render(other, dialogs)
+
+    assert rendered_other == rendered
+    assert "DIFFERENT-DATASET-DIAGNOSTIC" not in rendered_other
+    assert "password" not in rendered_other.casefold()
 
 
 def test_live_worker_raw_secret_never_reaches_operator_surfaces() -> None:
-    app = _LivePollHarness()
+    app = _LivePollHarness(_LIVE_SECRET)
 
     AutosportApp._poll_live_worker(app)
 
     assert app.live_refresh_button.states == [("!disabled",)]
-    rendered = "\n".join(app.log + app.live_status.values + app.status.values)
+    rendered = _live_render(app)
     for forbidden in (
         "AUTOSPORT-LIVE-SECRET-SENTINEL",
         "X-Api-Key",
     ):
         assert forbidden not in rendered
-    assert "LiveObservationError" in rendered
+    assert "LIVE_OBSERVATION_FAILURE" in rendered
     assert "Помилка поточного знімка" in rendered
+
+    other = _LivePollHarness("token=DIFFERENT-LIVE-DIAGNOSTIC")
+    AutosportApp._poll_live_worker(other)
+    rendered_other = _live_render(other)
+
+    assert rendered_other == rendered
+    assert "DIFFERENT-LIVE-DIAGNOSTIC" not in rendered_other
+    assert "token=" not in rendered_other.casefold()

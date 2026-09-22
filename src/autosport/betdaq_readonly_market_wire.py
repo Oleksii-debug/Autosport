@@ -280,6 +280,13 @@ def _parse_price_level(
             raise BetdaqSoapProtocolError("nil price level must be empty")
         return None
 
+    unexpected_attributes = sorted(set(element.attrib) - {"Price", "Stake"})
+    if unexpected_attributes:
+        raise BetdaqSoapProtocolError(
+            f"{provider_side} price level contains unexpected attribute(s): "
+            + ", ".join(unexpected_attributes)
+        )
+
     price_text = _optional_attr(element, "Price")
     stake_text = _optional_attr(element, "Stake")
     if price_text is None or stake_text is None:

@@ -740,6 +740,7 @@ def build_windows_package(
         "human_tested": False,
         "nvda_verified": False,
         "v1_ready": False,
+        "whole_product_complete": False,
     }
     _write_json(package_dir / "BUILD_INFO.json", build_info)
 
@@ -843,6 +844,8 @@ def verify_windows_package(
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
     if build_info.get("v1_ready") is not False:
         raise ValueError("BUILD_INFO.json must record v1_ready=false")
+    if build_info.get("whole_product_complete") is not False:
+        raise ValueError("BUILD_INFO.json must record whole_product_complete=false")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
@@ -951,6 +954,7 @@ def verify_windows_package(
         "human_tested": False,
         "nvda_verified": False,
         "v1_ready": False,
+        "whole_product_complete": False,
     }
 
 

@@ -214,6 +214,24 @@ class UrllibBetdaqSoapTransport:
         return payload
 
 
+_CANONICAL_HTTPS_POST = UrllibBetdaqSoapTransport.post
+
+
+def _require_canonical_account_transport(transport: object) -> None:
+    if type(transport) is not UrllibBetdaqSoapTransport:
+        raise BetdaqAccountReadOnlyError(
+            "canonical BETDAQ account evidence requires product-owned HTTPS transport"
+        )
+    bound_post = getattr(transport, "post", None)
+    if (
+        getattr(bound_post, "__self__", None) is not transport
+        or getattr(bound_post, "__func__", None) is not _CANONICAL_HTTPS_POST
+    ):
+        raise BetdaqAccountReadOnlyError(
+            "canonical BETDAQ account transport was replaced or shadowed"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class BetdaqSoapEvidence:
     method: str
@@ -608,6 +626,7 @@ class BetdaqAccountReadOnlyClient:
                 f"BETDAQ read-only adapter cannot prove complete capability: {names}"
             )
 
+        _require_canonical_account_transport(self._transport)
         context_before = _authenticated_account_context(
             self._credentials,
             self._venue_id,

@@ -9,7 +9,7 @@ from decimal import Decimal, localcontext
 from enum import StrEnum
 from fractions import Fraction
 from math import factorial
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Protocol, Sequence
 
 _HEX = frozenset("0123456789abcdef")
 
@@ -28,6 +28,59 @@ class IdentifiabilityTier(StrEnum):
     SIMULATED_COUNTERFACTUAL = "SIMULATED_COUNTERFACTUAL"
     FORWARD_RANDOMIZED_OR_PAIRED = "FORWARD_RANDOMIZED_OR_PAIRED"
     NOT_IDENTIFIABLE = "NOT_IDENTIFIABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedAblationAuthority:
+    """Product-resolved authority for exactly one ablation observation."""
+
+    authority_sha256: str
+    evidence_sha256: str
+    identifiability_tier: IdentifiabilityTier
+    scope_id: str
+    dataset_manifest_sha256: str
+    holdout_access_sha256: str
+    causal_cutoff: str
+    available_at: str
+    execution_receipt_sha256: str | None = None
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "authority_sha256", _sha(self.authority_sha256, "authority_sha256"))
+        object.__setattr__(self, "evidence_sha256", _sha(self.evidence_sha256, "evidence_sha256"))
+        if (
+            not isinstance(self.identifiability_tier, IdentifiabilityTier)
+            or self.identifiability_tier is IdentifiabilityTier.NOT_IDENTIFIABLE
+        ):
+            raise ValueError("resolved authority requires a positive identifiability tier")
+        _text(self.scope_id, "scope_id")
+        object.__setattr__(self, "dataset_manifest_sha256", _sha(self.dataset_manifest_sha256, "dataset_manifest_sha256"))
+        object.__setattr__(self, "holdout_access_sha256", _sha(self.holdout_access_sha256, "holdout_access_sha256"))
+        _instant(self.causal_cutoff, "causal_cutoff")
+        _instant(self.available_at, "available_at")
+        object.__setattr__(
+            self,
+            "execution_receipt_sha256",
+            _opt_sha(self.execution_receipt_sha256, "execution_receipt_sha256"),
+        )
+        if type(self.assumptions) is not tuple:
+            raise ValueError("resolved authority assumptions must be a tuple")
+        assumptions = tuple(_text(value, "resolved authority assumption") for value in self.assumptions)
+        if assumptions != tuple(sorted(assumptions)) or len(assumptions) != len(set(assumptions)):
+            raise ValueError("resolved authority assumptions must be sorted and unique")
+        object.__setattr__(self, "assumptions", assumptions)
+        if self.identifiability_tier is IdentifiabilityTier.SIMULATED_COUNTERFACTUAL and not assumptions:
+            raise ValueError("resolved simulation authority requires explicit assumptions")
+
+
+class AblationAuthorityResolver(Protocol):
+    """Read-only product authority resolver; it grants no promotion/execution authority."""
+
+    def resolve(
+        self,
+        authority_sha256: str,
+        evidence_sha256: str,
+    ) -> ResolvedAblationAuthority | None: ...
 
 
 class ClaimKind(StrEnum):
@@ -295,7 +348,8 @@ class AblationObservation:
             raise ValueError("simulated counterfactual requires explicit assumptions")
 
     @property
-    def identifiability_tier(self) -> IdentifiabilityTier:
+    def authority_kind(self) -> IdentifiabilityTier:
+        """Kind claimed by the opaque reference; not a verified scientific tier."""
         if self.metric_value is None:
             return IdentifiabilityTier.NOT_IDENTIFIABLE
         if self.simulator_sha256 is not None:
@@ -304,13 +358,23 @@ class AblationObservation:
             return IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL
         if self.assignment_evidence_sha256 is not None:
             return IdentifiabilityTier.FORWARD_RANDOMIZED_OR_PAIRED
-        return IdentifiabilityTier.FACTUAL_MECHANICAL if self.factual_evidence_sha256 is not None else IdentifiabilityTier.NOT_IDENTIFIABLE
+        return (
+            IdentifiabilityTier.FACTUAL_MECHANICAL
+            if self.factual_evidence_sha256 is not None
+            else IdentifiabilityTier.NOT_IDENTIFIABLE
+        )
+
+    @property
+    def identifiability_tier(self) -> IdentifiabilityTier:
+        """A raw caller-constructed observation has no positive scientific tier."""
+        return IdentifiabilityTier.NOT_IDENTIFIABLE
 
     def canonical_payload(self) -> dict[str, object]:
         return {
             "enabled_components": [item.value for item in self.enabled_components], "metric_value": None if self.metric_value is None else _dec_text(self.metric_value),
             "uncertainty_low": None if self.uncertainty_low is None else _dec_text(self.uncertainty_low), "uncertainty_high": None if self.uncertainty_high is None else _dec_text(self.uncertainty_high),
-            "identifiability_tier": self.identifiability_tier.value, "evidence_sha256": self.evidence_sha256, "factual_evidence_sha256": self.factual_evidence_sha256,
+            "identifiability_tier": self.identifiability_tier.value, "authority_kind": self.authority_kind.value,
+            "evidence_sha256": self.evidence_sha256, "factual_evidence_sha256": self.factual_evidence_sha256,
             "evidence_available_at": self.evidence_available_at, "eligible_count": self.eligible_count, "selected_count": self.selected_count,
             "resolved_count": self.resolved_count, "pending_count": self.pending_count, "void_count": self.void_count, "missing_count": self.missing_count,
             "applicable_costs_complete": self.applicable_costs_complete, "execution_receipt_sha256": self.execution_receipt_sha256,
@@ -423,10 +487,80 @@ def _tier(tiers: Iterable[IdentifiabilityTier]) -> IdentifiabilityTier:
     return IdentifiabilityTier.NOT_IDENTIFIABLE
 
 
-def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequence[AblationObservation]) -> AblationEvaluationEvidence:
+def _authority_reference(item: AblationObservation) -> tuple[IdentifiabilityTier, str] | None:
+    values = (
+        (IdentifiabilityTier.FACTUAL_MECHANICAL, item.factual_evidence_sha256),
+        (IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL, item.replay_authority_sha256),
+        (IdentifiabilityTier.SIMULATED_COUNTERFACTUAL, item.simulator_sha256),
+        (IdentifiabilityTier.FORWARD_RANDOMIZED_OR_PAIRED, item.assignment_evidence_sha256),
+    )
+    present = tuple((kind, value) for kind, value in values if value is not None)
+    if not present:
+        return None
+    if len(present) != 1:
+        raise ValueError("observation authority reference is ambiguous")
+    return present[0]
+
+
+def _resolve_observation_authority(
+    protocol: AblationProtocol,
+    item: AblationObservation,
+    resolver: AblationAuthorityResolver | None,
+) -> IdentifiabilityTier:
+    if item.metric_value is None:
+        return IdentifiabilityTier.NOT_IDENTIFIABLE
+    reference = _authority_reference(item)
+    if reference is None:
+        raise ValueError("evaluated observation requires an identifiability authority reference")
+    claimed_kind, authority_sha256 = reference
+    if resolver is None:
+        raise ValueError(
+            "evaluated observation requires product authority re-resolution; opaque digests cannot mint scientific credit"
+        )
+    resolved = resolver.resolve(authority_sha256, item.evidence_sha256)
+    if not isinstance(resolved, ResolvedAblationAuthority):
+        raise ValueError("ablation authority reference is not product-resolved")
+    if resolved.authority_sha256 != authority_sha256:
+        raise ValueError("resolved authority digest does not match observation reference")
+    if resolved.evidence_sha256 != item.evidence_sha256:
+        raise ValueError("resolved authority does not bind exact observation evidence")
+    if resolved.identifiability_tier is not claimed_kind:
+        raise ValueError("resolved authority kind does not match observation reference kind")
+    if resolved.scope_id != protocol.scope_id:
+        raise ValueError("resolved authority scope does not match frozen ablation protocol")
+    if resolved.dataset_manifest_sha256 != protocol.dataset_manifest_sha256:
+        raise ValueError("resolved authority dataset does not match frozen ablation protocol")
+    if resolved.holdout_access_sha256 != protocol.holdout_access_sha256:
+        raise ValueError("resolved authority holdout does not match frozen ablation protocol")
+    if _instant(resolved.causal_cutoff, "resolved causal_cutoff") != _instant(
+        protocol.causal_cutoff, "protocol causal_cutoff"
+    ):
+        raise ValueError("resolved authority causal cutoff does not match frozen ablation protocol")
+    resolved_at = _instant(resolved.available_at, "resolved authority available_at")
+    if resolved_at > _instant(item.evidence_available_at, "evidence_available_at"):
+        raise ValueError("resolved authority was not available when observation evidence became available")
+    if resolved_at > _instant(protocol.evaluation_as_of, "evaluation_as_of"):
+        raise ValueError("resolved authority was not available at frozen evaluation time")
+    if resolved.execution_receipt_sha256 != item.execution_receipt_sha256:
+        raise ValueError("resolved authority execution receipt does not match observation")
+    if resolved.identifiability_tier is IdentifiabilityTier.SIMULATED_COUNTERFACTUAL:
+        if resolved.assumptions != item.assumptions:
+            raise ValueError("resolved simulator assumptions do not match observation")
+    elif resolved.assumptions:
+        raise ValueError("non-simulation authority cannot carry simulator assumptions")
+    return resolved.identifiability_tier
+
+
+def evaluate_pipeline_ablation(
+    protocol: AblationProtocol,
+    observations: Sequence[AblationObservation],
+    *,
+    authority_resolver: AblationAuthorityResolver | None = None,
+) -> AblationEvaluationEvidence:
     if not isinstance(protocol, AblationProtocol) or not observations:
         raise ValueError("ablation evaluation requires a canonical protocol and observations")
     allowed, by_enabled = frozenset(protocol.components), {}
+    resolved_tiers: dict[tuple[PipelineComponent, ...], IdentifiabilityTier] = {}
     as_of = _instant(protocol.evaluation_as_of, "evaluation_as_of")
     for item in observations:
         if not isinstance(item, AblationObservation):
@@ -435,13 +569,15 @@ def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequenc
             raise ValueError("observation coalition is outside protocol or duplicated")
         if _instant(item.evidence_available_at, "evidence_available_at") > as_of:
             raise ValueError("future evidence cannot enter the frozen evaluation")
+        tier = _resolve_observation_authority(protocol, item, authority_resolver)
+        resolved_tiers[item.enabled_components] = tier
         if protocol.claim_kind is ClaimKind.ECONOMIC and item.metric_value is not None and not item.applicable_costs_complete:
             raise ValueError("economic metric requires complete applicable-cost evidence")
-        if item.identifiability_tier is IdentifiabilityTier.FACTUAL_MECHANICAL and {PipelineComponent.DATA, PipelineComponent.MODEL, PipelineComponent.THRESHOLD_SELECTION}.intersection(item.enabled_components):
+        if tier is IdentifiabilityTier.FACTUAL_MECHANICAL and {PipelineComponent.DATA, PipelineComponent.MODEL, PipelineComponent.THRESHOLD_SELECTION}.intersection(item.enabled_components):
             raise ValueError("data/model/threshold interventions require replay, simulation, or prospective assignment authority")
-        if protocol.claim_kind is ClaimKind.EXECUTION and item.identifiability_tier is IdentifiabilityTier.FACTUAL_MECHANICAL and item.metric_value is not None and item.execution_receipt_sha256 is None:
+        if protocol.claim_kind is ClaimKind.EXECUTION and tier is IdentifiabilityTier.FACTUAL_MECHANICAL and item.metric_value is not None and item.execution_receipt_sha256 is None:
             raise ValueError("factual execution metric requires exact execution receipt")
-        if PipelineComponent.SIZING in item.enabled_components and item.identifiability_tier is IdentifiabilityTier.FACTUAL_MECHANICAL and item.metric_value is not None and not item.sizing_linearity_proven:
+        if PipelineComponent.SIZING in item.enabled_components and tier is IdentifiabilityTier.FACTUAL_MECHANICAL and item.metric_value is not None and not item.sizing_linearity_proven:
             raise ValueError("factual sizing attribution requires proven linearity")
         if item.selected_count == 0 and item.metric_value is not None and item.zero_action_semantics_sha256 is None:
             raise ValueError("zero-action metric requires frozen WAIT/NO_BET semantics")
@@ -488,7 +624,7 @@ def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequenc
             exact_high += weight * (
                 Fraction(intervals[with_component][1]) - Fraction(intervals[coalition][0])
             )
-            tiers += [by_enabled[coalition].identifiability_tier, by_enabled[with_component].identifiability_tier]
+            tiers += [resolved_tiers[coalition], resolved_tiers[with_component]]
             evidence.update((by_enabled[coalition].evidence_sha256, by_enabled[with_component].evidence_sha256))
         tier = _tier(tiers)
         identifiable = tier is not IdentifiabilityTier.NOT_IDENTIFIABLE
@@ -534,4 +670,4 @@ def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequenc
     return AblationEvaluationEvidence(protocol.protocol_sha256, True, ordered, tuple(sorted(findings, key=lambda item: item.component.value)), (), total, total_low, total_high, total - one_at_a_time)
 
 
-__all__ = ["AblationEvaluationEvidence", "AblationObservation", "AblationProtocol", "ClaimKind", "ComponentBinding", "ComponentFinding", "IdentifiabilityTier", "MetricDirection", "MetricSemantics", "PipelineComponent", "evaluate_pipeline_ablation"]
+__all__ = ["AblationAuthorityResolver", "AblationEvaluationEvidence", "AblationObservation", "AblationProtocol", "ClaimKind", "ComponentBinding", "ComponentFinding", "IdentifiabilityTier", "MetricDirection", "MetricSemantics", "PipelineComponent", "ResolvedAblationAuthority", "evaluate_pipeline_ablation"]

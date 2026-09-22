@@ -416,3 +416,72 @@ def test_extreme_decimal_scale_fails_closed_instead_of_rounding() -> None:
         match="scale exceeds exact risk-arithmetic bound",
     ):
         _lay_liability(Decimal("1"), Decimal("1E+5000"))
+
+
+
+def test_multi_action_plan_aggregates_confirmed_and_unknown_gross_commitment(
+    tmp_path,
+) -> None:
+    action_a = _action(action_id="action-a", stake="10")
+    action_b = _action(action_id="action-b", stake="20")
+    action_c = _action(action_id="action-c", stake="30")
+    plan = _plan(action_a, action_b, action_c)
+    ledger = RealExecutionLedger(tmp_path / "multi.jsonl")
+    ledger.reserve_plan(plan)
+
+    ledger.begin_attempt(
+        plan_id=plan.plan_id,
+        action_id=action_a.action_id,
+        attempt_id="attempt-a",
+        reserved_at=RESERVED_AT,
+    )
+    ledger.mark_submitted("attempt-a", submitted_at=SUBMITTED_AT)
+    ledger.begin_attempt(
+        plan_id=plan.plan_id,
+        action_id=action_b.action_id,
+        attempt_id="attempt-b",
+        reserved_at=RESERVED_AT,
+    )
+    ledger.mark_submitted("attempt-b", submitted_at=SUBMITTED_AT)
+
+    _ack(
+        ledger,
+        attempt_id="attempt-a",
+        status=AcknowledgementStatus.PARTIAL,
+        accepted_stake="4",
+        accepted_odds="2",
+    )
+    ledger.mark_unknown(
+        "attempt-b",
+        reason="transport_timeout",
+        observed_at=UNKNOWN_AT,
+    )
+
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert evidence.plan_stale is True
+    assert evidence.confirmed_open_capital == Decimal("4")
+    assert evidence.contingent_unknown_capital == Decimal("26")
+    assert evidence.max_plausible_capital_at_risk == Decimal("30")
+    assert {item.action_id for item in evidence.attempts} == {
+        "action-a",
+        "action-b",
+    }
+    # action-c was only planned. It never crossed the durable attempt boundary.
+    assert all(item.action_id != "action-c" for item in evidence.attempts)
+
+
+def test_unsupported_side_fails_closed_instead_of_using_stake_as_risk(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(
+        tmp_path,
+        _action(side="EACH_WAY", stake="10"),
+    )
+    _attempt(ledger, plan)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskUnsupported,
+        match="unsupported execution side",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)

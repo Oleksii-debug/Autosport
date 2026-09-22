@@ -647,19 +647,24 @@ class ParlayApiProductSource:
         return cursor, tuple(quotes), tuple(sorted(flags))
 
     @classmethod
-    def _scheduled_start(cls, event: MarketEvent) -> str:
-        raw = event.metadata.get("commence_time")
+    def _scheduled_start(cls, event: MarketEvent) -> str | None:
+        if "commence_time" not in event.metadata:
+            raise ProductSourcePayloadError("provider event requires commence_time field")
+        raw = event.metadata["commence_time"]
+        if raw is None:
+            return None
         try:
             value = cls._text(raw, "commence_time")
             cls._instant(value, "commence_time")
         except ValueError as exc:
             raise ProductSourcePayloadError(
-                "provider event requires timezone-aware commence_time"
+                "provider event requires timezone-aware commence_time when reported"
             ) from exc
         return value
 
     def _catalog_events(self, quotes: tuple[ProviderQuote, ...]) -> tuple[CatalogEvent, ...]:
         values: dict[str, CatalogEvent] = {}
+        scheduled_by_event: dict[str, str | None] = {}
         for quote in quotes:
             event = self.normalizer.normalize(self.source_id, quote)
             if event.sport is None:
@@ -669,6 +674,14 @@ class ParlayApiProductSource:
                     "provider quote sport conflicts with product source identity"
                 )
             scheduled = self._scheduled_start(event)
+            event_id = quote.provider_event_id
+            if event_id in scheduled_by_event and scheduled_by_event[event_id] != scheduled:
+                raise ProductSourcePayloadError(
+                    "provider snapshot contradicts commence_time evidence within one event"
+                )
+            scheduled_by_event[event_id] = scheduled
+            if scheduled is None:
+                continue
             phase = (
                 EventPhase.PRE_MATCH
                 if self._instant(event.observed_ts, "observed_ts")
@@ -678,18 +691,18 @@ class ParlayApiProductSource:
             candidate = CatalogEvent(
                 source_id=self.source_id,
                 sport=event.sport,
-                event_id=quote.provider_event_id,
+                event_id=event_id,
                 phase=phase,
                 available_at=event.observed_ts,
                 scheduled_start_at=scheduled,
             )
             candidate.validate()
-            previous = values.get(quote.provider_event_id)
+            previous = values.get(event_id)
             if previous is not None and previous != candidate:
                 raise ProductSourcePayloadError(
                     "provider snapshot contradicts lifecycle metadata within one event"
                 )
-            values[quote.provider_event_id] = candidate
+            values[event_id] = candidate
         return tuple(values[key] for key in sorted(values))
 
     def _pending_page(self, pending: dict[str, object]) -> CatalogPage:

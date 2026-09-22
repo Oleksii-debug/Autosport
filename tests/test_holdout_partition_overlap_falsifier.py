@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from autosport import _holdout_physical_content_guard as guard
+from autosport.scientific_registry import promotion_holdout_access_id
+
+
+SHA_A = "a" * 64
+SHA_B = "b" * 64
+OBS_A = "c" * 64
+OBS_B = "d" * 64
+OBS_C = "e" * 64
+OBS_D = "f" * 64
+T7 = "2026-01-08T00:00:00+00:00"
+
+
+def _holdout_id(*, protocol_id: str, manifest_sha256: str) -> str:
+    return promotion_holdout_access_id(
+        research_protocol_id=protocol_id,
+        dataset_manifest_sha256=manifest_sha256,
+        source_identity="lawful-provider:fixture",
+        license_identity="license-evidence:v1",
+        confirmation_trial_family_id=f"{protocol_id}:confirmation-trial-family",
+    )
+
+
+def _attempt(
+    *,
+    experiment_id: str,
+    protocol_id: str,
+    dataset_snapshot_id: str,
+    manifest_sha256: str,
+) -> dict[str, object]:
+    return {
+        "experiment_id": experiment_id,
+        "research_protocol_id": protocol_id,
+        "research_question_id": "question-factory",
+        "hypothesis_id": "hypothesis-factory",
+        "candidate_strategy_version_id": f"strategy:{experiment_id}",
+        "candidate_model_version_id": f"model:{experiment_id}",
+        "evaluation_bundle_id": f"eval:{experiment_id}",
+        "dataset_snapshot_id": dataset_snapshot_id,
+        "confirmation_trial_family_id": f"{protocol_id}:confirmation-trial-family",
+        "holdout_access_id": _holdout_id(
+            protocol_id=protocol_id,
+            manifest_sha256=manifest_sha256,
+        ),
+        "estimand": "mse",
+        "direction": "LOWER_IS_BETTER",
+        "rollback_identity": "strategy-v1",
+        "created_at": T7,
+    }
+
+
+@dataclass(frozen=True)
+class _Record:
+    payload: dict[str, object]
+
+
+class _MembershipRegistry:
+    """Minimal DatasetSnapshot read surface with explicit observation membership.
+
+    The canonical #819 guard currently resolves only `manifest_sha256`. This
+    falsifier supplies the additional product-owned evidence needed to distinguish
+    a genuinely disjoint confirmation population from a different manifest that
+    partially reuses already disclosed observations.
+    """
+
+    def __init__(
+        self,
+        snapshots: dict[str, tuple[str, tuple[str, ...]]],
+    ) -> None:
+        self._snapshots = snapshots
+
+    def get(self, kind: str, record_id: str):
+        assert kind == "DatasetSnapshot"
+        value = self._snapshots.get(record_id)
+        if value is None:
+            return None
+        manifest, membership = value
+        return _Record(
+            {
+                "manifest_sha256": manifest,
+                "observation_membership_sha256s": list(membership),
+            }
+        )
+
+
+def test_distinct_manifests_with_overlapping_observations_are_already_consumed() -> None:
+    prior = _attempt(
+        experiment_id="experiment-prior",
+        protocol_id="protocol-prior",
+        dataset_snapshot_id="dataset-prior",
+        manifest_sha256=SHA_A,
+    )
+    current = _attempt(
+        experiment_id="experiment-current",
+        protocol_id="protocol-current",
+        dataset_snapshot_id="dataset-current",
+        manifest_sha256=SHA_B,
+    )
+    registry = _MembershipRegistry(
+        {
+            "dataset-prior": (SHA_A, (OBS_A, OBS_B)),
+            "dataset-current": (SHA_B, (OBS_B, OBS_C)),
+        }
+    )
+
+    assert guard._holdout_consumed_by_physical_evidence(
+        (prior,),
+        same_attempt_identity=current,
+        registry=registry,
+    ), (
+        "a changed whole-population manifest must not mint fresh confirmation "
+        "capacity when product-owned membership proves an observation was already "
+        "disclosed by a prior promotion attempt"
+    )
+
+
+def test_distinct_manifests_with_proven_disjoint_membership_remain_fresh() -> None:
+    prior = _attempt(
+        experiment_id="experiment-prior",
+        protocol_id="protocol-prior",
+        dataset_snapshot_id="dataset-prior",
+        manifest_sha256=SHA_A,
+    )
+    current = _attempt(
+        experiment_id="experiment-current",
+        protocol_id="protocol-current",
+        dataset_snapshot_id="dataset-current",
+        manifest_sha256=SHA_B,
+    )
+    registry = _MembershipRegistry(
+        {
+            "dataset-prior": (SHA_A, (OBS_A, OBS_B)),
+            "dataset-current": (SHA_B, (OBS_C, OBS_D)),
+        }
+    )
+
+    assert not guard._holdout_consumed_by_physical_evidence(
+        (prior,),
+        same_attempt_identity=current,
+        registry=registry,
+    )

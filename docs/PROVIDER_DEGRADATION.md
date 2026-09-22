@@ -6,7 +6,6 @@ Provider failure is not the same fact as provider capability. This contract reco
 
 Every event has exactly one explicit reason:
 
-- `capability_unsupported`
 - `transient_provider_failure`
 - `stale_data`
 - `malformed_evidence`
@@ -16,6 +15,8 @@ Every event has exactly one explicit reason:
 - `unknown`
 
 Each reason maps deterministically to a diagnostic recovery class (`no_automatic_retry`, `retry_with_backoff`, `refresh_evidence`, `reauthorize`, or `operator_review`). The recovery class describes the kind of follow-up that may be needed; it does not perform or authorize that follow-up.
+
+`capability_unsupported` is deliberately not a degradation reason. Technical SUPPORTED/UNSUPPORTED/UNKNOWN truth remains solely in the canonical versioned `BookmakerCapabilityProfile`; a degradation event cannot mint or contradict that authority.
 
 ## Evidence binding
 

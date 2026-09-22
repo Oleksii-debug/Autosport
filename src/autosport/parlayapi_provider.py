@@ -164,6 +164,8 @@ def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> 
         raise ProviderTransportError(f"provider HTTP {exc.code}", int(exc.code), retry_after) from exc
     except URLError as exc:
         raise ProviderTransportError(f"provider transport error: {exc.reason}") from exc
+    except OSError as exc:
+        raise ProviderTransportError("provider transport error") from exc
 
 
 class ParlayApiTableTennisProvider:

@@ -291,13 +291,13 @@ def screen_pre_submit(
             residual_concurrency_risk=True,
         )
 
+    # Product-writer serialization does not prove exclusive control of the provider
+    # account. Manual or other authorized external writers may still race this screen.
     return PreSubmitScreen(
         decision=PreSubmitDecision.NO_KNOWN_CONFLICT_NOT_GUARANTEED,
         conflicting_provider_order_ids=(),
         writer_coordination=writer_coordination,
-        residual_concurrency_risk=(
-            writer_coordination is not WriterCoordination.PROVEN_PRODUCT_SERIALIZED
-        ),
+        residual_concurrency_risk=True,
     )
 
 

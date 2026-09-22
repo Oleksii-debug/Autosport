@@ -134,7 +134,7 @@ def test_failed_requires_provider_reason():
 
 def test_unknown_edit_id_never_becomes_identity_from_similarity():
     assert identity_disposition(offer_edit_id=None) is MatchbookOfferEditIdentityDisposition.UNKNOWN_NO_EDIT_ID_FAIL_CLOSED
-    assert identity_disposition(offer_edit_id=9001) is MatchbookOfferEditIdentityDisposition.EXACT_PROVIDER_EDIT_ID
+    assert identity_disposition(offer_edit_id=9001) is MatchbookOfferEditIdentityDisposition.EDIT_ID_PRESENT_REQUIRES_PROVIDER_ORIGIN
     for bad in (0, -1, True, "9001"):
         with pytest.raises(MatchbookOfferEditReconciliationError):
             identity_disposition(offer_edit_id=bad)

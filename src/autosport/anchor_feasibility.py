@@ -224,8 +224,13 @@ def evaluate_anchor_feasibility(
         cost_per_observed = None
 
     terminal_complete = state_counts[AcquisitionState.PENDING] == 0 and as_of >= end
+    window_delta = end - start
+    window_microseconds = (
+        (window_delta.days * 86_400 + window_delta.seconds) * 1_000_000
+        + window_delta.microseconds
+    )
     review_days_fraction = Fraction(
-        int((end - start).total_seconds() * 1_000_000),
+        window_microseconds,
         86_400 * 1_000_000,
     )
     review_days = _fraction_to_decimal(review_days_fraction, precision=50)

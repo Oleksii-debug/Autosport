@@ -444,9 +444,9 @@ class MatchbookReadOnlyProvider:
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_int(max_items, field="max_items")
         if self._pending_quotes is None:
+            response = self._request(self._url())
             observed_ts = self.clock()
             sequence = _sequence_from_observed(observed_ts)
-            response = self._request(self._url())
             body_sha256 = _optional_sha256(response.body_sha256)
             quotes = self._materialize_quotes(
                 response.payload,

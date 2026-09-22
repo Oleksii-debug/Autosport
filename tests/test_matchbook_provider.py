@@ -66,13 +66,14 @@ def sample_payload() -> dict:
 
 
 def provider(transport, **kwargs):
+    clock = kwargs.pop("clock", lambda: OBSERVED)
     return MatchbookReadOnlyProvider(
         "secret-session-token",
         sport_key="soccer",
         currency="EUR",
         sport_ids=(15,),
         transport=transport,
-        clock=lambda: OBSERVED,
+        clock=clock,
         **kwargs,
     )
 
@@ -89,6 +90,41 @@ def response(payload=None):
 def test_transport_error_is_typed_provider_unavailability():
     error = MatchbookTransportError("Matchbook unavailable", 503)
     assert isinstance(error, ProviderUnavailableError)
+
+
+def test_observation_clock_is_sampled_only_after_successful_response():
+    response_returned = False
+    clock_calls = 0
+
+    def transport(*_):
+        nonlocal response_returned
+        response_returned = True
+        return response()
+
+    def clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        assert response_returned is True
+        return OBSERVED
+
+    batch = provider(transport, clock=clock).read_batch()
+    assert clock_calls == 1
+    assert {quote.observed_ts for quote in batch.quotes} == {OBSERVED}
+
+    normalized = CanonicalNormalizer().normalize(batch.source_id, batch.quotes[0])
+    assert normalized.observed_ts == OBSERVED
+    assert normalized.ingest_ts == OBSERVED
+
+
+def test_terminal_transport_failure_never_mints_observation_timestamp():
+    def transport(*_):
+        raise MatchbookTransportError("Matchbook HTTP 401", 401)
+
+    def clock():
+        pytest.fail("failed provider I/O must not mint product receive time")
+
+    with pytest.raises(MatchbookTransportError):
+        provider(transport, clock=clock).read_batch()
 
 
 def test_authenticated_get_scope_never_places_session_token_in_url():
@@ -242,23 +278,36 @@ def test_expanded_and_aggregated_are_distinct_provider_series():
 def test_rate_limit_retry_is_bounded_and_capped():
     attempts = 0
     sleeps = []
+    successful_response_returned = False
+    clock_calls = 0
 
     def transport(*_):
-        nonlocal attempts
+        nonlocal attempts, successful_response_returned
         attempts += 1
         if attempts == 1:
             raise MatchbookTransportError("Matchbook HTTP 429", 429, 30.0)
+        successful_response_returned = True
         return response()
+
+    def clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        assert attempts == 2
+        assert successful_response_returned is True
+        return OBSERVED
 
     client = provider(
         transport,
+        clock=clock,
         max_attempts=2,
         max_backoff_seconds=0.5,
         sleeper=sleeps.append,
     )
-    client.read_batch()
+    batch = client.read_batch()
     assert attempts == 2
     assert sleeps == [0.5]
+    assert clock_calls == 1
+    assert {quote.observed_ts for quote in batch.quotes} == {OBSERVED}
 
 
 def test_auth_failure_is_not_retried():

@@ -94,3 +94,20 @@ def test_simple_existing_allocation_semantics_remain_unchanged() -> None:
         ("campaign-a", Decimal("0.25")),
         ("campaign-b", Decimal("0.75")),
     )
+
+@pytest.mark.parametrize(
+    "shares",
+    (
+        (
+            ("campaign-a", Decimal("1")),
+            ("campaign-b", Decimal("1E-1000000000")),
+        ),
+        (("campaign-a", Decimal("1E+1000000000")),),
+    ),
+)
+def test_extreme_exponent_gap_rejects_without_gap_materialization(
+    shares: tuple[tuple[str, Decimal], ...],
+) -> None:
+    with pytest.raises(MonetaryAuthorityError, match="conserve exactly one"):
+        _allocation(shares)
+

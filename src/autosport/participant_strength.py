@@ -15,7 +15,12 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, ClassVar, Mapping, Sequence
 
 from .forecasting import ForecastRecord
-from .opponent_intelligence import RatingSnapshot, SnapshotState
+from .opponent_intelligence import (
+    OpponentIntelligenceError,
+    OpponentIntelligenceStore,
+    RatingSnapshot,
+    SnapshotState,
+)
 from .participant_identity import IdentityView
 from .scientific_registry import ScientificRegistry
 from .strategy_model_factory import (
@@ -651,6 +656,7 @@ def emit_registered_strength_forecast(
     *,
     registry: ScientificRegistry,
     artifact_store: FactoryArtifactStore,
+    opponent_store: OpponentIntelligenceStore,
     evidence: StrengthSnapshotPair,
     model_version_id: str,
     strategy_version_id: str,
@@ -662,12 +668,32 @@ def emit_registered_strength_forecast(
         raise TypeError("registry must be ScientificRegistry")
     if not isinstance(artifact_store, FactoryArtifactStore):
         raise TypeError("artifact_store must be FactoryArtifactStore")
+    if not isinstance(opponent_store, OpponentIntelligenceStore):
+        raise TypeError("opponent_store must be OpponentIntelligenceStore")
     if not isinstance(evidence, StrengthSnapshotPair):
         raise TypeError("evidence must be StrengthSnapshotPair")
     model_id = _text(model_version_id, "model_version_id")
     strategy_id = _text(strategy_version_id, "strategy_version_id")
     quote = _text(quote_key, "quote_key")
     decision = _instant(evidence.decision_at, "decision_at")
+
+    for label, supplied in (
+        ("subject", evidence.subject),
+        ("opponent", evidence.opponent),
+    ):
+        try:
+            canonical = opponent_store.resolve_rating_snapshot(
+                supplied.snapshot_id,
+                as_of=evidence.decision_at,
+            )
+        except OpponentIntelligenceError as exc:
+            raise ParticipantStrengthError(
+                f"{label} rating snapshot lacks product-owned origin authority: {exc}"
+            ) from exc
+        if canonical != supplied:
+            raise ParticipantStrengthError(
+                f"{label} rating snapshot does not match product-owned evidence"
+            )
 
     model_entry = registry.get("ModelVersion", model_id)
     strategy_entry = registry.get("StrategyVersion", strategy_id)

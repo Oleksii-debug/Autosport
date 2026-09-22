@@ -268,6 +268,8 @@ def run_matrix(
     results: list[ScenarioResult] = []
     for scenario_name, component in SCENARIOS:
         case_root = output_dir / "cases" / component
+        if case_root.exists():
+            shutil.rmtree(case_root)
         package_root = case_root / "package"
         log_path = output_dir / "logs" / f"{scenario_name}.log"
         copied_sha = ""

@@ -171,18 +171,10 @@ class ProphetXOrderAdmissionAssessment:
         and current strike identity require separate provider-origin authorities.
         """
 
-        return all(
-            state is AdmissionState.PROVEN
-            for state in (
-                self.instrument_identity,
-                self.price_ladder,
-                self.quantity_format,
-                self.min_max_stake,
-                self.exposure_limit,
-                self.order_type_tif,
-                self.batch_shape,
-            )
-        )
+        # This bounded DTO is structural evidence only. Even a caller that
+        # manually reconstructs every field as PROVEN cannot mint provider-write
+        # authority from it.
+        return False
 
 
 @dataclass(frozen=True, slots=True)

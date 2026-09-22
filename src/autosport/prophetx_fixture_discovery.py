@@ -187,6 +187,15 @@ def _default_transport(
         raise ProphetXDiscoveryUnavailable("TRANSPORT_UNAVAILABLE") from exc
 
 
+def _transport_origin_verified(
+    transport: Transport,
+    _canonical_transport: Transport = _default_transport,
+) -> bool:
+    """Bind origin authority to the exact transport callable used for a request."""
+
+    return transport is _canonical_transport
+
+
 def _trimmed_text(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError(f"{field} must be a non-empty trimmed string")
@@ -344,7 +353,6 @@ class ProphetXFixtureDiscovery:
         self.timeout_seconds = _timeout(timeout_seconds)
         self.transport = transport
         self.clock = clock
-        self._provider_origin_verified = transport is _default_transport
         raw_mapping = {} if sport_by_tournament_id is None else dict(sport_by_tournament_id)
         normalized: dict[str, str] = {}
         for tournament_id, sport in raw_mapping.items():
@@ -353,7 +361,7 @@ class ProphetXFixtureDiscovery:
 
     def discover(self) -> ProphetXFixtureCatalog:
         acquisitions: list[ProphetXDiscoveryAcquisition] = []
-        tournament_response = self._get(_TOURNAMENTS_PATH)
+        tournament_response, tournament_origin_verified = self._get(_TOURNAMENTS_PATH)
         tournament_observed = _canonical_observed_at(self.clock())
         acquisitions.append(
             self._acquisition(
@@ -361,6 +369,7 @@ class ProphetXFixtureDiscovery:
                 tournament_id=None,
                 observed_at=tournament_observed,
                 response=tournament_response,
+                provider_origin_verified=tournament_origin_verified,
             )
         )
         tournaments = self._parse_tournaments(tournament_response.payload)
@@ -369,7 +378,10 @@ class ProphetXFixtureDiscovery:
         failures: list[ProphetXDiscoveryFailure] = []
         for tournament in tournaments:
             try:
-                response = self._get(_EVENTS_PATH, {"tournament_id": tournament.tournament_id})
+                response, event_origin_verified = self._get(
+                    _EVENTS_PATH,
+                    {"tournament_id": tournament.tournament_id},
+                )
             except ProphetXDiscoveryUnavailable as exc:
                 failures.append(self._safe_failure(tournament.tournament_id, exc))
                 continue
@@ -380,6 +392,7 @@ class ProphetXFixtureDiscovery:
                     tournament_id=tournament.tournament_id,
                     observed_at=observed_at,
                     response=response,
+                    provider_origin_verified=event_origin_verified,
                 )
             )
             events.extend(self._parse_events(response.payload, tournament=tournament))
@@ -408,16 +421,18 @@ class ProphetXFixtureDiscovery:
         self,
         path: str,
         query: Mapping[str, str] | None = None,
-    ) -> ProphetXDiscoveryJsonResponse:
+    ) -> tuple[ProphetXDiscoveryJsonResponse, bool]:
         suffix = "" if not query else f"?{urlencode(query)}"
-        response = self.transport(
+        transport = self.transport
+        provider_origin_verified = _transport_origin_verified(transport)
+        response = transport(
             f"{_SANDBOX_BASE_URL}{path}{suffix}",
             self._headers(),
             self.timeout_seconds,
         )
         if response.status_code != 200:
             raise ProphetXDiscoveryUnavailable(f"HTTP_{response.status_code}", response.status_code)
-        return response
+        return response, provider_origin_verified
 
     def _acquisition(
         self,
@@ -426,6 +441,7 @@ class ProphetXFixtureDiscovery:
         tournament_id: str | None,
         observed_at: str,
         response: ProphetXDiscoveryJsonResponse,
+        provider_origin_verified: bool,
     ) -> ProphetXDiscoveryAcquisition:
         return ProphetXDiscoveryAcquisition(
             request_kind=request_kind,
@@ -433,7 +449,7 @@ class ProphetXFixtureDiscovery:
             observed_at=observed_at,
             response_sha256=response.body_sha256,
             data_context_id=self.data_context_id,
-            provider_origin_verified=self._provider_origin_verified,
+            provider_origin_verified=provider_origin_verified,
         )
 
     @staticmethod

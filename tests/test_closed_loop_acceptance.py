@@ -332,6 +332,25 @@ def _phase_one(tmp_path):
         spec=spec,
         staged=staged,
     )
+
+    class CallerSelectedRegistry(ScientificRegistry):
+        def get(self, *args, **kwargs):
+            raise AssertionError(
+                "caller-selected registry methods must not be authoritative"
+            )
+
+    caller_selected_registry = CallerSelectedRegistry(registry.path)
+    rebound_artifact = bind_challenger_artifact(
+        runtime=AgentLoopRuntime(runtime.path),
+        curriculum=curriculum,
+        selection=selection,
+        replay_binding=replay_binding,
+        supervisor=supervisor,
+        registry=caller_selected_registry,
+        spec=spec,
+        staged=staged,
+    )
+    assert rebound_artifact == artifact
     assert artifact.research_question_id == question.question_id
     assert artifact.environment_id == environment.environment_id
     assert artifact.economic_goal_fingerprint == GOAL_SHA

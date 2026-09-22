@@ -64,6 +64,18 @@ def _utc(value: datetime, name: str) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _event_utc(value: object) -> datetime | None:
+    if type(value) is not str:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def _age_us(value: timedelta) -> int:
     if not isinstance(value, timedelta):
         raise TypeError("max_age must be a timedelta")
@@ -285,6 +297,32 @@ def build_market_implied_baseline_evidence(
         ) from exc
 
     identity = outcome_authority.identity
+    decision_boundary = decision_cutoff.astimezone(timezone.utc)
+    causally_known_selections: set[str] = set()
+    for event in store.events():
+        if (
+            event.source_id != identity.source_id
+            or event.sport != identity.sport
+            or event.event_id != identity.event_id
+            or event.market_id != identity.market_id
+        ):
+            continue
+        observed = _event_utc(event.observed_ts)
+        ingested = _event_utc(event.ingest_ts)
+        if observed is None or ingested is None:
+            continue
+        if observed > decision_boundary or ingested > decision_boundary:
+            continue
+        if event.market_type is not identity.market_type:
+            raise MarketImpliedBaselineError(
+                "canonical durable market identity contradicts verified outcome authority"
+            )
+        causally_known_selections.add(event.selection_id)
+    if tuple(sorted(causally_known_selections)) != outcome_authority.selection_ids:
+        raise MarketImpliedBaselineError(
+            "canonical durable market history contradicts verified outcome roster"
+        )
+
     # Replay the complete decision-visible canonical market before applying the
     # asserted outcome roster.  Filtering by outcome_authority.selection_ids first
     # would let an incomplete/caller-minted roster erase a real selection that is

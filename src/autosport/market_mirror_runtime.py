@@ -67,13 +67,28 @@ class FocusedMirrorDependencyIndex:
     is the only truthful result.
     """
 
-    def __init__(self, mirror: MarketMirror) -> None:
+    def __init__(
+        self,
+        mirror: MarketMirror,
+        *,
+        max_cached_keys_per_input: int = 4096,
+    ) -> None:
         if not isinstance(mirror, MarketMirror):
             raise TypeError("mirror must be a MarketMirror")
+        if (
+            isinstance(max_cached_keys_per_input, bool)
+            or not isinstance(max_cached_keys_per_input, int)
+            or max_cached_keys_per_input <= 0
+        ):
+            raise ValueError(
+                "max_cached_keys_per_input must be a positive non-boolean integer"
+            )
         self._mirror = mirror
+        self._max_cached_keys_per_input = max_cached_keys_per_input
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
         self._matched_revisions: dict[str, int] = {}
+        self._incomplete_keysets: set[str] = set()
         self._lock = RLock()
 
     @staticmethod
@@ -91,6 +106,58 @@ class FocusedMirrorDependencyIndex:
         # Reuse the canonical focused-view normalization contract so registration and
         # later mirror reads cannot disagree about selector semantics.
         return MarketMirror._selector(values, name=name)
+
+    @property
+    def max_cached_keys_per_input(self) -> int:
+        """Maximum exact routed quote identities retained for one dependency."""
+        return self._max_cached_keys_per_input
+
+    def routed_cache_complete(self, input_id: str) -> bool:
+        """Report whether one dependency's bounded routed-key cache is complete."""
+        normalized_id = self._input_id(input_id)
+        with self._lock:
+            if normalized_id not in self._dependencies:
+                raise KeyError(f"unknown focused mirror input {normalized_id!r}")
+            return normalized_id not in self._incomplete_keysets
+
+    def _bounded_matching_keys(
+        self,
+        events: Iterable[MarketEvent],
+        dependency: FocusedMirrorDependency,
+    ) -> tuple[set[MirrorQuoteKey], bool]:
+        """Build an exact bounded derived keyset or explicitly mark it incomplete.
+
+        A partial keyset must never be consumed as complete decision truth. Once the
+        budget would be exceeded, discard the derived keys and make the caller use a
+        coherent selector read from the canonical MarketMirror instead.
+        """
+        keys: set[MirrorQuoteKey] = set()
+        for event in events:
+            if not dependency.matches(event):
+                continue
+            key = (event.source_id, event.quote_key)
+            if key in keys:
+                continue
+            if len(keys) >= self._max_cached_keys_per_input:
+                return set(), False
+            keys.add(key)
+        return keys, True
+
+    def _replace_cached_keys(
+        self,
+        input_id: str,
+        keys: set[MirrorQuoteKey],
+        *,
+        complete: bool,
+        revision: int,
+    ) -> None:
+        """Replace one derived key cache while the dependency-index lock is held."""
+        self._matched_keys[input_id] = keys if complete else set()
+        self._matched_revisions[input_id] = revision
+        if complete:
+            self._incomplete_keysets.discard(input_id)
+        else:
+            self._incomplete_keysets.add(input_id)
 
     def register(
         self,
@@ -113,17 +180,20 @@ class FocusedMirrorDependencyIndex:
             selection_ids=self._selector(selection_ids, name="selection_ids"),
         )
         captured = self._mirror.view()
-        initial_keys = {
-            (event.source_id, event.quote_key)
-            for event in captured.events
-            if dependency.matches(event)
-        }
+        initial_keys, initial_complete = self._bounded_matching_keys(
+            captured.events,
+            dependency,
+        )
         with self._lock:
             if normalized_id in self._dependencies:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
-            self._matched_keys[normalized_id] = initial_keys
-            self._matched_revisions[normalized_id] = captured.revision
+            self._replace_cached_keys(
+                normalized_id,
+                initial_keys,
+                complete=initial_complete,
+                revision=captured.revision,
+            )
 
             # Close the capture -> publication race without making a second mirror
             # authority. If the canonical mirror advanced before registration became
@@ -132,12 +202,16 @@ class FocusedMirrorDependencyIndex:
             # post-registration invalidations and route through affected_inputs().
             published = self._mirror.view()
             if published.revision != captured.revision:
-                self._matched_keys[normalized_id] = {
-                    (event.source_id, event.quote_key)
-                    for event in published.events
-                    if dependency.matches(event)
-                }
-                self._matched_revisions[normalized_id] = published.revision
+                published_keys, published_complete = self._bounded_matching_keys(
+                    published.events,
+                    dependency,
+                )
+                self._replace_cached_keys(
+                    normalized_id,
+                    published_keys,
+                    complete=published_complete,
+                    revision=published.revision,
+                )
         return dependency
 
     def unregister(self, input_id: str) -> bool:
@@ -146,6 +220,7 @@ class FocusedMirrorDependencyIndex:
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
             self._matched_revisions.pop(normalized_id, None)
+            self._incomplete_keysets.discard(normalized_id)
             return removed is not None
 
     @property
@@ -172,20 +247,22 @@ class FocusedMirrorDependencyIndex:
         if batch.full_refresh_required:
             captured = self._mirror.view()
             rebuilt = {
-                dependency.input_id: {
-                    (event.source_id, event.quote_key)
-                    for event in captured.events
-                    if dependency.matches(event)
-                }
+                dependency.input_id: self._bounded_matching_keys(
+                    captured.events,
+                    dependency,
+                )
                 for dependency in dependencies
             }
             with self._lock:
                 for dependency in dependencies:
                     if self._dependencies.get(dependency.input_id) == dependency:
-                        self._matched_keys[dependency.input_id] = rebuilt[
-                            dependency.input_id
-                        ]
-                        self._matched_revisions[dependency.input_id] = captured.revision
+                        keys, complete = rebuilt[dependency.input_id]
+                        self._replace_cached_keys(
+                            dependency.input_id,
+                            keys,
+                            complete=complete,
+                            revision=captured.revision,
+                        )
             return tuple(dependency.input_id for dependency in dependencies)
 
         if not dependencies:
@@ -217,12 +294,28 @@ class FocusedMirrorDependencyIndex:
                 if self._dependencies.get(dependency.input_id) != dependency:
                     continue
                 matched = self._matched_keys.setdefault(dependency.input_id, set())
+                cache_complete = (
+                    dependency.input_id not in self._incomplete_keysets
+                )
                 dependency_affected = False
                 for event in changed_events:
                     if not dependency.matches(event):
                         continue
-                    matched.add((event.source_id, event.quote_key))
                     dependency_affected = True
+                    if not cache_complete:
+                        continue
+                    key = (event.source_id, event.quote_key)
+                    if key in matched:
+                        continue
+                    if len(matched) >= self._max_cached_keys_per_input:
+                        # Do not evict one identity and silently lose selector truth.
+                        # Saturation converts this derived cache to explicit fallback
+                        # mode; the canonical MarketMirror remains intact.
+                        matched.clear()
+                        self._incomplete_keysets.add(dependency.input_id)
+                        cache_complete = False
+                        continue
+                    matched.add(key)
                 if dependency_affected:
                     affected.append(dependency.input_id)
 
@@ -252,16 +345,29 @@ class FocusedMirrorDependencyIndex:
         }
 
     def matching_keys(self, input_id: str) -> tuple[MirrorQuoteKey, ...]:
-        """Return immutable quote identities known to match one registered input."""
+        """Return exact cached identities only when the bounded cache is complete."""
         normalized_id = self._input_id(input_id)
         with self._lock:
             if normalized_id not in self._dependencies:
                 raise KeyError(f"unknown focused mirror input {normalized_id!r}")
+            if normalized_id in self._incomplete_keysets:
+                raise RuntimeError(
+                    "focused mirror routed key cache is incomplete; "
+                    "use a canonical decision view"
+                )
             return tuple(sorted(self._matched_keys.get(normalized_id, set())))
 
     def all_matching_keys(self) -> tuple[MirrorQuoteKey, ...]:
-        """Return the union of registered dependency identities, never quote values."""
+        """Return the exact cache union, never an incomplete derived subset."""
         with self._lock:
+            if any(
+                input_id in self._incomplete_keysets
+                for input_id in self._dependencies
+            ):
+                raise RuntimeError(
+                    "focused mirror routed key cache is incomplete; "
+                    "use canonical decision views"
+                )
             keys: set[MirrorQuoteKey] = set()
             for input_id in self._dependencies:
                 keys.update(self._matched_keys.get(input_id, set()))
@@ -329,17 +435,38 @@ class FocusedMirrorDependencyIndex:
         *,
         as_of: datetime,
         max_age: timedelta,
-    ) -> tuple[MirrorSnapshot, dict[str, frozenset[MirrorQuoteKey]]]:
-        """Rebuild requested routed keys from one stable canonical mirror revision."""
+    ) -> tuple[MirrorSnapshot, dict[str, frozenset[MirrorQuoteKey]]] | None:
+        """Rebuild bounded routed keys, or require canonical selector fallback."""
         for _ in range(4):
             full = self._mirror.view()
-            keys_by_input = {
-                dependency.input_id: frozenset(
-                    (event.source_id, event.quote_key)
-                    for event in full.events
-                    if dependency.matches(event)
+            bounded = {
+                dependency.input_id: self._bounded_matching_keys(
+                    full.events,
+                    dependency,
                 )
                 for dependency in dependencies
+            }
+            if any(not complete for _, complete in bounded.values()):
+                with self._lock:
+                    for dependency in dependencies:
+                        if self._dependencies.get(dependency.input_id) != dependency:
+                            raise RuntimeError(
+                                "focused mirror dependency changed during routed resync"
+                            )
+                    for dependency in dependencies:
+                        input_id = dependency.input_id
+                        keys, complete = bounded[input_id]
+                        self._replace_cached_keys(
+                            input_id,
+                            keys,
+                            complete=complete,
+                            revision=full.revision,
+                        )
+                return None
+
+            keys_by_input = {
+                input_id: frozenset(keys)
+                for input_id, (keys, _) in bounded.items()
             }
             union_keys: set[MirrorQuoteKey] = set()
             for keys in keys_by_input.values():
@@ -361,8 +488,12 @@ class FocusedMirrorDependencyIndex:
                         )
                 for dependency in dependencies:
                     input_id = dependency.input_id
-                    self._matched_keys[input_id] = set(keys_by_input[input_id])
-                    self._matched_revisions[input_id] = captured.revision
+                    self._replace_cached_keys(
+                        input_id,
+                        set(keys_by_input[input_id]),
+                        complete=True,
+                        revision=captured.revision,
+                    )
             return captured, keys_by_input
 
         raise RuntimeError(
@@ -393,6 +524,7 @@ class FocusedMirrorDependencyIndex:
         dependencies: list[FocusedMirrorDependency] = []
         keys_by_input: dict[str, frozenset[MirrorQuoteKey]] = {}
         revisions_by_input: dict[str, int | None] = {}
+        cache_incomplete = False
         with self._lock:
             for input_id in normalized:
                 try:
@@ -406,9 +538,19 @@ class FocusedMirrorDependencyIndex:
                     self._matched_keys.get(input_id, set())
                 )
                 revisions_by_input[input_id] = self._matched_revisions.get(input_id)
+                cache_incomplete = (
+                    cache_incomplete or input_id in self._incomplete_keysets
+                )
 
         if not dependencies:
             return {}
+
+        if cache_incomplete:
+            return self.decision_views(
+                normalized,
+                as_of=as_of,
+                max_age=max_age,
+            )
 
         union_keys: set[MirrorQuoteKey] = set()
         for keys in keys_by_input.values():
@@ -424,11 +566,18 @@ class FocusedMirrorDependencyIndex:
             revisions_by_input[dependency.input_id] != captured.revision
             for dependency in dependency_tuple
         ):
-            captured, keys_by_input = self._coherent_routed_resync(
+            resynced = self._coherent_routed_resync(
                 dependency_tuple,
                 as_of=as_of,
                 max_age=max_age,
             )
+            if resynced is None:
+                return self.decision_views(
+                    normalized,
+                    as_of=as_of,
+                    max_age=max_age,
+                )
+            captured, keys_by_input = resynced
 
         return {
             dependency.input_id: MirrorSnapshot(

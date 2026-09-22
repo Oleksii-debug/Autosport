@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from autosport.drift_control import DriftMonitor, DriftState, DriftWindow
+from autosport.scientific_registry import DatasetSnapshot
 from autosport.champion_eligibility import (
     ChampionEligibilityDecision,
     ChampionEligibilityError,
@@ -134,6 +136,67 @@ def test_later_canonical_drift_invalidates_old_eligible_decision_without_future_
             registry,
             decision,
             as_of="2026-02-17T12:00:00Z",
+            canonical_strategy_id="strategy-context",
+            expected_strategy_version_id="strategy-1",
+            expected_model_version_id="model-1",
+            expected_environment_sha256=ENV,
+            expected_protocol_id="protocol-1",
+            expected_config_sha256=CONFIG,
+            admissible_actions=frozenset({"WAIT"}),
+        )
+
+
+def test_late_revision_of_same_window_invalidates_old_eligible_decision(
+    tmp_path,
+) -> None:
+    registry, findings, windows = _scoped_history(
+        tmp_path,
+        values_sequence=(("1", "2"), ("1", "2")),
+    )
+    decision = _scoped_decision(registry, findings, windows)
+    assert decision.status is ChampionEligibilityStatus.ELIGIBLE
+    persist_eligibility_decision(registry, decision)
+
+    prior = windows[-1]
+    revised = DriftWindow.from_samples(
+        dataset_snapshot_id="dataset-current-2-revision",
+        source_identity=prior.source_identity,
+        window_start=prior.window_start,
+        window_end=prior.window_end,
+        as_of="2026-02-14T00:00:00Z",
+        values=("3", "4"),
+        value_observed_at=(prior.window_start, prior.window_end),
+        value_available_at=("2026-02-14T00:00:00Z", "2026-02-14T00:00:00Z"),
+        effective_sample_size=2,
+        sport=prior.sport,
+        league=prior.league,
+        regime=prior.regime,
+    )
+    registry.append(
+        DatasetSnapshot(
+            dataset_snapshot_id=revised.dataset_snapshot_id,
+            manifest_sha256=revised.evidence_sha256,
+            source_identity=revised.source_identity,
+            license_identity="license:test",
+            causal_cutoff=revised.window_end,
+            available_at_utc=revised.as_of,
+        )
+    )
+    revised_finding = DriftMonitor(registry).evaluate(
+        findings[-1].reference_id,
+        revised,
+        evaluated_at=revised.as_of,
+    )
+    assert revised_finding.state is DriftState.DRIFT_DETECTED
+
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="later canonical drift invalidates champion eligibility",
+    ):
+        validate_activation_eligibility(
+            registry,
+            decision,
+            as_of="2026-02-14T12:00:00Z",
             canonical_strategy_id="strategy-context",
             expected_strategy_version_id="strategy-1",
             expected_model_version_id="model-1",

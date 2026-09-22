@@ -480,18 +480,30 @@ def test_capability_profile_cannot_be_minted_after_action_time() -> None:
         _verify(_action(), late_profile, _authority(), _readback())
 
 
-def test_non_execution_data_uses_need_separate_explicit_approval() -> None:
+def test_non_execution_data_uses_are_outside_execution_reconciliation_authority() -> None:
     authority = _authority()
     for purpose in (
         SmarketsDataPurpose.DATA_HARVESTING,
         SmarketsDataPurpose.REDISTRIBUTION,
         SmarketsDataPurpose.BENCHMARKING,
     ):
-        with pytest.raises(SmarketsReconciliationError):
+        with pytest.raises(SmarketsReconciliationError, match="outside"):
             authority.require_purpose(purpose)
-    _authority(data_harvesting_approved=True).require_purpose(
-        SmarketsDataPurpose.DATA_HARVESTING
-    )
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("data_harvesting_approved", "data harvesting"),
+        ("benchmarking_approved", "benchmarking"),
+        ("redistribution_approved", "provider entitlement"),
+    ],
+)
+def test_non_execution_approval_flags_cannot_mint_api_permission(
+    field: str, message: str
+) -> None:
+    with pytest.raises(SmarketsReconciliationError, match=message):
+        _authority(**{field: True})
 
 
 def test_rate_limit_evidence_blocks_for_provider_relative_reset_seconds() -> None:

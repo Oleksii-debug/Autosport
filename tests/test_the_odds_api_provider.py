@@ -231,6 +231,35 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIsNone(first.metadata["exchange_side"])
         self.assertEqual(second.metadata["exchange_side"], "lay")
 
+    def test_documented_implicit_lay_markets_preserve_requested_scope(self):
+        for requested_market, returned_market in (
+            ("h2h", "h2h_lay"),
+            ("outrights", "outrights_lay"),
+        ):
+            with self.subTest(
+                requested_market=requested_market,
+                returned_market=returned_market,
+            ):
+                provider = TheOddsApiProvider(
+                    "k",
+                    sport="soccer_epl",
+                    markets=(requested_market,),
+                    transport=lambda *_: HttpJsonResponse(
+                        [event(market_key=returned_market)],
+                        200,
+                        {},
+                    ),
+                    clock=lambda: "2026-09-22T14:00:00+00:00",
+                )
+
+                quote = provider.read_batch().quotes[0]
+
+                self.assertEqual(
+                    quote.metadata["request"]["markets"],
+                    [requested_market],
+                )
+                self.assertEqual(quote.metadata["exchange_side"], "lay")
+
     def test_spread_point_is_exact_and_changes_evidence_identity(self):
         positive = event(market_key="spreads", point=Decimal("1.5"))
         negative = event(
@@ -734,6 +763,51 @@ class TheOddsApiProviderTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(TheOddsApiPayloadError, "requested markets scope"):
             provider.read_batch()
+
+    def test_historical_allows_documented_implicit_lay_markets_only(self):
+        for requested_market, returned_market in (
+            ("h2h", "h2h_lay"),
+            ("outrights", "outrights_lay"),
+        ):
+            with self.subTest(
+                requested_market=requested_market,
+                returned_market=returned_market,
+            ):
+                payload = {
+                    "timestamp": "2026-09-22T12:40:00Z",
+                    "previous_timestamp": None,
+                    "next_timestamp": None,
+                    "data": [
+                        event(
+                            market_key=returned_market,
+                            market_last_update="2026-09-22T12:39:00Z",
+                        )
+                    ],
+                }
+                provider = TheOddsApiProvider(
+                    "k",
+                    sport="soccer_epl",
+                    markets=(requested_market,),
+                    transport=lambda *_: HttpJsonResponse(payload, 200, {}),
+                    clock=lambda: "2026-09-22T14:00:00+00:00",
+                )
+
+                snapshot = provider.read_historical_snapshot(
+                    "2026-09-22T12:42:00Z"
+                )
+
+                self.assertEqual(
+                    snapshot.request_evidence.markets,
+                    (requested_market,),
+                )
+                self.assertEqual(
+                    snapshot.batch.quotes[0].metadata["request"]["markets"],
+                    [requested_market],
+                )
+                self.assertEqual(
+                    snapshot.batch.quotes[0].metadata["exchange_side"],
+                    "lay",
+                )
 
     def test_historical_response_uses_the_same_request_scope_fence(self):
         payload = {

@@ -129,6 +129,34 @@ def test_absolute_executable_path_is_rejected(tmp_path: Path):
         )
 
 
+def test_symlink_escape_outside_install_root_is_rejected(tmp_path: Path):
+    outside = tmp_path.parent / "outside-autosport.exe"
+    outside.write_bytes(b"external-binary")
+    link = tmp_path / "versions" / "7" / "Autosport.exe"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this host")
+    payload = {
+        "schema_version": 1,
+        "product": "autosport",
+        "generation": 7,
+        "version": "7.0.0",
+        "executable_relpath": "versions/7/Autosport.exe",
+        "executable_sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+        "user_scope": "user-A",
+    }
+    raw = json.dumps(payload).encode()
+    with pytest.raises(LaunchIdentityError, match="outside the install root"):
+        resolve_active_generation(
+            manifest_bytes=raw,
+            expected_manifest_sha256=hashlib.sha256(raw).hexdigest(),
+            install_root=tmp_path,
+            expected_user_scope="user-A",
+        )
+
+
 def test_binary_digest_mismatch_is_rejected(tmp_path: Path):
     _, raw, manifest_sha, exe = _manifest(tmp_path)
     exe.write_bytes(b"tampered")

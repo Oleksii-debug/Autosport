@@ -102,7 +102,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIn("apiKey=secret", calls[0][0])
         self.assertNotIn("secret", repr(quote.metadata))
 
-    def test_bookmakers_take_request_precedence_without_erasing_requested_regions_from_provenance(self):
+    def test_bookmakers_take_request_precedence_and_can_omit_regions(self):
         seen = {}
 
         def transport(url, timeout):
@@ -112,7 +112,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
-            regions=("eu", "uk"),
+            regions=(),
             bookmakers=("book-a",),
             markets=("h2h",),
             transport=transport,
@@ -123,7 +123,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertNotIn("regions=", seen["url"])
         request = quote.metadata["request"]
         self.assertEqual(request["effective_bookmaker_scope"], "bookmakers")
-        self.assertEqual(request["regions"], ["eu", "uk"])
+        self.assertEqual(request["regions"], [])
         self.assertEqual(request["bookmakers"], ["book-a"])
 
     def test_missing_sids_remain_explicit_missing_and_are_not_fabricated(self):
@@ -138,6 +138,24 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIsNone(quote.metadata["market_sid"])
         self.assertIsNone(quote.metadata["outcome_sid"])
         self.assertNotEqual(quote.provider_selection_id, quote.provider_event_id)
+
+    def test_provider_native_sids_round_trip_losslessly_even_with_identity_delimiters(self):
+        payload = event(
+            bookmaker_sid="event|native",
+            market_sid="market|native",
+            outcome_sid="outcome|native",
+        )
+        quote = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            transport=lambda *_: HttpJsonResponse([payload], 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        ).read_batch().quotes[0]
+        self.assertEqual(quote.metadata["bookmaker_event_sid"], "event|native")
+        self.assertEqual(quote.metadata["market_sid"], "market|native")
+        self.assertEqual(quote.metadata["outcome_sid"], "outcome|native")
+        self.assertNotIn("|", quote.provider_market_id)
+        self.assertNotIn("|", quote.provider_selection_id)
 
     def test_same_display_event_across_sports_has_distinct_canonical_identity(self):
         football = event(sport="soccer_epl")
@@ -172,14 +190,8 @@ class TheOddsApiProviderTests(unittest.TestCase):
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
         first, second = provider.read_batch().quotes
-        self.assertNotEqual(
-            first.provider_market_id,
-            second.provider_market_id,
-        )
-        self.assertNotEqual(
-            first.provider_selection_id,
-            second.provider_selection_id,
-        )
+        self.assertNotEqual(first.provider_market_id, second.provider_market_id)
+        self.assertNotEqual(first.provider_selection_id, second.provider_selection_id)
         self.assertIsNone(first.metadata["exchange_side"])
         self.assertEqual(second.metadata["exchange_side"], "lay")
 
@@ -200,12 +212,9 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertEqual(first.market_type, MarketType.HANDICAP)
         self.assertEqual(first.metadata["point"], "1.5")
         self.assertEqual(second.metadata["point"], "-1.5")
-        self.assertNotEqual(
-            first.provider_selection_id,
-            second.provider_selection_id,
-        )
+        self.assertNotEqual(first.provider_selection_id, second.provider_selection_id)
 
-    def test_stale_market_timestamp_is_not_rejuvenated_by_receive_time(self):
+    def test_stale_current_market_timestamp_is_not_rejuvenated_by_receive_time(self):
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
@@ -225,34 +234,20 @@ class TheOddsApiProviderTests(unittest.TestCase):
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
-            transport=lambda *_: HttpJsonResponse(
-                [duplicate, duplicate],
-                200,
-                {},
-            ),
+            transport=lambda *_: HttpJsonResponse([duplicate, duplicate], 200, {}),
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
-        with self.assertRaisesRegex(
-            TheOddsApiPayloadError,
-            "duplicate exact",
-        ):
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "duplicate exact"):
             provider.read_batch()
 
     def test_float_ingress_is_rejected_in_injected_payload(self):
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
-            transport=lambda *_: HttpJsonResponse(
-                [event(price=2.1)],
-                200,
-                {},
-            ),
+            transport=lambda *_: HttpJsonResponse([event(price=2.1)], 200, {}),
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
-        with self.assertRaisesRegex(
-            TheOddsApiPayloadError,
-            "exact Decimal/string",
-        ):
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "exact Decimal/string"):
             provider.read_batch()
 
     def test_empty_response_is_narrow_dynamic_no_data_not_completeness(self):
@@ -260,9 +255,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
             "k",
             sport="soccer_epl",
             transport=lambda *_: HttpJsonResponse(
-                [],
-                200,
-                {"x-requests-last": "0"},
+                [], 200, {"x-requests-last": "0"}
             ),
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
@@ -276,71 +269,62 @@ class TheOddsApiProviderTests(unittest.TestCase):
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
-            transport=lambda *_: HttpJsonResponse(
-                {"message": "quota"},
-                429,
-                {},
-            ),
+            transport=lambda *_: HttpJsonResponse({"message": "quota"}, 429, {}),
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
-        with self.assertRaises(TheOddsApiTransportError) as ctx:
+        with self.assertRaises(TheOddsApiTransportError) as context:
             provider.read_batch()
-        self.assertIsInstance(ctx.exception, ProviderUnavailableError)
-        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertIsInstance(context.exception, ProviderUnavailableError)
+        self.assertEqual(context.exception.status_code, 429)
 
-    def test_historical_evidence_binds_actual_snapshot_not_requested_timestamp(self):
+    def test_historical_evidence_binds_actual_snapshot_and_freshness_to_snapshot_time(self):
         payload = {
             "timestamp": "2026-09-22T12:40:00Z",
             "previous_timestamp": "2026-09-22T12:35:00Z",
             "next_timestamp": "2026-09-22T12:45:00Z",
-            "data": [
-                event(
-                    market_last_update="2026-09-22T12:39:00Z"
-                )
-            ],
+            "data": [event(market_last_update="2026-09-22T12:39:00Z")],
         }
         seen = {}
 
         def transport(url, timeout):
             seen["url"] = url
             return HttpJsonResponse(
-                payload,
-                200,
-                {"x-requests-last": "10"},
+                payload, 200, {"x-requests-last": "10"}
             )
 
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
+            max_market_age_seconds=120,
             transport=transport,
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
-        snapshot = provider.read_historical_snapshot(
-            "2026-09-22T12:42:00Z"
-        )
+        snapshot = provider.read_historical_snapshot("2026-09-22T12:42:00Z")
+        self.assertEqual(snapshot.requested_at, "2026-09-22T12:42:00Z")
+        self.assertEqual(snapshot.snapshot_at, "2026-09-22T12:40:00Z")
+        self.assertEqual(snapshot.batch.cursor, "2026-09-22T12:40:00Z")
         self.assertEqual(
-            snapshot.requested_at,
-            "2026-09-22T12:42:00Z",
-        )
-        self.assertEqual(
-            snapshot.snapshot_at,
-            "2026-09-22T12:40:00Z",
-        )
-        self.assertEqual(
-            snapshot.batch.cursor,
-            "2026-09-22T12:40:00Z",
-        )
-        self.assertEqual(
-            snapshot.batch.quotes[0].metadata[
-                "historical_snapshot_at"
-            ],
+            snapshot.batch.quotes[0].metadata["historical_snapshot_at"],
             "2026-09-22T12:40:00Z",
         )
         self.assertEqual(snapshot.request_evidence.quota_last, 10)
-        self.assertIn(
-            "date=2026-09-22T12%3A42%3A00Z",
-            seen["url"],
+        self.assertIn("date=2026-09-22T12%3A42%3A00Z", seen["url"])
+
+    def test_historical_market_update_after_actual_snapshot_fails_closed(self):
+        payload = {
+            "timestamp": "2026-09-22T12:40:00Z",
+            "previous_timestamp": None,
+            "next_timestamp": None,
+            "data": [event(market_last_update="2026-09-22T12:41:00Z")],
+        }
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            transport=lambda *_: HttpJsonResponse(payload, 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
         )
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "historical snapshot"):
+            provider.read_historical_snapshot("2026-09-22T12:42:00Z")
 
     def test_historical_correction_changes_deterministic_sequence(self):
         payloads = iter(
@@ -372,19 +356,11 @@ class TheOddsApiProviderTests(unittest.TestCase):
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
-            transport=lambda *_: HttpJsonResponse(
-                next(payloads),
-                200,
-                {},
-            ),
+            transport=lambda *_: HttpJsonResponse(next(payloads), 200, {}),
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
-        first = provider.read_historical_snapshot(
-            "2026-09-22T12:42:00Z"
-        )
-        second = provider.read_historical_snapshot(
-            "2026-09-22T12:42:00Z"
-        )
+        first = provider.read_historical_snapshot("2026-09-22T12:42:00Z")
+        second = provider.read_historical_snapshot("2026-09-22T12:42:00Z")
         self.assertNotEqual(
             first.batch.quotes[0].sequence,
             second.batch.quotes[0].sequence,
@@ -416,6 +392,20 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIn("TRUNCATED_BATCH", first.quality_flags)
         self.assertNotIn("TRUNCATED_BATCH", second.quality_flags)
         self.assertEqual(len(calls), 1)
+
+    def test_secret_bearing_network_origin_is_pinned_and_timeout_is_finite(self):
+        with self.assertRaisesRegex(ValueError, "canonical The Odds API"):
+            TheOddsApiProvider(
+                "secret",
+                sport="soccer_epl",
+                base_url="https://attacker.example",
+            )
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            TheOddsApiProvider(
+                "secret",
+                sport="soccer_epl",
+                timeout_seconds=float("inf"),
+            )
 
     def test_adapter_exposes_no_provider_write_or_real_money_surface(self):
         provider = TheOddsApiProvider(

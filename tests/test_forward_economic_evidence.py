@@ -739,3 +739,65 @@ def test_executed_cost_requires_explicit_gross_wager_pnl():
             economic_cost_available_at=T0 + timedelta(hours=2),
         )
 
+def test_zero_cost_requires_explicit_evidence_for_all_in_completeness():
+    obs = observation(0)
+    legacy_acc = ForwardEconomicEvidenceAccumulator(protocol(minimum_events=1))
+    legacy_acc.record(
+        obs,
+        resolver_for(
+            [
+                (
+                    obs,
+                    outcome("challenger", obs, side=BetSide.NONE, pnl="0"),
+                    outcome("champion", obs, side=BetSide.NONE, pnl="0"),
+                )
+            ]
+        ),
+    )
+    assert legacy_acc.summary().all_in_economics_complete is False
+
+    cost_available_at = T0 + timedelta(minutes=30)
+    challenger = ResolvedPolicyOutcome(
+        policy_id="challenger",
+        sequence=obs.sequence,
+        universe_event_sha256=obs.universe_event_sha256,
+        decision_sha256=obs.challenger_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.NONE,
+        accepted_odds=None,
+        accepted_stake=None,
+        net_pnl_currency=Decimal("0"),
+        execution_evidence_sha256=None,
+        execution_accepted_at=None,
+        settlement_evidence_sha256=None,
+        settlement_available_at=None,
+        economic_cost_currency=Decimal("0"),
+        economic_cost_evidence_sha256=SHA_C,
+        economic_cost_available_at=cost_available_at,
+    )
+    champion = ResolvedPolicyOutcome(
+        policy_id="champion",
+        sequence=obs.sequence,
+        universe_event_sha256=obs.universe_event_sha256,
+        decision_sha256=obs.champion_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.NONE,
+        accepted_odds=None,
+        accepted_stake=None,
+        net_pnl_currency=Decimal("0"),
+        execution_evidence_sha256=None,
+        execution_accepted_at=None,
+        settlement_evidence_sha256=None,
+        settlement_available_at=None,
+        economic_cost_currency=Decimal("0"),
+        economic_cost_evidence_sha256=SHA_D,
+        economic_cost_available_at=cost_available_at,
+    )
+    complete_acc = ForwardEconomicEvidenceAccumulator(protocol(minimum_events=1))
+    complete_acc.record(obs, resolver_for([(obs, challenger, champion)]))
+    complete = complete_acc.summary()
+
+    assert complete.all_in_economics_complete is True
+    assert complete.positive_authority_verified is False
+    assert complete.scientific_promotion_gate_passed is False
+

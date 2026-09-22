@@ -85,3 +85,41 @@ def test_native_workspace_access_error_uses_canonical_localization_catalog() -> 
             "localization boundary:\n"
             + "\n".join(_direct_product_copy(function))
         )
+
+def test_workspace_access_message_renders_canonical_catalog_values() -> None:
+    from autosport.localization import text
+    from autosport.windows_entry import _workspace_access_error_message
+
+    workspace = Path("C:/Users/test/AppData/Local/Autosport/workspace")
+    error = OSError("Access denied\nsecond line")
+
+    message = _workspace_access_error_message(workspace, error)
+
+    assert message == text(
+        "ui.windows.workspace_access.message",
+        workspace=workspace,
+        error_type="OSError",
+        error_detail="Access denied second line",
+    )
+    assert "{workspace}" not in message
+    assert "{error_type}" not in message
+    assert "{error_detail}" not in message
+
+
+def test_workspace_access_message_uses_localized_unknown_error_fallback() -> None:
+    from autosport.localization import text
+    from autosport.windows_entry import _workspace_access_error_message
+
+    workspace = Path("C:/Users/test/AppData/Local/Autosport/workspace")
+    fallback = text("ui.windows.workspace_access.unknown_error")
+
+    message = _workspace_access_error_message(workspace, OSError())
+
+    assert message == text(
+        "ui.windows.workspace_access.message",
+        workspace=workspace,
+        error_type="OSError",
+        error_detail=fallback,
+    )
+    assert fallback in message
+

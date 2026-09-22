@@ -117,6 +117,32 @@ def test_unicode_casefold_postmortem_search_is_causal_and_restart_deterministic(
     assert expected[0].available_at == T3
 
 
+def test_hit_availability_compares_timezone_offsets_by_actual_instant(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = _seed_registry(path)
+    postmortem_available_at = "2026-01-02T23:30:00-02:00"
+    registry.append(
+        Postmortem(
+            postmortem_id="postmortem-offset",
+            experiment_id="experiment-2",
+            classification=ResearchOutcome.NULL,
+            finding="Унікальний offset marker.",
+            retest_conditions=("NEW_EVALUATION_BUNDLE",),
+            created_at=postmortem_available_at,
+        )
+    )
+
+    hits = search_negative_results(
+        registry,
+        "offset marker",
+        as_of="2026-01-03T02:00:00+00:00",
+    )
+
+    assert len(hits) == 1
+    assert hits[0].postmortem_ids == ("postmortem-offset",)
+    assert hits[0].available_at == postmortem_available_at
+
+
 def test_limit_and_tie_order_are_deterministic(tmp_path):
     _path, registry = _with_postmortem(tmp_path)
     _append_second_non_positive(registry)

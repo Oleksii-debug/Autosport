@@ -38,9 +38,9 @@ def _decode_json_object(payload: bytes, label: str) -> dict[str, object]:
 
 
 def _canonical_json_bytes(payload: dict[str, object]) -> bytes:
-    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+    # Keep one JSON authority for release evidence. In particular this preserves the
+    # repository's indentation, UTF-8, key ordering, finite-number and newline rules.
+    return canonical_release._canonical_json_bytes(payload)
 
 
 def _relative_members(
@@ -171,6 +171,23 @@ def _load_stage_neutral_members(package_zip: Path) -> dict[str, bytes]:
         raise ValueError("stage-neutral release package is not a valid ZIP") from exc
 
 
+def _require_canonical_container(package_zip: Path) -> None:
+    # The canonical writer should make these checks tautological in an untampered run,
+    # but validating the authored bytes closes a path-swap/metadata drift gap between
+    # publication and PASS evidence.
+    try:
+        with package_zip.open("rb") as snapshot:
+            with zipfile.ZipFile(snapshot, "r") as archive:
+                infos = archive.infolist()
+                canonical_release._require_canonical_zip_metadata(
+                    infos,
+                    archive.comment,
+                )
+                canonical_release._require_canonical_zip_local_headers(snapshot, infos)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("stage-neutral release package is not a valid ZIP") from exc
+
+
 def _transform_members(
     legacy_members: dict[str, bytes],
     *,
@@ -225,6 +242,12 @@ def _transform_members(
 
     _validate_manifest(transformed, label="stage-neutral release package")
     _validate_sums(transformed, label="stage-neutral release package")
+    if transformed["BUILD_INFO.json"] != _canonical_json_bytes(transformed_build):
+        raise ValueError("stage-neutral BUILD_INFO.json is not canonical JSON")
+    if transformed["PACKAGE_MANIFEST.json"] != _canonical_json_bytes(
+        transformed_manifest
+    ):
+        raise ValueError("stage-neutral PACKAGE_MANIFEST.json is not canonical JSON")
     return transformed
 
 
@@ -234,6 +257,7 @@ def _verify_stage_neutral_output(
     expected_source_sha: str,
     expected_members: dict[str, bytes],
 ) -> dict[str, object]:
+    _require_canonical_container(package_zip)
     observed = _load_stage_neutral_members(package_zip)
     if observed != expected_members:
         raise ValueError("stage-neutral release package payload drifted during write")
@@ -250,6 +274,15 @@ def _verify_stage_neutral_output(
     _require_false_truth_labels(build_info)
     if build_info.get("whole_product_complete") is not False:
         raise ValueError("stage-neutral BUILD_INFO.json must preserve whole_product_complete=false")
+    if observed["BUILD_INFO.json"] != _canonical_json_bytes(build_info):
+        raise ValueError("stage-neutral BUILD_INFO.json canonical JSON drifted")
+
+    manifest = _decode_json_object(
+        observed["PACKAGE_MANIFEST.json"],
+        "PACKAGE_MANIFEST.json",
+    )
+    if observed["PACKAGE_MANIFEST.json"] != _canonical_json_bytes(manifest):
+        raise ValueError("stage-neutral PACKAGE_MANIFEST.json canonical JSON drifted")
 
     digest = hashlib.sha256(package_zip.read_bytes()).hexdigest()
     return {

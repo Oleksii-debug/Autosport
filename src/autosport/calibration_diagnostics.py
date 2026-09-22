@@ -175,6 +175,21 @@ class CalibrationCoverage:
             raise ValueError("coverage ratios must be finite floats")
         if any(not 0.0 <= value <= 1.0 for value in ratios):
             raise ValueError("coverage ratios must be inside 0..1")
+        expected_selection = (
+            self.selected_count / self.eligible_count if self.eligible_count else 0.0
+        )
+        expected_forecast = (
+            self.forecasted_count / self.eligible_count if self.eligible_count else 0.0
+        )
+        expected_resolution = (
+            self.resolved_count / self.selected_count if self.selected_count else 0.0
+        )
+        if self.selection_coverage != expected_selection:
+            raise ValueError("selection_coverage must equal selected / eligible")
+        if self.forecast_coverage != expected_forecast:
+            raise ValueError("forecast_coverage must equal forecasted / eligible")
+        if self.resolution_coverage != expected_resolution:
+            raise ValueError("resolution_coverage must equal resolved / selected")
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -387,7 +402,7 @@ class CalibrationDiagnostics:
 
     def to_payload(self, *, include_identity: bool = True) -> dict[str, object]:
         payload: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "autosport-calibration-diagnostics",
             "window_id": self.window_id,
             "split": self.split,
@@ -770,7 +785,7 @@ def evaluate_calibration_diagnostics(
     ]
     cohort_sha256 = _digest(cohort_payload)
     config_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "window": {
             "window_id": window.window_id,
             "training_end_ts": window.training_end_ts,

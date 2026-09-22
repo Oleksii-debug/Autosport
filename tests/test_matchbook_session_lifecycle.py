@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from threading import Event, Thread
 
 import pytest
 
@@ -427,3 +428,43 @@ def test_read_ticket_capture_requires_active_session_and_respects_clock_rollback
 
     assert lifecycle.state is SessionState.CLOCK_FAULT
     assert lifecycle.is_active is False
+
+
+def test_response_commit_and_generation_rotation_share_one_atomic_lock() -> None:
+    lifecycle = active()
+    ticket = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    rotation_started = Event()
+    rotation_done = Event()
+    errors: list[BaseException] = []
+
+    def rotate() -> None:
+        try:
+            rotation_started.set()
+            lifecycle.record_login_200(
+                generation_id="gen-2",
+                monotonic_ns=ns(22),
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            rotation_done.set()
+
+    lifecycle._lock.acquire()
+    try:
+        worker = Thread(target=rotate)
+        worker.start()
+        assert rotation_started.wait(timeout=1.0)
+        assert rotation_done.is_set() is False
+        assert lifecycle.authorize_read_response_commit(
+            ticket,
+            monotonic_ns=ns(21),
+        ) == "gen-1"
+    finally:
+        lifecycle._lock.release()
+
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+    assert errors == []
+    assert rotation_done.is_set() is True
+    assert lifecycle.generation_id == "gen-2"
+    assert lifecycle.state is SessionState.ACTIVE

@@ -583,6 +583,38 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_missing_commit_order_immutability_trigger_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                self.replay(store)
+                store.connection.execute(
+                    "DROP TRIGGER market_event_commit_order_no_update"
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "immutable append-generation triggers mismatch",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "immutable append-generation triggers mismatch",
+            ):
+                SQLiteMarketStore(path)
+
     def test_missing_cutoff_immutability_trigger_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

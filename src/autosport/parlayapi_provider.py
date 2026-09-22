@@ -212,8 +212,8 @@ class ParlayApiTableTennisProvider:
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
         if self._pending_quotes is None:
-            observed_ts = self.clock()
             response = self._fetch()
+            observed_ts = self.clock()
             events = self._event_list(response.payload)
             self._pending_quotes = self._snapshot_quotes(
                 events,
@@ -289,8 +289,8 @@ class ParlayApiTableTennisProvider:
 
         query = urlencode({"dateFrom": date_from, "dateTo": date_to})
         url = f"{self.base_url}/v1/historical/sports/{self.sport_key}/coverage?{query}"
-        observed_at = self.clock()
         response = self._request(url)
+        observed_at = self.clock()
         window_hours_raw = _header(response.headers, "x-historical-window-hours")
         window_from_raw = _header(response.headers, "x-historical-window-from")
         if window_hours_raw is None or window_from_raw is None:

@@ -13,9 +13,14 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from typing import Any, Mapping
+from weakref import ref
 
 
 _HEX = frozenset("0123456789abcdef")
+_MONEY_MAX_SIGNIFICANT_DIGITS = 64
+_MONEY_MIN_EXPONENT = -18
+_MONEY_MAX_EXPONENT = 36
+_MONEY_MAX_ADJUSTED_EXPONENT = 36
 
 
 class BetfairCommissionAttributionError(ValueError):
@@ -65,6 +70,17 @@ def _decimal(value: object, field: str) -> Decimal:
         raise BetfairCommissionAttributionError(
             f"{field} must be a finite Decimal"
         )
+    value_tuple = value.as_tuple()
+    exponent = int(value_tuple.exponent)
+    if (
+        len(value_tuple.digits) > _MONEY_MAX_SIGNIFICANT_DIGITS
+        or exponent < _MONEY_MIN_EXPONENT
+        or exponent > _MONEY_MAX_EXPONENT
+        or (value != 0 and value.adjusted() > _MONEY_MAX_ADJUSTED_EXPONENT)
+    ):
+        raise BetfairCommissionAttributionError(
+            f"{field} exceeds the bounded monetary Decimal domain"
+        )
     return value
 
 
@@ -106,13 +122,14 @@ def _exact_sum(values: tuple[Decimal, ...]) -> Decimal:
     sign = "-" if total < 0 else ""
     digits = str(abs(total))
     if common_exponent >= 0:
-        return Decimal(sign + digits + ("0" * common_exponent))
+        result = Decimal(sign + digits + ("0" * common_exponent))
+        return _decimal(result, "exact_sum result")
     places = -common_exponent
     if len(digits) > places:
         text = digits[:-places] + "." + digits[-places:]
     else:
         text = "0." + ("0" * (places - len(digits))) + digits
-    return Decimal(sign + text)
+    return _decimal(Decimal(sign + text), "exact_sum result")
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> str:
@@ -133,6 +150,8 @@ def _digest(payload: Mapping[str, Any]) -> str:
 class BetGrossAmount:
     """Structural reference to one bet-level gross realized amount."""
 
+    venue_id: str
+    account_id: str
     bet_id: str
     market_id: str
     currency: str
@@ -140,6 +159,8 @@ class BetGrossAmount:
     evidence_sha256: str
 
     def __post_init__(self) -> None:
+        _text(self.venue_id, "venue_id")
+        _text(self.account_id, "account_id")
         _text(self.bet_id, "bet_id")
         _text(self.market_id, "market_id")
         _currency(self.currency)
@@ -148,6 +169,8 @@ class BetGrossAmount:
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "venue_id": self.venue_id,
+            "account_id": self.account_id,
             "bet_id": self.bet_id,
             "market_id": self.market_id,
             "currency": self.currency,
@@ -164,12 +187,16 @@ class MarketCommissionAmount:
     credits/reversals added back to gross P&L.
     """
 
+    venue_id: str
+    account_id: str
     market_id: str
     currency: str
     commission_charge: Decimal
     evidence_sha256: str
 
     def __post_init__(self) -> None:
+        _text(self.venue_id, "venue_id")
+        _text(self.account_id, "account_id")
         _text(self.market_id, "market_id")
         _currency(self.currency)
         _decimal(self.commission_charge, "commission_charge")
@@ -177,6 +204,8 @@ class MarketCommissionAmount:
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "venue_id": self.venue_id,
+            "account_id": self.account_id,
             "market_id": self.market_id,
             "currency": self.currency,
             "commission_charge": _decimal_text(self.commission_charge),
@@ -222,21 +251,30 @@ class BetCommissionAllocation:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetAttributedNet:
+    venue_id: str
+    account_id: str
+    market_id: str
     bet_id: str
     gross_profit: Decimal
     allocated_commission: Decimal
     derived_net_profit: Decimal
+    attribution_id: str
     allocation_policy_id: str
     allocation_policy_version: int
+    allocation_policy_sha256: str
     provider_exact: bool = False
 
     def __post_init__(self) -> None:
+        _text(self.venue_id, "venue_id")
+        _text(self.account_id, "account_id")
+        _text(self.market_id, "market_id")
         _text(self.bet_id, "bet_id")
         _decimal(self.gross_profit, "gross_profit")
         _decimal(self.allocated_commission, "allocated_commission")
         _decimal(self.derived_net_profit, "derived_net_profit")
+        _sha256(self.attribution_id, "attribution_id")
         _text(self.allocation_policy_id, "allocation_policy_id")
         if (
             type(self.allocation_policy_version) is not int
@@ -245,6 +283,7 @@ class BetAttributedNet:
             raise BetfairCommissionAttributionError(
                 "allocation_policy_version must be a positive integer"
             )
+        _sha256(self.allocation_policy_sha256, "allocation_policy_sha256")
         if self.provider_exact is not False:
             raise BetfairCommissionAttributionError(
                 "per-bet allocated net must remain non-provider-exact"
@@ -255,6 +294,91 @@ class BetAttributedNet:
             raise BetfairCommissionAttributionError(
                 "derived_net_profit must equal gross_profit - allocated_commission"
             )
+
+    def _binding_fingerprint(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.betfair_attributed_net",
+                "schema_version": 2,
+                "venue_id": self.venue_id,
+                "account_id": self.account_id,
+                "market_id": self.market_id,
+                "bet_id": self.bet_id,
+                "gross_profit": _decimal_text(self.gross_profit),
+                "allocated_commission": _decimal_text(
+                    self.allocated_commission
+                ),
+                "derived_net_profit": _decimal_text(self.derived_net_profit),
+                "attribution_id": self.attribution_id,
+                "allocation_policy_id": self.allocation_policy_id,
+                "allocation_policy_version": self.allocation_policy_version,
+                "allocation_policy_sha256": self.allocation_policy_sha256,
+                "provider_exact": self.provider_exact,
+            }
+        )
+
+    def assert_derived_from(
+        self,
+        attribution: "MarketCommissionAttribution",
+    ) -> None:
+        if type(attribution) is not MarketCommissionAttribution:
+            raise BetfairCommissionAttributionError(
+                "derived net parent must be exact MarketCommissionAttribution"
+            )
+        issued = _DERIVED_NET_ISSUED.get(id(self))
+        if (
+            issued is None
+            or issued[0]() is not self
+            or issued[1] != self._binding_fingerprint()
+        ):
+            raise BetfairCommissionAttributionError(
+                "per-bet net was not issued by canonical attribution derivation"
+            )
+        policy = attribution.allocation_policy
+        if (
+            policy is None
+            or self.attribution_id != attribution.attribution_id
+            or self.allocation_policy_id != policy.policy_id
+            or self.allocation_policy_version != policy.policy_version
+            or self.allocation_policy_sha256 != policy.policy_sha256
+            or self.venue_id != attribution.market_commission.venue_id
+            or self.account_id != attribution.market_commission.account_id
+            or self.market_id != attribution.market_commission.market_id
+        ):
+            raise BetfairCommissionAttributionError(
+                "per-bet net is not bound to the supplied parent attribution"
+            )
+        parent_rows = {row.bet_id: row for row in attribution.gross_bets}
+        parent_allocations = {
+            row.bet_id: row for row in attribution.allocations
+        }
+        gross = parent_rows.get(self.bet_id)
+        allocation = parent_allocations.get(self.bet_id)
+        if (
+            gross is None
+            or allocation is None
+            or self.gross_profit != gross.gross_profit
+            or self.allocated_commission != allocation.allocated_commission
+        ):
+            raise BetfairCommissionAttributionError(
+                "per-bet net economics do not match parent attribution"
+            )
+
+
+_DERIVED_NET_ISSUED: dict[int, tuple[object, str]] = {}
+
+
+def _issue_bet_attributed_net(value: BetAttributedNet) -> BetAttributedNet:
+    key = id(value)
+
+    def forget(_weakref: object, *, issued_key: int = key) -> None:
+        _DERIVED_NET_ISSUED.pop(issued_key, None)
+
+    _DERIVED_NET_ISSUED[key] = (
+        ref(value, forget),
+        value._binding_fingerprint(),
+    )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +403,8 @@ class MarketCommissionAttribution:
             raise BetfairCommissionAttributionError("allocations must be a tuple")
 
         bet_ids: set[str] = set()
+        venue_id = self.market_commission.venue_id
+        account_id = self.market_commission.account_id
         market_id = self.market_commission.market_id
         currency = self.market_commission.currency
         for bet in self.gross_bets:
@@ -289,6 +415,14 @@ class MarketCommissionAttribution:
             if bet.bet_id in bet_ids:
                 raise BetfairCommissionAttributionError("duplicate gross bet_id")
             bet_ids.add(bet.bet_id)
+            if bet.venue_id != venue_id:
+                raise BetfairCommissionAttributionError(
+                    "gross bet and commission venue_id differ"
+                )
+            if bet.account_id != account_id:
+                raise BetfairCommissionAttributionError(
+                    "gross bet and commission account_id differ"
+                )
             if bet.market_id != market_id:
                 raise BetfairCommissionAttributionError(
                     "gross bet and commission market_id differ"
@@ -357,19 +491,30 @@ class MarketCommissionAttribution:
         allocated_by_id = {item.bet_id: item for item in self.allocations}
         policy = self.allocation_policy
         return tuple(
-            BetAttributedNet(
-                bet_id=bet_id,
-                gross_profit=gross_by_id[bet_id].gross_profit,
-                allocated_commission=allocated_by_id[bet_id].allocated_commission,
-                derived_net_profit=_exact_sum(
-                    (
-                        gross_by_id[bet_id].gross_profit,
-                        allocated_by_id[bet_id].allocated_commission.copy_negate(),
-                    )
-                ),
-                allocation_policy_id=policy.policy_id,
-                allocation_policy_version=policy.policy_version,
-                provider_exact=False,
+            _issue_bet_attributed_net(
+                BetAttributedNet(
+                    venue_id=gross_by_id[bet_id].venue_id,
+                    account_id=gross_by_id[bet_id].account_id,
+                    market_id=gross_by_id[bet_id].market_id,
+                    bet_id=bet_id,
+                    gross_profit=gross_by_id[bet_id].gross_profit,
+                    allocated_commission=allocated_by_id[
+                        bet_id
+                    ].allocated_commission,
+                    derived_net_profit=_exact_sum(
+                        (
+                            gross_by_id[bet_id].gross_profit,
+                            allocated_by_id[
+                                bet_id
+                            ].allocated_commission.copy_negate(),
+                        )
+                    ),
+                    attribution_id=self.attribution_id,
+                    allocation_policy_id=policy.policy_id,
+                    allocation_policy_version=policy.policy_version,
+                    allocation_policy_sha256=policy.policy_sha256,
+                    provider_exact=False,
+                )
             )
             for bet_id in sorted(gross_by_id)
         )
@@ -378,7 +523,7 @@ class MarketCommissionAttribution:
     def attribution_id(self) -> str:
         payload: dict[str, object] = {
             "schema": "autosport.betfair_commission_attribution",
-            "schema_version": 1,
+            "schema_version": 2,
             "gross_bets": [
                 item.to_payload()
                 for item in sorted(self.gross_bets, key=lambda item: item.bet_id)

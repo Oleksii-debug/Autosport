@@ -11,6 +11,7 @@ from autosport.betfair_replace_saga import (
     BetfairReplaceSagaStateError,
     BetfairReplaceSagaStore,
     OriginalOrderState,
+    ReplaceExposureTruth,
     ReplaceInstruction,
     ReplaceInstructionReconciliation,
     ReplaceInstructionResult,
@@ -186,7 +187,7 @@ def test_cancel_success_new_place_failure_never_rolls_back_original_exposure(tmp
 
     snapshot = store.record_provider_result("replace-saga-1", evidence)
 
-    assert snapshot.state is ReplaceSagaState.REPLACE_CANCELLED_WITHOUT_REPLACEMENT
+    assert snapshot.state is ReplaceSagaState.CANCEL_CONFIRMED
     assert set(snapshot.exposure.known_not_executable_original_bet_ids) == {
         "old-bet-1",
         "old-bet-2",
@@ -194,7 +195,7 @@ def test_cancel_success_new_place_failure_never_rolls_back_original_exposure(tmp
     assert snapshot.exposure.known_replacement_bet_ids == ()
     assert snapshot.exposure.unresolved_original_bet_ids == ()
     assert snapshot.exposure.unresolved_replacement_bet_ids_for == ()
-    assert snapshot.retry_disposition is ReplaceRetryDisposition.TERMINAL_NO_RETRY
+    assert snapshot.retry_disposition is ReplaceRetryDisposition.READBACK_REQUIRED
 
 
 def test_full_provider_success_records_new_ids_but_does_not_grant_execution_authority(tmp_path):
@@ -202,12 +203,14 @@ def test_full_provider_success_records_new_ids_but_does_not_grant_execution_auth
 
     snapshot = store.record_provider_result("replace-saga-1", provider_evidence())
 
-    assert snapshot.state is ReplaceSagaState.REPLACED
+    assert snapshot.state is ReplaceSagaState.UNKNOWN_PARTIAL
+    assert snapshot.retry_disposition is ReplaceRetryDisposition.READBACK_REQUIRED
     assert set(snapshot.exposure.known_replacement_bet_ids) == {
         "new-bet-1",
         "new-bet-2",
     }
     assert snapshot.exposure.provider_verified is False
+    assert snapshot.exposure.execution_admission_eligible is False
     assert snapshot.exposure.real_money_authorized is False
 
 
@@ -217,7 +220,7 @@ def test_timeout_can_be_reconciled_to_exactly_one_replacement_per_instruction(tm
 
     snapshot = store.record_reconciliation("replace-saga-1", reconciliation())
 
-    assert snapshot.state is ReplaceSagaState.REPLACED
+    assert snapshot.state is ReplaceSagaState.UNKNOWN_PARTIAL
     assert set(snapshot.exposure.known_not_executable_original_bet_ids) == {
         "old-bet-1",
         "old-bet-2",
@@ -226,7 +229,7 @@ def test_timeout_can_be_reconciled_to_exactly_one_replacement_per_instruction(tm
         "new-bet-1",
         "new-bet-2",
     }
-    assert snapshot.retry_disposition is ReplaceRetryDisposition.TERMINAL_NO_RETRY
+    assert snapshot.retry_disposition is ReplaceRetryDisposition.READBACK_REQUIRED
 
 
 def test_old_order_still_executable_while_new_order_exists_is_conflict(tmp_path):
@@ -394,3 +397,111 @@ def test_reconciliation_must_advance_causal_boundary(tmp_path):
 
     with pytest.raises(BetfairReplaceSagaStateError, match="newer"):
         store.record_reconciliation("replace-saga-1", too_old)
+
+
+
+def test_prepared_cannot_mint_unknown_without_durable_submitted_boundary(tmp_path):
+    store = prepared_store(tmp_path)
+
+    with pytest.raises(BetfairReplaceSagaStateError, match="SUBMITTED"):
+        store.mark_unknown(
+            "replace-saga-1",
+            reason="caller says transport was ambiguous",
+            observed_at=OBSERVED,
+        )
+
+    restarted = BetfairReplaceSagaStore(store.path).snapshot("replace-saga-1")
+    assert restarted.state is ReplaceSagaState.PREPARED
+    assert (
+        restarted.retry_disposition
+        is ReplaceRetryDisposition.EXPLICIT_EXECUTION_POLICY_REQUIRED
+    )
+
+
+def test_prepared_cannot_mint_reconciliation_without_durable_submitted_boundary(tmp_path):
+    store = prepared_store(tmp_path)
+
+    with pytest.raises(BetfairReplaceSagaStateError, match="SUBMITTED"):
+        store.record_reconciliation("replace-saga-1", reconciliation())
+
+    restarted = BetfairReplaceSagaStore(store.path).snapshot("replace-saga-1")
+    assert restarted.state is ReplaceSagaState.PREPARED
+
+
+def test_positive_exposure_authority_flags_are_not_caller_constructible():
+    with pytest.raises(TypeError):
+        ReplaceExposureTruth(
+            saga_id="forged",
+            state=ReplaceSagaState.REPLACED,
+            known_not_executable_original_bet_ids=("old-bet-1",),
+            known_executable_original_bet_ids=(),
+            known_replacement_bet_ids=("new-bet-1",),
+            unresolved_original_bet_ids=(),
+            unresolved_replacement_bet_ids_for=(),
+            request_sha256=SHA_A,
+            provider_verified=True,
+            execution_admission_eligible=True,
+            real_money_authorized=True,
+        )
+
+
+def test_unverified_provider_success_cannot_mint_terminal_no_retry(tmp_path):
+    store = submitted_store(tmp_path)
+
+    snapshot = store.record_provider_result("replace-saga-1", provider_evidence())
+
+    assert snapshot.state is ReplaceSagaState.UNKNOWN_PARTIAL
+    assert snapshot.retry_disposition is ReplaceRetryDisposition.READBACK_REQUIRED
+    assert snapshot.exposure.provider_verified is False
+    assert snapshot.exposure.execution_admission_eligible is False
+    assert snapshot.exposure.real_money_authorized is False
+
+
+def test_unverified_reconciliation_cannot_mint_terminal_no_retry(tmp_path):
+    store = submitted_store(tmp_path)
+    store.mark_unknown("replace-saga-1", reason="response lost", observed_at=OBSERVED)
+
+    snapshot = store.record_reconciliation("replace-saga-1", reconciliation())
+
+    assert snapshot.state is ReplaceSagaState.UNKNOWN_PARTIAL
+    assert snapshot.retry_disposition is ReplaceRetryDisposition.READBACK_REQUIRED
+    assert snapshot.exposure.provider_verified is False
+    assert snapshot.exposure.execution_admission_eligible is False
+    assert snapshot.exposure.real_money_authorized is False
+
+
+def test_conflict_high_water_survives_later_clean_reconciliation_and_restart(tmp_path):
+    store = submitted_store(tmp_path)
+    store.mark_unknown("replace-saga-1", reason="response lost", observed_at=OBSERVED)
+
+    conflict = store.record_reconciliation(
+        "replace-saga-1",
+        reconciliation(
+            original1=OriginalOrderState.EXECUTABLE,
+            evidence_id=SHA_D,
+            observed_at=RECONCILED,
+        ),
+    )
+    assert conflict.state is ReplaceSagaState.CONFLICT
+    assert (
+        conflict.retry_disposition
+        is ReplaceRetryDisposition.CONFLICT_REQUIRES_OPERATOR
+    )
+
+    later = store.record_reconciliation(
+        "replace-saga-1",
+        reconciliation(
+            original1=OriginalOrderState.NOT_EXECUTABLE,
+            evidence_id="e" * 64,
+            observed_at="2026-09-21T09:00:04+00:00",
+        ),
+    )
+    assert later.state is ReplaceSagaState.CONFLICT
+    assert later.retry_disposition is ReplaceRetryDisposition.CONFLICT_REQUIRES_OPERATOR
+
+    restarted = BetfairReplaceSagaStore(store.path).snapshot("replace-saga-1")
+    assert restarted.state is ReplaceSagaState.CONFLICT
+    assert (
+        restarted.retry_disposition
+        is ReplaceRetryDisposition.CONFLICT_REQUIRES_OPERATOR
+    )

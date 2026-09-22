@@ -283,6 +283,63 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "TRANSPORT_UNAVAILABLE")
         self.assertNotIn("secret-token", str(caught.exception))
 
+
+    def test_duplicate_identity_with_conflicting_unmodeled_provider_field_fails_closed(self):
+        discovery, _ = self._discovery(
+            tournament_rows=[
+                {"id": 109, "name": "A", "classification": {"tier": 1}},
+                {"id": 109, "name": "A", "classification": {"tier": 2}},
+            ],
+            clocks=["2026-09-22T20:00:00Z"],
+        )
+        with self.assertRaisesRegex(ProphetXDiscoveryPayloadError, "conflicting duplicate tournament"):
+            discovery.discover()
+
+    def test_raw_provider_metadata_is_preserved_separately_from_canonical_sport_mapping(self):
+        discovery, _ = self._discovery(
+            tournament_rows=[{"id": 109, "name": "A", "sport_name": "Provider Baseball"}],
+            events_by_tournament={
+                "109": [{"event_id": 1, "name": "Game", "league_code": "RAW-LEAGUE"}]
+            },
+            mapping={"109": "baseball"},
+            clocks=["2026-09-22T20:00:00Z", "2026-09-22T20:00:01Z"],
+        )
+        catalog = discovery.discover()
+        self.assertEqual(catalog.tournaments[0].canonical_sport, "baseball")
+        self.assertEqual(catalog.events[0].canonical_sport, "baseball")
+        self.assertIn("sport_name", dict(catalog.tournaments[0].provider_metadata))
+        self.assertIn("league_code", dict(catalog.events[0].provider_metadata))
+        self.assertRegex(catalog.tournaments[0].provider_row_sha256, r"^[0-9a-f]{64}$")
+        self.assertRegex(catalog.events[0].provider_row_sha256, r"^[0-9a-f]{64}$")
+
+    def test_injected_transport_cannot_claim_verified_provider_origin(self):
+        discovery, _ = self._discovery(
+            tournament_rows=[{"id": 109, "name": "A"}],
+            events_by_tournament={"109": []},
+            clocks=["2026-09-22T20:00:00Z", "2026-09-22T20:00:01Z"],
+        )
+        catalog = discovery.discover()
+        self.assertTrue(catalog.acquisitions)
+        self.assertTrue(all(not item.provider_origin_verified for item in catalog.acquisitions))
+
+    def test_injected_unavailability_detail_is_sanitized_before_durable_failure(self):
+        discovery, _ = self._discovery(
+            events_by_tournament={
+                "109": [{"event_id": 1001, "name": "A"}],
+                "210": ProphetXDiscoveryUnavailable("Bearer secret-token provider detail"),
+            },
+            clocks=["2026-09-22T20:00:00Z", "2026-09-22T20:00:01Z"],
+        )
+        catalog = discovery.discover()
+        self.assertFalse(catalog.complete)
+        self.assertEqual(catalog.failures[0].code, "PROVIDER_UNAVAILABLE")
+        self.assertIsNone(catalog.failures[0].status_code)
+        self.assertNotIn("secret-token", repr(catalog.failures))
+
+    def test_response_rejects_non_http_status_range(self):
+        with self.assertRaisesRegex(ValueError, "valid HTTP status"):
+            _response(_tournaments([]), status_code=999)
+
     def test_no_write_account_market_price_or_execution_surface_is_exported(self):
         public = set(dir(ProphetXFixtureDiscovery))
         forbidden = {

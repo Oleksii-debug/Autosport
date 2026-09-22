@@ -41,7 +41,7 @@ class MatchbookOfferEditRetryDisposition(str, Enum):
 
 
 class MatchbookOfferEditIdentityDisposition(str, Enum):
-    EXACT_PROVIDER_EDIT_ID = "exact_provider_edit_id"
+    EDIT_ID_PRESENT_REQUIRES_PROVIDER_ORIGIN = "edit_id_present_requires_provider_origin"
     UNKNOWN_NO_EDIT_ID_FAIL_CLOSED = "unknown_no_edit_id_fail_closed"
 
 
@@ -244,11 +244,11 @@ class MatchbookOfferEditReadback:
 
 
 def identity_disposition(*, offer_edit_id: object | None) -> MatchbookOfferEditIdentityDisposition:
-    """Collection/search similarity is never a substitute for an exact provider edit id."""
+    """Validate edit-id shape without claiming that the caller proved provider origin."""
     if offer_edit_id is None:
         return MatchbookOfferEditIdentityDisposition.UNKNOWN_NO_EDIT_ID_FAIL_CLOSED
     _positive_int(offer_edit_id, "offer_edit_id")
-    return MatchbookOfferEditIdentityDisposition.EXACT_PROVIDER_EDIT_ID
+    return MatchbookOfferEditIdentityDisposition.EDIT_ID_PRESENT_REQUIRES_PROVIDER_ORIGIN
 
 
 def retry_disposition(

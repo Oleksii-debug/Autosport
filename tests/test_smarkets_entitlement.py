@@ -87,10 +87,15 @@ def test_http_reachability_is_not_an_entitlement_input():
 def test_unapproved_purpose_fails_closed():
     result = _evaluate(
         _entitlement(),
-        purpose=SmarketsPurpose.BENCHMARKING,
+        purpose=SmarketsPurpose.REDISTRIBUTION,
     )
     assert result.entitled is False
     assert result.reason == "PURPOSE_NOT_APPROVED"
+
+
+def test_provider_prohibited_benchmarking_cannot_be_minted():
+    with pytest.raises(SmarketsEntitlementError, match="provider terms prohibit"):
+        _entitlement(purposes=(SmarketsPurpose.BENCHMARKING,))
 
 
 def test_event_scope_mismatch_fails_closed():
@@ -307,7 +312,11 @@ def test_setup_cost_is_one_time_not_per_bet_and_not_incurred_truth():
         billing_trigger="successful_api_activation",
         observed_at=NOW,
         source_document_sha256=DOC_SHA,
+        refund_window_days=60,
+        refund_condition="permanent_api_withdrawal_within_window",
     )
+    assert observation.refund_window_days == 60
+    assert observation.refund_condition == "permanent_api_withdrawal_within_window"
     assert observation.one_time is True
     assert observation.applies_per_bet is False
     assert observation.incurred_cost_authority is False
@@ -390,6 +399,18 @@ def test_issue_rejects_noncanonical_collection_types_and_purpose_values():
             rate_window_seconds=1,
             observed_at=NOW,
             source_document_sha256=DOC_SHA,
+        )
+
+
+def test_setup_cost_refund_terms_are_paired():
+    with pytest.raises(SmarketsEntitlementError, match="supplied together"):
+        issue_smarkets_setup_cost_observation(
+            amount=Decimal("150"),
+            currency="GBP",
+            billing_trigger="successful_api_activation",
+            observed_at=NOW,
+            source_document_sha256=DOC_SHA,
+            refund_window_days=60,
         )
 
 

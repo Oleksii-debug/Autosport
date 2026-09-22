@@ -810,3 +810,292 @@ def build_empirical_execution_evidence(
         censor_cutoff_recorded_at=censor_cutoff_recorded_at,
         censor_cutoff_event_count=censor_cutoff_event_count,
     )
+
+POPULATION_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class EmpiricalExecutionPopulationEvidence:
+    """Frozen whole-ledger execution-quality denominator.
+
+    This aggregate is deliberately built from every durable attempt in one verified
+    RealExecutionLedger snapshot. It accepts no caller-selected sample list in its
+    public builder, so rejected, partial, unresolved and reconciled-not-found
+    attempts cannot disappear merely because a price or timing scalar is missing.
+
+    The evaluation protocol SHA is a binding label only. This class does not claim
+    that the protocol itself was product-issued or scientifically qualified.
+    """
+
+    source_ledger_sha256: str
+    source_event_count: int
+    evaluation_protocol_sha256: str
+    samples: tuple[EmpiricalExecutionEvidence, ...]
+    schema_version: int = POPULATION_SCHEMA_VERSION
+
+    total_attempts: int = field(init=False)
+    state_counts: tuple[tuple[str, int], ...] = field(init=False)
+    terminal_count: int = field(init=False)
+    right_censored_count: int = field(init=False)
+    provider_evidence_count: int = field(init=False)
+    slippage_known_count: int = field(init=False)
+    slippage_unknown_count: int = field(init=False)
+    slippage_not_applicable_count: int = field(init=False)
+    causal_timing_known_count: int = field(init=False)
+    causal_timing_unknown_count: int = field(init=False)
+    denominator_sha256: str = field(init=False)
+    evidence_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != POPULATION_SCHEMA_VERSION:
+            raise EmpiricalExecutionEvidenceError(
+                "unsupported empirical population evidence schema"
+            )
+        _sha256(self.source_ledger_sha256, "source_ledger_sha256")
+        _sha256(self.evaluation_protocol_sha256, "evaluation_protocol_sha256")
+        if type(self.source_event_count) is not int or self.source_event_count < 1:
+            raise EmpiricalExecutionEvidenceError(
+                "source_event_count must be positive int"
+            )
+        if type(self.samples) is not tuple or not self.samples:
+            raise EmpiricalExecutionEvidenceError(
+                "population evidence requires non-empty canonical sample tuple"
+            )
+        if any(type(sample) is not EmpiricalExecutionEvidence for sample in self.samples):
+            raise EmpiricalExecutionEvidenceError(
+                "population samples must be canonical EmpiricalExecutionEvidence"
+            )
+
+        attempt_ids = tuple(sample.attempt_id for sample in self.samples)
+        if attempt_ids != tuple(sorted(attempt_ids)):
+            raise EmpiricalExecutionEvidenceError(
+                "population samples must be ordered by canonical attempt_id"
+            )
+        if len(set(attempt_ids)) != len(attempt_ids):
+            raise EmpiricalExecutionEvidenceError(
+                "population evidence cannot duplicate an attempt"
+            )
+        for sample in self.samples:
+            if sample.source_ledger_sha256 != self.source_ledger_sha256:
+                raise EmpiricalExecutionEvidenceError(
+                    "population sample source ledger mismatch"
+                )
+            if sample.source_event_count != self.source_event_count:
+                raise EmpiricalExecutionEvidenceError(
+                    "population sample source event-count mismatch"
+                )
+
+        total = len(self.samples)
+        counts = tuple(
+            (
+                state.value,
+                sum(sample.attempt_state == state.value for sample in self.samples),
+            )
+            for state in AttemptState
+        )
+        if sum(count for _, count in counts) != total:
+            raise EmpiricalExecutionEvidenceError(
+                "population state counts do not cover denominator"
+            )
+
+        terminal_count = sum(sample.terminal for sample in self.samples)
+        right_censored_count = sum(sample.right_censored for sample in self.samples)
+        if terminal_count + right_censored_count != total:
+            raise EmpiricalExecutionEvidenceError(
+                "population terminal/censor counts do not cover denominator"
+            )
+
+        provider_evidence_count = sum(
+            sample.provider_evidence_id is not None for sample in self.samples
+        )
+        slippage_known_count = sum(
+            sample.slippage_status == SLIPPAGE_STATUS_KNOWN for sample in self.samples
+        )
+        slippage_unknown_count = sum(
+            sample.slippage_status == SLIPPAGE_STATUS_UNKNOWN for sample in self.samples
+        )
+        slippage_not_applicable_count = sum(
+            sample.slippage_status == SLIPPAGE_STATUS_NOT_APPLICABLE
+            for sample in self.samples
+        )
+        if (
+            slippage_known_count
+            + slippage_unknown_count
+            + slippage_not_applicable_count
+            != total
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population slippage statuses do not cover denominator"
+            )
+
+        causal_timing_known_count = sum(
+            sample.causal_timing_status != TIMING_STATUS_UNKNOWN
+            for sample in self.samples
+        )
+        causal_timing_unknown_count = sum(
+            sample.causal_timing_status == TIMING_STATUS_UNKNOWN
+            for sample in self.samples
+        )
+        if causal_timing_known_count + causal_timing_unknown_count != total:
+            raise EmpiricalExecutionEvidenceError(
+                "population timing statuses do not cover denominator"
+            )
+
+        object.__setattr__(self, "total_attempts", total)
+        object.__setattr__(self, "state_counts", counts)
+        object.__setattr__(self, "terminal_count", terminal_count)
+        object.__setattr__(self, "right_censored_count", right_censored_count)
+        object.__setattr__(self, "provider_evidence_count", provider_evidence_count)
+        object.__setattr__(self, "slippage_known_count", slippage_known_count)
+        object.__setattr__(self, "slippage_unknown_count", slippage_unknown_count)
+        object.__setattr__(
+            self,
+            "slippage_not_applicable_count",
+            slippage_not_applicable_count,
+        )
+        object.__setattr__(
+            self,
+            "causal_timing_known_count",
+            causal_timing_known_count,
+        )
+        object.__setattr__(
+            self,
+            "causal_timing_unknown_count",
+            causal_timing_unknown_count,
+        )
+
+        denominator_payload = {
+            "source_ledger_sha256": self.source_ledger_sha256,
+            "source_event_count": self.source_event_count,
+            "attempt_ids": list(attempt_ids),
+            "sample_evidence_sha256s": [
+                sample.evidence_sha256 for sample in self.samples
+            ],
+        }
+        object.__setattr__(
+            self,
+            "denominator_sha256",
+            _digest(denominator_payload),
+        )
+        object.__setattr__(
+            self,
+            "evidence_sha256",
+            _digest(self.to_dict(include_evidence_sha256=False)),
+        )
+
+    @staticmethod
+    def _rate(count: int, denominator: int) -> dict[str, int]:
+        return {"numerator": count, "denominator": denominator}
+
+    def to_dict(self, *, include_evidence_sha256: bool = True) -> dict[str, Any]:
+        state_counts = dict(self.state_counts)
+        payload: dict[str, Any] = {
+            "schema": "autosport.empirical_execution_population_evidence",
+            "schema_version": self.schema_version,
+            "source_ledger_sha256": self.source_ledger_sha256,
+            "source_event_count": self.source_event_count,
+            "evaluation_protocol_sha256": self.evaluation_protocol_sha256,
+            "denominator_sha256": self.denominator_sha256,
+            "attempt_ids": [sample.attempt_id for sample in self.samples],
+            "sample_evidence_sha256s": [
+                sample.evidence_sha256 for sample in self.samples
+            ],
+            "total_attempts": self.total_attempts,
+            "state_counts": state_counts,
+            "state_rates": {
+                state: self._rate(count, self.total_attempts)
+                for state, count in self.state_counts
+            },
+            "terminal_count": self.terminal_count,
+            "terminal_rate": self._rate(
+                self.terminal_count,
+                self.total_attempts,
+            ),
+            "right_censored_count": self.right_censored_count,
+            "right_censored_rate": self._rate(
+                self.right_censored_count,
+                self.total_attempts,
+            ),
+            "provider_evidence_count": self.provider_evidence_count,
+            "provider_evidence_rate": self._rate(
+                self.provider_evidence_count,
+                self.total_attempts,
+            ),
+            "slippage_status_counts": {
+                SLIPPAGE_STATUS_KNOWN: self.slippage_known_count,
+                SLIPPAGE_STATUS_UNKNOWN: self.slippage_unknown_count,
+                SLIPPAGE_STATUS_NOT_APPLICABLE: self.slippage_not_applicable_count,
+            },
+            "causal_timing_status_counts": {
+                "KNOWN": self.causal_timing_known_count,
+                TIMING_STATUS_UNKNOWN: self.causal_timing_unknown_count,
+            },
+        }
+        if include_evidence_sha256:
+            payload["evidence_sha256"] = self.evidence_sha256
+        return payload
+
+
+def build_empirical_execution_population_evidence(
+    ledger: RealExecutionLedger,
+    *,
+    evaluation_protocol_sha256: str,
+) -> EmpiricalExecutionPopulationEvidence:
+    """Project a frozen complete attempt denominator from one ledger snapshot.
+
+    The function deliberately takes no caller-provided sample/attempt subset.
+    Every ATTEMPT_RESERVED identity in the verified snapshot is projected. A
+    concurrent ledger mutation fails closed rather than silently mixing snapshots.
+    """
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be canonical RealExecutionLedger")
+    protocol_sha256 = _sha256(
+        evaluation_protocol_sha256,
+        "evaluation_protocol_sha256",
+    )
+
+    initial_snapshot = ledger.verified_snapshot()
+    try:
+        events = RealExecutionLedger._parse(initial_snapshot.payload)
+    except ExecutionLedgerIntegrityError:
+        raise
+
+    attempt_ids: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        if event.get("event_type") != EventType.ATTEMPT_RESERVED.value:
+            continue
+        attempt_id = _text(event.get("attempt_id"), "attempt_id")
+        if attempt_id in seen:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "verified snapshot contains duplicate attempt reservation"
+            )
+        seen.add(attempt_id)
+        attempt_ids.append(attempt_id)
+
+    if not attempt_ids:
+        raise EmpiricalExecutionEvidenceUnavailable(
+            "verified snapshot contains no execution attempts"
+        )
+
+    samples = tuple(
+        build_empirical_execution_evidence(ledger, attempt_id=attempt_id)
+        for attempt_id in sorted(attempt_ids)
+    )
+
+    final_snapshot = ledger.verified_snapshot()
+    if (
+        final_snapshot.sha256 != initial_snapshot.sha256
+        or final_snapshot.event_count != initial_snapshot.event_count
+    ):
+        raise EmpiricalExecutionEvidenceUnavailable(
+            "ledger changed during population projection"
+        )
+
+    return EmpiricalExecutionPopulationEvidence(
+        source_ledger_sha256=initial_snapshot.sha256,
+        source_event_count=initial_snapshot.event_count,
+        evaluation_protocol_sha256=protocol_sha256,
+        samples=samples,
+    )
+

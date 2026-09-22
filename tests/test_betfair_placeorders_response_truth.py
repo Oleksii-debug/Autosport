@@ -50,6 +50,7 @@ def _payload(
     persistence_type: str = "LAPSE",
     response_id: object = 1,
     selection_id: object | None = None,
+    execution_error_code: str | None = None,
 ) -> bytes:
     report: dict[str, object] = {
         "status": instruction_status,
@@ -94,7 +95,9 @@ def _payload(
         "instructionReports": [report],
     }
     if execution_status == "FAILURE":
-        result["errorCode"] = "BET_ACTION_ERROR"
+        result["errorCode"] = execution_error_code or "BET_ACTION_ERROR"
+    elif execution_error_code is not None:
+        result["errorCode"] = execution_error_code
 
     return json.dumps(
         {
@@ -114,6 +117,64 @@ def _parse(payload: bytes, action: ExecutionAction):
         provider_order_ref="b" * 32,
         observed_at=OBSERVED_AT,
     )
+
+
+def test_processed_with_errors_uses_sole_failure_instruction_truth() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="PROCESSED_WITH_ERRORS",
+        instruction_status="FAILURE",
+        include_size_matched=True,
+        size_matched=0,
+        bet_id="bet-pwe-rejected",
+        order_status="EXECUTION_COMPLETE",
+        execution_error_code="BET_ACTION_ERROR",
+    )
+
+    report = _parse(payload, action)
+
+    assert report.status == "PROCESSED_WITH_ERRORS"
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
+
+
+def test_processed_with_errors_rejects_sole_success_instruction() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="PROCESSED_WITH_ERRORS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=0,
+        average_price_matched=0,
+        bet_id="bet-pwe-success",
+        order_status="EXECUTABLE",
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="PROCESSED_WITH_ERRORS requires a failed sole instruction",
+    ):
+        _parse(payload, action)
+
+
+def test_processed_with_errors_without_terminal_command_rejection_is_unknown() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="PROCESSED_WITH_ERRORS",
+        instruction_status="FAILURE",
+        include_size_matched=True,
+        size_matched=0,
+        bet_id="bet-pwe-unknown",
+        order_status="EXECUTION_COMPLETE",
+        execution_error_code="PROCESSED_WITH_ERRORS",
+    )
+
+    report = _parse(payload, action)
+
+    assert report.status == "PROCESSED_WITH_ERRORS"
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
 
 
 def test_failure_without_size_matched_is_ambiguous_not_rejected() -> None:

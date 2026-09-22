@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import math
@@ -8,6 +10,7 @@ from enum import Enum
 from statistics import NormalDist
 from typing import Iterable
 
+from .domain import _quote_identity
 from .forecasting import (
     ForecastOutcomeFact,
     ForecastRecord,
@@ -21,7 +24,7 @@ _BRIER_INTERVAL_METHOD = "hoeffding-bounded-brier-v1"
 _LOG_LOSS_INTERVAL_METHOD = "hoeffding-clipped-log-loss-v1"
 _CALIBRATION_INTERVAL_METHOD = "bonferroni-wilson-binomial-v1"
 _ECE_INTERVAL_METHOD = "simultaneous-bin-envelope-v1"
-_DEPENDENCE_SCREEN_METHOD = "exact-quote-key-uniqueness-v1"
+_DEPENDENCE_SCREEN_METHOD = "canonical-event-snapshot-evidence-uniqueness-v2"
 
 
 class CalibrationDependenceAssumption(str, Enum):
@@ -29,6 +32,128 @@ class CalibrationDependenceAssumption(str, Enum):
 
     SINGLE_OBSERVATION = "single-observation-v1"
     INDEPENDENT_BERNOULLI = "independent-bernoulli-v1"
+
+
+def _canonical_quote_event_cluster(quote_key: str) -> tuple[str, str]:
+    """Return the canonical sport/event cluster encoded by one quote identity.
+
+    IID calibration diagnostics must not treat multiple selections or markets from
+    one sporting event as independent Bernoulli trials. ForecastRecord deliberately
+    stores the canonical quote identity rather than a second event-id field, so this
+    decoder validates that identity against the product's domain codec before using
+    it as a dependence witness.
+    """
+
+    if type(quote_key) is not str or not quote_key or quote_key != quote_key.strip():
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        )
+
+    if "|" in quote_key:
+        parts = quote_key.split("|")
+        if len(parts) != 3 or any(not part or part != part.strip() for part in parts):
+            raise ValueError(
+                "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+            )
+        event_id, market_id, selection_id = parts
+        if _quote_identity(event_id, market_id, selection_id, None) != quote_key:
+            raise ValueError(
+                "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+            )
+        return ("", event_id)
+
+    prefix = "sport-v2-"
+    if not quote_key.startswith(prefix):
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        )
+    token = quote_key[len(prefix) :]
+    if not token:
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        )
+    try:
+        padding = "=" * ((-len(token)) % 4)
+        decoded = base64.urlsafe_b64decode((token + padding).encode("ascii"))
+        payload = json.loads(decoded.decode("utf-8"))
+    except (UnicodeError, ValueError, binascii.Error) as exc:
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        ) from exc
+    if type(payload) is not list or len(payload) != 5 or payload[0] != "quote":
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        )
+    _, sport, event_id, market_id, selection_id = payload
+    components = (sport, event_id, market_id, selection_id)
+    if any(
+        type(value) is not str or not value or value != value.strip()
+        for value in components
+    ):
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        )
+    try:
+        canonical = _quote_identity(event_id, market_id, selection_id, sport)
+    except ValueError as exc:
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        ) from exc
+    if canonical != quote_key:
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require canonical quote_key identity"
+        )
+    return (sport, event_id)
+
+
+def _assert_iid_dependence_witnesses(
+    records: tuple[ForecastRecord, ...],
+) -> None:
+    """Reject known shared causal/source clusters before nominal IID intervals.
+
+    This is deliberately a fail-closed screen, not an effective-sample-size
+    estimator. Raw row count remains the report count. A future cluster-aware
+    estimator needs its own preregistered sufficient statistics and method identity.
+    """
+
+    quote_keys = tuple(record.quote_key for record in records)
+    if len(set(quote_keys)) != len(quote_keys):
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics reject repeated quote_key "
+            "dependence; use a separately justified cluster/ESS method"
+        )
+
+    event_clusters = tuple(
+        _canonical_quote_event_cluster(record.quote_key) for record in records
+    )
+    if len(set(event_clusters)) != len(event_clusters):
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics reject repeated canonical event "
+            "cluster dependence; use a separately justified cluster/ESS method"
+        )
+
+    snapshots = tuple(record.market_snapshot_hash for record in records)
+    if any(snapshot is None for snapshot in snapshots):
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics require market_snapshot_hash "
+            "dependence evidence for every row"
+        )
+    if len(set(snapshots)) != len(snapshots):
+        raise ValueError(
+            "INDEPENDENT_BERNOULLI diagnostics reject repeated market_snapshot_hash "
+            "dependence; use a separately justified cluster/ESS method"
+        )
+
+    evidence_owner: dict[str, str] = {}
+    for record in records:
+        for evidence_hash in record.evidence_hashes:
+            prior = evidence_owner.get(evidence_hash)
+            if prior is not None:
+                raise ValueError(
+                    "INDEPENDENT_BERNOULLI diagnostics reject shared source evidence "
+                    "dependence; use a separately justified cluster/ESS method"
+                )
+            evidence_owner[evidence_hash] = record.forecast_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,13 +872,9 @@ def evaluate_calibration_diagnostics(
     if (
         resolved_dependence
         is CalibrationDependenceAssumption.INDEPENDENT_BERNOULLI
+        and len(selected) > 1
     ):
-        quote_keys = tuple(record.quote_key for record in selected)
-        if len(set(quote_keys)) != len(quote_keys):
-            raise ValueError(
-                "INDEPENDENT_BERNOULLI diagnostics reject repeated quote_key "
-                "dependence; use a separately justified cluster/ESS method"
-            )
+        _assert_iid_dependence_witnesses(selected)
 
     selected_outcomes = tuple(
         outcome_by_id[record.forecast_id] for record in selected

@@ -35,7 +35,13 @@ def _source(tmp_path) -> BetfairMarketCommissionAuthority:
     )
 
 
-def _receipt(*, settled_from=T0, settled_to=T1) -> BetfairMarketCommissionReceipt:
+def _receipt(
+    *,
+    settled_from=T0,
+    settled_to=T1,
+    profit: str = "0",
+    commission: str = "2",
+) -> BetfairMarketCommissionReceipt:
     date_range = {"from": settled_from, "to": settled_to}
     account_id = f"betfair-account-evidence:{A}"
     scope = {
@@ -57,8 +63,8 @@ def _receipt(*, settled_from=T0, settled_to=T1) -> BetfairMarketCommissionReceip
         adapter_id="betfair-exchange-jsonrpc-readonly",
         adapter_version="1",
         market_id="1.234",
-        commission=Decimal("2"),
-        profit=Decimal("20"),
+        commission=Decimal(commission),
+        profit=Decimal(profit),
         currency="EUR",
         settled_at=datetime(2026, 9, 20, 23, tzinfo=timezone.utc),
         observed_at=datetime(2026, 9, 21, 1, tzinfo=timezone.utc),
@@ -121,7 +127,15 @@ def _page(
     )
 
 
-def _bind_source(monkeypatch, source, receipt):
+def _bind_source(
+    monkeypatch,
+    source,
+    receipt,
+    *,
+    market_bet_count: int = 0,
+    market_profit: str | None = None,
+    market_commission: str | None = None,
+):
     monkeypatch.setattr(population, "_now_utc", lambda: NOW)
 
     def resolve(bound_source, *, receipt_id, record_sha256, as_of):
@@ -132,6 +146,30 @@ def _bind_source(monkeypatch, source, receipt):
         return receipt, source._client
 
     monkeypatch.setattr(population._commission_origin, "resolve_bound_receipt", resolve)
+
+    def read_market_rollup(**kwargs):
+        assert kwargs["client"] is source._client
+        assert kwargs["market_id"] == receipt.market_id
+        return population.ClearedMarketRollupWitness(
+            bet_count=market_bet_count,
+            profit=Decimal(
+                market_profit
+                if market_profit is not None
+                else str(receipt.profit)
+            ),
+            commission=Decimal(
+                market_commission
+                if market_commission is not None
+                else str(receipt.commission)
+            ),
+            settled_date=receipt.settled_at.isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z"),
+            response_sha256="c" * 64,
+            observed_at="2026-09-21T11:00:00+00:00",
+        )
+
+    monkeypatch.setattr(population, "_read_market_rollup", read_market_rollup)
 
 
 def _capture(authority, receipt, **kwargs):
@@ -148,8 +186,8 @@ def test_complete_two_pass_population_keeps_external_bet_and_truth_narrow(
     tmp_path, monkeypatch
 ) -> None:
     source = _source(tmp_path)
-    receipt = _receipt()
-    _bind_source(monkeypatch, source, receipt)
+    receipt = _receipt(profit="15")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=3)
     calls = []
 
     def read_page(**kwargs):
@@ -178,6 +216,8 @@ def test_complete_two_pass_population_keeps_external_bet_and_truth_narrow(
 
     assert value.bet_ids == ("autosport-a", "autosport-b", "manual-c")
     assert value.bounded_revalidation_proven is True
+    assert value.economic_scope_coextensive_proven is True
+    assert value.market_rollup_witness.bet_count == 3
     assert value.cross_call_atomicity_proven is False
     assert value.permanent_finality_proven is False
     assert value.grants_execution_authority is False
@@ -188,8 +228,8 @@ def test_complete_two_pass_population_keeps_external_bet_and_truth_narrow(
 
 def test_second_pass_change_fails_closed(tmp_path, monkeypatch) -> None:
     source = _source(tmp_path)
-    receipt = _receipt()
-    _bind_source(monkeypatch, source, receipt)
+    receipt = _receipt(profit="5")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=1)
     calls = 0
 
     def read_page(**kwargs):
@@ -379,8 +419,8 @@ def test_revalidation_is_semantic_not_raw_page_partition_identity(
     tmp_path, monkeypatch
 ) -> None:
     source = _source(tmp_path)
-    receipt = _receipt()
-    _bind_source(monkeypatch, source, receipt)
+    receipt = _receipt(profit="10")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=2)
     settled_calls = 0
 
     def read_page(**kwargs):
@@ -422,6 +462,103 @@ def test_revalidation_is_semantic_not_raw_page_partition_identity(
         page_size=2,
     )
     assert value.bet_ids == ("a", "b")
+
+
+def test_market_bet_count_rejects_range_subset_even_when_profit_matches(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt(profit="5")
+    _bind_source(
+        monkeypatch,
+        source,
+        receipt,
+        market_bet_count=2,
+        market_profit="5",
+    )
+
+    def read_page(**kwargs):
+        status = kwargs["bet_status"]
+        rows = [_row("inside", profit="5")] if status == "SETTLED" else []
+        return _page(rows, status=status, marker=1)
+
+    monkeypatch.setattr(population, "_read_page", read_page)
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="betCount|coextensive",
+    ):
+        _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+
+
+def test_complete_settled_bets_must_conserve_fresh_market_profit(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt(profit="20")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=1)
+
+    def read_page(**kwargs):
+        status = kwargs["bet_status"]
+        rows = [_row("bet-1", profit="15")] if status == "SETTLED" else []
+        return _page(rows, status=status, marker=1)
+
+    monkeypatch.setattr(population, "_read_page", read_page)
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="profit|conserve",
+    ):
+        _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+
+
+def test_fresh_market_revision_change_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt(profit="20")
+    _bind_source(
+        monkeypatch,
+        source,
+        receipt,
+        market_bet_count=1,
+        market_profit="21",
+    )
+
+    def read_page(**kwargs):
+        status = kwargs["bet_status"]
+        rows = [_row("bet-1", profit="20")] if status == "SETTLED" else []
+        return _page(rows, status=status, marker=1)
+
+    monkeypatch.setattr(population, "_read_page", read_page)
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="revision changed",
+    ):
+        _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+
+
+def test_gross_conservation_is_independent_of_ambient_decimal_context(
+    tmp_path, monkeypatch
+) -> None:
+    from decimal import localcontext
+
+    source = _source(tmp_path)
+    receipt = _receipt(profit="1")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=10)
+
+    rows = [_row(f"bet-{index}", profit="0.1") for index in range(10)]
+
+    def read_page(**kwargs):
+        status = kwargs["bet_status"]
+        return _page(rows if status == "SETTLED" else [], status=status, marker=1)
+
+    monkeypatch.setattr(population, "_read_page", read_page)
+    with localcontext() as context:
+        context.prec = 2
+        value = _capture(
+            population.BetfairClearedMarketPopulationAuthority(source),
+            receipt,
+        )
+    population.assert_betfair_cleared_market_population_authoritative(value)
 
 
 def test_settlement_range_must_match_commission_receipt(tmp_path, monkeypatch) -> None:
@@ -480,6 +617,55 @@ def test_fixed_page_read_has_no_local_ownership_filter() -> None:
     assert "betIds" not in params
 
 
+def test_fresh_market_rollup_uses_exact_market_scope_and_reads_bet_count() -> None:
+    captured = []
+
+    class Transport:
+        def post(self, url, *, headers, body, timeout_seconds):
+            request = json.loads(body.decode("utf-8"))
+            captured.append(request)
+            return json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "clearedOrders": [
+                            {
+                                "marketId": "1.234",
+                                "betCount": 2,
+                                "settledDate": "2026-09-20T23:00:00.000Z",
+                                "commission": 2,
+                                "profit": 7,
+                            }
+                        ],
+                        "moreAvailable": False,
+                    },
+                }
+            ).encode("utf-8")
+
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "token"),
+        transport=Transport(),
+        clock=lambda: NOW,
+    )
+    witness = population._read_market_rollup(
+        client=client,
+        market_id="1.234",
+        date_range={"from": T0, "to": T1},
+    )
+    assert witness.bet_count == 2
+    assert witness.profit == Decimal("7")
+    assert witness.commission == Decimal("2")
+    assert captured[0]["params"] == {
+        "betStatus": "SETTLED",
+        "groupBy": "MARKET",
+        "marketIds": ["1.234"],
+        "fromRecord": 0,
+        "recordCount": 1000,
+        "settledDateRange": {"from": T0, "to": T1},
+    }
+
+
 def test_durable_reopen_preserves_evidence_identity_without_minting_source_authority(
     tmp_path, monkeypatch
 ) -> None:
@@ -523,6 +709,28 @@ def test_durable_page_substitution_breaks_population_integrity(
     with pytest.raises(
         population.BetfairClearedMarketPopulationError,
         match="evidence digest mismatch",
+    ):
+        population.BetfairClearedMarketPopulation.from_dict(raw)
+
+
+def test_durable_market_rollup_tamper_breaks_population_integrity(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt()
+    _bind_source(monkeypatch, source, receipt)
+    monkeypatch.setattr(
+        population,
+        "_read_page",
+        lambda **kwargs: _page([], status=kwargs["bet_status"], marker=1),
+    )
+    value = _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+    raw = json.loads(json.dumps(value.to_dict()))
+    raw["market_rollup_witness"]["bet_count"] = 1
+
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="betCount|coextensive|digest",
     ):
         population.BetfairClearedMarketPopulation.from_dict(raw)
 

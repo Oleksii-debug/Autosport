@@ -44,6 +44,8 @@ class ProphetXDiscoveryJsonResponse:
     def __post_init__(self) -> None:
         if type(self.status_code) is not int:
             raise TypeError("status_code must be a non-boolean int")
+        if self.status_code < 100 or self.status_code > 599:
+            raise ValueError("status_code must be a valid HTTP status")
         if not isinstance(self.headers, Mapping):
             raise TypeError("headers must be a mapping")
         if not isinstance(self.body_sha256, str) or not _SHA256_RE.fullmatch(self.body_sha256):
@@ -57,6 +59,7 @@ class ProphetXDiscoveryAcquisition:
     observed_at: str
     response_sha256: str
     data_context_id: str
+    provider_origin_verified: bool
     environment: str = "sandbox"
     provider: str = "prophetx"
     source_timestamp: None = None
@@ -67,6 +70,8 @@ class ProphetXTournament:
     tournament_id: str
     name: str | None
     canonical_sport: str | None
+    provider_row_sha256: str
+    provider_metadata: tuple[tuple[str, str], ...]
 
     @property
     def identity(self) -> str:
@@ -79,6 +84,8 @@ class ProphetXSportEvent:
     event_id: str
     name: str | None
     canonical_sport: str | None
+    provider_row_sha256: str
+    provider_metadata: tuple[tuple[str, str], ...]
 
     @property
     def identity(self) -> tuple[str, str]:
@@ -208,6 +215,55 @@ def _optional_name(value: object, *, field: str) -> str | None:
     return value
 
 
+def _canonical_provider_node(value: object) -> list[Any]:
+    if value is None:
+        return ["null"]
+    if type(value) is bool:
+        return ["bool", value]
+    if type(value) is int:
+        return ["int", str(value)]
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ProphetXDiscoveryPayloadError("provider row contains non-finite number")
+        return ["number", str(value.normalize())]
+    if isinstance(value, str):
+        return ["str", value]
+    if isinstance(value, list):
+        return ["list", [_canonical_provider_node(item) for item in value]]
+    if isinstance(value, dict):
+        items: list[list[Any]] = []
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise ProphetXDiscoveryPayloadError("provider row contains non-string object key")
+            items.append([key, _canonical_provider_node(value[key])])
+        return ["object", items]
+    raise ProphetXDiscoveryPayloadError("provider row contains unsupported JSON value type")
+
+
+def _canonical_provider_text(value: object) -> str:
+    return json.dumps(
+        _canonical_provider_node(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _provider_row_sha256(row: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_provider_text(dict(row)).encode("utf-8")).hexdigest()
+
+
+def _provider_metadata(
+    row: Mapping[str, Any],
+    *,
+    exclude: frozenset[str],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (key, _canonical_provider_text(value))
+        for key, value in sorted(row.items())
+        if key not in exclude
+    )
+
+
 def _canonical_sport(value: object) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError("canonical sport must be a non-empty trimmed string")
@@ -288,6 +344,7 @@ class ProphetXFixtureDiscovery:
         self.timeout_seconds = _timeout(timeout_seconds)
         self.transport = transport
         self.clock = clock
+        self._provider_origin_verified = transport is _default_transport
         raw_mapping = {} if sport_by_tournament_id is None else dict(sport_by_tournament_id)
         normalized: dict[str, str] = {}
         for tournament_id, sport in raw_mapping.items():
@@ -314,13 +371,7 @@ class ProphetXFixtureDiscovery:
             try:
                 response = self._get(_EVENTS_PATH, {"tournament_id": tournament.tournament_id})
             except ProphetXDiscoveryUnavailable as exc:
-                failures.append(
-                    ProphetXDiscoveryFailure(
-                        tournament_id=tournament.tournament_id,
-                        code=exc.code,
-                        status_code=exc.status_code,
-                    )
-                )
+                failures.append(self._safe_failure(tournament.tournament_id, exc))
                 continue
             observed_at = _canonical_observed_at(self.clock())
             acquisitions.append(
@@ -382,6 +433,26 @@ class ProphetXFixtureDiscovery:
             observed_at=observed_at,
             response_sha256=response.body_sha256,
             data_context_id=self.data_context_id,
+            provider_origin_verified=self._provider_origin_verified,
+        )
+
+    @staticmethod
+    def _safe_failure(
+        tournament_id: str,
+        exc: ProphetXDiscoveryUnavailable,
+    ) -> ProphetXDiscoveryFailure:
+        status_code = exc.status_code
+        if type(status_code) is int and 100 <= status_code <= 599:
+            return ProphetXDiscoveryFailure(
+                tournament_id=tournament_id,
+                code=f"HTTP_{status_code}",
+                status_code=status_code,
+            )
+        code = exc.code if exc.code in {"TRANSPORT_UNAVAILABLE", "PROVIDER_ORIGIN_MISMATCH"} else "PROVIDER_UNAVAILABLE"
+        return ProphetXDiscoveryFailure(
+            tournament_id=tournament_id,
+            code=code,
+            status_code=None,
         )
 
     def _parse_tournaments(self, payload: Any) -> list[ProphetXTournament]:
@@ -392,6 +463,11 @@ class ProphetXFixtureDiscovery:
                 tournament_id=tournament_id,
                 name=_optional_name(raw.get("name"), field="tournament name"),
                 canonical_sport=self.sport_by_tournament_id.get(tournament_id),
+                provider_row_sha256=_provider_row_sha256(raw),
+                provider_metadata=_provider_metadata(
+                    raw,
+                    exclude=frozenset({"id", "name"}),
+                ),
             )
             prior = result.get(tournament_id)
             if prior is not None and not _same_tournament(prior, tournament):
@@ -417,6 +493,11 @@ class ProphetXFixtureDiscovery:
                 event_id=event_id,
                 name=_optional_name(raw.get("name"), field="event name"),
                 canonical_sport=tournament.canonical_sport,
+                provider_row_sha256=_provider_row_sha256(raw),
+                provider_metadata=_provider_metadata(
+                    raw,
+                    exclude=frozenset({"event_id", "tournament_id", "name"}),
+                ),
             )
             prior = result.get(event_id)
             if prior is not None and not _same_event(prior, event):

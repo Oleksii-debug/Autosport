@@ -16,6 +16,8 @@ API = "http://www.GlobalBettingExchange.com/ExternalAPI/"
 SOAP11 = "http://schemas.xmlsoap.org/soap/envelope/"
 SOAP12 = "http://www.w3.org/2003/05/soap-envelope"
 XSI = "http://www.w3.org/2001/XMLSchema-instance"
+WSSE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+WSU = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 
 
 def _response(
@@ -31,9 +33,11 @@ def _response(
     ),
     result_extra: str = "",
     market_attrs: str = "",
+    header_extra: str = "",
 ) -> str:
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="{soap_ns}" xmlns:xsi="{XSI}">
+  {header_extra}
   <soap:Body>
     <GetPricesResponse xmlns="{API}">
       <GetPricesResult>
@@ -78,6 +82,8 @@ def test_parses_provider_native_getprices_without_side_canonicalization() -> Non
     assert response.return_code == 0
     assert response.return_description == "Success"
     assert response.call_id == "call-123"
+    assert response.provider_created_at is None
+    assert response.provider_created_at_text is None
     assert len(response.markets) == 1
 
     market = response.markets[0]
@@ -102,6 +108,33 @@ def test_parses_provider_native_getprices_without_side_canonicalization() -> Non
     assert selection.against_side_prices[0].price == Decimal("2.10")
     assert selection.against_side_prices[0].stake == Decimal("9.50")
 
+
+
+def test_preserves_official_ws_security_created_without_synthesizing_local_time() -> None:
+    header = f"""<soap:Header xmlns:soap="{SOAP11}" xmlns:wsse="{WSSE}" xmlns:wsu="{WSU}">
+      <wsse:Security>
+        <wsu:Timestamp>
+          <wsu:Created>2026-09-22T19:17:03.125Z</wsu:Created>
+          <wsu:Expires>2026-09-22T19:22:03.125Z</wsu:Expires>
+        </wsu:Timestamp>
+      </wsse:Security>
+    </soap:Header>"""
+    response = parse_get_prices_response(_response(header_extra=header))
+    assert response.provider_created_at_text == "2026-09-22T19:17:03.125Z"
+    assert response.provider_created_at is not None
+    assert response.provider_created_at.utcoffset().total_seconds() == 0
+
+
+def test_malformed_ws_security_created_fails_closed_when_present() -> None:
+    header = f"""<soap:Header xmlns:soap="{SOAP11}" xmlns:wsse="{WSSE}" xmlns:wsu="{WSU}">
+      <wsse:Security>
+        <wsu:Timestamp>
+          <wsu:Created>2026-09-22T19:17:03</wsu:Created>
+        </wsu:Timestamp>
+      </wsse:Security>
+    </soap:Header>"""
+    with pytest.raises(BetdaqSoapProtocolError, match="timezone"):
+        parse_get_prices_response(_response(header_extra=header))
 
 def test_accepts_soap12_envelope() -> None:
     response = parse_get_prices_response(_response(soap_ns=SOAP12))

@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.continuous_session import (
     ContinuousSessionCoordinator,
@@ -324,7 +324,9 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                 "loss",
             )
 
-    def test_canonical_snapshot_is_detached_from_retained_resolution_object(self) -> None:
+    def test_canonical_snapshot_is_detached_from_retained_resolution_object(
+        self,
+    ) -> None:
         resolution = _resolution(outcome="win")
         resolution.validate(as_of=_AT)
 
@@ -337,6 +339,24 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
         self.assertEqual(snapshot.quote_outcomes["receipt-quote-1"], "win")
         self.assertEqual(resolution.quote_outcomes["receipt-quote-1"], "loss")
 
+
+    def test_canonical_snapshot_rechecks_cycle_causality_cutoff(self) -> None:
+        resolution = _resolution(outcome="win")
+        resolution.validate(as_of=_AT)
+        object.__setattr__(
+            resolution,
+            "available_at",
+            "2026-09-21T08:41:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "not causally available",
+        ):
+            ContinuousSessionCoordinator._settlement_handoff_snapshot(
+                (resolution,),
+                as_of=_AT,
+            )
 
     def test_settlement_rejects_post_validation_outcome_mutation_before_book_write(
         self,

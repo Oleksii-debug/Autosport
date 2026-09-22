@@ -4,16 +4,24 @@ import json
 import os
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 import autosport.campaign_precommit_manifest as precommit_module
 from autosport.campaign_precommit_manifest import (
+    RAW_MANIFEST_IS_PROSPECTIVE_AUTHORITY,
     CampaignPrecommitManifest,
     CampaignPrecommitManifestError,
     load_campaign_precommit_manifest,
+    publish_campaign_precommit_manifest,
+    resolve_campaign_precommit_publication_witness,
     write_campaign_precommit_manifest_once,
+)
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityConflictError,
+    MonotonicWorkspaceAuthority,
 )
 
 
@@ -726,3 +734,238 @@ def test_boundary_crossed_after_temp_flush_never_publishes_canonical(
         == original.manifest_sha256
     )
     assert load_campaign_precommit_manifest(target) == original
+
+
+
+def _publication_workspace(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path]:
+    workspace = tmp_path / "workspace"
+    evidence = workspace / "evidence"
+    evidence.mkdir(parents=True)
+    return workspace, evidence / "precommit.json", tmp_path / "machine-authority"
+
+
+def test_raw_manifest_bytes_are_not_standalone_prospective_authority() -> None:
+    assert RAW_MANIFEST_IS_PROSPECTIVE_AUTHORITY is False
+
+
+def test_monotonic_publication_witness_round_trip_and_late_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, path, authority_root = _publication_workspace(tmp_path)
+    original = manifest()
+    before = datetime(2099, 12, 31, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
+
+    first = publish_campaign_precommit_manifest(
+        path,
+        original,
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+    resolved = resolve_campaign_precommit_publication_witness(
+        path,
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+
+    assert first == resolved
+    assert first.manifest_sha256 == original.manifest_sha256
+    assert first.post_publish_observed_at == "2099-12-31T20:00:00.000000Z"
+    assert first.target_relative_path == "evidence/precommit.json"
+    assert first.authority_generation == 2
+
+    after = datetime(2100, 1, 1, 7, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: after)
+    retry = publish_campaign_precommit_manifest(
+        path,
+        original,
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+    assert retry == first
+
+
+def test_existing_raw_manifest_cannot_be_retroactively_promoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, path, authority_root = _publication_workspace(tmp_path)
+    original = manifest()
+    before = datetime(2099, 12, 31, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
+
+    write_campaign_precommit_manifest_once(path, original)
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="cannot be retroactively qualified",
+    ):
+        publish_campaign_precommit_manifest(
+            path,
+            original,
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deterministic link timing seam")
+def test_link_boundary_race_can_leave_bytes_but_cannot_issue_witness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, path, authority_root = _publication_workspace(tmp_path)
+    original = manifest(
+        committed_at="2099-12-31T23:59:00Z",
+        observation_not_before="2100-01-01T00:00:00Z",
+        observation_not_after="2100-01-02T00:00:00Z",
+    )
+    before = datetime(2099, 12, 31, 23, 59, 59, 900000, tzinfo=timezone.utc)
+    after = datetime(2100, 1, 1, 0, 0, 0, 100000, tzinfo=timezone.utc)
+    clock = iter((before, before, before, after))
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: next(clock))
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="no publication witness issued",
+    ):
+        publish_campaign_precommit_manifest(
+            path,
+            original,
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+    assert path.exists()
+    assert load_campaign_precommit_manifest(path) == original
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="not a publication witness",
+    ):
+        resolve_campaign_precommit_publication_witness(
+            path,
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+
+def test_pending_witness_recovers_original_preboundary_observation_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, path, authority_root = _publication_workspace(tmp_path)
+    original = manifest(
+        committed_at="2099-12-31T23:00:00Z",
+        observation_not_before="2100-01-01T00:00:00Z",
+        observation_not_after="2100-01-02T00:00:00Z",
+    )
+    before = datetime(2099, 12, 31, 23, 59, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
+
+    real_commit = MonotonicWorkspaceAuthority.commit
+
+    def interrupt_witness_commit(
+        self: MonotonicWorkspaceAuthority,
+        **kwargs: object,
+    ) -> object:
+        tx_id = kwargs.get("tx_id")
+        if isinstance(tx_id, str) and tx_id.startswith(
+            precommit_module._WITNESS_TX_PREFIX
+        ):
+            raise MonotonicAuthorityConflictError("simulated crash before witness COMMIT")
+        return real_commit(self, **kwargs)
+
+    monkeypatch.setattr(
+        precommit_module.MonotonicWorkspaceAuthority,
+        "commit",
+        interrupt_witness_commit,
+    )
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="cannot commit campaign precommit publication witness",
+    ):
+        publish_campaign_precommit_manifest(
+            path,
+            original,
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+    monkeypatch.setattr(
+        precommit_module.MonotonicWorkspaceAuthority,
+        "commit",
+        real_commit,
+    )
+    after = datetime(2100, 1, 1, 1, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: after)
+
+    recovered = publish_campaign_precommit_manifest(
+        path,
+        original,
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+    assert recovered.post_publish_observed_at == "2099-12-31T23:59:00.000000Z"
+    assert recovered.authority_generation == 2
+    assert resolve_campaign_precommit_publication_witness(
+        path,
+        workspace=workspace,
+        authority_root=authority_root,
+    ) == recovered
+
+
+def test_committed_witness_rejects_manifest_digest_or_path_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, path, authority_root = _publication_workspace(tmp_path)
+    original = manifest()
+    before = datetime(2099, 12, 31, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
+    witness = publish_campaign_precommit_manifest(
+        path,
+        original,
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+
+    moved = path.with_name("copied-precommit.json")
+    moved.write_bytes(path.read_bytes())
+    with pytest.raises(CampaignPrecommitManifestError):
+        resolve_campaign_precommit_publication_witness(
+            moved,
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+    path.unlink()
+    changed = replace(original, strategy_version_id="strategy-v18")
+    write_campaign_precommit_manifest_once(path, changed)
+    with pytest.raises(CampaignPrecommitManifestError):
+        resolve_campaign_precommit_publication_witness(
+            path,
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+    assert witness.manifest_sha256 != changed.manifest_sha256
+
+
+def test_publication_witness_target_must_remain_inside_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace, _path, authority_root = _publication_workspace(tmp_path)
+    outside = tmp_path / "outside.json"
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="inside the protected workspace",
+    ):
+        publish_campaign_precommit_manifest(
+            outside,
+            manifest(),
+            workspace=workspace,
+            authority_root=authority_root,
+        )

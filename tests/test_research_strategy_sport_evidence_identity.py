@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from decimal import Decimal
 
@@ -30,6 +32,33 @@ def _event(*, sport: str) -> MarketEvent:
     )
 
 
+def _legacy_event_projection(event: MarketEvent) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "market_id": event.market_id,
+        "selection_id": event.selection_id,
+        "decimal_odds": str(event.decimal_odds),
+        "observed_ts": event.observed_ts,
+        "source_id": event.source_id,
+        "sequence": event.sequence,
+        "market_type": event.market_type.value,
+        "status": event.status,
+        "source_ts": event.source_ts,
+        "score_state": event.score_state,
+        "metadata": event.metadata,
+    }
+
+
+def _sha256_json(payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def test_research_event_evidence_hash_binds_sport_identity() -> None:
     football = _event(sport="football")
     tennis = replace(football, sport="tennis")
@@ -51,3 +80,18 @@ def test_research_market_snapshot_hash_binds_sport_identity() -> None:
         {quote_key: tennis},
         (quote_key,),
     )
+
+
+def test_v2_research_hashes_do_not_alias_legacy_unversioned_domain() -> None:
+    football = _event(sport="football")
+    quote_key = football.quote_key
+    legacy_projection = _legacy_event_projection(football)
+
+    legacy_event_hash = _sha256_json(legacy_projection)
+    legacy_snapshot_hash = _sha256_json({quote_key: legacy_projection})
+
+    assert market_event_evidence_hash(football) != legacy_event_hash
+    assert research_market_snapshot_hash(
+        {quote_key: football},
+        (quote_key,),
+    ) != legacy_snapshot_hash

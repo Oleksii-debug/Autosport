@@ -110,6 +110,50 @@ class AttemptCapitalAtRisk:
             raise ExecutionCapitalAtRiskError(
                 "attempt maximum must equal confirmed plus contingent capital"
             )
+        if self.state is AttemptState.RESERVED:
+            if (
+                self.confirmed_open_capital != 0
+                or self.contingent_unknown_capital != 0
+                or self.max_plausible_capital_at_risk != 0
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "RESERVED attempt cannot claim external capital"
+                )
+        elif self.state in {
+            AttemptState.SUBMITTED,
+            AttemptState.UNKNOWN,
+            AttemptState.REJECTED,
+            AttemptState.RECONCILED_NOT_FOUND,
+        }:
+            if (
+                self.confirmed_open_capital != 0
+                or self.contingent_unknown_capital != self.requested_stake
+                or self.max_plausible_capital_at_risk != self.requested_stake
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "unconfirmed/negative-ledger attempt must retain full "
+                    "requested BACK stake as contingent capital"
+                )
+        elif self.state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
+            if self.confirmed_open_capital > self.requested_stake:
+                raise ExecutionCapitalAtRiskError(
+                    "confirmed capital cannot exceed requested BACK stake"
+                )
+            expected_contingent = _subtract_nonnegative(
+                self.requested_stake,
+                self.confirmed_open_capital,
+            )
+            if (
+                self.contingent_unknown_capital != expected_contingent
+                or self.max_plausible_capital_at_risk != self.requested_stake
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "accepted/PARTIAL BACK attempt must retain exact remainder"
+                )
+        else:
+            raise ExecutionCapitalAtRiskUnsupported(
+                f"unsupported attempt state: {self.state!r}"
+            )
 
     @property
     def truth(self) -> CapitalRiskTruth:
@@ -159,6 +203,12 @@ class ExecutionCapitalAtRiskEvidence:
                 )
         if type(self.plan_stale) is not bool:
             raise ExecutionCapitalAtRiskError("plan_stale must be exact bool")
+        if type(self.attempts) is not tuple or any(
+            type(item) is not AttemptCapitalAtRisk for item in self.attempts
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "attempts must be exact AttemptCapitalAtRisk tuple"
+            )
         if (
             self.execution_authority is not False
             or self.capital_release_authority is not False

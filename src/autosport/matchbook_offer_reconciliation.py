@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from threading import Lock
 from typing import Iterable
+import weakref
 
 
 class MatchbookOfferReconciliationError(ValueError):
@@ -86,7 +88,7 @@ def _time(value: object, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class MatchbookOfferReadback:
     """Singular provider readback evidence; never provider-write or settlement authority."""
 
@@ -143,6 +145,15 @@ class MatchbookOfferReadback:
     def provider_write_authority(self) -> bool:
         return False
 
+    @property
+    def provider_origin_authoritative(self) -> bool:
+        """Whether this exact in-process object was issued by product acquisition."""
+        try:
+            _assert_provider_readback_issued(self)
+        except MatchbookOfferReconciliationError:
+            return False
+        return True
+
     def fingerprint(self) -> str:
         payload = {
             "account_context_id": self.account_context_id,
@@ -157,6 +168,41 @@ class MatchbookOfferReadback:
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
+
+
+_ISSUED_READBACK_LOCK = Lock()
+_ISSUED_READBACKS: dict[int, str] = {}
+
+
+def _forget_issued_readback(identity: int) -> None:
+    with _ISSUED_READBACK_LOCK:
+        _ISSUED_READBACKS.pop(identity, None)
+
+
+def _issue_provider_readback(readback: MatchbookOfferReadback) -> MatchbookOfferReadback:
+    """Internal acquisition seam: issue only after canonical provider-origin validation."""
+    if type(readback) is not MatchbookOfferReadback:
+        raise MatchbookOfferReconciliationError(
+            "provider readback issuance requires exact MatchbookOfferReadback"
+        )
+    identity = id(readback)
+    with _ISSUED_READBACK_LOCK:
+        _ISSUED_READBACKS[identity] = readback.fingerprint()
+    weakref.finalize(readback, _forget_issued_readback, identity)
+    return readback
+
+
+def _assert_provider_readback_issued(readback: MatchbookOfferReadback) -> None:
+    if type(readback) is not MatchbookOfferReadback:
+        raise MatchbookOfferReconciliationError(
+            "provider readback authority requires exact MatchbookOfferReadback"
+        )
+    with _ISSUED_READBACK_LOCK:
+        issued = _ISSUED_READBACKS.get(id(readback))
+    if issued != readback.fingerprint():
+        raise MatchbookOfferReconciliationError(
+            "Matchbook offer readback lacks product-issued provider origin"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +318,8 @@ def retry_disposition(
             or observed_offer.account_context_id != expected_account
             or observed_offer.offer_id != expected_id
         ):
+            return MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+        if not observed_offer.provider_origin_authoritative:
             return MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
         return MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
     return MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY

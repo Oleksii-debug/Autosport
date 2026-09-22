@@ -88,8 +88,16 @@ def test_exact_retry_reuses_same_committed_receipt(tmp_path, monkeypatch) -> Non
         dataset_snapshot_id=resolved.dataset_snapshot_id,
         authority_root=authority_root,
     )
+    verified = publication.resolve_fixed_n_membership_publication(
+        registry,
+        workspace=workspace,
+        research_protocol_id=resolved.research_protocol_id,
+        dataset_snapshot_id=resolved.dataset_snapshot_id,
+        authority_root=authority_root,
+    )
 
     assert second == first
+    assert verified == first
     assert second.authority_generation == first.authority_generation
 
 
@@ -108,6 +116,18 @@ def test_restart_recovers_published_state_after_crash_before_commit(
     monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", crash_before_commit)
     with pytest.raises(publication.RiskMembershipPublicationError):
         publication.publish_fixed_n_membership_structure(
+            registry,
+            workspace=workspace,
+            research_protocol_id=resolved.research_protocol_id,
+            dataset_snapshot_id=resolved.dataset_snapshot_id,
+            authority_root=authority_root,
+        )
+
+    with pytest.raises(
+        publication.RiskMembershipPublicationError,
+        match="pending PREPARE",
+    ):
+        publication.resolve_fixed_n_membership_publication(
             registry,
             workspace=workspace,
             research_protocol_id=resolved.research_protocol_id,
@@ -220,6 +240,29 @@ def test_state_symlink_substitution_fails_closed(tmp_path, monkeypatch) -> None:
             dataset_snapshot_id=resolved.dataset_snapshot_id,
             authority_root=authority_root,
         )
+
+
+def test_read_only_resolver_does_not_create_missing_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    resolved = _membership()
+    _install_membership(monkeypatch, resolved)
+
+    with pytest.raises(
+        publication.RiskMembershipPublicationError,
+        match="no existing publication receipt",
+    ):
+        publication.resolve_fixed_n_membership_publication(
+            registry,
+            workspace=workspace,
+            research_protocol_id=resolved.research_protocol_id,
+            dataset_snapshot_id=resolved.dataset_snapshot_id,
+            authority_root=authority_root,
+        )
+
+    assert not list(workspace.glob(".risk-fixed-n-membership-*.json"))
+    assert not authority_root.exists()
 
 
 def test_registry_outside_workspace_is_rejected_before_publication(

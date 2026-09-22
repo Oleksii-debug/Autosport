@@ -1,5 +1,5 @@
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from autosport.betfair_fill_or_kill import (
     BetfairFillOrKillError,
@@ -214,6 +214,32 @@ class BetfairFillOrKillTests(unittest.TestCase):
                 "fixed-point representation exceeds resource bound",
             ):
                 self._report(request, **{field: value})
+
+    def test_unmatched_remainder_is_exact_and_context_independent(self):
+        requested = Decimal("1.2345678901234567890123456789")
+        matched = Decimal("0.0000000000000000000000000001")
+        expected_remainder = Decimal("1.2345678901234567890123456788")
+        request = self._request(
+            requested_size=requested,
+            min_fill_size=matched,
+        )
+        report = self._report(
+            request,
+            size_matched=matched,
+            average_price_matched="21.5",
+        )
+
+        with localcontext() as context:
+            context.prec = 5
+            low_precision = inspect_betfair_fill_or_kill_lifecycle(request, report)
+        with localcontext() as context:
+            context.prec = 80
+            high_precision = inspect_betfair_fill_or_kill_lifecycle(request, report)
+
+        self.assertEqual(low_precision.unmatched_remainder, expected_remainder)
+        self.assertEqual(high_precision.unmatched_remainder, expected_remainder)
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(low_precision.evidence_id, high_precision.evidence_id)
 
     def test_structural_evidence_is_deterministic(self):
         request = self._request(min_fill_size="3")

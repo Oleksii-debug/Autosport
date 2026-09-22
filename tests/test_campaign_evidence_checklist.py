@@ -100,7 +100,7 @@ def test_positive_physical_truth_without_evidence_refs_is_not_handoff_ready() ->
     assert assessment.pre_handoff_ready is False
 
 
-def test_pre_handoff_requires_explicit_human_and_nvda_evidence_refs() -> None:
+def test_caller_human_and_nvda_refs_remain_diagnostic_not_handoff_authority() -> None:
     assessment = assess_campaign_evidence(
         checklist(
             day_evidence=complete_days(),
@@ -116,7 +116,8 @@ def test_pre_handoff_requires_explicit_human_and_nvda_evidence_refs() -> None:
     assert assessment.human_evidence_complete
     assert assessment.nvda_evidence_complete
     assert assessment.physical_accessibility_evidence_complete
-    assert assessment.pre_handoff_ready
+    assert assessment.positive_authority_verified is False
+    assert assessment.pre_handoff_ready is False
     assert assessment.proves_real_money_execution is False
     assert assessment.proves_whole_product_complete is False
 

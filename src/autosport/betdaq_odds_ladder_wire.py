@@ -167,7 +167,6 @@ def parse_get_odds_ladder_response(
 
     entries: list[BetdaqOddsLadderEntry] = []
     seen_prices: set[Decimal] = set()
-    seen_representations: set[str] = set()
     for child in list(result):
         if child.tag == _tag(EXTERNAL_API_NS, "ReturnStatus"):
             continue
@@ -198,10 +197,7 @@ def parse_get_odds_ladder_response(
         )
         if price in seen_prices:
             raise BetdaqSoapProtocolError("duplicate Ladder price")
-        if representation in seen_representations:
-            raise BetdaqSoapProtocolError("duplicate Ladder representation")
         seen_prices.add(price)
-        seen_representations.add(representation)
         entries.append(
             BetdaqOddsLadderEntry(
                 price=price,

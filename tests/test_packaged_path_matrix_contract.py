@@ -140,6 +140,60 @@ def test_ascii_control_failure_is_inconclusive_not_path_failure(tmp_path: Path) 
 
 
 
+def test_stale_report_and_logs_are_removed_before_validation(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    stale_report = out / "path-matrix-report.json"
+    stale_report.write_text('{"matrix_status":"PASS","stale":true}\n', encoding="utf-8")
+    stale_logs = out / "logs"
+    stale_logs.mkdir()
+    (stale_logs / "old.log").write_text("SECRET_OLD_OUTPUT", encoding="utf-8")
+
+    report = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=out,
+        arguments=(),
+        launcher=(sys.executable,),
+        mode="exit-zero",
+        startup_seconds=0.01,
+        timeout_seconds=2,
+        keep_copies=False,
+    )
+    assert report.matrix_status == "PASS"
+    payload = json.loads(stale_report.read_text(encoding="utf-8"))
+    assert payload["matrix_status"] == "PASS"
+    assert "stale" not in payload
+    assert not stale_logs.exists()
+
+
+def test_stale_report_is_removed_even_when_validation_fails_early(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    stale_report = out / "path-matrix-report.json"
+    stale_report.write_text('{"matrix_status":"PASS","stale":true}\n', encoding="utf-8")
+    stale_logs = out / "logs"
+    stale_logs.mkdir()
+    (stale_logs / "old.log").write_text("SECRET_OLD_OUTPUT", encoding="utf-8")
+
+    with pytest.raises(m.MatrixError, match="executable does not exist"):
+        m.run_matrix(
+            artifact_root=artifact,
+            executable_relative_path=Path("missing.exe"),
+            output_dir=out,
+            arguments=(),
+            launcher=(),
+            mode="exit-zero",
+            startup_seconds=0.01,
+            timeout_seconds=2,
+            keep_copies=False,
+        )
+    assert not stale_report.exists()
+    assert not stale_logs.exists()
+
+
 def test_stale_case_workspace_is_removed_before_probe(tmp_path: Path) -> None:
     artifact = tmp_path / "artifact"
     artifact.mkdir()

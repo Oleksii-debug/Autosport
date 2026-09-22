@@ -996,7 +996,13 @@ def _report_outcome(
         if instruction.order_status == "EXECUTION_COMPLETE":
             return PlaceOrdersOutcome.PARTIAL
         return PlaceOrdersOutcome.UNKNOWN
-    if instruction.bet_id is not None:
+    if (
+        instruction.bet_id is not None
+        and instruction.order_status == "EXECUTABLE"
+    ):
+        # A provider order identity alone does not prove a live unmatched
+        # remainder. EXECUTION_COMPLETE explicitly means there is no
+        # remaining unmatched portion; missing status is also insufficient.
         return PlaceOrdersOutcome.PLACED_UNMATCHED
     return PlaceOrdersOutcome.UNKNOWN
 

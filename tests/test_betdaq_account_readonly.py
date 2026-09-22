@@ -723,7 +723,7 @@ def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position(
     assert snapshot.settled_positions == ()
 
 
-def test_settled_and_void_raw_evidence_are_preserved_but_not_misreported_as_complete_settled_history(
+def test_settled_void_raw_evidence_not_laundered_as_complete_history(
     monkeypatch,
 ):
     c, _ = canonical_client(

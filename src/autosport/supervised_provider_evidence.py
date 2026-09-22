@@ -587,6 +587,14 @@ def _install_verified_provider_evidence_authority() -> None:
     sealed_absence_type = VerifiedProviderAbsenceEvidence
     sealed_fingerprint = _verified_provider_evidence_fingerprint
     sealed_error = ProviderEvidenceError
+    sealed_readback_assertion = BetfairExecutionReadbackEnvelope.assert_authoritative
+    sealed_readback_assertion_code = getattr(
+        sealed_readback_assertion, "__code__", None
+    )
+    sealed_readback_fingerprint = BetfairExecutionReadbackEnvelope._authority_fingerprint
+    sealed_readback_fingerprint_code = getattr(
+        sealed_readback_fingerprint, "__code__", None
+    )
     timeout_absence_assertion: object | None = None
     missing = object()
 
@@ -619,6 +627,7 @@ def _install_verified_provider_evidence_authority() -> None:
 
     sealed_verify_graph = seal_function_graph(raw_verify)
     sealed_wrapper_bindings = {
+        "BetfairExecutionReadbackEnvelope": BetfairExecutionReadbackEnvelope,
         "VerifiedProviderEffectEvidence": sealed_effect_type,
         "VerifiedProviderAbsenceEvidence": sealed_absence_type,
         "_verified_provider_evidence_fingerprint": sealed_fingerprint,
@@ -647,6 +656,32 @@ def _install_verified_provider_evidence_authority() -> None:
                 raise sealed_error(
                     f"provider evidence authority binding changed: {name}"
                 )
+        current_readback_assertion = getattr(
+            sealed_wrapper_bindings["BetfairExecutionReadbackEnvelope"],
+            "assert_authoritative",
+            missing,
+        )
+        if (
+            current_readback_assertion is not sealed_readback_assertion
+            or getattr(current_readback_assertion, "__code__", None)
+            is not sealed_readback_assertion_code
+        ):
+            raise sealed_error(
+                "provider readback origin authority method changed"
+            )
+        current_readback_fingerprint = getattr(
+            BetfairExecutionReadbackEnvelope,
+            "_authority_fingerprint",
+            missing,
+        )
+        if (
+            current_readback_fingerprint is not sealed_readback_fingerprint
+            or getattr(current_readback_fingerprint, "__code__", None)
+            is not sealed_readback_fingerprint_code
+        ):
+            raise sealed_error(
+                "provider readback authority fingerprint method changed"
+            )
 
     def register_timeout_absence_authority(assertion: object) -> None:
         nonlocal timeout_absence_assertion
@@ -674,6 +709,7 @@ def _install_verified_provider_evidence_authority() -> None:
             readback=readback,
             expected_provider_order_ref=expected_provider_order_ref,
         )
+        assert_executable_authority_intact()
         evidence_key = id(evidence)
 
         def forget(_weakref: object, *, key: int = evidence_key) -> None:

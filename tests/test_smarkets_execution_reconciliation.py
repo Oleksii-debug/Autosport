@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from decimal import Decimal
@@ -642,7 +643,7 @@ def test_journal_rejects_execution_regression(tmp_path: Path) -> None:
             source_payload_sha256="d" * 64,
         ),
     )
-    with pytest.raises(SmarketsReconciliationError, match="stake regressed"):
+    with pytest.raises(SmarketsReconciliationError, match="executed quantity regressed"):
         journal.append(regressed)
 
 
@@ -706,3 +707,41 @@ def test_rejected_order_cannot_later_mint_fill_in_same_journal(tmp_path: Path) -
     )
     with pytest.raises(SmarketsReconciliationError, match="rejected provider order"):
         journal.append(later_fill)
+
+
+def test_restart_rejects_hash_correct_but_economically_forged_record(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    journal.append(_verify(_action(), _profile(), _authority(), _readback()))
+
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row["record"]["accepted_stake"] = "9"
+    unsigned = {
+        "prev_sha256": row["prev_sha256"],
+        "record": row["record"],
+        "schema_version": row["schema_version"],
+    }
+    encoded = json.dumps(
+        unsigned,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    row["record_sha256"] = hashlib.sha256(encoded).hexdigest()
+    path.write_text(
+        json.dumps(
+            row,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SmarketsReconciliationError, match="fixed-point economics"):
+        SmarketsReconciliationJournal(path).verify()

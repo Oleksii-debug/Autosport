@@ -310,7 +310,31 @@ class WindowsAutosportApp(AutosportApp):
             self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            detail = text("ui.error.recovery.worker", detail=message.error)
+            # RecoveryWorkerMessage.error is internal diagnostic evidence, not a
+            # presentation authority. It may contain arbitrary provider/exception
+            # text, including credentials. Preserve at most a bounded technical
+            # exception-class token and never copy raw detail to visible/UIA prose.
+            raw_error = message.error
+            safe_error_type = "RecoveryTaskError"
+            if type(raw_error) is str:
+                candidate = raw_error.partition(":")[0].strip()
+                candidate_body = candidate.replace("_", "")
+                if (
+                    candidate
+                    and candidate.isascii()
+                    and candidate_body.isalnum()
+                    and (
+                        candidate.endswith("Error")
+                        or candidate.endswith("Exception")
+                        or candidate in {"SystemExit", "KeyboardInterrupt"}
+                    )
+                ):
+                    safe_error_type = candidate
+            safe_detail = text(
+                "ui.error.exception.message_unavailable",
+                exception_type=safe_error_type,
+            )
+            detail = text("ui.error.recovery.worker", detail=safe_detail)
             self.status.set(text("ui.status.recovery.blocked"))
             self._append_log(detail)
             messagebox.showerror(text("ui.dialog.title"), detail)

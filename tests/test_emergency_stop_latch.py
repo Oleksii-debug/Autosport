@@ -16,6 +16,7 @@ from autosport.emergency_stop_latch import (
     EmergencyStopLatch,
     EmergencyStopState,
     EmergencyStopTransitionError,
+    EmergencyStopVetoError,
     _decode_snapshot,
 )
 
@@ -606,3 +607,73 @@ def test_ukrainian_reason_round_trips_canonically(tmp_path: Path) -> None:
     )
     assert snapshot.events[-1].reason == "Аварійна зупинка оператором"
     assert latch.inspect() == snapshot
+
+
+def test_admission_fence_holds_canonical_workspace_lock_through_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    latch = _latch(tmp_path, clear_authority=_ClearAuthority())
+    latch.engage(event_id="stop-1", reason="stop", authority_id="operator:1")
+    latch.clear(event_id="clear-1", reason="resume")
+
+    held = {"active": False}
+
+    class TrackingLock:
+        def __init__(self, workspace: str | Path) -> None:
+            assert Path(workspace) == latch.workspace
+
+        def __enter__(self) -> "TrackingLock":
+            assert held["active"] is False
+            held["active"] = True
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            assert held["active"] is True
+            held["active"] = False
+
+    original_read = latch._read_current_locked
+
+    def checked_read() -> object:
+        assert held["active"] is True
+        return original_read()
+
+    monkeypatch.setattr(stop_module, "WorkspaceEconomicLock", TrackingLock)
+    monkeypatch.setattr(latch, "_read_current_locked", checked_read)
+
+    with latch.admission_fence(EmergencyActionClass.NEW_EXPOSURE) as decision:
+        assert held["active"] is True
+        assert decision.may_proceed_past_stop_gate is True
+        assert decision.requires_separate_authority is True
+        assert decision.grants_execution_authority is False
+    assert held["active"] is False
+
+
+def test_admission_fence_blocks_engaged_or_unproven_state(tmp_path: Path) -> None:
+    latch = _latch(tmp_path)
+    with pytest.raises(EmergencyStopVetoError, match="not been durably initialized"):
+        with latch.admission_fence(EmergencyActionClass.NEW_EXPOSURE):
+            raise AssertionError("unreachable")
+
+    latch.engage(event_id="stop-1", reason="stop", authority_id="operator:1")
+    with pytest.raises(EmergencyStopVetoError, match="vetoes"):
+        with latch.admission_fence(EmergencyActionClass.INCREASE_EXPOSURE):
+            raise AssertionError("unreachable")
+
+    latch.state_path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(EmergencyStopVetoError, match="unproven"):
+        with latch.admission_fence(EmergencyActionClass.NEW_EXPOSURE):
+            raise AssertionError("unreachable")
+
+
+def test_admission_fence_cannot_be_mistaken_for_cancel_or_reconcile_authority(
+    tmp_path: Path,
+) -> None:
+    latch = _latch(tmp_path)
+    for action in (
+        EmergencyActionClass.CANCEL_EXISTING,
+        EmergencyActionClass.RISK_REDUCING_HEDGE,
+        EmergencyActionClass.READ_ONLY_RECONCILIATION,
+    ):
+        with pytest.raises(ValueError, match="only for new or increased exposure"):
+            with latch.admission_fence(action):
+                raise AssertionError("unreachable")

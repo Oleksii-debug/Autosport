@@ -158,19 +158,33 @@ class RecoveryWorkerTerminalLifecycleTests(unittest.TestCase):
     def test_partial_thread_start_exception_cancels_task_before_retry(self) -> None:
         worker = OneShotRecoveryWorker()
         original_start = __import__("threading").Thread.start
+        original_join = __import__("threading").Thread.join
         task_ran = __import__("threading").Event()
+        joined_threads = []
 
         def start_then_fail(thread) -> None:
             original_start(thread)
             raise OSError("late start failure")
 
-        with patch(
-            "autosport.recovery_worker.threading.Thread.start",
-            new=start_then_fail,
+        def join_probe(thread, timeout=None) -> None:
+            joined_threads.append(thread)
+            original_join(thread, timeout)
+
+        with (
+            patch(
+                "autosport.recovery_worker.threading.Thread.start",
+                new=start_then_fail,
+            ),
+            patch(
+                "autosport.recovery_worker.threading.Thread.join",
+                new=join_probe,
+            ),
         ):
             self.assertFalse(worker.start(lambda: task_ran.set()))
 
         self.assertFalse(task_ran.wait(0.1))
+        self.assertEqual(len(joined_threads), 1)
+        self.assertFalse(joined_threads[0].is_alive())
         self.assertFalse(worker.busy)
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())

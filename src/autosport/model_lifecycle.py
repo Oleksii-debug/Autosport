@@ -353,6 +353,7 @@ def evaluate_model_eligibility(
         raise TypeError("revision must be a ModelLifecycleRevision")
     evaluated_text, evaluated = _canonical_utc("evaluated_at", evaluated_at)
     _, created = _canonical_utc("created_at", revision.created_at)
+    _, revision_updated = _canonical_utc("updated_at", revision.updated_at)
     _, knowledge_until = _canonical_utc(
         "knowledge_valid_until", revision.knowledge_valid_until
     )
@@ -364,6 +365,8 @@ def evaluate_model_eligibility(
     reasons: list[str] = []
     if evaluated < created:
         reasons.append("before_model_creation")
+    if evaluated < revision_updated:
+        reasons.append("lifecycle_revision_not_yet_available")
     if revision.lifecycle_state is not ModelLifecycleState.ACTIVE:
         reasons.append(f"lifecycle_{revision.lifecycle_state.value}")
     if evaluated >= knowledge_until:

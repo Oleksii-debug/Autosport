@@ -173,10 +173,10 @@
     byId(205).value = state.bank || "";
     byId("dataset-summary").textContent = state.dataset_summary || "";
     if (document.activeElement !== byId("dataset-path")) {
-      byId("dataset-path").value = state.dataset_path || byId("dataset-path").value;
+      byId("dataset-path").value = state.dataset_path || "";
     }
     if (document.activeElement !== byId("research-plan-path")) {
-      byId("research-plan-path").value = state.research_plan_path || byId("research-plan-path").value;
+      byId("research-plan-path").value = state.research_plan_path || "";
     }
     byId("research-plan-summary").textContent = state.research_plan_summary || "";
 
@@ -274,7 +274,12 @@
   byId(104).addEventListener("change", () => {
     dispatch("live_mode.set", { mode: byId(104).value });
   });
-  byId(102).addEventListener("click", () => dispatch("replay.run"));
+  byId(102).addEventListener("click", () => {
+    dispatch("replay.run", {
+      dataset_path: byId("dataset-path").value,
+      research_plan_path: byId("research-plan-path").value,
+    });
+  });
   byId(105).addEventListener("click", () => dispatch("live.refresh"));
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
@@ -297,10 +302,12 @@
 
   byId(305).addEventListener("click", () => {
     ownerPanel.hidden = false;
+    byId(305).setAttribute("aria-expanded", "true");
     byId(306).focus();
   });
   byId(329).addEventListener("click", () => {
     ownerPanel.hidden = true;
+    byId(305).setAttribute("aria-expanded", "false");
     byId(305).focus();
   });
   byId(328).addEventListener("click", () => {
@@ -319,10 +326,12 @@
 
   byId(330).addEventListener("click", () => {
     manualPanel.hidden = false;
+    byId(330).setAttribute("aria-expanded", "true");
     byId(331).focus();
   });
   byId(336).addEventListener("click", () => {
     manualPanel.hidden = true;
+    byId(330).setAttribute("aria-expanded", "false");
     byId(330).focus();
   });
   byId(333).addEventListener("click", () => {
@@ -346,29 +355,9 @@
       byId(301).focus();
       return;
     }
-    if (event.key === "F6") {
-      event.preventDefault();
-      byId(201).focus();
-      return;
-    }
-    if (event.key === "F7") {
-      event.preventDefault();
-      byId(203).focus();
-      return;
-    }
     if (event.key === "F8") {
       event.preventDefault();
       byId(204).focus();
-      return;
-    }
-    if (event.key === "F9") {
-      event.preventDefault();
-      byId(305).click();
-      return;
-    }
-    if (event.key === "F10") {
-      event.preventDefault();
-      byId(330).click();
       return;
     }
 

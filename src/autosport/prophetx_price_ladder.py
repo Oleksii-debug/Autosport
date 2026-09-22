@@ -7,8 +7,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Final
 from http.client import HTTPException
+from typing import Final
+from weakref import ReferenceType, ref
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -37,7 +38,7 @@ class ProphetXPriceLadderHttpResponse:
     body: bytes
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProphetXPriceLadderSnapshot:
     """Immutable membership evidence from one complete ladder acquisition.
 
@@ -206,7 +207,7 @@ class ProphetXPriceLadderClient:
             separators=(",", ":"),
         ).encode("utf-8")
         ladder_sha256 = hashlib.sha256(canonical_membership).hexdigest()
-        return ProphetXPriceLadderSnapshot(
+        snapshot = ProphetXPriceLadderSnapshot(
             adapter_id=ADAPTER_ID,
             environment="SANDBOX",
             endpoint=_SANDBOX_URL,
@@ -215,6 +216,76 @@ class ProphetXPriceLadderClient:
             source_payload_sha256=source_payload_sha256,
             ladder_sha256=ladder_sha256,
             provider_origin_verified=self._provider_origin_verified,
+        )
+        if self._provider_origin_verified:
+            _remember_provider_origin(snapshot)
+        return snapshot
+
+
+_ISSUED_PROVIDER_ORIGIN: dict[int, tuple[ReferenceType[ProphetXPriceLadderSnapshot], str]] = {}
+
+
+def _snapshot_fingerprint(snapshot: ProphetXPriceLadderSnapshot) -> str:
+    payload = json.dumps(
+        {
+            "adapter_id": snapshot.adapter_id,
+            "environment": snapshot.environment,
+            "endpoint": snapshot.endpoint,
+            "prices": list(snapshot.prices),
+            "observed_at": snapshot.observed_at,
+            "source_payload_sha256": snapshot.source_payload_sha256,
+            "ladder_sha256": snapshot.ladder_sha256,
+            "provider_origin_verified": snapshot.provider_origin_verified,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _forget_provider_origin(
+    snapshot_id: int,
+    reference: ReferenceType[ProphetXPriceLadderSnapshot],
+) -> None:
+    current = _ISSUED_PROVIDER_ORIGIN.get(snapshot_id)
+    if current is not None and current[0] is reference:
+        _ISSUED_PROVIDER_ORIGIN.pop(snapshot_id, None)
+
+
+def _remember_provider_origin(
+    snapshot: ProphetXPriceLadderSnapshot,
+) -> ProphetXPriceLadderSnapshot:
+    snapshot_id = id(snapshot)
+    reference = ref(
+        snapshot,
+        lambda current, snapshot_id=snapshot_id: _forget_provider_origin(
+            snapshot_id, current
+        ),
+    )
+    _ISSUED_PROVIDER_ORIGIN[snapshot_id] = (
+        reference,
+        _snapshot_fingerprint(snapshot),
+    )
+    return snapshot
+
+
+def assert_provider_origin_verified(snapshot: ProphetXPriceLadderSnapshot) -> None:
+    """Require this exact in-process object to come from the default fixed-origin transport."""
+
+    if not isinstance(snapshot, ProphetXPriceLadderSnapshot):
+        raise ProphetXPriceLadderError(
+            "provider-origin verification requires ProphetXPriceLadderSnapshot"
+        )
+    issued = _ISSUED_PROVIDER_ORIGIN.get(id(snapshot))
+    if (
+        issued is None
+        or issued[0]() is not snapshot
+        or issued[1] != _snapshot_fingerprint(snapshot)
+        or not snapshot.provider_origin_verified
+    ):
+        raise ProphetXPriceLadderError(
+            "price-ladder snapshot was not issued by canonical fixed-origin acquisition"
         )
 
 
@@ -439,4 +510,5 @@ __all__ = [
     "ProphetXPriceLadderHttpResponse",
     "ProphetXPriceLadderSnapshot",
     "ProphetXPriceLadderTransportError",
+    "assert_provider_origin_verified",
 ]

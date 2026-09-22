@@ -121,10 +121,16 @@ def tree_manifest_sha(entries: Iterable[TreeEntry]) -> str:
     return _canonical_json_sha(serial)
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
 def copy_tree_verified(source: Path, destination: Path, *, expected_source_sha: str | None = None) -> str:
     source = source.resolve(strict=True)
-    if destination.exists():
-        shutil.rmtree(destination)
+    _remove_path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination, symlinks=True)
     dst_manifest = tree_manifest(destination)
@@ -258,18 +264,21 @@ def run_matrix(
     else:
         raise MatrixError("output directory must not be inside the artifact root")
     rel = _safe_relative_path(executable_relative_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "path-matrix-report.json"
+    _remove_path(report_path)
+    _remove_path(output_dir / "logs")
+
     source_exe = artifact_root / executable_relative_path
     if not source_exe.is_file():
         raise MatrixError(f"executable does not exist inside artifact root: {rel}")
     original_manifest = tree_manifest(artifact_root)
     artifact_sha = tree_manifest_sha(original_manifest)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[ScenarioResult] = []
     for scenario_name, component in SCENARIOS:
         case_root = output_dir / "cases" / component
-        if case_root.exists():
-            shutil.rmtree(case_root)
+        _remove_path(case_root)
         package_root = case_root / "package"
         log_path = output_dir / "logs" / f"{scenario_name}.log"
         copied_sha = ""
@@ -335,7 +344,6 @@ def run_matrix(
         scenarios=tuple(results),
         matrix_status=matrix_status,
     )
-    report_path = output_dir / "path-matrix-report.json"
     report_path.write_text(json.dumps(asdict(report), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 

@@ -90,9 +90,21 @@ def _manifest_object(manifest_bytes: bytes) -> dict[str, Any]:
         text = manifest_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise LaunchIdentityError("active-generation manifest must be UTF-8 JSON") from exc
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise LaunchIdentityError(
+                    f"active-generation manifest contains duplicate JSON key: {key}"
+                )
+            payload[key] = value
+        return payload
+
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(text, object_pairs_hook=reject_duplicate_keys)
+    except LaunchIdentityError:
+        raise
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise LaunchIdentityError("active-generation manifest must be valid JSON") from exc
     if type(payload) is not dict or set(payload) != _MANIFEST_KEYS:
         raise LaunchIdentityError("active-generation manifest schema mismatch")
@@ -269,6 +281,11 @@ def decide_single_instance(
     still running must block a second launch even after update/rollback changes
     the active-generation manifest. PID reuse is reclaimable because the nonce
     changes. Unknown/malformed observations fail closed.
+
+    This is a pure decision helper, not an ownership acquisition primitive.
+    The caller must serialize the read/decide/write owner transition with one
+    exclusive per-user lock or equivalent compare-and-swap; otherwise two
+    concurrent launchers could both observe no owner and both decide ACQUIRE.
     """
 
     requested_user_scope = _require_nonempty(

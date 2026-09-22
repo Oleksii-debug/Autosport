@@ -121,11 +121,12 @@ def _entry(
 
 @dataclass(frozen=True, slots=True)
 class ResolvedFixedNRiskMembership:
-    """Immutable description re-resolved from canonical scientific records.
+    """Structurally re-resolved fixed-N membership description.
 
-    This value is not a bearer capability. Financial/risk consumers must invoke
-    resolve_fixed_n_risk_membership against the canonical product registry
-    rather than trusting a caller-created instance.
+    This value is not a bearer capability and does not prove causal precommit.
+    ScientificRegistry record timestamps are record fields, not a non-backdateable
+    append clock. Financial/risk consumers must not treat this object as positive
+    pre-outcome authority until a product-owned chronology anchor is composed.
     """
 
     research_protocol_id: str
@@ -147,22 +148,29 @@ class ResolvedFixedNRiskMembership:
         return len(self.planned_run_ids)
 
     @property
+    def causal_precommit_proven(self) -> bool:
+        """Registry structure/timestamps alone cannot prove pre-outcome existence."""
+        return False
+
+    @property
     def iid_qualified(self) -> bool:
         """Membership uniqueness is deliberately not an IID/dependence proof."""
         return False
 
 
-def resolve_fixed_n_risk_membership(
+def inspect_fixed_n_risk_membership_structure(
     registry_path: str | Path,
     *,
     research_protocol_id: str,
     dataset_snapshot_id: str,
 ) -> ResolvedFixedNRiskMembership:
-    """Re-resolve exact fixed-N run membership precommitted before outcome reveal.
+    """Re-resolve exact fixed-N membership structure from ScientificRegistry.
 
-    The resolver composes existing ScientificRegistry authority only. It does
-    not issue risk evidence and intentionally refuses to infer IID/dependence from
-    unique IDs, hashes, or a caller assertion.
+    Embedded chronology is validated for internal consistency only. ScientificRegistry
+    available_at values are caller-supplied record fields and therefore cannot prove
+    that the membership existed before the external outcome reveal boundary. This
+    structural inspector grants no positive causal-precommit or IID/dependence
+    authority.
     """
 
     protocol_id = _canonical_text(research_protocol_id, "research_protocol_id")
@@ -331,3 +339,30 @@ def resolve_fixed_n_risk_membership(
         sampling_frame_sha256=sampling_frame_sha256,
         design_sha256=design_sha256,
     )
+
+def resolve_fixed_n_risk_membership(
+    registry_path: str | Path,
+    *,
+    research_protocol_id: str,
+    dataset_snapshot_id: str,
+) -> ResolvedFixedNRiskMembership:
+    """Fail closed until membership has non-backdateable pre-outcome proof.
+
+    Structural inspection runs first so malformed or rebound scientific records fail
+    with their precise invariant. A structurally valid membership is not enough:
+    current ScientificRegistry timestamps can be supplied by a caller and registry
+    append order has no trusted external-time anchor. Future positive composition
+    must bind this exact membership to product-owned chronology proving it existed
+    before outcome availability.
+    """
+
+    inspect_fixed_n_risk_membership_structure(
+        registry_path,
+        research_protocol_id=research_protocol_id,
+        dataset_snapshot_id=dataset_snapshot_id,
+    )
+    raise RiskSamplingMembershipError(
+        "fixed-N membership has no non-backdateable product-owned pre-outcome "
+        "chronology authority"
+    )
+

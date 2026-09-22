@@ -609,6 +609,7 @@ def resolve_betfair_live_capital_at_risk(
 def _install_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     raw_resolve = resolve_betfair_live_capital_at_risk
+    raw_getattribute = BetfairLiveCapitalAtRiskEvidence.__getattribute__
 
     def authoritative_resolve(*args, **kwargs) -> BetfairLiveCapitalAtRiskEvidence:
         evidence = raw_resolve(*args, **kwargs)
@@ -645,8 +646,19 @@ def _install_authority() -> None:
                 "live capital-at-risk current-order evidence is no longer current"
             )
 
+    def authority_getattribute(
+        self: BetfairLiveCapitalAtRiskEvidence,
+        name: str,
+    ):
+        if name == "assert_authoritative":
+            def bound_assert_authoritative() -> None:
+                assert_authoritative(self)
+
+            return bound_assert_authoritative
+        return raw_getattribute(self, name)
+
     globals()["resolve_betfair_live_capital_at_risk"] = authoritative_resolve
-    BetfairLiveCapitalAtRiskEvidence.assert_authoritative = assert_authoritative
+    BetfairLiveCapitalAtRiskEvidence.__getattribute__ = authority_getattribute
 
 
 _install_authority()

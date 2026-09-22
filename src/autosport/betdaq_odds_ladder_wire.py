@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -28,6 +29,9 @@ from .betdaq_readonly_market_wire import (
 
 
 _MAX_LADDER_ENTRIES = 10_000
+_XSD_DECIMAL_LEXICAL_RE = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +190,10 @@ def parse_get_odds_ladder_response(
         price_text = _required_attr(child, "price")
         if price_text != price_text.strip():
             raise BetdaqSoapProtocolError("Ladder price must be trimmed")
+        if _XSD_DECIMAL_LEXICAL_RE.fullmatch(price_text) is None:
+            raise BetdaqSoapProtocolError(
+                "Ladder price must use XML Schema decimal lexical form"
+            )
         price = _decimal(
             price_text,
             "Ladder price",

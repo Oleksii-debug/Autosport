@@ -13,7 +13,7 @@ on:
       - '.gitattributes'
       - '.github/workflows/ci.yml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -21,14 +21,15 @@ concurrency:
 
 jobs:
   test:
-    # Draft PRs are high-churn work-in-progress. Preserve the exact heavy gate
-    # for every integration-capable head without consuming runners while draft.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Draft/closed PRs are not integration-capable; preserve the exact heavy gate
+    # while skipped lifecycle runs displace obsolete work through concurrency.
+    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.draft == false)
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:

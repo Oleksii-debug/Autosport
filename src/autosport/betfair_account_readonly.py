@@ -66,10 +66,21 @@ class UrllibBetfairHttpTransport:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
 
-    def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
+    def post(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+        _urlopen=urlopen,
+    ) -> bytes:
+        # Capture the stdlib opener in the canonical method default at definition
+        # time. Runtime replacement of this module's `urlopen` alias therefore
+        # cannot steer production-origin reads into a caller-controlled response.
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            with _CANONICAL_URLLIB_OPEN(request, timeout=timeout_seconds) as response:
+            with _urlopen(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None
@@ -84,7 +95,6 @@ def _system_utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-_CANONICAL_URLLIB_OPEN = urlopen
 _CANONICAL_URLLIB_POST = UrllibBetfairHttpTransport.post
 _CANONICAL_MARKET_BOOK_CLOCK = _system_utc_now
 
@@ -227,9 +237,12 @@ def _market_book_source_origin_authoritative(source: object) -> bool:
         return False
     if "post" in vars(transport):
         return False
+    canonical_kwdefaults = _CANONICAL_URLLIB_POST.__kwdefaults__ or {}
+    canonical_urlopen = canonical_kwdefaults.get("_urlopen")
     return (
         type(transport).post is _CANONICAL_URLLIB_POST
-        and urlopen is _CANONICAL_URLLIB_OPEN
+        and canonical_urlopen is not None
+        and urlopen is canonical_urlopen
     )
 
 

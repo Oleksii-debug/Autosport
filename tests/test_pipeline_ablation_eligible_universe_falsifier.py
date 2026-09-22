@@ -8,10 +8,12 @@ from autosport.pipeline_ablation import (
     AblationProtocol,
     ClaimKind,
     ComponentBinding,
+    IdentifiabilityTier,
     MetricDirection,
     MetricSemantics,
     PipelineComponent,
-    evaluate_pipeline_ablation,
+    ResolvedAblationAuthority,
+    evaluate_pipeline_ablation as _evaluate_pipeline_ablation,
 )
 
 
@@ -49,6 +51,49 @@ def protocol(component: PipelineComponent) -> AblationProtocol:
         missing_outcome_policy="fail-inconclusive-v1",
         multiplicity_rule="holm-v1",
         created_at="2026-09-19T12:00:00Z",
+    )
+
+
+class _ReplayResolver:
+    def __init__(
+        self,
+        protocol: AblationProtocol,
+        observations: tuple[AblationObservation, ...],
+    ) -> None:
+        self._protocol = protocol
+        self._observations = {
+            (item.replay_authority_sha256, item.evidence_sha256): item
+            for item in observations
+        }
+
+    def resolve(
+        self,
+        authority_sha256: str,
+        evidence_sha256: str,
+    ) -> ResolvedAblationAuthority | None:
+        item = self._observations.get((authority_sha256, evidence_sha256))
+        if item is None:
+            return None
+        return ResolvedAblationAuthority(
+            authority_sha256=authority_sha256,
+            evidence_sha256=evidence_sha256,
+            identifiability_tier=IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL,
+            scope_id=self._protocol.scope_id,
+            dataset_manifest_sha256=self._protocol.dataset_manifest_sha256,
+            holdout_access_sha256=self._protocol.holdout_access_sha256,
+            causal_cutoff=self._protocol.causal_cutoff,
+            available_at=item.evidence_available_at,
+        )
+
+
+def evaluate_pipeline_ablation(
+    protocol: AblationProtocol,
+    observations: tuple[AblationObservation, ...],
+):
+    return _evaluate_pipeline_ablation(
+        protocol,
+        observations,
+        authority_resolver=_ReplayResolver(protocol, observations),
     )
 
 

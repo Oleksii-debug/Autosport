@@ -15,7 +15,7 @@ from decimal import (
     localcontext,
 )
 
-from .domain import PaperTicket, TicketStatus
+from .domain import PaperTicket, TicketLeg, TicketStatus
 from .paper import PaperBook
 
 
@@ -46,7 +46,7 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
-def _analysis_ticket_fingerprint(ticket: PaperTicket) -> tuple[object, ...]:
+def _analysis_ticket_fingerprint(\n    ticket: PaperTicket,\n) -> tuple[str, Decimal, tuple[TicketLeg, ...], str, TicketStatus]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
     return (

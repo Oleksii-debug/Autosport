@@ -50,7 +50,7 @@ def test_matrix_cannot_qualify_capability_after_its_own_as_of_cutoff() -> None:
     fact = issue_provider_capability_evidence(
         capability=BookmakerCapability.BALANCE_READ,
         profile_state=BookmakerCapabilityState.SUPPORTED,
-        grade=ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+        grade=ProviderCapabilityTruthGrade.CONFIGURED,
         profile_id=profile.profile_id,
         integration_evidence_id=integration.evidence_id,
         environment="production",
@@ -72,7 +72,7 @@ def test_matrix_cannot_qualify_capability_after_its_own_as_of_cutoff() -> None:
         evidence=(fact,),
     )
     accepted = frozenset(
-        {ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}
+        {ProviderCapabilityTruthGrade.CONFIGURED}
     )
 
     assert matrix.qualifies(

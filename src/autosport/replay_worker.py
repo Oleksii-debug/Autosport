@@ -106,6 +106,11 @@ class OneShotReplayWorker:
             # and can never publish a competing terminal task result.
             cancelled.set()
             start_gate.set()
+            # Thread.start() may have created the non-daemon helper before
+            # reporting failure. Wait for that exact cancelled helper to exit
+            # before publishing terminal setup failure or releasing ownership.
+            if thread.ident is not None:
+                thread.join()
             if isinstance(exc, Exception):
                 self._publish_setup_failure(exc)
                 return True

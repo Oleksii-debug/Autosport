@@ -246,6 +246,13 @@ DEFAULT_ENDPOINT_SPECS: tuple[EndpointSpec, ...] = (
         "https://developers.matchbook.com/reference/login",
     ),
     EndpointSpec(
+        "matchbook.security.get_session",
+        "GET",
+        "/bpapi/rest/security/session",
+        MatchbookApiGroup.SECURITY,
+        "https://developers.matchbook.com/reference/get-session",
+    ),
+    EndpointSpec(
         "matchbook.security.logout",
         "DELETE",
         "/bpapi/rest/security/session",
@@ -272,6 +279,13 @@ DEFAULT_ENDPOINT_SPECS: tuple[EndpointSpec, ...] = (
         "/edge/rest/account/sports",
         MatchbookApiGroup.ACCOUNT,
         "https://developers.matchbook.com/reference/account-sports",
+    ),
+    EndpointSpec(
+        "matchbook.account.positions",
+        "GET",
+        "/edge/rest/account/positions",
+        MatchbookApiGroup.BETTING_READ,
+        "https://developers.matchbook.com/reference/get-positions",
     ),
     EndpointSpec(
         "matchbook.navigation.get",
@@ -335,6 +349,27 @@ DEFAULT_ENDPOINT_SPECS: tuple[EndpointSpec, ...] = (
         "/edge/rest/v2/offers",
         MatchbookApiGroup.BETTING_WRITE,
         "https://developers.matchbook.com/reference/submit-offers-v2",
+    ),
+    EndpointSpec(
+        "matchbook.offers.cancel",
+        "DELETE",
+        "/edge/rest/v2/offers",
+        MatchbookApiGroup.BETTING_WRITE,
+        "https://developers.matchbook.com/reference/cancel-offers-v2",
+    ),
+    EndpointSpec(
+        "matchbook.offers.edit",
+        "PUT",
+        "/edge/rest/v2/offers/{offer_id}",
+        MatchbookApiGroup.BETTING_WRITE,
+        "https://developers.matchbook.com/reference/edit-offer-v2",
+    ),
+    EndpointSpec(
+        "matchbook.heartbeat.post",
+        "POST",
+        "/edge/rest/v1/heartbeat",
+        MatchbookApiGroup.DEFAULT,
+        "https://developers.matchbook.com/reference/post-heartbeat",
     ),
     EndpointSpec(
         "matchbook.reports.current_bets",

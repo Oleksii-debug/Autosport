@@ -124,5 +124,42 @@ class ContinuousSettlementTicketCausalityTests(unittest.TestCase):
             self.assertEqual(after._lifecycle, lifecycle_before)
 
 
+    def test_mixed_early_and_late_matching_tickets_fail_before_any_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            book = PaperBook("100")
+            leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+            early = book.open_ticket(
+                [leg],
+                "10",
+                placed_at="2026-09-22T06:59:00+00:00",
+            )
+            late = book.open_ticket(
+                [leg],
+                "10",
+                placed_at="2026-09-22T07:01:00+00:00",
+            )
+            book.save(root / "paper_book.json")
+            coordinator = self._coordinator(root)
+            resolution = self._resolution(
+                leg,
+                available_at="2026-09-22T07:00:00+00:00",
+            )
+            balance_before = book.balance
+            lifecycle_before = list(book._lifecycle)
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "predates matching open ticket placement",
+            ):
+                coordinator._settle(resolutions=(resolution,))
+
+            after = PaperBook.load(root / "paper_book.json")
+            self.assertEqual(after.balance, balance_before)
+            self.assertIs(after.tickets[early.ticket_id].status, TicketStatus.OPEN)
+            self.assertIs(after.tickets[late.ticket_id].status, TicketStatus.OPEN)
+            self.assertEqual(after._lifecycle, lifecycle_before)
+
+
 if __name__ == "__main__":
     unittest.main()

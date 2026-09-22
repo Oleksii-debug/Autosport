@@ -29,6 +29,7 @@ from .betdaq_readonly_market_wire import (
 
 
 _MAX_LADDER_ENTRIES = 10_000
+_RETURN_STATUS_ATTRIBUTES = frozenset({"Code", "Description", "CallId"})
 _XSD_DECIMAL_LEXICAL_RE = re.compile(
     r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z"
 )
@@ -53,6 +54,18 @@ class BetdaqOddsLadderWireResponse:
     content_sha256: str
 
 
+def _reject_unknown_attributes(
+    element: ET.Element,
+    allowed: frozenset[str],
+    field: str,
+) -> None:
+    unexpected = sorted(set(element.attrib) - allowed)
+    if unexpected:
+        raise BetdaqSoapProtocolError(
+            f"{field} contains unexpected attribute(s): {', '.join(unexpected)}"
+        )
+
+
 def _parse_return_status(
     result: ET.Element,
 ) -> tuple[bool, int | None, str | None, str | None]:
@@ -65,6 +78,7 @@ def _parse_return_status(
         return False, None, None, None
 
     status = statuses[0]
+    _reject_unknown_attributes(status, _RETURN_STATUS_ATTRIBUTES, "ReturnStatus")
     code = _integer(_required_attr(status, "Code"), "ReturnStatus Code")
     description = _safe_text(
         _required_attr(status, "Description"),
@@ -161,6 +175,7 @@ def parse_get_odds_ladder_response(
         raise BetdaqSoapProtocolError(
             "GetOddsLadderResponse must contain exactly one result"
         )
+    _reject_unknown_attributes(result, frozenset(), "GetOddsLadderResult")
 
     (
         return_status_present,

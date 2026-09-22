@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Iterable
@@ -49,6 +50,15 @@ _EXPECTED_TABLE_XINFO = {
         (3, "sequence", "INTEGER", 1, None, 0, 0),
         (4, "payload_json", "TEXT", 1, None, 0, 0),
     ),
+    "market_event_commit_order": (
+        (0, "dedupe_key", "TEXT", 0, None, 1, 0),
+        (1, "append_generation", "INTEGER", 1, None, 0, 0),
+    ),
+    "market_replay_cutoffs": (
+        (0, "cutoff_id", "TEXT", 0, None, 1, 0),
+        (1, "as_of", "TEXT", 1, None, 0, 0),
+        (2, "max_append_generation", "INTEGER", 1, None, 0, 0),
+    ),
 }
 _LEGACY_CURRENT_XINFO = (
     (0, "quote_key", "TEXT", 0, None, 1, 0),
@@ -59,6 +69,8 @@ _LEGACY_CURRENT_XINFO = (
 _EXPECTED_PRIMARY_KEYS = {
     "market_events": ("dedupe_key",),
     "current_quotes": ("source_id", "quote_key"),
+    "market_event_commit_order": ("dedupe_key",),
+    "market_replay_cutoffs": ("cutoff_id",),
 }
 _LEGACY_CURRENT_PRIMARY_KEYS = ("quote_key",)
 _CANONICAL_SECONDARY_INDEXES = {
@@ -72,6 +84,7 @@ _FORBIDDEN_TABLE_SQL = re.compile(
 )
 _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
+_REPLAY_CUTOFF_DOMAIN = "autosport.market-replay-cutoff.v1"
 
 
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
@@ -86,6 +99,15 @@ def _timezone_aware_instant(value: str, field_name: str) -> datetime:
 
 def _observed_instant(value: str) -> datetime:
     return _timezone_aware_instant(value, "observed_ts")
+
+
+def _canonical_replay_cutoff(value: str) -> str:
+    return _timezone_aware_instant(value, "as_of").astimezone(timezone.utc).isoformat()
+
+
+def _replay_cutoff_id(canonical_as_of: str) -> str:
+    payload = f"{_REPLAY_CUTOFF_DOMAIN}\0{canonical_as_of}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
@@ -617,10 +639,115 @@ class SQLiteMarketStore:
         else:
             self._create_current_quotes()
 
+        commit_order_state = _schema_object(
+            self.connection, "market_event_commit_order"
+        )
+        replay_cutoff_state = _schema_object(
+            self.connection, "market_replay_cutoffs"
+        )
+        if (commit_order_state is None) != (replay_cutoff_state is None):
+            raise ValueError(
+                "causal replay schema is incomplete: commit order/cutoff tables disagree"
+            )
+        initialize_causal_replay = commit_order_state is None
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS market_event_commit_order (
+                dedupe_key TEXT PRIMARY KEY,
+                append_generation INTEGER NOT NULL
+            )"""
+        )
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS market_replay_cutoffs (
+                cutoff_id TEXT PRIMARY KEY,
+                as_of TEXT NOT NULL,
+                max_append_generation INTEGER NOT NULL
+            )"""
+        )
+        if initialize_causal_replay:
+            # Existing pre-v1 history predates product-owned append-generation
+            # evidence. Keep it as one coarse generation-0 baseline rather than
+            # inventing a false relative commit chronology from event timestamps.
+            self.connection.execute(
+                """INSERT INTO market_event_commit_order
+                   (dedupe_key, append_generation)
+                   SELECT dedupe_key, 0 FROM market_events"""
+            )
+
         for table_name in _EXPECTED_TABLE_XINFO:
             _validate_canonical_table(self.connection, table_name)
         _ensure_canonical_secondary_indexes(self.connection)
+        self._validate_causal_replay_state()
         self.connection.commit()
+
+    def _validate_causal_replay_state(self) -> None:
+        """Fail closed if durable append-generation/cutoff evidence is inconsistent."""
+
+        missing_commit = self.connection.execute(
+            """SELECT 1
+               FROM market_events AS m
+               LEFT JOIN market_event_commit_order AS c
+                 ON c.dedupe_key = m.dedupe_key
+               WHERE c.dedupe_key IS NULL
+               LIMIT 1"""
+        ).fetchone()
+        orphan_commit = self.connection.execute(
+            """SELECT 1
+               FROM market_event_commit_order AS c
+               LEFT JOIN market_events AS m
+                 ON m.dedupe_key = c.dedupe_key
+               WHERE m.dedupe_key IS NULL
+               LIMIT 1"""
+        ).fetchone()
+        if missing_commit is not None or orphan_commit is not None:
+            raise ValueError(
+                "market event append-generation authority does not exactly cover history"
+            )
+
+        invalid_generation = self.connection.execute(
+            """SELECT 1 FROM market_event_commit_order
+               WHERE typeof(append_generation) != 'integer'
+                  OR append_generation < 0
+               LIMIT 1"""
+        ).fetchone()
+        if invalid_generation is not None:
+            raise ValueError("market event append generation is invalid")
+
+        duplicate_positive = self.connection.execute(
+            """SELECT 1
+               FROM market_event_commit_order
+               WHERE append_generation > 0
+               GROUP BY append_generation
+               HAVING COUNT(*) != 1
+               LIMIT 1"""
+        ).fetchone()
+        if duplicate_positive is not None:
+            raise ValueError("positive market event append generations are not unique")
+
+        positive_shape = self.connection.execute(
+            """SELECT COUNT(*), COALESCE(MAX(append_generation), 0)
+               FROM market_event_commit_order
+               WHERE append_generation > 0"""
+        ).fetchone()
+        if positive_shape is None:
+            raise RuntimeError("cannot verify market event append generations")
+        positive_count, max_positive = positive_shape
+        if (
+            type(positive_count) is not int
+            or type(max_positive) is not int
+            or positive_count != max_positive
+        ):
+            raise ValueError("positive market event append generations are not contiguous")
+
+    def _next_append_generation(self) -> int:
+        row = self.connection.execute(
+            "SELECT COALESCE(MAX(append_generation), 0) "
+            "FROM market_event_commit_order"
+        ).fetchone()
+        if row is None or type(row[0]) is not int or row[0] < 0:
+            raise ValueError("cannot resolve market event append generation")
+        if row[0] >= _SQLITE_INTEGER_MAX:
+            raise OverflowError("market event append generation exhausted")
+        return row[0] + 1
 
     def _rebuild_current_quotes(self) -> None:
         """Repair provider-aware current projection from one write-locked history snapshot."""
@@ -716,7 +843,28 @@ class SQLiteMarketStore:
                     "conflicting duplicate market event identity: "
                     f"{event.dedupe_key}"
                 )
+            commit_row = self.connection.execute(
+                """SELECT append_generation
+                   FROM market_event_commit_order
+                   WHERE dedupe_key=?""",
+                (event.dedupe_key,),
+            ).fetchone()
+            if (
+                commit_row is None
+                or type(commit_row[0]) is not int
+                or commit_row[0] < 0
+            ):
+                raise ValueError(
+                    "duplicate market event lacks valid append-generation authority"
+                )
             return False
+
+        self.connection.execute(
+            """INSERT INTO market_event_commit_order
+               (dedupe_key, append_generation)
+               VALUES (?, ?)""",
+            (event.dedupe_key, self._next_append_generation()),
+        )
         previous = self.connection.execute(
             f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
                 WHERE source_id=? AND quote_key=?""",
@@ -772,6 +920,89 @@ class SQLiteMarketStore:
                     (event_id,),
                 ).fetchall()
             events = [_event_from_history_row(row) for row in rows]
+        return sorted(events, key=_event_order_key)
+
+    def replay_events_at_frozen_cutoff(self, *, as_of: str) -> list[MarketEvent]:
+        """Return the exact durable history generation first frozen for as_of.
+
+        The first read of a causal cutoff atomically binds that normalized UTC
+        decision instant to the store's current product-owned append generation.
+        Later appends can be audited through events() and can appear under a
+        newly issued later cutoff, but they cannot rewrite this already-issued
+        cutoff even when their event-carried clocks are backdated.
+        """
+
+        canonical_as_of = _canonical_replay_cutoff(as_of)
+        cutoff_id = _replay_cutoff_id(canonical_as_of)
+        with self._connection_lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._validate_causal_replay_state()
+                current_row = self.connection.execute(
+                    """SELECT as_of, max_append_generation
+                       FROM market_replay_cutoffs
+                       WHERE cutoff_id=?""",
+                    (cutoff_id,),
+                ).fetchone()
+                if current_row is None:
+                    generation_row = self.connection.execute(
+                        """SELECT COALESCE(MAX(append_generation), 0)
+                           FROM market_event_commit_order"""
+                    ).fetchone()
+                    if (
+                        generation_row is None
+                        or type(generation_row[0]) is not int
+                        or generation_row[0] < 0
+                    ):
+                        raise ValueError(
+                            "cannot freeze causal replay append generation"
+                        )
+                    max_generation = generation_row[0]
+                    self.connection.execute(
+                        """INSERT INTO market_replay_cutoffs
+                           (cutoff_id, as_of, max_append_generation)
+                           VALUES (?, ?, ?)""",
+                        (cutoff_id, canonical_as_of, max_generation),
+                    )
+                else:
+                    stored_as_of, max_generation = current_row
+                    if (
+                        stored_as_of != canonical_as_of
+                        or type(max_generation) is not int
+                        or max_generation < 0
+                        or cutoff_id != _replay_cutoff_id(str(stored_as_of))
+                    ):
+                        raise ValueError("causal replay cutoff authority is invalid")
+                    latest_row = self.connection.execute(
+                        """SELECT COALESCE(MAX(append_generation), 0)
+                           FROM market_event_commit_order"""
+                    ).fetchone()
+                    if (
+                        latest_row is None
+                        or type(latest_row[0]) is not int
+                        or max_generation > latest_row[0]
+                    ):
+                        raise ValueError(
+                            "causal replay cutoff references unavailable generation"
+                        )
+
+                qualified_columns = ",".join(
+                    f"m.{column}" for column in _HISTORY_COLUMNS
+                )
+                rows = self.connection.execute(
+                    f"""SELECT {qualified_columns}
+                        FROM market_events AS m
+                        JOIN market_event_commit_order AS c
+                          ON c.dedupe_key = m.dedupe_key
+                        WHERE c.append_generation <= ?""",
+                    (max_generation,),
+                ).fetchall()
+                events = [_event_from_history_row(row) for row in rows]
+            except Exception:
+                self.connection.rollback()
+                raise
+            else:
+                self.connection.commit()
         return sorted(events, key=_event_order_key)
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:

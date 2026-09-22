@@ -56,10 +56,15 @@ def _path_digest(root: Path, path: Path) -> str:
 
 
 _PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
+_PERCENT_HEX_BYTES = re.compile(rb"%[0-9A-Fa-f]{2}")
 
 
 def _lower_percent_hex(value: str) -> str:
     return _PERCENT_HEX.sub(lambda match: match.group(0).lower(), value)
+
+
+def _lower_percent_hex_bytes(value: bytes) -> bytes:
+    return _PERCENT_HEX_BYTES.sub(lambda match: match.group(0).lower(), value)
 
 
 def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
@@ -98,10 +103,16 @@ def _scan_file(
             if not chunk:
                 break
             window = tail + chunk
+            normalized_percent_window: bytes | None = None
             for needle, labels in needles:
                 if any(label in found for label in labels):
                     continue
-                if needle in window:
+                haystack = window
+                if "url-percent-utf8-lower" in labels:
+                    if normalized_percent_window is None:
+                        normalized_percent_window = _lower_percent_hex_bytes(window)
+                    haystack = normalized_percent_window
+                if needle in haystack:
                     found.update(labels)
             if len(found) == sum(len(labels) for _needle, labels in needles):
                 break

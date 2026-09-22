@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow, Underflow, localcontext
 
 from .agents import AgentContext
 from .decision_ledger import (
@@ -130,6 +130,31 @@ class PaperValueAgent:
             context.paper_book,
             expected_profit_per_unit,
         )
+    @staticmethod
+    def _risk_amount(event: MarketEvent, chosen_stake: Decimal) -> Decimal | None:
+        """Return bankroll capital at risk while preserving the provider order-stake unit."""
+
+        if event.exchange_side != "lay":
+            return chosen_stake
+
+        # chosen_stake remains the LAY order-stake unit. PaperRiskPolicy receives
+        # committed bankroll capital, so LAY must present maximum-loss liability.
+        # Match the canonical paper-risk Decimal envelope and fail closed rather
+        # than silently rounding an exposure amount.
+        arithmetic = Context(prec=28, Emin=-999999, Emax=999999)
+        arithmetic.traps[Inexact] = True
+        arithmetic.traps[InvalidOperation] = True
+        arithmetic.traps[Overflow] = True
+        arithmetic.traps[Underflow] = True
+        arithmetic.clear_flags()
+        try:
+            with localcontext(arithmetic):
+                liability = chosen_stake * (event.decimal_odds - Decimal("1"))
+        except ArithmeticError:
+            return None
+        if not liability.is_finite() or liability <= 0:
+            return None
+        return liability
 
     def _reconcile_existing_economic_action(
         self,
@@ -363,9 +388,12 @@ class PaperValueAgent:
         # risk gate. Re-evaluating after an accepted/partial ticket would resize
         # against changed exposure and could mint a different #623 plan.
         if persisted is None:
+            risk_amount = self._risk_amount(event, chosen_stake)
+            if risk_amount is None:
+                return
             risk = self.risk_policy.evaluate(
                 context.paper_book,
-                chosen_stake,
+                risk_amount,
                 context=proposal_context,
             )
             if not risk.allowed:

@@ -44,7 +44,7 @@ class MatchbookReadForbidden(MatchbookSessionTransportError):
     pass
 
 
-class MatchbookStaleGenerationResponse(MatchbookSessionTransportError):
+class MatchbookStaleGenerationResponse(SessionLifecycleError):
     pass
 
 
@@ -237,9 +237,7 @@ class MatchbookReadOnlySessionTransport:
 
     def logout(self) -> None:
         if self._logout is None:
-            raise MatchbookSessionTransportError(
-                "Matchbook logout transport is not configured"
-            )
+            raise ValueError("Matchbook logout transport is not configured")
 
         with self._lock:
             session = self._live_session
@@ -270,14 +268,12 @@ class MatchbookReadOnlySessionTransport:
                     generation_id=session.generation_id,
                     monotonic_ns=logout_ns,
                 )
-            except (SessionLifecycleError, MatchbookSessionTransportError):
+            except SessionLifecycleError:
                 # Provider already confirmed logout. Never retain local token authority
                 # merely because the local audit/lifecycle commit could not complete.
                 self._live_session = None
                 self._condition.notify_all()
-                raise MatchbookSessionTransportError(
-                    "Matchbook logout could not be committed to session lifecycle"
-                ) from None
+                raise
             self._live_session = None
             self._condition.notify_all()
 
@@ -286,7 +282,7 @@ class MatchbookReadOnlySessionTransport:
     ) -> None:
         try:
             commit_ns = self._clock()
-        except MatchbookSessionTransportError:
+        except SessionLifecycleError:
             self._clear_matching_live_session(ticket.generation_id)
             raise
         try:
@@ -430,7 +426,7 @@ class MatchbookReadOnlySessionTransport:
                     generation_id=generation_id,
                     monotonic_ns=self._clock(),
                 )
-            except (SessionLifecycleError, MatchbookSessionTransportError):
+            except SessionLifecycleError:
                 # Clear local token authority regardless. A subsequent login rotates
                 # the lifecycle generation and invalidates any abandoned tickets.
                 pass
@@ -441,11 +437,9 @@ class MatchbookReadOnlySessionTransport:
         try:
             value = self._clock_ns()
         except Exception:
-            raise MatchbookSessionTransportError(
-                "Matchbook session clock failed"
-            ) from None
+            raise SessionLifecycleError("Matchbook session clock failed") from None
         if type(value) is not int or value < 0:
-            raise MatchbookSessionTransportError(
+            raise SessionLifecycleError(
                 "Matchbook session clock must return a non-negative integer"
             )
         return value

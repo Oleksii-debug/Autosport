@@ -143,45 +143,87 @@ _ISSUED: dict[
 ] = {}
 
 
+_MAX_EXACT_PRECISION = 4096
+
+
 def _decimal_text(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ExecutionCapitalAtRiskError("capital value must be a finite Decimal")
-    # Decimal.normalize() obeys the ambient context and can round under low
-    # precision. Formatting the exact coefficient first keeps evidence identity
-    # independent of caller Decimal settings.
-    text = format(value, "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    if value.is_zero():
+        return "0"
+    sign, raw_digits, raw_exponent = value.as_tuple()
+    digits = list(raw_digits)
+    exponent = int(raw_exponent)
+    while digits and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits) or "0"
+    prefix = "-" if sign else ""
+    return f"{prefix}{coefficient}e{exponent}"
 
 
-def _precision(*values: Decimal) -> int:
-    digits = sum(max(1, len(value.as_tuple().digits)) for value in values)
-    return max(64, digits + 16)
+def _bounded_precision(required: int) -> int:
+    precision = max(64, required)
+    if precision > _MAX_EXACT_PRECISION:
+        raise ExecutionCapitalAtRiskUnsupported(
+            "execution Decimal scale exceeds exact risk-arithmetic bound"
+        )
+    return precision
+
+
+def _add_precision(*values: Decimal) -> int:
+    exponents = [int(value.as_tuple().exponent) for value in values]
+    minimum_exponent = min(exponents)
+    aligned_widths = [
+        max(1, len(value.as_tuple().digits))
+        + int(value.as_tuple().exponent)
+        - minimum_exponent
+        for value in values
+    ]
+    return _bounded_precision(max(aligned_widths) + 2)
+
+
+def _multiply_precision(left: Decimal, right: Decimal) -> int:
+    required = (
+        max(1, len(left.as_tuple().digits))
+        + max(1, len(right.as_tuple().digits))
+        + 2
+    )
+    return _bounded_precision(required)
 
 
 def _add(left: Decimal, right: Decimal) -> Decimal:
     with localcontext() as context:
-        context.prec = _precision(left, right)
+        context.prec = _add_precision(left, right)
         return left + right
 
 
-def _subtract_nonnegative(left: Decimal, right: Decimal) -> Decimal:
+def _subtract(left: Decimal, right: Decimal) -> Decimal:
     with localcontext() as context:
-        context.prec = _precision(left, right)
-        result = left - right
+        context.prec = _add_precision(left, right)
+        return left - right
+
+
+def _subtract_nonnegative(left: Decimal, right: Decimal) -> Decimal:
+    result = _subtract(left, right)
     if result < 0:
         return Decimal(0)
     return result
 
 
-def _lay_liability(stake: Decimal, odds: Decimal) -> Decimal:
+def _multiply(left: Decimal, right: Decimal) -> Decimal:
     with localcontext() as context:
-        context.prec = _precision(stake, odds)
-        price_minus_one = odds - Decimal(1)
-        if price_minus_one <= 0:
-            raise ExecutionCapitalAtRiskUnsupported(
-                "LAY odds must be greater than one"
-            )
-        return stake * price_minus_one
+        context.prec = _multiply_precision(left, right)
+        return left * right
+
+
+def _lay_liability(stake: Decimal, odds: Decimal) -> Decimal:
+    price_minus_one = _subtract(odds, Decimal(1))
+    if price_minus_one <= 0:
+        raise ExecutionCapitalAtRiskUnsupported(
+            "LAY odds must be greater than one"
+        )
+    return _multiply(stake, price_minus_one)
 
 
 def _capital_at_terms(side: str, stake: Decimal, odds: Decimal) -> Decimal:

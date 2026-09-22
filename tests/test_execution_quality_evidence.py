@@ -470,7 +470,6 @@ def test_post_issuance_quality_mutation_invalidates_issuance(tmp_path):
         validate_paper_execution_quality_report(report)
 
 
-
 def test_quality_decimal_arithmetic_and_identity_ignore_ambient_context(tmp_path):
     row = _row("decimal-context")
     frozen = _universe(tmp_path, (row,))
@@ -504,6 +503,7 @@ def test_distinct_high_precision_execution_odds_do_not_alias_under_low_precision
     tmp_path,
 ):
     def project(path, execution_odds):
+        path.mkdir()
         row = _row("decimal-distinct")
         frozen = _universe(path, (row,))
         ledger, _ = _ledger_with_outcome(

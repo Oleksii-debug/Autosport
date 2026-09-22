@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
@@ -110,7 +110,7 @@ def _provider_identity(value: object, *, field: str, allow_colon: bool = True) -
     return value
 
 
-def _decode_provider_json(raw: bytes) -> Any:
+def _decode_provider_json(raw: bytes, *, exact_decimals: bool = False) -> Any:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -132,6 +132,7 @@ def _decode_provider_json(raw: bytes) -> Any:
             text,
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_non_finite,
+            parse_float=Decimal if exact_decimals else float,
         )
     except json.JSONDecodeError as exc:
         raise ProviderPayloadError("provider returned invalid JSON") from exc
@@ -151,7 +152,8 @@ def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> 
         opener = build_opener(_RejectAuthenticatedRedirects())
         with opener.open(request, timeout=timeout) as response:  # nosec B310 - caller pins HTTPS provider URL
             raw = response.read()
-            payload = _decode_provider_json(raw)
+            exact_decimals = urlsplit(url).path.rstrip("/").endswith("/odds")
+            payload = _decode_provider_json(raw, exact_decimals=exact_decimals)
             return HttpJsonResponse(payload, int(response.status), dict(response.headers.items()))
     except HTTPError as exc:
         retry_after = _parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)

@@ -146,6 +146,146 @@ class MultiSportProductSourceTests(unittest.TestCase):
             self.assertEqual(delta.stream_epoch, page.stream_epoch)
             self.assertEqual(event.sport, "basketball_nba")
 
+    def test_null_commence_time_preserves_quote_without_minting_lifecycle_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quote = _quote(sport_key="basketball_nba")
+            quote.metadata["commence_time"] = None
+            source = ParlayApiProductSource(
+                _Provider(
+                    "basketball_nba",
+                    [
+                        ProviderBatch(
+                            source_id="parlayapi:basketball_nba",
+                            quotes=(quote,),
+                            cursor="basketball-null-commence-1",
+                        )
+                    ],
+                ),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-21T12:00:01+00:00",
+            )
+
+            page = source.fetch_catalog_page(None)
+            self.assertEqual(page.events, ())
+
+            delta = source.fetch_deltas(None, (), 1)[0]
+            event = source.resolve_event(delta)
+            self.assertIn("commence_time", event.metadata)
+            self.assertIsNone(event.metadata["commence_time"])
+
+    def test_missing_commence_time_field_remains_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quote = _quote(sport_key="basketball_nba")
+            quote.metadata.pop("commence_time")
+            source = ParlayApiProductSource(
+                _Provider(
+                    "basketball_nba",
+                    [
+                        ProviderBatch(
+                            source_id="parlayapi:basketball_nba",
+                            quotes=(quote,),
+                            cursor="basketball-missing-commence-1",
+                        )
+                    ],
+                ),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "requires commence_time field",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_malformed_reported_commence_time_remains_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quote = _quote(sport_key="basketball_nba")
+            quote.metadata["commence_time"] = "not-a-time"
+            source = ParlayApiProductSource(
+                _Provider(
+                    "basketball_nba",
+                    [
+                        ProviderBatch(
+                            source_id="parlayapi:basketball_nba",
+                            quotes=(quote,),
+                            cursor="basketball-malformed-commence-1",
+                        )
+                    ],
+                ),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "timezone-aware commence_time when reported",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_same_event_cannot_mix_null_and_reported_commence_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = _quote(sport_key="basketball_nba", sequence=1)
+            missing.metadata["commence_time"] = None
+            reported = _quote(sport_key="basketball_nba", sequence=2)
+            source = ParlayApiProductSource(
+                _Provider(
+                    "basketball_nba",
+                    [
+                        ProviderBatch(
+                            source_id="parlayapi:basketball_nba",
+                            quotes=(missing, reported),
+                            cursor="basketball-mixed-commence-1",
+                        )
+                    ],
+                ),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "contradicts commence_time evidence within one event",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_same_event_cannot_report_conflicting_commence_times(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first = _quote(sport_key="basketball_nba", sequence=1)
+            second = _quote(sport_key="basketball_nba", sequence=2)
+            second.metadata["commence_time"] = "2026-09-21T19:00:00+00:00"
+            source = ParlayApiProductSource(
+                _Provider(
+                    "basketball_nba",
+                    [
+                        ProviderBatch(
+                            source_id="parlayapi:basketball_nba",
+                            quotes=(first, second),
+                            cursor="basketball-conflicting-commence-1",
+                        )
+                    ],
+                ),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "contradicts commence_time evidence within one event",
+            ):
+                source.fetch_catalog_page(None)
+
     def test_basketball_product_source_reopens_exact_durable_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

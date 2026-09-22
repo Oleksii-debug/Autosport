@@ -72,7 +72,11 @@ def _decimal(value: object, field: str, *, positive: bool = False) -> Decimal:
 
 
 def _aware_utc(value: object, field: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None:
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise MatchbookOfferEditReconciliationError(
             f"{field} must be a timezone-aware datetime"
         )

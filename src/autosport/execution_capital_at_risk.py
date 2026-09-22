@@ -61,7 +61,7 @@ class AttemptCapitalAtRisk:
             or self.max_plausible_capital_at_risk is None
         ):
             return CapitalRiskTruth.UNBOUNDED_CONTINGENT
-        return CapitalRiskTruth.EXACT
+        return CapitalRiskTruth.CONSERVATIVE_BOUND
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -93,7 +93,7 @@ class ExecutionCapitalAtRiskEvidence:
             or self.max_plausible_capital_at_risk is None
         ):
             return CapitalRiskTruth.UNBOUNDED_CONTINGENT
-        return CapitalRiskTruth.EXACT
+        return CapitalRiskTruth.CONSERVATIVE_BOUND
 
     def assert_issued_current(self, ledger: RealExecutionLedger) -> None:
         """Prove canonical in-process issuance and unchanged durable ledger bytes.

@@ -15,8 +15,6 @@ class _Value:
         self.value = value
 
 
-
-
 def test_research_plan_not_required_status_precedes_blocking_modal() -> None:
     app = object.__new__(AutosportApp)
     app.dataset_worker = SimpleNamespace(busy=False)
@@ -51,6 +49,7 @@ def test_research_plan_not_required_status_precedes_blocking_modal() -> None:
         strategy_id="non-research-strategy",
     )
     showinfo.assert_called_once()
+
 
 def test_research_plan_validation_status_precedes_blocking_modal() -> None:
     app = object.__new__(AutosportApp)

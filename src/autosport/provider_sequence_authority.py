@@ -88,6 +88,7 @@ class SQLiteProviderSequenceAuthority:
         try:
             self._configure_connection(connection)
             connection.execute("BEGIN IMMEDIATE")
+            self._require_wal_mode(connection)
             self._validate_schema_and_authority(connection)
             row = connection.execute(
                 "SELECT last_sequence FROM provider_sequences_v1 WHERE source_id=?",
@@ -269,6 +270,7 @@ class SQLiteProviderSequenceAuthority:
         connection = self._connect_existing()
         try:
             self._configure_connection(connection)
+            self._require_wal_mode(connection)
             self._validate_schema_and_authority(connection)
         except sqlite3.Error as exc:
             raise ProviderSequenceAuthorityError(
@@ -299,6 +301,14 @@ class SQLiteProviderSequenceAuthority:
         connection.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA synchronous=FULL")
+
+    @staticmethod
+    def _require_wal_mode(connection: sqlite3.Connection) -> None:
+        row = connection.execute("PRAGMA journal_mode").fetchone()
+        if row is None or len(row) != 1 or str(row[0]).lower() != "wal":
+            raise ProviderSequenceAuthorityError(
+                "provider sequence authority requires SQLite WAL mode"
+            )
 
     def _validate_schema_and_authority(self, connection: sqlite3.Connection) -> None:
         expected_meta = (

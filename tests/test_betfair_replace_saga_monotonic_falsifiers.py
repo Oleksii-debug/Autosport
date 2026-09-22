@@ -328,3 +328,22 @@ def test_journal_path_identity_preserves_lexical_reparse_location(tmp_path):
     assert os.fspath(store._absolute_path().parent) == os.path.abspath(
         os.fspath(alias)
     )
+
+
+def test_relative_journal_path_identity_is_frozen_across_cwd_change(
+    tmp_path,
+    monkeypatch,
+):
+    first_cwd = tmp_path / "first-cwd"
+    second_cwd = tmp_path / "second-cwd"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+
+    monkeypatch.chdir(first_cwd)
+    store = BetfairReplaceSagaStore("state/replace-sagas.jsonl")
+    expected = first_cwd / "state" / "replace-sagas.jsonl"
+
+    monkeypatch.chdir(second_cwd)
+
+    assert store.path == expected
+    assert store._absolute_path() == expected

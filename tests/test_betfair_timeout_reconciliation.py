@@ -170,6 +170,7 @@ def _resolve(
     absence_floor: str | None = None,
     absence_ceiling: str | None = None,
     capture_started_at: str | None = None,
+    elapsed_visibility_ready: bool = True,
 ):
     calls = []
 
@@ -192,6 +193,11 @@ def _resolve(
         timeout_resolution,
         "_betfair_readback_capture_started_at",
         lambda readback: capture_started_at or evidence.observed_at,
+    )
+    monkeypatch.setattr(
+        timeout_resolution,
+        "_timeout_elapsed_visibility_ready",
+        lambda ledger, attempt_id, capture_started_monotonic_ns: elapsed_visibility_ready,
     )
     result = timeout_resolution.resolve_betfair_timeout_provider_state(
         ledger,
@@ -396,6 +402,11 @@ def test_direct_generic_bound_absence_is_not_timeout_authoritative(
     with pytest.raises(ProviderEvidenceError, match="timeout-horizon authority"):
         provider_evidence.assert_verified_provider_evidence_authoritative(direct)
 
+    monkeypatch.setattr(
+        timeout_resolution,
+        "_timeout_elapsed_visibility_ready",
+        lambda ledger, attempt_id, capture_started_monotonic_ns: True,
+    )
     resolved = timeout_resolution.resolve_betfair_timeout_provider_state(
         ledger,
         action,
@@ -533,6 +544,146 @@ def test_missing_durable_provider_ref_cannot_mint_timeout_authority(
             attempt_id="attempt-1",
             expected_profile_sha256="a" * 64,
             readback=object(),
+        )
+
+
+def _set_timeout_authority_wall_clock(monkeypatch, value: str) -> None:
+    fixed = datetime.fromisoformat(value)
+
+    class _AuthorityDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(timeout_resolution, "datetime", _AuthorityDateTime)
+
+
+def test_first_postdeadline_negative_capture_never_proves_elapsed_horizon(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    _set_timeout_authority_wall_clock(
+        monkeypatch, "2026-09-21T18:00:16+00:00"
+    )
+    ticks = iter([1_000_000_000])
+    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
+
+    capture = _empty_provider_capture(action, provider_ref)
+    result = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        _profile(),
+        attempt_id="attempt-1",
+        expected_profile_sha256=_profile().profile_id,
+        readback=capture,
+    )
+
+    assert (
+        result.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+    )
+    assert result.evidence is None
+
+
+def test_fresh_negative_capture_after_full_monotonic_horizon_can_issue_absence(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    _set_timeout_authority_wall_clock(
+        monkeypatch, "2026-09-21T18:00:16+00:00"
+    )
+    ticks = iter([1_000_000_000, 16_000_000_000])
+    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
+    profile = _profile()
+
+    first_capture = _empty_provider_capture(action, provider_ref)
+    first = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=first_capture,
+    )
+    assert (
+        first.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+    )
+    assert first.evidence is None
+
+    second_capture = _empty_provider_capture(action, provider_ref)
+    second = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=second_capture,
+    )
+    assert (
+        second.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
+    )
+    assert isinstance(second.evidence, VerifiedProviderAbsenceEvidence)
+    timeout_resolution.assert_betfair_timeout_absence_authoritative(second.evidence)
+
+
+def test_restart_requires_new_process_local_elapsed_horizon(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, path = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    _set_timeout_authority_wall_clock(
+        monkeypatch, "2026-09-21T18:00:16+00:00"
+    )
+    ticks = iter([1_000_000_000, 16_000_000_000])
+    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
+    profile = _profile()
+
+    first_capture = _empty_provider_capture(action, provider_ref)
+    first = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=first_capture,
+    )
+    assert first.evidence is None
+
+    restarted = RealExecutionLedger(path)
+    second_capture = _empty_provider_capture(action, provider_ref)
+    second = timeout_resolution.resolve_betfair_timeout_provider_state(
+        restarted,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=second_capture,
+    )
+    assert (
+        second.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+    )
+    assert second.evidence is None
+
+
+def test_monotonic_capture_regression_fails_closed(tmp_path, monkeypatch) -> None:
+    ledger, _, _, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert (
+        timeout_resolution._timeout_elapsed_visibility_ready(
+            ledger, "attempt-1", 100
+        )
+        is False
+    )
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="monotonic capture clock regressed",
+    ):
+        timeout_resolution._timeout_elapsed_visibility_ready(
+            ledger, "attempt-1", 99
         )
 
 

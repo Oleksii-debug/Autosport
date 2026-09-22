@@ -8,7 +8,7 @@ import tk_uia
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
-from .secret_redaction import safe_exception_text
+from .secret_redaction import redact_operator_text, safe_exception_text
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
@@ -229,7 +229,7 @@ def summarize_description(
                 f"automation_id={workbench_result_id}: manual calculation result is not runtime readonly"
             )
 
-    provider_trouble = [str(item) for item in description.provider_trouble]
+    provider_trouble = [redact_operator_text(str(item)) for item in description.provider_trouble]
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
 

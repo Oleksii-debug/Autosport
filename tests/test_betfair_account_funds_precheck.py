@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta, timezone
+from datetime import timedelta
 from decimal import Decimal
 import json
 import pickle
@@ -10,7 +10,11 @@ import pytest
 
 from autosport import betfair_account_funds_precheck as subject
 from autosport import betfair_account_readonly as _readonly
-from autosport.betfair_account_readonly import BetfairSessionCredentials
+from autosport.betfair_account_identity import build_betfair_authenticated_client
+from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
+    BetfairSessionCredentials,
+)
 
 
 class _Response:
@@ -92,14 +96,25 @@ def _install_provider(
     return methods
 
 
+def _client(
+    *,
+    application_key: str = "app-key",
+    session_token: str = "session-token",
+) -> BetfairReadOnlyClient:
+    return build_betfair_authenticated_client(
+        BetfairSessionCredentials(application_key, session_token),
+        account_label="funds-precheck-test",
+    )
+
+
 def _evaluate(
     *,
+    client: BetfairReadOnlyClient | None = None,
     required: Decimal = Decimal("25"),
     currency: str = "EUR",
-    credentials: BetfairSessionCredentials | None = None,
 ):
     return subject.evaluate_betfair_account_funds(
-        credentials or BetfairSessionCredentials("app-key", "session-token"),
+        client or _client(),
         required,
         required_currency_code=currency,
     )
@@ -122,12 +137,13 @@ class _AdversarialDecimal(Decimal):
         return True
 
 
-def test_happy_path_is_bound_to_product_issued_k07_context(
+def test_happy_path_is_bound_to_exact_product_issued_k07_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     methods = _install_provider(monkeypatch, balance=100)
+    client = _client()
 
-    result = _evaluate()
+    result = _evaluate(client=client)
 
     assert result.passed is True
     assert result.execution_authorized is False
@@ -137,6 +153,7 @@ def test_happy_path_is_bound_to_product_issued_k07_context(
     assert len(result.account_funds_sha256) == 64
     assert result.currency_code == "EUR"
     assert not hasattr(result, "account_id")
+    assert subject._ISSUED[id(result)].client is client
     assert subject.is_authoritative_funds_precheck(result)
     assert subject.require_authoritative_funds_precheck(result) is result
     assert methods == [
@@ -149,17 +166,13 @@ def test_identical_public_payloads_in_distinct_authenticated_contexts_do_not_ali
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch, balance=100)
+    first_client = _client(application_key="app-a", session_token="session-a")
+    second_client = _client(application_key="app-b", session_token="session-b")
 
-    first = _evaluate(
-        credentials=BetfairSessionCredentials("app-a", "session-a"),
-    )
-    second = _evaluate(
-        credentials=BetfairSessionCredentials("app-b", "session-b"),
-    )
+    first = _evaluate(client=first_client)
+    second = _evaluate(client=second_client)
 
     assert first.currency_code == second.currency_code == "EUR"
-    # Provider account-details/funds payloads are intentionally semantically equal.
-    # K07 still scopes each positive result to the exact authenticated session.
     assert first.account_context_id != second.account_context_id
     assert first.account_identity_id != second.account_identity_id
     assert first.precheck_id != second.precheck_id
@@ -167,15 +180,55 @@ def test_identical_public_payloads_in_distinct_authenticated_contexts_do_not_ali
     assert subject.is_authoritative_funds_precheck(second)
 
 
+def test_same_credentials_in_distinct_k07_clients_do_not_claim_cross_context_equivalence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    credentials = BetfairSessionCredentials("same-app", "same-session")
+    first_client = build_betfair_authenticated_client(
+        credentials,
+        account_label="first",
+    )
+    second_client = build_betfair_authenticated_client(
+        credentials,
+        account_label="second",
+    )
+
+    first = _evaluate(client=first_client)
+    second = _evaluate(client=second_client)
+
+    assert first.account_context_id != second.account_context_id
+    assert first.account_identity_id != second.account_identity_id
+
+
+def test_direct_unissued_readonly_client_cannot_mint_funds_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    methods = _install_provider(monkeypatch)
+    direct = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session"),
+        venue_id="betfair",
+        account_id="caller-label",
+    )
+
+    with pytest.raises(
+        subject.BetfairAccountFundsPrecheckError,
+        match="account-funds acquisition failed",
+    ):
+        _evaluate(client=direct)
+
+    assert methods == []
+
+
 def test_k07_session_rotation_revokes_existing_positive_funds_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch, balance=100)
-    result = _evaluate()
+    client = _client()
+    result = _evaluate(client=client)
     assert subject.is_authoritative_funds_precheck(result)
 
-    record = subject._ISSUED[id(result)]
-    record.client._credentials = BetfairSessionCredentials(
+    client._credentials = BetfairSessionCredentials(
         "rotated-app-key",
         "rotated-session-token",
     )
@@ -190,11 +243,11 @@ def test_k07_transport_origin_rotation_revokes_existing_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch, balance=100)
-    result = _evaluate()
+    client = _client()
+    result = _evaluate(client=client)
     assert subject.is_authoritative_funds_precheck(result)
 
-    record = subject._ISSUED[id(result)]
-    record.client._transport = _readonly.UrllibBetfairHttpTransport()
+    client._transport = _readonly.UrllibBetfairHttpTransport()
 
     assert not subject.is_authoritative_funds_precheck(result)
 
@@ -228,9 +281,10 @@ def test_invalid_required_currency_fails_before_provider_read(
     bad_currency: str,
 ) -> None:
     methods = _install_provider(monkeypatch)
+    client = _client()
 
     with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="currency"):
-        _evaluate(currency=bad_currency)
+        _evaluate(client=client, currency=bad_currency)
 
     assert methods == []
 
@@ -244,9 +298,10 @@ def test_invalid_required_liability_fails_before_provider_read(
     bad: Decimal,
 ) -> None:
     methods = _install_provider(monkeypatch)
+    client = _client()
 
     with pytest.raises(subject.BetfairAccountFundsPrecheckError):
-        _evaluate(required=bad)
+        _evaluate(client=client, required=bad)
 
     assert methods == []
 
@@ -255,13 +310,14 @@ def test_adversarial_decimal_subclass_is_rejected_before_provider_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     methods = _install_provider(monkeypatch)
+    client = _client()
     required = _AdversarialDecimal("1000000")
 
     with pytest.raises(
         subject.BetfairAccountFundsPrecheckError,
         match="finite non-negative Decimal",
     ):
-        _evaluate(required=required)
+        _evaluate(client=client, required=required)
 
     assert methods == []
 
@@ -380,19 +436,21 @@ def test_precheck_identity_binds_economic_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch, balance=100)
+    client = _client()
 
-    left = _evaluate(required=Decimal("10"))
-    right = _evaluate(required=Decimal("11"))
+    left = _evaluate(client=client, required=Decimal("10"))
+    right = _evaluate(client=client, required=Decimal("11"))
 
+    assert left.account_context_id == right.account_context_id
     assert left.precheck_id != right.precheck_id
 
 
-def test_wrong_credentials_type_rejected_before_provider_read(
+def test_wrong_client_type_rejected_before_provider_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     methods = _install_provider(monkeypatch)
 
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="exact canonical"):
         subject.evaluate_betfair_account_funds(
             object(),
             Decimal("1"),

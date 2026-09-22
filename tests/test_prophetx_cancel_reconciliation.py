@@ -8,7 +8,9 @@ from autosport.prophetx_cancel_reconciliation import (
     CancelCause,
     CancelOutcome,
     CancelReject,
+    CancelRejectReason,
     CancelRequest,
+    CancelScope,
     CancelTransport,
     CanceledReport,
     Fill,
@@ -16,6 +18,7 @@ from autosport.prophetx_cancel_reconciliation import (
     ProphetXCancelConflict,
     ProphetXCancelError,
     RestTransportObservation,
+    RestTransportState,
     WorkingOrder,
     decode_checkpoint,
     encode_checkpoint,
@@ -37,6 +40,8 @@ def request(**kw):
         transport=CancelTransport.FIX,
     )
     d.update(kw)
+    if d["transport"] is CancelTransport.REST and "cancel_cl_ord_id" not in kw:
+        d["cancel_cl_ord_id"] = None
     return CancelRequest(**d)
 
 
@@ -128,7 +133,7 @@ def reject(
         provider_order_id="px-1",
         cancel_cl_ord_id="cancel-1",
         orig_cl_ord_id="orig-1",
-        reason="too late",
+        reason=CancelRejectReason.TOO_LATE,
         order_status=order_status,
         transact_time=f"2026-09-22T20:00:{seq:02d}Z",
         fix_session_id="sess",
@@ -140,7 +145,7 @@ def reject(
 
 def rest(
     http_status=None,
-    outcome_text="timeout",
+    state=RestTransportState.TIMEOUT_AFTER_POSSIBLE_SEND,
     **kw,
 ):
     d = dict(
@@ -149,7 +154,7 @@ def rest(
         account_id="acct",
         provider_order_id="px-1",
         http_status=http_status,
-        outcome_text=outcome_text,
+        state=state,
         observed_at="2026-09-22T20:00:03Z",
     )
     d.update(kw)
@@ -221,23 +226,23 @@ def test_full_fill_wins_race_and_cannot_be_relabelled_canceled():
 
 
 @pytest.mark.parametrize(
-    ("http_status", "outcome_text"),
+    ("http_status", "state"),
     [
-        (None, "timeout_after_possible_send"),
-        (404, "sample_already_cancelled_branch"),
-        (200, "malformed_or_unqualified_success_body"),
+        (None, RestTransportState.TIMEOUT_AFTER_POSSIBLE_SEND),
+        (404, RestTransportState.HTTP_404_SAMPLE_AMBIGUOUS),
+        (200, RestTransportState.MALFORMED_OR_UNQUALIFIED_RESPONSE),
     ],
 )
 def test_rest_transport_result_never_mints_terminal_truth(
     http_status,
-    outcome_text,
+    state,
 ):
     p = reconcile_cancel(
         working(),
         [
             rest(
                 http_status=http_status,
-                outcome_text=outcome_text,
+                state=state,
             )
         ],
         request=request(
@@ -637,6 +642,35 @@ def test_sandbox_evidence_never_claims_readiness_or_real_money_truth():
         "readiness",
     )
     assert request().environment == "sandbox"
+
+
+def test_rest_request_has_no_fix_cancel_clordid_and_scope_is_frozen():
+    req = request(transport=CancelTransport.REST)
+    assert req.cancel_cl_ord_id is None
+    assert req.scope is CancelScope.WHOLE_REMAINDER
+    with pytest.raises(ProphetXCancelError):
+        request(
+            transport=CancelTransport.REST,
+            cancel_cl_ord_id="invented-fix-id",
+        )
+
+
+def test_cancel_reject_reason_is_closed_provider_contract():
+    with pytest.raises(ProphetXCancelError):
+        reject(reason="too late")
+    assert (
+        reject(reason=CancelRejectReason.UNKNOWN_ORDER).reason
+        is CancelRejectReason.UNKNOWN_ORDER
+    )
+
+
+def test_rest_transport_state_is_closed_contract():
+    with pytest.raises(ProphetXCancelError):
+        rest(state="timeout")
+    assert (
+        rest(state=RestTransportState.HTTP_200_UNQUALIFIED).state
+        is RestTransportState.HTTP_200_UNQUALIFIED
+    )
 
 
 def test_working_order_state_invariants():

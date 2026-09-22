@@ -349,15 +349,38 @@ def test_order_disappearance_requires_explicit_final_evidence():
     assert evidence.absent_bet_ids == ("bet-1",)
 
 
-def test_proven_absence_can_terminalize_single_order_without_inventing_no_exposure(tmp_path):
+def test_opaque_final_digest_cannot_terminalize_disappeared_single_order(tmp_path):
     store, _ = submitted_store(tmp_path)
     snap = store.record_reconciliation(
         "cancel-saga-1",
         reconciliation(absent=("bet-1",), complete=True, final_sha=SHA_C),
     )
-    assert snap.state is CancelSagaState.CANCEL_RECONCILED
+    assert snap.state is CancelSagaState.SUBMITTED_UNKNOWN
+    assert snap.retry_disposition is CancelRetryDisposition.READBACK_REQUIRED
+    assert snap.exposure.provider_verified is False
     assert snap.exposure.matched_bet_ids == ("bet-1",)
+    assert snap.exposure.executable_bet_ids == ()
+    assert snap.exposure.unresolved_bet_ids == ("bet-1",)
     assert snap.exposure.portfolio_reset_proven is False
+
+    restarted = BetfairCancelSagaStore(store.path).snapshot("cancel-saga-1")
+    assert restarted.state is CancelSagaState.SUBMITTED_UNKNOWN
+    assert restarted.retry_disposition is CancelRetryDisposition.READBACK_REQUIRED
+    assert restarted.exposure.provider_verified is False
+    assert restarted.exposure.unresolved_bet_ids == ("bet-1",)
+
+
+def test_provider_success_plus_opaque_disappearance_stays_unverified(tmp_path):
+    store, _ = submitted_store(tmp_path)
+    store.record_provider_result("cancel-saga-1", provider())
+    snap = store.record_reconciliation(
+        "cancel-saga-1",
+        reconciliation(absent=("bet-1",), complete=True, final_sha=SHA_C),
+    )
+    assert snap.state is CancelSagaState.PROVIDER_RESULT_UNVERIFIED
+    assert snap.retry_disposition is CancelRetryDisposition.READBACK_REQUIRED
+    assert snap.exposure.provider_verified is False
+    assert snap.exposure.unresolved_bet_ids == ("bet-1",)
 
 
 def test_market_scope_complete_readback_with_no_executable_limit_orders_reconciles(tmp_path):

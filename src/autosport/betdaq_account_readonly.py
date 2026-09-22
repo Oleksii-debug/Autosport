@@ -839,7 +839,27 @@ def _to_open_position(
     account_id: str,
     currency: str,
 ) -> BookmakerPositionObservation:
-    odds = order.matched_price if order.matched_stake > 0 else order.requested_price
+    # Current UNMATCHED/MATCHED/SUSPENDED orders can still carry an unmatched
+    # remainder.  That quantity remains provider-side order exposure/reservation
+    # evidence and must not disappear merely because BookmakerPositionObservation
+    # has one provider_amount field.  A cancelled order's unmatched remainder is no
+    # longer live, so only its already-matched portion remains economically relevant.
+    active_unmatched = (
+        order.unmatched_stake if order.status_code in {1, 2, 6} else Decimal(0)
+    )
+    provider_amount = _exact_decimal_sum(order.matched_stake, active_unmatched)
+
+    # One decimal_odds value cannot truthfully represent both the average matched
+    # price and a different requested price for a still-unmatched remainder.
+    if order.matched_stake > 0 and active_unmatched > 0:
+        odds = None
+    elif order.matched_stake > 0:
+        odds = order.matched_price
+    elif active_unmatched > 0:
+        odds = order.requested_price
+    else:
+        odds = None
+
     return BookmakerPositionObservation(
         venue_id,
         account_id,
@@ -850,11 +870,43 @@ def _to_open_position(
         currency,
         order.evidence.observed_at,
         order.evidence.source_payload_sha256,
-        provider_amount=order.matched_stake,
-        provider_amount_semantics="betdaq_matched_stake",
+        provider_amount=provider_amount,
+        provider_amount_semantics="betdaq_matched_plus_active_unmatched_stake",
         provider_side=order.polarity,
         decimal_odds=odds,
     )
+
+
+def _exact_decimal_sum(left: Decimal, right: Decimal) -> Decimal:
+    """Add provider Decimal quantities without ambient-context rounding."""
+
+    left = _finite_decimal(left, "left")
+    right = _finite_decimal(right, "right")
+
+    def signed_coefficient(value: Decimal) -> tuple[int, int]:
+        sign, digits, exponent = value.as_tuple()
+        coefficient = 0
+        for digit in digits:
+            coefficient = (coefficient * 10) + digit
+        return (-coefficient if sign else coefficient), exponent
+
+    left_coefficient, left_exponent = signed_coefficient(left)
+    right_coefficient, right_exponent = signed_coefficient(right)
+    common_exponent = min(left_exponent, right_exponent)
+    left_coefficient *= 10 ** (left_exponent - common_exponent)
+    right_coefficient *= 10 ** (right_exponent - common_exponent)
+    coefficient = left_coefficient + right_coefficient
+
+    if coefficient == 0:
+        return Decimal(0)
+
+    while coefficient % 10 == 0:
+        coefficient //= 10
+        common_exponent += 1
+
+    sign = 1 if coefficient < 0 else 0
+    digits = tuple(int(character) for character in str(abs(coefficient)))
+    return Decimal((sign, digits, common_exponent))
 
 
 def _validate_strict_sequence(

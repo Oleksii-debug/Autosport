@@ -8,23 +8,23 @@ from enum import Enum
 from typing import Any, Iterable
 
 
-class ApiGroupAuthorityError(RuntimeError):
+class MatchbookApiGroupAuthorityError(RuntimeError):
     """Base error for deterministic Matchbook API-group classification."""
 
 
-class UnknownEndpoint(ApiGroupAuthorityError):
+class UnknownEndpoint(MatchbookApiGroupAuthorityError):
     """No documented endpoint authority matches the exact method/path."""
 
 
-class AmbiguousEndpointAuthority(ApiGroupAuthorityError):
+class AmbiguousEndpointAuthority(MatchbookApiGroupAuthorityError):
     """Two endpoint templates could classify the same request."""
 
 
-class InvalidEndpointEvidence(ApiGroupAuthorityError):
+class InvalidEndpointEvidence(MatchbookApiGroupAuthorityError):
     """Endpoint authority metadata is malformed."""
 
 
-class ApiGroup(str, Enum):
+class MatchbookApiGroup(str, Enum):
     ACCOUNT = "ACCOUNT"
     EVENTS = "EVENTS"
     SECURITY = "SECURITY"
@@ -125,7 +125,7 @@ class EndpointSpec:
     operation_id: str
     method: str
     path_template: str
-    group: ApiGroup
+    group: MatchbookApiGroup
     source_url: str
     evidence_as_of: str = EVIDENCE_AS_OF
 
@@ -135,8 +135,8 @@ class EndpointSpec:
         object.__setattr__(
             self, "path_template", _validate_path(self.path_template, template=True)
         )
-        if type(self.group) is not ApiGroup:
-            raise InvalidEndpointEvidence("group must be ApiGroup")
+        if type(self.group) is not MatchbookApiGroup:
+            raise InvalidEndpointEvidence("group must be MatchbookApiGroup")
         source = _text(self.source_url, field="source_url")
         if not source.startswith("https://developers.matchbook.com/"):
             raise InvalidEndpointEvidence("source_url must be an official Matchbook developer URL")
@@ -161,7 +161,7 @@ class ClassificationReceipt:
     method: str
     path: str
     path_template: str
-    group: ApiGroup
+    group: MatchbookApiGroup
     source_url: str
     evidence_as_of: str
     registry_sha256: str
@@ -242,126 +242,126 @@ DEFAULT_ENDPOINT_SPECS: tuple[EndpointSpec, ...] = (
         "matchbook.security.login",
         "POST",
         "/bpapi/rest/security/session",
-        ApiGroup.SECURITY,
+        MatchbookApiGroup.SECURITY,
         "https://developers.matchbook.com/reference/login",
     ),
     EndpointSpec(
         "matchbook.security.logout",
         "DELETE",
         "/bpapi/rest/security/session",
-        ApiGroup.SECURITY,
+        MatchbookApiGroup.SECURITY,
         "https://developers.matchbook.com/reference/logout",
     ),
     EndpointSpec(
         "matchbook.account.get",
         "GET",
         "/edge/rest/account",
-        ApiGroup.ACCOUNT,
+        MatchbookApiGroup.ACCOUNT,
         "https://developers.matchbook.com/reference/get-account",
     ),
     EndpointSpec(
         "matchbook.account.balance",
         "GET",
         "/edge/rest/account/balance",
-        ApiGroup.ACCOUNT,
+        MatchbookApiGroup.ACCOUNT,
         "https://developers.matchbook.com/reference/get-new-wallet-balance",
     ),
     EndpointSpec(
         "matchbook.account.sports",
         "GET",
         "/edge/rest/account/sports",
-        ApiGroup.ACCOUNT,
+        MatchbookApiGroup.ACCOUNT,
         "https://developers.matchbook.com/reference/account-sports",
     ),
     EndpointSpec(
         "matchbook.navigation.get",
         "GET",
         "/edge/rest/navigation",
-        ApiGroup.NAVIGATION,
+        MatchbookApiGroup.NAVIGATION,
         "https://developers.matchbook.com/reference/get-navigation",
     ),
     EndpointSpec(
         "matchbook.events.list",
         "GET",
         "/edge/rest/events",
-        ApiGroup.EVENTS,
+        MatchbookApiGroup.EVENTS,
         "https://developers.matchbook.com/reference/get-events",
     ),
     EndpointSpec(
         "matchbook.events.get",
         "GET",
         "/edge/rest/events/{event_id}",
-        ApiGroup.EVENTS,
+        MatchbookApiGroup.EVENTS,
         "https://developers.matchbook.com/reference/get-event",
     ),
     EndpointSpec(
         "matchbook.markets.list",
         "GET",
         "/edge/rest/events/{event_id}/markets",
-        ApiGroup.EVENTS,
+        MatchbookApiGroup.EVENTS,
         "https://developers.matchbook.com/reference/get-markets",
     ),
     EndpointSpec(
         "matchbook.runners.list",
         "GET",
         "/edge/rest/events/{event_id}/markets/{market_id}/runners",
-        ApiGroup.EVENTS,
+        MatchbookApiGroup.EVENTS,
         "https://developers.matchbook.com/reference/get-runners",
     ),
     EndpointSpec(
         "matchbook.prices.get",
         "GET",
         "/edge/rest/events/{event_id}/markets/{market_id}/runners/{runner_id}/prices",
-        ApiGroup.EVENTS,
+        MatchbookApiGroup.EVENTS,
         "https://developers.matchbook.com/reference/get-prices",
     ),
     EndpointSpec(
         "matchbook.offers.list_unsettled",
         "GET",
         "/edge/rest/v2/offers",
-        ApiGroup.BETTING_READ,
+        MatchbookApiGroup.BETTING_READ,
         "https://developers.matchbook.com/reference/get-offers-v2",
     ),
     EndpointSpec(
         "matchbook.offers.get_unsettled",
         "GET",
         "/edge/rest/v2/offers/{offer_id}",
-        ApiGroup.BETTING_READ,
+        MatchbookApiGroup.BETTING_READ,
         "https://developers.matchbook.com/reference/get-offer-v2",
     ),
     EndpointSpec(
         "matchbook.offers.submit",
         "POST",
         "/edge/rest/v2/offers",
-        ApiGroup.BETTING_WRITE,
+        MatchbookApiGroup.BETTING_WRITE,
         "https://developers.matchbook.com/reference/submit-offers-v2",
     ),
     EndpointSpec(
         "matchbook.reports.current_bets",
         "GET",
         "/edge/rest/reports/v2/bets/current",
-        ApiGroup.REPORTS,
+        MatchbookApiGroup.REPORTS,
         "https://developers.matchbook.com/reference/get-current-bets-v2",
     ),
     EndpointSpec(
         "matchbook.reports.settled_bets",
         "GET",
         "/edge/rest/reports/v2/bets/settled",
-        ApiGroup.REPORTS,
+        MatchbookApiGroup.REPORTS,
         "https://developers.matchbook.com/reference/get-settled-bets-v2",
     ),
     EndpointSpec(
         "matchbook.reports.current_offers",
         "GET",
         "/edge/rest/reports/v2/offers/current",
-        ApiGroup.REPORTS,
+        MatchbookApiGroup.REPORTS,
         "https://developers.matchbook.com/reference/get-current-offers-v2",
     ),
     EndpointSpec(
         "matchbook.reports.wallet_transactions",
         "GET",
         "/edge/rest/reports/v1/transactions",
-        ApiGroup.REPORTS,
+        MatchbookApiGroup.REPORTS,
         "https://developers.matchbook.com/reference/get-new-wallet-transactions",
     ),
 )

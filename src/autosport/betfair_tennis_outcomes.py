@@ -133,10 +133,18 @@ def assess_betfair_tennis_historical_market_definition_authority(
     for index, runner in enumerate(runners):
         if type(runner) is not dict or runner.get("id") is None:
             raise ValueError(f"marketDefinition.runners[{index}] requires id")
+        raw_selection_id = runner["id"]
+        if isinstance(raw_selection_id, bool) or not isinstance(
+            raw_selection_id,
+            (str, int),
+        ):
+            raise ValueError(
+                f"marketDefinition.runners[{index}].id must be string or integer"
+            )
         selection_ids.append(
             _canonical_text(
                 f"marketDefinition.runners[{index}].id",
-                str(runner["id"]),
+                str(raw_selection_id),
             )
         )
     if len(selection_ids) != len(set(selection_ids)):

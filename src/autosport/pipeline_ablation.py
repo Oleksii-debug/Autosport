@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import StrEnum
+from fractions import Fraction
 from math import factorial
 from typing import Iterable, Mapping, Sequence
 
@@ -88,6 +89,38 @@ def _dec_text(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
+
+
+def _project_fraction(value: Fraction) -> Decimal:
+    """Return a deterministic finite Decimal projection of an exact rational."""
+
+    with localcontext() as context:
+        context.prec = 50
+        return Decimal(value.numerator) / Decimal(value.denominator)
+
+
+def _finite_fraction_decimal(value: Fraction) -> Decimal:
+    """Convert a rational known to have a finite base-10 expansion exactly."""
+
+    denominator = value.denominator
+    twos = fives = 0
+    while denominator % 2 == 0:
+        denominator //= 2
+        twos += 1
+    while denominator % 5 == 0:
+        denominator //= 5
+        fives += 1
+    if denominator != 1:
+        raise ValueError("rational does not have a finite Decimal representation")
+    scale = max(twos, fives)
+    scaled = value.numerator * (5 ** (scale - twos)) * (2 ** (scale - fives))
+    sign = "-" if scaled < 0 else ""
+    digits = str(abs(scaled))
+    if scale == 0:
+        return Decimal(sign + digits)
+    if len(digits) <= scale:
+        return Decimal(sign + "0." + ("0" * (scale - len(digits))) + digits)
+    return Decimal(sign + digits[:-scale] + "." + digits[-scale:])
 
 
 def _digest(payload: Mapping[str, object]) -> str:
@@ -296,10 +329,42 @@ class ComponentFinding:
     contribution_high: Decimal | None
     reason: str
     evidence_sha256s: tuple[str, ...]
+    exact_contribution_numerator: int | None = None
+    exact_contribution_denominator: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.exact_contribution_numerator is None) != (self.exact_contribution_denominator is None):
+            raise ValueError("exact contribution requires numerator and denominator together")
+        if self.contribution is None:
+            if self.exact_contribution_numerator is not None:
+                raise ValueError("unidentified contribution cannot carry exact allocation")
+            return
+        if self.exact_contribution_numerator is None:
+            raise ValueError("identified contribution requires exact rational allocation")
+        if type(self.exact_contribution_numerator) is not int or type(self.exact_contribution_denominator) is not int:
+            raise ValueError("exact contribution ratio must use exact integers")
+        if self.exact_contribution_denominator <= 0:
+            raise ValueError("exact contribution denominator must be positive")
+        exact = Fraction(self.exact_contribution_numerator, self.exact_contribution_denominator)
+        if (
+            exact.numerator != self.exact_contribution_numerator
+            or exact.denominator != self.exact_contribution_denominator
+        ):
+            raise ValueError("exact contribution ratio must be reduced and canonical")
+
+    @property
+    def exact_contribution(self) -> Fraction | None:
+        if self.exact_contribution_numerator is None:
+            return None
+        return Fraction(self.exact_contribution_numerator, self.exact_contribution_denominator)
 
     def canonical_payload(self) -> dict[str, object]:
         return {"component": self.component.value, "identifiability_tier": self.identifiability_tier.value,
                 "contribution": None if self.contribution is None else _dec_text(self.contribution),
+                "exact_contribution": None if self.exact_contribution is None else {
+                    "numerator": self.exact_contribution_numerator,
+                    "denominator": self.exact_contribution_denominator,
+                },
                 "contribution_low": None if self.contribution_low is None else _dec_text(self.contribution_low),
                 "contribution_high": None if self.contribution_high is None else _dec_text(self.contribution_high),
                 "reason": self.reason, "evidence_sha256s": list(self.evidence_sha256s)}
@@ -318,7 +383,7 @@ class AblationEvaluationEvidence:
     interaction_residual: Decimal | None
 
     def canonical_payload(self) -> dict[str, object]:
-        return {"schema_version": 1, "kind": "autosport-pipeline-ablation-evaluation-v1", "protocol_sha256": self.protocol_sha256,
+        return {"schema_version": 2, "kind": "autosport-pipeline-ablation-evaluation-v2", "protocol_sha256": self.protocol_sha256,
                 "complete_factorial": self.complete_factorial, "observations": [item.canonical_payload() for item in self.observations],
                 "findings": [item.canonical_payload() for item in self.findings],
                 "missing_coalitions": [[component.value for component in coalition] for coalition in self.missing_coalitions],
@@ -403,27 +468,69 @@ def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequenc
     total = utility[full] - utility[empty]
     total_low, total_high = intervals[full][0] - intervals[empty][1], intervals[full][1] - intervals[empty][0]
     n, findings = len(full), []
-    with localcontext() as context:
-        context.prec = 50
-        denominator = Decimal(factorial(n))
-        for component in full:
-            value = low = high = Decimal(0)
-            tiers, evidence = [], set()
-            others = tuple(item for item in full if item != component)
-            for coalition in _coalitions(others):
-                with_component = tuple(sorted((*coalition, component), key=lambda item: item.value))
-                weight = Decimal(factorial(len(coalition)) * factorial(n - len(coalition) - 1)) / denominator
-                value += weight * (utility[with_component] - utility[coalition])
-                low += weight * (intervals[with_component][0] - intervals[coalition][1])
-                high += weight * (intervals[with_component][1] - intervals[coalition][0])
-                tiers += [by_enabled[coalition].identifiability_tier, by_enabled[with_component].identifiability_tier]
-                evidence.update((by_enabled[coalition].evidence_sha256, by_enabled[with_component].evidence_sha256))
-            tier = _tier(tiers)
-            identifiable = tier is not IdentifiabilityTier.NOT_IDENTIFIABLE
-            findings.append(ComponentFinding(component, tier, value if identifiable else None, low if identifiable else None, high if identifiable else None,
-                "Shapley allocation over the complete frozen factorial value function; allocation is protocol-defined and is not stronger than the weakest supporting evidence tier" if identifiable else "mixed evidence tiers prevent one unambiguous identifiability label",
-                tuple(sorted(evidence))))
-        one_at_a_time = sum((utility[full] - utility[tuple(item for item in full if item != component)] for component in full), Decimal(0))
+    denominator = factorial(n)
+    for component in full:
+        exact_value = exact_low = exact_high = Fraction(0, 1)
+        tiers, evidence = [], set()
+        others = tuple(item for item in full if item != component)
+        for coalition in _coalitions(others):
+            with_component = tuple(sorted((*coalition, component), key=lambda item: item.value))
+            weight = Fraction(
+                factorial(len(coalition)) * factorial(n - len(coalition) - 1),
+                denominator,
+            )
+            exact_value += weight * (
+                Fraction(utility[with_component]) - Fraction(utility[coalition])
+            )
+            exact_low += weight * (
+                Fraction(intervals[with_component][0]) - Fraction(intervals[coalition][1])
+            )
+            exact_high += weight * (
+                Fraction(intervals[with_component][1]) - Fraction(intervals[coalition][0])
+            )
+            tiers += [by_enabled[coalition].identifiability_tier, by_enabled[with_component].identifiability_tier]
+            evidence.update((by_enabled[coalition].evidence_sha256, by_enabled[with_component].evidence_sha256))
+        tier = _tier(tiers)
+        identifiable = tier is not IdentifiabilityTier.NOT_IDENTIFIABLE
+        findings.append(ComponentFinding(
+            component,
+            tier,
+            _project_fraction(exact_value) if identifiable else None,
+            _project_fraction(exact_low) if identifiable else None,
+            _project_fraction(exact_high) if identifiable else None,
+            (
+                "Shapley allocation over the complete frozen factorial value function; exact rational allocation is canonical and the Decimal field is a deterministic mass-conserving projection; allocation is not stronger than the weakest supporting evidence tier"
+                if identifiable
+                else "mixed evidence tiers prevent one unambiguous identifiability label"
+            ),
+            tuple(sorted(evidence)),
+            exact_value.numerator if identifiable else None,
+            exact_value.denominator if identifiable else None,
+        ))
+
+    identifiable_findings = [item for item in findings if item.exact_contribution is not None]
+    if len(identifiable_findings) == len(findings):
+        exact_total = Fraction(total)
+        exact_allocated = sum((item.exact_contribution for item in identifiable_findings), Fraction(0, 1))
+        if exact_allocated != exact_total:
+            raise RuntimeError("exact Shapley allocation violated efficiency")
+        projected_allocated = sum((Fraction(item.contribution) for item in identifiable_findings), Fraction(0, 1))
+        residual = exact_total - projected_allocated
+        if residual:
+            last = findings[-1]
+            balanced = Fraction(last.contribution) + residual
+            findings[-1] = ComponentFinding(
+                last.component,
+                last.identifiability_tier,
+                _finite_fraction_decimal(balanced),
+                last.contribution_low,
+                last.contribution_high,
+                last.reason,
+                last.evidence_sha256s,
+                last.exact_contribution_numerator,
+                last.exact_contribution_denominator,
+            )
+    one_at_a_time = sum((utility[full] - utility[tuple(item for item in full if item != component)] for component in full), Decimal(0))
     return AblationEvaluationEvidence(protocol.protocol_sha256, True, ordered, tuple(sorted(findings, key=lambda item: item.component.value)), (), total, total_low, total_high, total - one_at_a_time)
 
 

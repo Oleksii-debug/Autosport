@@ -154,6 +154,58 @@ def test_wire_timestamp_preserves_missing_timezone_instead_of_inventing_utc() ->
     assert timestamp.value.tzinfo is None
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "2026-09-23T01:10",
+        "2026-09-23T01:10:00,5",
+        "2026-09-23T01:10:00+0000",
+        "20260923T011000",
+    ),
+)
+def test_wire_timestamp_rejects_non_xsd_lexical_forms(invalid: str) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="ISO-8601"):
+        parse_list_selections_changed_since_response(
+            _changed(_selection(cancel_time=invalid))
+        )
+
+
+@pytest.mark.parametrize(
+    ("wire", "timezone_present"),
+    (
+        ("2026-09-23T01:10:00Z", True),
+        ("2026-09-23T01:10:00+00:00", True),
+        ("2026-09-23T01:10:00.125", False),
+    ),
+)
+def test_wire_timestamp_accepts_supported_xsd_lexical_forms(
+    wire: str,
+    timezone_present: bool,
+) -> None:
+    response = parse_list_selections_changed_since_response(
+        _changed(_selection(cancel_time=wire))
+    )
+    timestamp = response.selections[0].cancel_orders_time
+
+    assert timestamp.text == wire
+    assert timestamp.timezone_present is timezone_present
+
+
+def test_settlement_timestamp_uses_same_xsd_lexical_gate() -> None:
+    settlement = """
+      <SettlementInformation
+        SettledTime="2026-09-23T01:12"
+        VoidPercentage="0"
+        LeftSideFactor="1.0"
+        RightSideFactor="0.5"
+        SettlementResultString="Win" />
+    """
+    with pytest.raises(BetdaqSoapProtocolError, match="ISO-8601"):
+        parse_list_selections_changed_since_response(
+            _changed(_selection(settlement=settlement))
+        )
+
+
 def test_changed_rows_preserve_provider_order_without_undocumented_sorting() -> None:
     rows = (
         _selection(selection_id=1, sequence=500)

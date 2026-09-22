@@ -1,8 +1,10 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
 import pytest
 
+import autosport.matchbook_offer_reconciliation as reconciliation
 from autosport.matchbook_offer_reconciliation import (
     MatchbookOfferPage, MatchbookOfferPageChain, MatchbookOfferReadback,
     MatchbookOfferReconciliationError, MatchbookOfferStatus, MatchbookOfferTruth,
@@ -14,8 +16,30 @@ T0 = datetime(2026, 9, 22, 1, 0, tzinfo=timezone.utc)
 A, B, SCOPE = "a" * 64, "b" * 64, "c" * 64
 
 
-def offer(offer_id=1, *, status=MatchbookOfferStatus.OPEN, original="10", matched="0", remaining="10", at=T0, raw=A):
-    return MatchbookOfferReadback("acct", offer_id, status, Decimal(original), Decimal(matched), Decimal(remaining), at, raw)
+def offer(
+    offer_id=1,
+    *,
+    status=MatchbookOfferStatus.OPEN,
+    original="10",
+    matched="0",
+    remaining="10",
+    at=T0,
+    raw=A,
+    issued=False,
+):
+    value = MatchbookOfferReadback(
+        "acct",
+        offer_id,
+        status,
+        Decimal(original),
+        Decimal(matched),
+        Decimal(remaining),
+        at,
+        raw,
+    )
+    if issued:
+        return reconciliation._issue_provider_readback(value)
+    return value
 
 
 def page(offset, rows, *, per_page=2):
@@ -26,11 +50,23 @@ def test_delayed_is_pending_and_non_authoritative():
     x = offer(status=MatchbookOfferStatus.DELAYED)
     assert x.truth is MatchbookOfferTruth.DELAYED_PENDING
     assert not x.settlement_authority and not x.provider_write_authority
+    assert not x.provider_origin_authoritative
     assert (
         retry_disposition(
             observed_offer=x,
             expected_account_context_id=x.account_context_id,
             expected_offer_id=x.offer_id,
+        )
+        is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+    )
+
+    issued = offer(status=MatchbookOfferStatus.DELAYED, issued=True)
+    assert issued.provider_origin_authoritative
+    assert (
+        retry_disposition(
+            observed_offer=issued,
+            expected_account_context_id=issued.account_context_id,
+            expected_offer_id=issued.offer_id,
         )
         is MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
     )
@@ -76,7 +112,7 @@ def test_transport_exception_requires_reconciliation():
 
 
 def test_observed_offer_requires_exact_submit_attempt_binding():
-    x = offer(17)
+    x = offer(17, issued=True)
 
     assert (
         retry_disposition(observed_offer=x)
@@ -106,6 +142,46 @@ def test_observed_offer_requires_exact_submit_attempt_binding():
         )
         is MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
     )
+
+
+def test_caller_constructed_readback_cannot_mint_provider_origin():
+    forged = offer(4242, status=MatchbookOfferStatus.OPEN, raw="f" * 64)
+    assert not forged.provider_origin_authoritative
+    assert (
+        retry_disposition(
+            observed_offer=forged,
+            expected_account_context_id="acct",
+            expected_offer_id=4242,
+        )
+        is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+    )
+
+
+def test_copy_or_reconstruction_does_not_inherit_provider_origin():
+    issued = offer(77, issued=True)
+    copied = replace(issued)
+    reconstructed = MatchbookOfferReadback(
+        issued.account_context_id,
+        issued.offer_id,
+        issued.status,
+        issued.original_stake,
+        issued.matched_stake,
+        issued.remaining_stake,
+        issued.captured_at,
+        issued.raw_response_sha256,
+    )
+    assert issued.provider_origin_authoritative
+    assert not copied.provider_origin_authoritative
+    assert not reconstructed.provider_origin_authoritative
+    for detached in (copied, reconstructed):
+        assert (
+            retry_disposition(
+                observed_offer=detached,
+                expected_account_context_id=detached.account_context_id,
+                expected_offer_id=detached.offer_id,
+            )
+            is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+        )
 
 
 def test_aggregated_ids_are_not_singular_identity():

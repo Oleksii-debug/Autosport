@@ -129,26 +129,82 @@ class BetfairReadCompletenessWitness:
         ).hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairPagedReadResult:
     items: tuple[BetfairCurrentOrderObservation | BetfairClearedOrderObservation, ...]
     witness: BetfairReadCompletenessWitness
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple):
+            raise BetfairReadOnlyError("Betfair paged result items must be a tuple")
+        if not isinstance(self.witness, BetfairReadCompletenessWitness):
+            raise BetfairReadOnlyError("Betfair paged result requires a completeness witness")
+        if len(self.items) != self.witness.rows_observed:
+            raise BetfairReadOnlyError(
+                "Betfair paged result rows do not match completeness evidence"
+            )
+
+    def _fingerprint(self) -> str:
+        return sha256(
+            repr(("paged", self.items, self.witness._fingerprint())).encode("utf-8")
+        ).hexdigest()
+
+    def _assert_issued(self) -> None:
+        with _ISSUED_LOCK:
+            issued = _ISSUED_RESULTS.get(id(self))
+        if issued != self._fingerprint():
+            raise BetfairReadOnlyError(
+                "Betfair paged result was not issued by the observer"
+            )
+
     @property
     def authoritative_empty(self) -> bool:
-        return not self.items and self.witness.authoritative
+        if self.items:
+            return False
+        try:
+            self._assert_issued()
+            self.witness.assert_authoritative()
+        except BetfairReadOnlyError:
+            return False
+        return True
 
-    def assert_complete(self) -> tuple[BetfairCurrentOrderObservation | BetfairClearedOrderObservation, ...]:
+    def assert_complete(
+        self,
+    ) -> tuple[BetfairCurrentOrderObservation | BetfairClearedOrderObservation, ...]:
+        self._assert_issued()
         self.witness.assert_authoritative()
         return self.items
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairValueReadResult:
     value: BetfairAccountFundsObservation | BetfairAccountDetailsObservation | None
     witness: BetfairReadCompletenessWitness
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.witness, BetfairReadCompletenessWitness):
+            raise BetfairReadOnlyError("Betfair value result requires a completeness witness")
+        expected_rows = 0 if self.value is None else 1
+        if self.witness.rows_observed != expected_rows:
+            raise BetfairReadOnlyError(
+                "Betfair value result rows do not match completeness evidence"
+            )
+
+    def _fingerprint(self) -> str:
+        return sha256(
+            repr(("value", self.value, self.witness._fingerprint())).encode("utf-8")
+        ).hexdigest()
+
+    def _assert_issued(self) -> None:
+        with _ISSUED_LOCK:
+            issued = _ISSUED_RESULTS.get(id(self))
+        if issued != self._fingerprint():
+            raise BetfairReadOnlyError(
+                "Betfair value result was not issued by the observer"
+            )
+
     def assert_complete(self) -> BetfairAccountFundsObservation | BetfairAccountDetailsObservation:
+        self._assert_issued()
         self.witness.assert_authoritative()
         if self.value is None:
             raise BetfairReadOnlyError("complete scalar read unexpectedly lacks a value")
@@ -157,11 +213,17 @@ class BetfairValueReadResult:
 
 _ISSUED_LOCK = Lock()
 _ISSUED_WITNESSES: dict[int, str] = {}
+_ISSUED_RESULTS: dict[int, str] = {}
 
 
 def _drop_issued(identity: int) -> None:
     with _ISSUED_LOCK:
         _ISSUED_WITNESSES.pop(identity, None)
+
+
+def _drop_issued_result(identity: int) -> None:
+    with _ISSUED_LOCK:
+        _ISSUED_RESULTS.pop(identity, None)
 
 
 def _issue(witness: BetfairReadCompletenessWitness) -> BetfairReadCompletenessWitness:
@@ -170,6 +232,16 @@ def _issue(witness: BetfairReadCompletenessWitness) -> BetfairReadCompletenessWi
         _ISSUED_WITNESSES[identity] = witness._fingerprint()
     weakref.finalize(witness, _drop_issued, identity)
     return witness
+
+
+def _issue_result(
+    result: BetfairPagedReadResult | BetfairValueReadResult,
+) -> BetfairPagedReadResult | BetfairValueReadResult:
+    identity = id(result)
+    with _ISSUED_LOCK:
+        _ISSUED_RESULTS[identity] = result._fingerprint()
+    weakref.finalize(result, _drop_issued_result, identity)
+    return result
 
 
 class BetfairReadCompletenessObserver:
@@ -414,7 +486,7 @@ class BetfairReadCompletenessObserver:
                 completeness,
                 code,
             )
-            return BetfairValueReadResult(None, witness)
+            return _issue_result(BetfairValueReadResult(None, witness))
         page = (
             0,
             1,
@@ -431,7 +503,7 @@ class BetfairReadCompletenessObserver:
             BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
             None,
         )
-        return BetfairValueReadResult(value, witness)
+        return _issue_result(BetfairValueReadResult(value, witness))
 
     def _paged_result(
         self,
@@ -454,7 +526,7 @@ class BetfairReadCompletenessObserver:
             completeness,
             failure_code,
         )
-        return BetfairPagedReadResult(tuple(items), witness)
+        return _issue_result(BetfairPagedReadResult(tuple(items), witness))
 
     def _witness(
         self,

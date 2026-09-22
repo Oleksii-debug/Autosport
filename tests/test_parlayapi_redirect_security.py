@@ -3,16 +3,14 @@ from __future__ import annotations
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
-
 from autosport.parlayapi_provider import ProviderTransportError, _default_transport
 
 
 _DUMMY_API_KEY = "dummy-parlay-key-for-redirect-test"
 
 
-def _start_server(handler_factory: Callable[[], type[BaseHTTPRequestHandler]]):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_factory())
+def _start_server(handler_class: type[BaseHTTPRequestHandler]):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
     thread = threading.Thread(
         target=lambda: server.serve_forever(poll_interval=0.01),
         daemon=True,
@@ -27,7 +25,7 @@ def _stop_server(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
     thread.join(timeout=2.0)
 
 
-def _json_handler(seen: list[dict[str, str]]) -> Callable[[], type[BaseHTTPRequestHandler]]:
+def _json_handler(seen: list[dict[str, str]]) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             seen.append({key: value for key, value in self.headers.items()})
@@ -48,7 +46,7 @@ def _redirect_handler(
     status_code: int,
     location: str,
     seen: list[dict[str, str]],
-) -> Callable[[], type[BaseHTTPRequestHandler]]:
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             seen.append({key: value for key, value in self.headers.items()})

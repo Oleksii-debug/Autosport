@@ -859,14 +859,16 @@ class BetfairReplaceSagaStore:
     )
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        # Freeze the lexical location once. A later cwd change must not switch
+        # the journal lock or monotonic authority namespace.
+        self.path = Path(os.path.abspath(os.fspath(path)))
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _absolute_path(self) -> Path:
         # Preserve lexical path identity. MonotonicWorkspaceAuthority deliberately
         # reserves lexical workspace locations so symlink/junction retargeting
         # cannot silently select a fresh ancestry.
-        return Path(os.path.abspath(os.fspath(self.path)))
+        return self.path
 
     def _monotonic_path_identity(self) -> str:
         return os.path.normcase(self._absolute_path().name)

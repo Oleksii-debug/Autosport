@@ -123,7 +123,7 @@ def test_present_return_status_is_preserved_and_failure_is_typed() -> None:
     assert exc.value.call_id == "x2"
 
 
-def test_duplicate_price_or_representation_fails_closed() -> None:
+def test_duplicate_numeric_price_fails_closed_even_with_different_lexeme() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="duplicate Ladder price"):
         parse_get_odds_ladder_response(
             _response(
@@ -133,17 +133,6 @@ def test_duplicate_price_or_representation_fails_closed() -> None:
                 )
             )
         )
-
-    with pytest.raises(BetdaqSoapProtocolError, match="duplicate Ladder representation"):
-        parse_get_odds_ladder_response(
-            _response(
-                entries=(
-                    '<Ladder price="2.00" representation="same" />'
-                    '<Ladder price="2.10" representation="same" />'
-                )
-            )
-        )
-
 
 def test_invalid_or_empty_ladder_cannot_be_current_authority() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="at least one"):

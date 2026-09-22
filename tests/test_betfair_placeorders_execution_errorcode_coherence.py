@@ -108,6 +108,8 @@ def _failure_payload(
     *,
     execution_error_code: str,
     instruction_error_code: str,
+    order_status: str | None = "EXECUTION_COMPLETE",
+    average_price_matched: int = 0,
 ) -> bytes:
     return json.dumps(
         {
@@ -132,9 +134,13 @@ def _failure_payload(
                             },
                         },
                         "betId": "bet-rejection-123",
-                        "orderStatus": "EXECUTION_COMPLETE",
+                        **(
+                            {"orderStatus": order_status}
+                            if order_status is not None
+                            else {}
+                        ),
                         "placedDate": OBSERVED_AT,
-                        "averagePriceMatched": 0,
+                        "averagePriceMatched": average_price_matched,
                         "sizeMatched": 0,
                     }
                 ],
@@ -197,3 +203,44 @@ def test_documented_bet_action_rejection_remains_terminal_rejected() -> None:
 
     assert report.instruction.order_status == "EXECUTION_COMPLETE"
     assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
+
+
+
+def test_failure_with_positive_average_is_ambiguous() -> None:
+    action = _action()
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="internally inconsistent",
+    ):
+        _parse_place_orders_response(
+            _failure_payload(
+                execution_error_code="BET_ACTION_ERROR",
+                instruction_error_code="BET_TAKEN_OR_LAPSED",
+                average_price_matched=2,
+            ),
+            request_id=1,
+            request_sha256="a" * 64,
+            action=action,
+            provider_order_ref="b" * 32,
+            observed_at=OBSERVED_AT,
+        )
+
+
+def test_qualified_failure_without_terminal_order_status_requires_readback() -> None:
+    action = _action()
+    report = _parse_place_orders_response(
+        _failure_payload(
+            execution_error_code="BET_ACTION_ERROR",
+            instruction_error_code="BET_TAKEN_OR_LAPSED",
+            order_status=None,
+        ),
+        request_id=1,
+        request_sha256="a" * 64,
+        action=action,
+        provider_order_ref="b" * 32,
+        observed_at=OBSERVED_AT,
+    )
+
+    assert report.instruction.order_status is None
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN

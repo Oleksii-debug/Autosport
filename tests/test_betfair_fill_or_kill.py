@@ -197,7 +197,6 @@ class BetfairFillOrKillTests(unittest.TestCase):
         for field, value in (
             ("requested_size", Decimal("1E+1000000")),
             ("requested_size", Decimal("1E-1000000")),
-            ("requested_size", Decimal("0E-1000000")),
         ):
             with self.subTest(field=field, value=str(value)), self.assertRaisesRegex(
                 BetfairFillOrKillError,

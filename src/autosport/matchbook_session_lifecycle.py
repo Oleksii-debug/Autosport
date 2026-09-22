@@ -125,21 +125,24 @@ class MatchbookSessionLifecycle:
             raise TypeError("snapshot must be SessionAuditSnapshot")
         lifecycle = cls()
         lifecycle._generation_id = snapshot.generation_id
-        lifecycle._login_monotonic_ns = snapshot.login_monotonic_ns
-        lifecycle._last_observation_monotonic_ns = snapshot.last_observation_monotonic_ns
         lifecycle._last_http_status = snapshot.last_http_status
-        lifecycle._clock_faulted = snapshot.clock_faulted
+        # monotonic_ns values are meaningful only inside the process that
+        # observed them. A restart creates a new monotonic-clock domain, so old
+        # values remain audit evidence in snapshot but MUST NOT become the new
+        # process clock baseline or login-age authority.
+        lifecycle._login_monotonic_ns = None
+        lifecycle._last_observation_monotonic_ns = None
+        lifecycle._clock_faulted = False
         if snapshot.generation_id is not None:
             lifecycle._terminal_generations.add(snapshot.generation_id)
-        if snapshot.clock_faulted:
-            lifecycle._state = SessionState.CLOCK_FAULT
-            lifecycle._restart_requires_reauth = True
-        elif snapshot.generation_id is None:
-            lifecycle._state = SessionState.COLD
-            lifecycle._restart_requires_reauth = False
-        else:
             lifecycle._state = SessionState.RESTART_REAUTH_REQUIRED
             lifecycle._restart_requires_reauth = True
+        elif snapshot.clock_faulted:
+            lifecycle._state = SessionState.RESTART_REAUTH_REQUIRED
+            lifecycle._restart_requires_reauth = True
+        else:
+            lifecycle._state = SessionState.COLD
+            lifecycle._restart_requires_reauth = False
         return lifecycle
 
     @property

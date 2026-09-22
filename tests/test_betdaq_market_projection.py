@@ -394,20 +394,12 @@ def test_empty_provider_side_does_not_fabricate_quote_or_liquidity() -> None:
     assert batch.quotes[0].exchange_side == "back"
 
 
-def test_cursor_is_only_caller_supplied_opaque_evidence_and_not_synthesized() -> None:
-    without_cursor = project_betdaq_get_prices(
+def test_getprices_projection_cannot_mint_provider_sequence_cursor() -> None:
+    batch = project_betdaq_get_prices(
         response=_response(),
         market_context=_context(),
         observed_ts=OBSERVED_TS,
         sequence=113,
-    )
-    with_cursor = project_betdaq_get_prices(
-        response=_response(),
-        market_context=_context(),
-        observed_ts=OBSERVED_TS,
-        sequence=113,
-        cursor="selection-frontier:88",
     )
 
-    assert without_cursor.cursor is None
-    assert with_cursor.cursor == "selection-frontier:88"
+    assert batch.cursor is None

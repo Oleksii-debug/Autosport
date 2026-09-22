@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
+    ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExternalAcknowledgement,
     RealExecutionLedger,
@@ -165,6 +167,53 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
 
         self.assertEqual(action.to_dict()["requested_odds"], "2.5")
         self.assertEqual(action.to_dict()["requested_stake"], "10")
+
+    def test_hash_valid_persisted_float_money_is_rejected_on_reopen(self) -> None:
+        plan = _plan()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            ledger_path = Path(temporary_directory) / "real-execution.jsonl"
+            RealExecutionLedger(ledger_path).reserve_plan(plan)
+
+            record = json.loads(ledger_path.read_text(encoding="utf-8").strip())
+            event = record["event"]
+            durable_plan = event["payload"]["plan"]
+            durable_plan["actions"][0]["requested_stake"] = 0.1
+
+            canonical_plan = json.dumps(
+                durable_plan,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            event["payload"]["plan_fingerprint"] = hashlib.sha256(
+                canonical_plan.encode("utf-8")
+            ).hexdigest()
+            canonical_event = json.dumps(
+                event,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            record["sha256"] = hashlib.sha256(
+                canonical_event.encode("utf-8")
+            ).hexdigest()
+            ledger_path.write_text(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ExecutionLedgerIntegrityError):
+                RealExecutionLedger(ledger_path).verify_integrity()
 
     def test_low_precision_persistence_reopens_idempotently_at_high_precision(self) -> None:
         plan = _plan()

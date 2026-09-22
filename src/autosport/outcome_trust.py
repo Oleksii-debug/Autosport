@@ -383,6 +383,32 @@ def assert_compatible_outcome_lineages(
             )
 
 
+def assert_outcome_availability_not_downgraded(
+    authority: OutcomeLineageBinding,
+    evidence: OutcomeLineageBinding,
+) -> None:
+    """Reject deletion of product availability still preserved by durable evidence."""
+
+    if (
+        authority.source_identity != evidence.source_identity
+        or authority.record_id != evidence.record_id
+    ):
+        return
+    assert_compatible_outcome_lineages(authority, evidence)
+    overlap = min(len(authority.revisions), len(evidence.revisions))
+    for index in range(overlap):
+        authoritative = authority.revisions[index]
+        preserved = evidence.revisions[index]
+        if (
+            preserved.first_available_at is not None
+            and authoritative.first_available_at is None
+        ):
+            raise OutcomeLineageTrustError(
+                "outcome lineage trust lost product first availability preserved by "
+                f"durable evidence at revision {index + 1}"
+            )
+
+
 def bind_outcome_lineage_availability(
     incoming: OutcomeLineageBinding,
     *,

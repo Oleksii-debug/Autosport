@@ -521,6 +521,7 @@ def test_orders_readback_is_non_serializable(monkeypatch) -> None:
     with pytest.raises(TypeError):
         pickle.dumps(readback)
 
+
 def test_account_activity_read_uses_exact_live_session_and_hides_payload(
     monkeypatch,
 ) -> None:
@@ -564,6 +565,7 @@ def test_account_activity_read_uses_exact_live_session_and_hides_payload(
     assert read.provider_account_id == session.provider_account_id
     assert read.endpoint == session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
     assert read.provider_date == "2026-09-21T10:00:00+00:00"
+    assert read.content_type == "application/json; charset=utf-8"
     assert read.product_available_at == "2026-09-22T18:00:01+00:00"
     assert read.payload_sha256 == sha256(activity_payload).hexdigest()
     assert read.payload_size == len(activity_payload)
@@ -686,6 +688,7 @@ def test_forged_account_activity_read_cannot_resolve(monkeypatch) -> None:
         endpoint=issued.endpoint,
         http_status=issued.http_status,
         provider_date=issued.provider_date,
+        content_type=issued.content_type,
         product_available_at=issued.product_available_at,
         payload_sha256=issued.payload_sha256,
         payload_size=issued.payload_size,

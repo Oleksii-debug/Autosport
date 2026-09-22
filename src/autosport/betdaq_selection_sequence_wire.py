@@ -58,9 +58,10 @@ _SETTLEMENT_INFORMATION_ATTRIBUTES = frozenset(
 )
 
 
-_XSD_DATETIME_LEXICAL = re.compile(
+_SUPPORTED_XSD_DATETIME_LEXICAL = re.compile(
     r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
-    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z"
+    r"(?:\.\d+)?"
+    r"(?:Z|[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00))?\Z"
 )
 
 
@@ -122,7 +123,7 @@ def _wire_timestamp(value: str, field: str) -> BetdaqWireTimestamp:
     if (
         not raw
         or raw != value
-        or _XSD_DATETIME_LEXICAL.fullmatch(raw) is None
+        or _SUPPORTED_XSD_DATETIME_LEXICAL.fullmatch(raw) is None
     ):
         raise BetdaqSoapProtocolError(
             f"{field} must be a trimmed ISO-8601/XSD dateTime"

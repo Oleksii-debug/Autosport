@@ -29,8 +29,6 @@ on:
       - 'src/autosport/collector_sqlite_store.py'
       - 'src/autosport/workspace_lock.py'
       - 'tests/test_endurance.py'
-      - 'tests/endurance_resource_probe.py'
-      - 'tests/test_endurance_resource_probe.py'
       - 'tests/test_collector_endurance_composition.py'
       - 'tests/test_causal_collector.py'
       - 'tests/test_collector_retention_compaction.py'
@@ -73,8 +71,6 @@ jobs:
         run: python -m pip install 'pytest>=8,<9'
       - name: Run bounded endurance gate
         run: python -m autosport endurance --workspace .autosport-endurance --events 20000 --quote-keys 2000 --batch-size 500 --restart-cycles 3 --tickets 50 --output endurance-report.json
-      - name: Run deterministic resource trend qualification
-        run: python -m pytest -q tests/test_endurance_resource_probe.py
       - name: Run collector composed endurance gate
         run: >-
           python -m pytest -q

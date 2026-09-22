@@ -277,8 +277,9 @@ def assess_settlement_rule_drift(
 ) -> ProviderSettlementRuleDriftAssessment:
     """Reverify a frozen rule snapshot and quarantine material bound-state drift.
 
-    The exact bound rulebook is the sole source of the returned treatment code.
-    latest_rulebook is diagnostic drift evidence only and can never replace it.
+    The exact bound rulebook is the sole source of the returned structural treatment
+    label. This assessment is not permission to settle. latest_rulebook is diagnostic
+    drift evidence only and can never replace the bound snapshot.
     """
 
     if type(assertion) is not ProviderSettlementRuleSnapshotAssertion:

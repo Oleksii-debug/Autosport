@@ -464,6 +464,44 @@ def test_revalidation_is_semantic_not_raw_page_partition_identity(
     assert value.bet_ids == ("a", "b")
 
 
+def test_market_evidence_instance_does_not_change_semantic_population_identity(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt(profit="5")
+    _bind_source(monkeypatch, source, receipt, market_bet_count=1)
+
+    def read_page(**kwargs):
+        status = kwargs["bet_status"]
+        rows = [_row("bet-1", profit="5")] if status == "SETTLED" else []
+        return _page(rows, status=status, marker=1)
+
+    monkeypatch.setattr(population, "_read_page", read_page)
+    evidence_counter = 0
+
+    def read_market_rollup(**kwargs):
+        nonlocal evidence_counter
+        evidence_counter += 1
+        return population.ClearedMarketRollupWitness(
+            bet_count=1,
+            profit=Decimal("5"),
+            commission=receipt.commission,
+            settled_date=receipt.settled_at.isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z"),
+            response_sha256=f"{evidence_counter:064x}",
+            observed_at=f"2026-09-21T11:0{evidence_counter}:00+00:00",
+        )
+
+    monkeypatch.setattr(population, "_read_market_rollup", read_market_rollup)
+    authority = population.BetfairClearedMarketPopulationAuthority(source)
+    first = _capture(authority, receipt)
+    second = _capture(authority, receipt)
+
+    assert first.population_sha256 == second.population_sha256
+    assert first.evidence_sha256 != second.evidence_sha256
+
+
 def test_market_bet_count_rejects_range_subset_even_when_profit_matches(
     tmp_path, monkeypatch
 ) -> None:

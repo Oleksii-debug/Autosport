@@ -101,6 +101,30 @@ def _safe_exception_text(exc: BaseException) -> str:
     return f"{name}: {detail}" if detail else name
 
 
+def _safe_worker_error_detail(raw_error: object, *, fallback_type: str) -> str:
+    """Project internal worker diagnostics into bounded operator-safe detail."""
+
+    safe_error_type = fallback_type
+    if type(raw_error) is str:
+        candidate = raw_error.partition(":")[0].strip()
+        candidate_body = candidate.replace("_", "")
+        if (
+            candidate
+            and candidate.isascii()
+            and candidate_body.isalnum()
+            and (
+                candidate.endswith("Error")
+                or candidate.endswith("Exception")
+                or candidate in {"SystemExit", "KeyboardInterrupt"}
+            )
+        ):
+            safe_error_type = candidate
+    return text(
+        "ui.error.exception.message_unavailable",
+        exception_type=safe_error_type,
+    )
+
+
 class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -550,7 +574,13 @@ class AutosportApp(tk.Tk):
         self._pending_dataset_path = None
         self._set_replay_controls_busy(False)
         if message.error is not None:
-            message_text = text("ui.error.dataset.rejected", detail=message.error)
+            message_text = text(
+                "ui.error.dataset.rejected",
+                detail=_safe_worker_error_detail(
+                    message.error,
+                    fallback_type="DatasetValidationError",
+                ),
+            )
             self.status.set(text("ui.status.dataset.validation_failed"))
             self._append_log(message_text)
             messagebox.showerror(text("ui.dialog.title"), message_text)
@@ -632,7 +662,13 @@ class AutosportApp(tk.Tk):
             return
         self.live_refresh_button.state(["!disabled"])
         if message.error is not None:
-            message_text = text("ui.error.live.snapshot", detail=message.error)
+            message_text = text(
+                "ui.error.live.snapshot",
+                detail=_safe_worker_error_detail(
+                    message.error,
+                    fallback_type="LiveObservationError",
+                ),
+            )
             self.live_status.set(message_text)
             self.status.set(text("ui.status.live.failed"))
             self._append_log(message_text)

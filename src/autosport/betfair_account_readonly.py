@@ -15,7 +15,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
@@ -58,6 +58,19 @@ class BetfairHttpTransport(Protocol):
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes: ...
 
 
+class _RejectBetfairRedirects(HTTPRedirectHandler):
+    """Fail closed before credentialed Betfair requests follow redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(
+            req.full_url,
+            code,
+            "Betfair HTTP redirect blocked",
+            headers,
+            fp,
+        )
+
+
 class UrllibBetfairHttpTransport:
     def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
         if not isinstance(max_response_bytes, int) or isinstance(max_response_bytes, bool) or max_response_bytes <= 0:
@@ -65,9 +78,12 @@ class UrllibBetfairHttpTransport:
         self._max_response_bytes = max_response_bytes
 
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
-        request = Request(url, data=body, headers=dict(headers), method="POST")
+        request = Request(url, data=body, method="POST")
+        for name, value in headers.items():
+            request.add_unredirected_header(name, value)
+        opener = build_opener(_RejectBetfairRedirects())
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None

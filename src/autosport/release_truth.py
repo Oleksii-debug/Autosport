@@ -190,10 +190,13 @@ def _evidence_id(audit_input: ReleaseTruthAuditInput) -> str:
 def audit_release_truth(audit_input: ReleaseTruthAuditInput) -> ReleaseTruthAudit:
     """Audit release claims without converting machine proof into human truth.
 
-    A positive HUMAN_TESTED, NVDA_VERIFIED, or REAL_MONEY_EXECUTION claim needs its
-    own evidence reference. WHOLE_PRODUCT_COMPLETE is always outside this narrow
-    audit authority: even complete release evidence cannot prove total product
-    completion. The returned audit grants neither release nor execution authority.
+    Positive HUMAN_TESTED, NVDA_VERIFIED, and REAL_MONEY_EXECUTION inputs are
+    requests to audit claimed truth, not trusted truth themselves. Evidence-reference
+    text is descriptive metadata only: this module has no independent physical or
+    real-execution evidence resolver, so positive claims remain unverified and the
+    corresponding returned truth flags stay false. WHOLE_PRODUCT_COMPLETE is always
+    outside this narrow audit authority. The returned audit grants neither release
+    nor execution authority.
     """
 
     if not isinstance(audit_input, ReleaseTruthAuditInput):
@@ -210,27 +213,39 @@ def audit_release_truth(audit_input: ReleaseTruthAuditInput) -> ReleaseTruthAudi
 
     claims = audit_input.claims
     problems: list[TruthClaimProblem] = []
-    if claims.human_tested and claims.human_test_evidence_ref is None:
-        problems.append(
-            TruthClaimProblem(
-                "HUMAN_TESTED",
-                "positive human-tested truth requires its own evidence reference",
+    if claims.human_tested:
+        reason = (
+            "positive human-tested truth requires its own evidence reference"
+            if claims.human_test_evidence_ref is None
+            else (
+                "positive human-tested truth requires independently verified "
+                "product-issued physical evidence; evidence reference text alone "
+                "is not authority"
             )
         )
-    if claims.nvda_verified and claims.nvda_evidence_ref is None:
-        problems.append(
-            TruthClaimProblem(
-                "NVDA_VERIFIED",
-                "positive NVDA verification requires its own evidence reference",
+        problems.append(TruthClaimProblem("HUMAN_TESTED", reason))
+    if claims.nvda_verified:
+        reason = (
+            "positive NVDA verification requires its own evidence reference"
+            if claims.nvda_evidence_ref is None
+            else (
+                "positive NVDA verification requires independently verified "
+                "product-issued physical evidence; evidence reference text alone "
+                "is not authority"
             )
         )
-    if claims.real_money_execution and claims.real_money_evidence_ref is None:
-        problems.append(
-            TruthClaimProblem(
-                "REAL_MONEY_EXECUTION",
-                "positive real-money execution truth requires its own evidence reference",
+        problems.append(TruthClaimProblem("NVDA_VERIFIED", reason))
+    if claims.real_money_execution:
+        reason = (
+            "positive real-money execution truth requires its own evidence reference"
+            if claims.real_money_evidence_ref is None
+            else (
+                "positive real-money execution truth requires independently verified "
+                "product-issued execution evidence; evidence reference text alone "
+                "is not authority"
             )
         )
+        problems.append(TruthClaimProblem("REAL_MONEY_EXECUTION", reason))
     if claims.whole_product_complete:
         problems.append(
             TruthClaimProblem(
@@ -244,11 +259,11 @@ def audit_release_truth(audit_input: ReleaseTruthAuditInput) -> ReleaseTruthAudi
         missing_machine_proofs=missing,
         failed_machine_proofs=failed,
         truth_claim_problems=tuple(problems),
-        human_tested=claims.human_tested,
+        human_tested=False,
         human_test_evidence_ref=claims.human_test_evidence_ref,
-        nvda_verified=claims.nvda_verified,
+        nvda_verified=False,
         nvda_evidence_ref=claims.nvda_evidence_ref,
-        real_money_execution=claims.real_money_execution,
+        real_money_execution=False,
         real_money_evidence_ref=claims.real_money_evidence_ref,
         whole_product_complete_claimed=claims.whole_product_complete,
     )

@@ -150,13 +150,17 @@ class FocusedMirrorDependencyIndex:
         coherent selector read from the canonical MarketMirror instead.
         """
         keys: set[MirrorQuoteKey] = set()
+        key_limit = min(
+            self._max_cached_keys_per_input,
+            self._max_cached_keys_total,
+        )
         for event in events:
             if not dependency.matches(event):
                 continue
             key = (event.source_id, event.quote_key)
             if key in keys:
                 continue
-            if len(keys) >= self._max_cached_keys_per_input:
+            if len(keys) >= key_limit:
                 return set(), False
             keys.add(key)
         return keys, True

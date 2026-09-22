@@ -37,7 +37,6 @@ from .risk_sampling_membership import (
 _SCHEMA: Final = "autosport.risk.fixed-n-membership-publication"
 _SCHEMA_VERSION: Final = 1
 _AUTHORITY_DOMAIN: Final = "autosport.risk.fixed-n-membership-publication.v1"
-_STATE_DIR: Final = Path(".risk-authority") / "fixed-n-membership-publications"
 
 
 class RiskMembershipPublicationError(RuntimeError):
@@ -65,10 +64,6 @@ class RiskMembershipPublicationReceipt:
     sampling_frame_sha256: str
     design_sha256: str
     receipt_sha256: str
-
-    @property
-    def publication_proven(self) -> bool:
-        return True
 
     @property
     def causal_precommit_proven(self) -> bool:
@@ -178,7 +173,19 @@ def _workspace_and_registry(
 
 
 def _state_path(workspace: Path, membership_sha256: str) -> Path:
-    return workspace / _STATE_DIR / f"{membership_sha256}.json"
+    return workspace / f".risk-fixed-n-membership-{membership_sha256}.json"
+
+
+def _path_exists_nofollow(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RiskMembershipPublicationError(
+            "fixed-N membership publication state path cannot be inspected"
+        ) from exc
+    return True
 
 
 def _binding_sha256(
@@ -355,7 +362,7 @@ def publish_fixed_n_membership_structure(
         with durable_path_lock(state_path):
             observed = (
                 _decode_state(state_path, expected=state_payload)
-                if state_path.exists()
+                if _path_exists_nofollow(state_path)
                 else None
             )
 

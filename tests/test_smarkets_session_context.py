@@ -520,3 +520,213 @@ def test_orders_readback_is_non_serializable(monkeypatch) -> None:
 
     with pytest.raises(TypeError):
         pickle.dumps(readback)
+
+def test_account_activity_read_uses_exact_live_session_and_hides_payload(
+    monkeypatch,
+) -> None:
+    secret = "account-activity-session-secret"
+    activity_payload = b'{"activity":[{"note":"provider-payload-secret-sentinel"}]}'
+    responses = iter(
+        (
+            _FakeResponse(),
+            _FakeResponse(
+                activity_payload,
+                url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            ),
+        )
+    )
+    captured = []
+
+    def fake_open(request, timeout):
+        captured.append((request, timeout))
+        return next(responses)
+
+    monkeypatch.setattr(session_context, "_open_accounts_request", fake_open)
+    _install_identity(
+        monkeypatch,
+        times=(
+            "2026-09-22T18:00:00+00:00",
+            "2026-09-22T18:00:01+00:00",
+        ),
+    )
+
+    session = open_smarkets_authenticated_session(secret)
+    read = session.acquire_account_activity(timeout_seconds=4)
+
+    request, timeout = captured[1]
+    assert request.full_url == session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
+    assert request.get_method() == "GET"
+    assert request.get_header("Authorization") == f"Session-Token {secret}"
+    assert request.get_header("Accept") == "application/json"
+    assert timeout == 4.0
+    assert read.session_generation_id == session.generation_id
+    assert read.account_context_sha256 == session.account_context_sha256
+    assert read.provider_account_id == session.provider_account_id
+    assert read.endpoint == session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
+    assert read.provider_date == "2026-09-21T10:00:00+00:00"
+    assert read.product_available_at == "2026-09-22T18:00:01+00:00"
+    assert read.payload_sha256 == sha256(activity_payload).hexdigest()
+    assert read.payload_size == len(activity_payload)
+    assert read.payload == activity_payload
+    assert session.resolve_account_activity_read(read) is read
+    assert secret not in repr(read)
+    assert "provider-payload-secret-sentinel" not in repr(read)
+
+    with pytest.raises(TypeError):
+        pickle.dumps(read)
+
+
+def test_account_activity_read_rejects_redirect(monkeypatch) -> None:
+    _install_accounts(monkeypatch, _FakeResponse())
+    _install_identity(monkeypatch, times=("2026-09-22T18:00:00+00:00",))
+    session = open_smarkets_authenticated_session("token-A")
+
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: _FakeResponse(
+            b'{"activity":[]}',
+            url="https://evil.example/v3/accounts/activity/",
+        ),
+    )
+
+    with pytest.raises(SmarketsSessionContextError, match="fixed official endpoint"):
+        session.acquire_account_activity()
+
+
+def test_account_activity_http_error_does_not_leak_session_secret(monkeypatch) -> None:
+    secret = "activity-secret-sentinel"
+    _install_accounts(monkeypatch, _FakeResponse())
+    _install_identity(monkeypatch, times=("2026-09-22T18:00:00+00:00",))
+    session = open_smarkets_authenticated_session(secret)
+
+    def fail_activity(request, timeout):
+        raise HTTPError(
+            session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            429,
+            f"provider echoed {secret}",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(session_context, "_open_accounts_request", fail_activity)
+
+    with pytest.raises(SmarketsSessionContextError) as caught:
+        session.acquire_account_activity()
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "HTTP 429" in str(caught.value)
+    assert secret not in str(caught.value)
+    assert secret not in rendered
+
+
+def test_account_activity_read_cannot_cross_session_generation(monkeypatch) -> None:
+    responses = iter(
+        (
+            _FakeResponse(),
+            _FakeResponse(),
+            _FakeResponse(
+                b'{"activity":[]}',
+                url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: next(responses),
+    )
+    _install_identity(
+        monkeypatch,
+        generation_ids=("generation-A", "generation-B"),
+        times=(
+            "2026-09-22T18:00:00+00:00",
+            "2026-09-22T18:00:01+00:00",
+            "2026-09-22T18:00:02+00:00",
+        ),
+    )
+
+    session_a = open_smarkets_authenticated_session("token-A")
+    session_b = open_smarkets_authenticated_session("token-B")
+    read_a = session_a.acquire_account_activity()
+
+    with pytest.raises(SmarketsSessionContextError, match="not issued by this session"):
+        session_b.resolve_account_activity_read(read_a)
+
+
+def test_forged_account_activity_read_cannot_resolve(monkeypatch) -> None:
+    responses = iter(
+        (
+            _FakeResponse(),
+            _FakeResponse(
+                b'{"activity":[]}',
+                url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: next(responses),
+    )
+    _install_identity(
+        monkeypatch,
+        times=(
+            "2026-09-22T18:00:00+00:00",
+            "2026-09-22T18:00:01+00:00",
+        ),
+    )
+    session = open_smarkets_authenticated_session("token-A")
+    issued = session.acquire_account_activity()
+
+    forged = session_context.SmarketsSessionAuthenticatedRead(
+        session_generation_id=issued.session_generation_id,
+        account_context_sha256=issued.account_context_sha256,
+        provider_account_id=issued.provider_account_id,
+        endpoint=issued.endpoint,
+        http_status=issued.http_status,
+        provider_date=issued.provider_date,
+        product_available_at=issued.product_available_at,
+        payload_sha256=issued.payload_sha256,
+        payload_size=issued.payload_size,
+        evidence_sha256=issued.evidence_sha256,
+        payload=issued.payload,
+        _seal=session_context._AUTHENTICATED_READ_SEAL,
+    )
+
+    with pytest.raises(SmarketsSessionContextError, match="not issued by this session"):
+        session.resolve_account_activity_read(forged)
+
+
+def test_close_revokes_account_activity_resolution(monkeypatch) -> None:
+    responses = iter(
+        (
+            _FakeResponse(),
+            _FakeResponse(
+                b'{"activity":[]}',
+                url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: next(responses),
+    )
+    _install_identity(
+        monkeypatch,
+        times=(
+            "2026-09-22T18:00:00+00:00",
+            "2026-09-22T18:00:01+00:00",
+        ),
+    )
+    session = open_smarkets_authenticated_session("token-A")
+    read = session.acquire_account_activity()
+
+    session.close()
+
+    with pytest.raises(SmarketsSessionContextError, match="closed"):
+        session.resolve_account_activity_read(read)
+    with pytest.raises(SmarketsSessionContextError, match="closed"):
+        session.acquire_account_activity()
+

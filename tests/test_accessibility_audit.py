@@ -283,6 +283,40 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertNotIn(secret_bearer, rendered)
         self.assertNotIn(secret_key, rendered)
 
+    def test_provider_stand_down_reason_is_redacted_without_changing_status_semantics(self):
+        description = self._passing_description()
+        secret_bearer = "StandDownBearer804"
+        secret_key = "StandDownApiKey804"
+        stand_down = (
+            f"Authorization: Bearer {secret_bearer}; "
+            f"api_key={secret_key}; ordinary=provider-disabled"
+        )
+        report = self._summarize(
+            SimpleNamespace(
+                **{
+                    **description.__dict__,
+                    "providers_stood_down_because": stand_down,
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "PASS")
+        rendered = report["providers_stood_down_because"]
+        self.assertIsInstance(rendered, str)
+        self.assertIn("[REDACTED]", rendered)
+        self.assertIn("ordinary=provider-disabled", rendered)
+        self.assertNotIn(secret_bearer, rendered)
+        self.assertNotIn(secret_key, rendered)
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+        self.assertFalse(report["real_money_execution"])
+
+    def test_provider_stand_down_reason_preserves_none(self):
+        report = self._summarize(self._passing_description())
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertIsNone(report["providers_stood_down_because"])
+
     def test_failure_artifact_uses_shared_secret_redaction_boundary(self):
         class ProviderOpaqueMarker804Error(RuntimeError):
             pass

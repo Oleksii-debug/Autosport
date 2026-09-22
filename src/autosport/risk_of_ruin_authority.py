@@ -7,7 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .scientific_registry import ScientificRegistry
+from ._scientific_registry_read_authority import (
+    ScientificRegistryReadAuthorityError,
+    require_scientific_registry_read_authority,
+)
+from .scientific_registry import RegistryEntry, ScientificRegistry
 
 
 _AUTHORITY_KIND = "autosport.risk-of-ruin-product-authority.v2"
@@ -131,6 +135,19 @@ def risk_of_ruin_result_sha256(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _entry_from_state(
+    state: dict[str, Any],
+    record_type: str,
+    record_id: str,
+) -> RegistryEntry | None:
+    """Resolve one record from one already-verified registry generation."""
+
+    for raw in state["records"]:
+        if raw["record_type"] == record_type and raw["record_id"] == record_id:
+            return RegistryEntry(**raw)
+    return None
+
+
 def verify_risk_of_ruin_authority(
     registry_path: str | Path | None,
     evidence: object,
@@ -145,8 +162,10 @@ def verify_risk_of_ruin_authority(
         return False, f"{prefix} risk-of-ruin evidence lacks product-issued durable authority"
     try:
         registry = ScientificRegistry(registry_path)
+        read_fn, _, _, _ = require_scientific_registry_read_authority()
+        state = read_fn(registry)
         evidence_id = getattr(evidence, "evidence_id")
-        entry = registry.get("EvaluationBundle", evidence_id)
+        entry = _entry_from_state(state, "EvaluationBundle", evidence_id)
         if entry is None:
             return False, f"{prefix} risk-of-ruin evidence is not product-issued"
         bundle = entry.payload
@@ -171,11 +190,29 @@ def verify_risk_of_ruin_authority(
         dataset_id = bundle.get("dataset_snapshot_id")
         if type(dataset_id) is not str or not dataset_id:
             return False, f"{prefix} risk-of-ruin authority lacks canonical dataset lineage"
-        dataset = registry.get("DatasetSnapshot", dataset_id)
+        dataset = _entry_from_state(state, "DatasetSnapshot", dataset_id)
         if dataset is None:
             return False, f"{prefix} risk-of-ruin authority references missing dataset"
-        if _instant(dataset.available_at) > issued_at:
+        dataset_available_at = _instant(dataset.available_at)
+        if dataset_available_at > evaluated_at:
+            return (
+                False,
+                f"{prefix} risk-of-ruin authority uses data unavailable at evaluation time",
+            )
+        if dataset_available_at > issued_at:
             return False, f"{prefix} risk-of-ruin authority uses a future dataset"
+        outcome_reveal_after = dataset.payload.get("outcome_reveal_after")
+        if outcome_reveal_after is not None:
+            if type(outcome_reveal_after) is not str:
+                return (
+                    False,
+                    f"{prefix} risk-of-ruin authority has invalid outcome visibility",
+                )
+            if _instant(outcome_reveal_after) > evaluated_at:
+                return (
+                    False,
+                    f"{prefix} risk-of-ruin outcomes were not causally available at evaluation time",
+                )
         dataset_cutoff = dataset.payload.get("causal_cutoff")
         if type(dataset_cutoff) is not str or _instant(dataset_cutoff) > _instant(
             getattr(evidence, "causal_cutoff")
@@ -205,7 +242,24 @@ def verify_risk_of_ruin_authority(
         artifacts = bundle.get("artifact_hashes")
         if type(artifacts) is not list or result_sha256 not in artifacts:
             return False, f"{prefix} risk-of-ruin durable result digest does not match"
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (
+        AttributeError,
+        OSError,
+        ScientificRegistryReadAuthorityError,
+        TypeError,
+        ValueError,
+    ):
         return False, f"{prefix} risk-of-ruin durable authority is invalid"
 
-    return True, "product-issued durable risk-of-ruin authority verified"
+    # A generic ScientificRegistry row proves durable provenance and integrity,
+    # not product issuance. The public registry constructor/append APIs are
+    # deliberately usable by ordinary callers, so accepting registry membership
+    # here would recreate the caller-minting defect this gate exists to prevent.
+    #
+    # Positive financial authority can be enabled only when an independent,
+    # durable product-owned risk evaluator/issuer is available and this verifier
+    # can re-resolve that issuer identity in addition to the scientific lineage.
+    return (
+        False,
+        f"{prefix} risk-of-ruin evidence lacks canonical product-issued evaluator authority",
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import tempfile
 import threading
@@ -7,6 +8,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import autosport.historical_snapshot as historical_snapshot
 from autosport.historical_snapshot import _atomic_write_jsonl, capture_historical_snapshot
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
@@ -27,7 +29,12 @@ class _Transport:
         return HttpJsonResponse(self.payload, 200, {"x-api-version": "test"})
 
 
-def _payload(*, timestamp: str = "2026-09-12T10:00:00Z", last_update: str | None = None) -> dict[str, object]:
+def _payload(
+    *,
+    timestamp: str = "2026-09-12T10:00:00Z",
+    last_update: str | None = None,
+    event_id: str = "tt-1",
+) -> dict[str, object]:
     market: dict[str, object] = {
         "key": "h2h",
         "outcomes": [
@@ -43,7 +50,7 @@ def _payload(*, timestamp: str = "2026-09-12T10:00:00Z", last_update: str | None
         "next_timestamp": "2026-09-12T10:05:00Z",
         "data": [
             {
-                "id": "tt-1",
+                "id": event_id,
                 "sport_key": "table_tennis",
                 "commence_time": "2026-09-12T11:00:00Z",
                 "home_team": "Player A",
@@ -161,6 +168,110 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     requested_at="2026-09-12T10:03:00Z",
                     output_path=Path(temp) / "market.jsonl",
                 )
+
+    def test_capture_rejects_output_evidence_alias_before_provider_io(self) -> None:
+        transport = _Transport(_payload())
+        provider = self._provider(transport)
+        with tempfile.TemporaryDirectory() as temp:
+            shared_path = Path(temp) / "shared.json"
+            with self.assertRaisesRegex(ValueError, "output and evidence paths must be distinct"):
+                capture_historical_snapshot(
+                    provider,
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=shared_path,
+                    evidence_path=shared_path,
+                )
+
+        self.assertEqual(transport.urls, [])
+
+    def test_capture_serializes_market_and_evidence_pair_publication(self) -> None:
+        provider_a = self._provider(_Transport(_payload(event_id="tt-a")))
+        provider_b = self._provider(_Transport(_payload(event_id="tt-b")))
+        a_market_published = threading.Event()
+        release_a = threading.Event()
+        b_lock_attempted = threading.Event()
+        b_writer_entered = threading.Event()
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+        reports: dict[str, object] = {}
+        original_writer = historical_snapshot._atomic_write_jsonl
+        original_lock = historical_snapshot.durable_path_lock
+
+        def controlled_writer(path: Path, rows) -> None:
+            original_writer(path, rows)
+            if threading.current_thread().name == "capture-a":
+                a_market_published.set()
+                if not release_a.wait(timeout=5):
+                    raise AssertionError("timed out waiting to release capture-a publication")
+            elif threading.current_thread().name == "capture-b":
+                b_writer_entered.set()
+
+        @contextmanager
+        def observed_lock(path: Path):
+            if threading.current_thread().name == "capture-b":
+                b_lock_attempted.set()
+            with original_lock(path):
+                yield
+
+        with tempfile.TemporaryDirectory() as temp:
+            market_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+
+            def capture(label: str, provider: ParlayApiTableTennisProvider) -> None:
+                try:
+                    reports[label] = capture_historical_snapshot(
+                        provider,
+                        requested_at="2026-09-12T10:03:00Z",
+                        output_path=market_path,
+                        evidence_path=evidence_path,
+                    )
+                except BaseException as exc:
+                    with errors_lock:
+                        errors.append(exc)
+
+            with unittest.mock.patch.object(
+                historical_snapshot,
+                "_atomic_write_jsonl",
+                side_effect=controlled_writer,
+            ), unittest.mock.patch.object(
+                historical_snapshot,
+                "durable_path_lock",
+                side_effect=observed_lock,
+            ):
+                thread_a = threading.Thread(
+                    target=capture,
+                    args=("a", provider_a),
+                    name="capture-a",
+                    daemon=True,
+                )
+                thread_b = threading.Thread(
+                    target=capture,
+                    args=("b", provider_b),
+                    name="capture-b",
+                    daemon=True,
+                )
+                thread_a.start()
+                self.assertTrue(a_market_published.wait(timeout=5))
+                thread_b.start()
+                self.assertTrue(b_lock_attempted.wait(timeout=5))
+                self.assertFalse(b_writer_entered.is_set())
+                release_a.set()
+                thread_a.join(timeout=5)
+                thread_b.join(timeout=5)
+
+            self.assertFalse(thread_a.is_alive())
+            self.assertFalse(thread_b.is_alive())
+            self.assertEqual(errors, [])
+            report_a = reports["a"]
+            report_b = reports["b"]
+            self.assertNotEqual(report_a.response_sha256, report_b.response_sha256)
+            final_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                historical_snapshot._sha256(market_path),
+                report_b.market_sha256,
+            )
+            self.assertEqual(final_evidence["market_sha256"], report_b.market_sha256)
+            self.assertEqual(final_evidence["response_sha256"], report_b.response_sha256)
 
     def test_atomic_writer_uses_isolated_temp_files_for_concurrent_publication(self) -> None:
         rows_a = [

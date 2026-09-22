@@ -23,9 +23,12 @@ from autosport.evaluation_universe import (
 )
 from autosport.execution_quality_evidence import (
     ExecutionQualityEvidenceClass,
+    ExecutionQualityEvidenceError,
     PaperExecutionQualityReport,
     PaperExecutionQualitySample,
     build_paper_execution_quality_report,
+    validate_paper_execution_quality_report,
+    validate_paper_execution_quality_sample,
 )
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -395,3 +398,74 @@ def test_positive_quality_evidence_cannot_be_caller_constructed():
 
     with pytest.raises(TypeError, match="canonical frozen ledger"):
         PaperExecutionQualityReport()
+
+def test_only_canonical_projector_issues_quality_evidence(tmp_path):
+    row = _row("issuance")
+    frozen = _universe(tmp_path, (row,))
+    ledger, _ = _ledger_with_outcome(
+        tmp_path,
+        frozen,
+        row,
+        _attempt(row, outcome=PaperAttemptOutcome.ACCEPTED),
+    )
+
+    report = build_paper_execution_quality_report(ledger)
+    sample = report.samples[0]
+
+    assert validate_paper_execution_quality_sample(sample) is sample
+    assert validate_paper_execution_quality_report(report) is report
+
+    sample_values = {
+        name: getattr(sample, name)
+        for name in PaperExecutionQualitySample.__dataclass_fields__
+    }
+    sample_values["execution_odds"] = Decimal("999")
+    sample_values["signed_price_delta"] = Decimal("997")
+    sample_values["adverse_slippage"] = Decimal("0")
+    forged_sample = PaperExecutionQualitySample._construct(**sample_values)
+
+    assert forged_sample.sample_sha256 != sample.sample_sha256
+    with pytest.raises(
+        ExecutionQualityEvidenceError,
+        match="product-issued from canonical evidence",
+    ):
+        validate_paper_execution_quality_sample(forged_sample)
+
+    report_values = {
+        name: getattr(report, name)
+        for name in PaperExecutionQualityReport.__dataclass_fields__
+    }
+    report_values["samples"] = (forged_sample,)
+    forged_report = PaperExecutionQualityReport._construct(**report_values)
+
+    with pytest.raises(
+        ExecutionQualityEvidenceError,
+        match="product-issued from canonical evidence",
+    ):
+        validate_paper_execution_quality_report(forged_report)
+
+
+def test_post_issuance_quality_mutation_invalidates_issuance(tmp_path):
+    row = _row("mutation")
+    frozen = _universe(tmp_path, (row,))
+    ledger, _ = _ledger_with_outcome(
+        tmp_path,
+        frozen,
+        row,
+        _attempt(row, outcome=PaperAttemptOutcome.ACCEPTED),
+    )
+
+    report = build_paper_execution_quality_report(ledger)
+    sample = report.samples[0]
+    assert validate_paper_execution_quality_sample(sample) is sample
+
+    object.__setattr__(sample, "execution_odds", Decimal("999"))
+
+    with pytest.raises(
+        ExecutionQualityEvidenceError,
+        match="product-issued from canonical evidence",
+    ):
+        validate_paper_execution_quality_sample(sample)
+    with pytest.raises(ExecutionQualityEvidenceError):
+        validate_paper_execution_quality_report(report)
+

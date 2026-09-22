@@ -84,6 +84,9 @@ class NvdaHumanAcceptanceStructuralResult:
             "NvdaHumanAcceptanceStructuralResult is validator-issued only"
         )
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("NvdaHumanAcceptanceStructuralResult may not be subclassed")
+
 
 def _issue_structural_result(
     *, transcript_sha256: str

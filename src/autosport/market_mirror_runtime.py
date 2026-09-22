@@ -26,6 +26,7 @@ class MirrorInvalidationBatch:
     changed_keys: tuple[MirrorQuoteKey, ...]
     full_refresh_required: bool
     has_more: bool
+    mirror_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ class FocusedMirrorDependencyIndex:
         self._mirror = mirror
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
+        self._matched_revisions: dict[str, int] = {}
         self._lock = RLock()
 
     @staticmethod
@@ -110,9 +112,10 @@ class FocusedMirrorDependencyIndex:
             market_ids=self._selector(market_ids, name="market_ids"),
             selection_ids=self._selector(selection_ids, name="selection_ids"),
         )
+        captured = self._mirror.view()
         initial_keys = {
             (event.source_id, event.quote_key)
-            for event in self._mirror.snapshot()
+            for event in captured.events
             if dependency.matches(event)
         }
         with self._lock:
@@ -120,6 +123,21 @@ class FocusedMirrorDependencyIndex:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
             self._matched_keys[normalized_id] = initial_keys
+            self._matched_revisions[normalized_id] = captured.revision
+
+            # Close the capture -> publication race without making a second mirror
+            # authority. If the canonical mirror advanced before registration became
+            # visible, refresh from one later coherent revision while the dependency
+            # publication lock is still held. Updates after this point are ordinary
+            # post-registration invalidations and route through affected_inputs().
+            published = self._mirror.view()
+            if published.revision != captured.revision:
+                self._matched_keys[normalized_id] = {
+                    (event.source_id, event.quote_key)
+                    for event in published.events
+                    if dependency.matches(event)
+                }
+                self._matched_revisions[normalized_id] = published.revision
         return dependency
 
     def unregister(self, input_id: str) -> bool:
@@ -127,6 +145,7 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
+            self._matched_revisions.pop(normalized_id, None)
             return removed is not None
 
     @property
@@ -143,7 +162,7 @@ class FocusedMirrorDependencyIndex:
                 raise KeyError(f"unknown focused mirror input {normalized_id!r}") from exc
 
     def affected_inputs(self, batch: MirrorInvalidationBatch) -> tuple[str, ...]:
-        """Return registered decision inputs affected by one drained invalidation batch."""
+        """Route one drained invalidation batch and advance keyset completeness."""
         if not isinstance(batch, MirrorInvalidationBatch):
             raise TypeError("batch must be a MirrorInvalidationBatch")
 
@@ -151,11 +170,11 @@ class FocusedMirrorDependencyIndex:
             dependencies = tuple(self._dependencies.values())
 
         if batch.full_refresh_required:
-            snapshot = self._mirror.snapshot()
+            captured = self._mirror.view()
             rebuilt = {
                 dependency.input_id: {
                     (event.source_id, event.quote_key)
-                    for event in snapshot
+                    for event in captured.events
                     if dependency.matches(event)
                 }
                 for dependency in dependencies
@@ -166,8 +185,23 @@ class FocusedMirrorDependencyIndex:
                         self._matched_keys[dependency.input_id] = rebuilt[
                             dependency.input_id
                         ]
+                        self._matched_revisions[dependency.input_id] = captured.revision
             return tuple(dependency.input_id for dependency in dependencies)
-        if not batch.changed_keys or not dependencies:
+
+        if not dependencies:
+            return ()
+
+        if not batch.changed_keys:
+            if not batch.has_more and batch.mirror_revision is not None:
+                with self._lock:
+                    for dependency in dependencies:
+                        if self._dependencies.get(dependency.input_id) != dependency:
+                            continue
+                        previous = self._matched_revisions.get(dependency.input_id)
+                        if previous is None or batch.mirror_revision > previous:
+                            self._matched_revisions[dependency.input_id] = (
+                                batch.mirror_revision
+                            )
             return ()
 
         changed_events = tuple(
@@ -177,9 +211,6 @@ class FocusedMirrorDependencyIndex:
                 event := self._mirror.event_for_quote_key(source_id, quote_key)
             ) is not None
         )
-        if not changed_events:
-            return ()
-
         affected: list[str] = []
         with self._lock:
             for dependency in dependencies:
@@ -194,6 +225,20 @@ class FocusedMirrorDependencyIndex:
                     dependency_affected = True
                 if dependency_affected:
                     affected.append(dependency.input_id)
+
+            # A terminal drain is a causal completeness checkpoint for the canonical
+            # buffer revision represented by this batch. Never advance beyond that
+            # revision: a newer mirror update may already exist but still be pending
+            # in a later invalidation batch.
+            if not batch.has_more and batch.mirror_revision is not None:
+                for dependency in dependencies:
+                    if self._dependencies.get(dependency.input_id) != dependency:
+                        continue
+                    previous = self._matched_revisions.get(dependency.input_id)
+                    if previous is None or batch.mirror_revision > previous:
+                        self._matched_revisions[dependency.input_id] = (
+                            batch.mirror_revision
+                        )
         return tuple(affected)
 
     @staticmethod
@@ -278,6 +323,52 @@ class FocusedMirrorDependencyIndex:
             for dependency in dependencies
         }
 
+    def _coherent_routed_resync(
+        self,
+        dependencies: tuple[FocusedMirrorDependency, ...],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> tuple[MirrorSnapshot, dict[str, frozenset[MirrorQuoteKey]]]:
+        """Rebuild requested routed keys from one stable canonical mirror revision."""
+        for _ in range(4):
+            full = self._mirror.view()
+            keys_by_input = {
+                dependency.input_id: frozenset(
+                    (event.source_id, event.quote_key)
+                    for event in full.events
+                    if dependency.matches(event)
+                )
+                for dependency in dependencies
+            }
+            union_keys: set[MirrorQuoteKey] = set()
+            for keys in keys_by_input.values():
+                union_keys.update(keys)
+
+            captured = self._mirror.active_view_for_keys(
+                union_keys,
+                as_of=as_of,
+                max_age=max_age,
+            )
+            if captured.revision != full.revision:
+                continue
+
+            with self._lock:
+                for dependency in dependencies:
+                    if self._dependencies.get(dependency.input_id) != dependency:
+                        raise RuntimeError(
+                            "focused mirror dependency changed during routed resync"
+                        )
+                for dependency in dependencies:
+                    input_id = dependency.input_id
+                    self._matched_keys[input_id] = set(keys_by_input[input_id])
+                    self._matched_revisions[input_id] = captured.revision
+            return captured, keys_by_input
+
+        raise RuntimeError(
+            "market mirror changed continuously during routed dependency resync"
+        )
+
     def incremental_decision_views(
         self,
         input_ids: tuple[str, ...],
@@ -285,12 +376,13 @@ class FocusedMirrorDependencyIndex:
         as_of: datetime,
         max_age: timedelta,
     ) -> dict[str, MirrorSnapshot]:
-        """Read many routed inputs from one coherent canonical mirror revision.
+        """Read routed inputs only when their keysets cover the captured revision.
 
-        The union of already-routed quote identities is captured in one
-        active_view_for_keys call. Each requested input is then projected from those
-        immutable bytes, so simultaneous live updates cannot tear one portfolio
-        recomputation across multiple mirror revisions.
+        Each routed keyset carries the exact mirror revision through which drained
+        invalidations are known complete. If the canonical mirror advances between
+        key capture and focused read, or registration published from an older cut,
+        one coherent selector resync is used instead of stamping the newer revision
+        onto an older incomplete key union.
         """
         if type(input_ids) is not tuple:
             raise TypeError("input_ids must be a tuple")
@@ -300,6 +392,7 @@ class FocusedMirrorDependencyIndex:
 
         dependencies: list[FocusedMirrorDependency] = []
         keys_by_input: dict[str, frozenset[MirrorQuoteKey]] = {}
+        revisions_by_input: dict[str, int | None] = {}
         with self._lock:
             for input_id in normalized:
                 try:
@@ -312,6 +405,7 @@ class FocusedMirrorDependencyIndex:
                 keys_by_input[input_id] = frozenset(
                     self._matched_keys.get(input_id, set())
                 )
+                revisions_by_input[input_id] = self._matched_revisions.get(input_id)
 
         if not dependencies:
             return {}
@@ -325,6 +419,17 @@ class FocusedMirrorDependencyIndex:
             as_of=as_of,
             max_age=max_age,
         )
+        dependency_tuple = tuple(dependencies)
+        if any(
+            revisions_by_input[dependency.input_id] != captured.revision
+            for dependency in dependency_tuple
+        ):
+            captured, keys_by_input = self._coherent_routed_resync(
+                dependency_tuple,
+                as_of=as_of,
+                max_age=max_age,
+            )
+
         return {
             dependency.input_id: MirrorSnapshot(
                 revision=captured.revision,
@@ -338,7 +443,7 @@ class FocusedMirrorDependencyIndex:
                     )
                 ),
             )
-            for dependency in dependencies
+            for dependency in dependency_tuple
         }
 
     def decision_view(
@@ -424,6 +529,7 @@ class BoundedMirrorInvalidationBuffer:
             raise ValueError("max_dirty_keys must be a positive non-boolean integer")
         self._mirror = mirror
         self._max_dirty_keys = max_dirty_keys
+        self._mirror_revision = mirror.view().revision
         self._dirty: dict[MirrorQuoteKey, None] = {}
         self._full_refresh_required = False
         self._lock = RLock()
@@ -461,6 +567,8 @@ class BoundedMirrorInvalidationBuffer:
             if result.status is not MirrorUpdate.APPLIED:
                 return result
 
+            self._mirror_revision += 1
+
             if self._full_refresh_required:
                 return result
 
@@ -492,6 +600,7 @@ class BoundedMirrorInvalidationBuffer:
                     changed_keys=(),
                     full_refresh_required=True,
                     has_more=False,
+                    mirror_revision=self._mirror_revision,
                 )
 
             count = min(max_items, len(self._dirty))
@@ -502,4 +611,5 @@ class BoundedMirrorInvalidationBuffer:
                 changed_keys=keys,
                 full_refresh_required=False,
                 has_more=bool(self._dirty),
+                mirror_revision=self._mirror_revision,
             )

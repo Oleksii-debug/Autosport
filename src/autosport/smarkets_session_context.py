@@ -71,7 +71,7 @@ def _account_record(raw: bytes) -> dict[str, object]:
         parsed = orders_acquisition._strict_json(raw)
     except orders_acquisition.SmarketsOrdersAcquisitionError as exc:
         # Do not propagate provider-controlled payload fragments into operator text.
-        raise SmarketsSessionContextError("Smarkets accounts payload is invalid JSON") from exc
+        raise SmarketsSessionContextError("Smarkets accounts payload is invalid JSON") from None
 
     if type(parsed) is not dict or type(parsed.get("account")) is not dict:
         raise SmarketsSessionContextError(
@@ -348,7 +348,7 @@ class SmarketsAuthenticatedSession:
             # Never forward provider payload/token material from a lower-level error.
             raise SmarketsSessionContextError(
                 "Smarkets orders readback is unavailable for this session"
-            ) from exc
+            ) from None
 
         if type(record) is not orders_acquisition.SmarketsOrdersAcquisitionRecord:
             raise SmarketsSessionContextError(

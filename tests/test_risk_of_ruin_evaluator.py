@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import fields, replace
 from decimal import Decimal
+import hashlib
 from pathlib import Path
 
 import pytest
+
+import autosport.risk_of_ruin_evaluator as risk_module
 
 from autosport.risk_of_ruin_evaluator import (
     IssuedRiskOfRuinResult,
@@ -219,6 +222,65 @@ def test_caller_request_cannot_mint_product_issued_authority(
         evaluator.issue(request)
 
     assert not evaluator.journal_path.exists()
+
+
+def test_pre_authority_v1_journal_is_quarantined_after_upgrade(
+    tmp_path: Path,
+) -> None:
+    evaluator = _evaluator(tmp_path)
+    request = _request(planned=10)
+
+    empty_state, records = evaluator._read_state_under_lock()
+    assert records == ()
+
+    legacy_result = evaluate_risk_of_ruin(
+        request,
+        workspace_instance_id=evaluator.authority.workspace_instance_id,
+        issued_at="2026-01-04T00:00:00+00:00",
+        source_sha256=SHA_F,
+    )
+    record = risk_module._record_payload(
+        legacy_result,
+        previous_record_sha256=None,
+    )
+    legacy_state = {
+        "schema": empty_state["schema"],
+        "schema_version": 1,
+        "workspace_instance_id": evaluator.authority.workspace_instance_id,
+        "records": [record],
+    }
+    intended = hashlib.sha256(
+        risk_module._atomic_json_bytes(legacy_state)
+    ).hexdigest()
+    tx_id = record["authority_tx_id"]
+    binding = record["semantic_binding_sha256"]
+
+    evaluator.authority.prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    risk_module.atomic_write_json(evaluator.journal_path, legacy_state)
+    published = risk_module._file_sha256(evaluator.journal_path)
+    assert published == intended
+    evaluator.authority.commit(
+        tx_id=tx_id,
+        observed_state_sha256=published,
+        semantic_binding_sha256=binding,
+    )
+
+    _, parsed = evaluator._read_state_under_lock()
+    assert len(parsed) == 1
+    parsed_result = IssuedRiskOfRuinResult.from_payload(parsed[0]["result"])
+    assert parsed_result == legacy_result
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="quarantined as audit history",
+    ):
+        evaluator.resolve(legacy_result.result_id)
+    assert evaluator.verify(legacy_result) is False
 
 
 def test_repeated_source_evidence_cannot_be_relabelled_as_independent_authority(

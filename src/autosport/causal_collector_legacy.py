@@ -838,31 +838,37 @@ class DesktopDeltaConsumer:
                 "apply_health must be included inside the durable apply_event boundary"
             )
 
-    def _causally_blocked_delta_ids(
+    def _contiguous_available_deltas(
         self,
         *,
         available: tuple[CollectorDelta, ...],
         as_of: datetime,
-    ) -> set[str]:
-        """Return visible rows that follow a durably committed but not-yet-visible row.
+    ) -> tuple[CollectorDelta, ...]:
+        """Project visible deltas in durable transport order without crossing a causal gap.
 
-        Collector commit order is the transport order.  A later row may become
-        desktop-available before an earlier committed row because availability is
-        causal evidence, not a delivery-sequence shortcut.  Such a row can remain
-        durably staged in CollectorDeltaStore, but applying/acknowledging it would
-        advance desktop state across evidence the desktop could not yet have known.
-
-        Revisions participate in the same committed transport stream.  A revision
-        committed after a later cursor therefore cannot retroactively block that
-        earlier commit, while a revision committed before a later row must become
-        causally visible before that later row is applied.
+        deltas_after_commit is the canonical desktop transport order. The causal
+        availability projection can be cursor-sorted and can expose a later commit
+        before an earlier commit becomes desktop-visible. Walk the durable source
+        feed instead: a not-yet-visible row fences only later commits in its own
+        epoch, while rows already committed before that hidden row remain eligible.
+        Revisions therefore preserve their actual commit position.
         """
 
-        source_ids = {delta.source_id for delta in available}
-        blocked: set[str] = set()
+        if not available:
+            return ()
+
+        available_by_id = {delta.delta_id: delta for delta in available}
+        if len(available_by_id) != len(available):
+            raise DeltaConflictError(
+                "desktop availability projection contains duplicate delta_id"
+            )
+
+        expected_ids = set(available_by_id)
+        accounted_ids: set[str] = set()
+        ordered: list[CollectorDelta] = []
         page_size = 1000
 
-        for source_id in source_ids:
+        for source_id in sorted({delta.source_id for delta in available}):
             after_delta_id: str | None = None
             hidden_epoch_rows: set[str] = set()
 
@@ -876,6 +882,10 @@ class DesktopDeltaConsumer:
                     break
 
                 for committed in page:
+                    selected = available_by_id.get(committed.delta_id)
+                    if selected is not None:
+                        accounted_ids.add(committed.delta_id)
+
                     if _instant(
                         committed.desktop_available_at,
                         "desktop_available_at",
@@ -883,25 +893,30 @@ class DesktopDeltaConsumer:
                         hidden_epoch_rows.add(committed.stream_epoch)
                         continue
                     if committed.stream_epoch in hidden_epoch_rows:
-                        blocked.add(committed.delta_id)
+                        continue
+                    if selected is not None:
+                        ordered.append(selected)
 
                 after_delta_id = page[-1].delta_id
                 if len(page) < page_size:
                     break
 
-        return blocked
+        if accounted_ids != expected_ids:
+            raise CursorRegressionError(
+                "desktop availability projection is not present in durable commit order"
+            )
+
+        return tuple(ordered)
 
     def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
-        causally_blocked = self._causally_blocked_delta_ids(
+        contiguous_available = self._contiguous_available_deltas(
             available=available,
             as_of=now,
         )
         delivered: list[str] = []
-        for delta in available:
-            if delta.delta_id in causally_blocked:
-                continue
+        for delta in contiguous_available:
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
                     item.gap_state is GapState.RECOVERED

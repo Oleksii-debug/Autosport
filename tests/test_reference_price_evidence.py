@@ -31,6 +31,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         price_semantics: str = "best_available_to_back",
         execution_quote_verified: bool = False,
         sequence: int = 1,
+        bookmaker_key: str | None = None,
     ) -> MarketEvent:
         return MarketEvent(
             event_id=event_id,
@@ -47,6 +48,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             metadata={
                 "price_semantics": price_semantics,
                 "execution_quote_verified": execution_quote_verified,
+                "bookmaker_key": source if bookmaker_key is None else bookmaker_key,
             },
             sport="table_tennis",
             market_semantics_id="winner.match.v1",
@@ -64,6 +66,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         max_age_seconds: int = 30,
         max_skew_seconds: int = 5,
         minimum_sources: int = 2,
+        eligible_price_source_ids=None,
     ) -> ReferencePriceProtocol:
         return ReferencePriceProtocol(
             eligible_source_ids=tuple(source_ids),
@@ -73,6 +76,11 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             max_age_seconds=max_age_seconds,
             max_skew_seconds=max_skew_seconds,
             minimum_sources=minimum_sources,
+            eligible_price_source_ids=(
+                None
+                if eligible_price_source_ids is None
+                else tuple(eligible_price_source_ids)
+            ),
         )
 
     def build(self, events, **kwargs):
@@ -83,6 +91,17 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             eligible_source_ids = kwargs.pop(
                 "eligible_source_ids",
                 tuple(sorted({event.source_id for event in materialized})),
+            )
+            eligible_price_source_ids = kwargs.pop(
+                "eligible_price_source_ids",
+                tuple(
+                    sorted(
+                        {
+                            event.metadata.get("bookmaker_key", event.source_id)
+                            for event in materialized
+                        }
+                    )
+                ),
             )
             protocol = self.protocol(
                 eligible_source_ids,
@@ -101,6 +120,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                 max_age_seconds=kwargs.pop("max_age_seconds", 30),
                 max_skew_seconds=kwargs.pop("max_skew_seconds", 5),
                 minimum_sources=kwargs.pop("minimum_sources", 2),
+                eligible_price_source_ids=eligible_price_source_ids,
             )
         if kwargs:
             raise AssertionError(f"unexpected test helper kwargs: {kwargs!r}")
@@ -124,6 +144,8 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             ("provider-a", "provider-b", "provider-c"),
         )
         self.assertEqual(forward.median_decimal_odds, Decimal("2.00"))
+        self.assertEqual(forward.lower_median_decimal_odds, Decimal("2.00"))
+        self.assertEqual(forward.upper_median_decimal_odds, Decimal("2.00"))
         self.assertEqual(forward.min_decimal_odds, Decimal("1.90"))
         self.assertEqual(forward.max_decimal_odds, Decimal("2.10"))
         self.assertEqual(forward.price_semantics, "best_available_to_back")
@@ -132,7 +154,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         self.assertFalse(forward.fill_fidelity_verified)
         self.assertEqual(len(forward.evidence_id), 64)
 
-    def test_even_source_count_uses_exact_decimal_median(self) -> None:
+    def test_even_source_count_preserves_observed_median_band(self) -> None:
         evidence = self.build(
             (
                 self.event("provider-a", "1.90"),
@@ -140,7 +162,9 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(evidence.median_decimal_odds, Decimal("2.00"))
+        self.assertIsNone(evidence.median_decimal_odds)
+        self.assertEqual(evidence.lower_median_decimal_odds, Decimal("1.90"))
+        self.assertEqual(evidence.upper_median_decimal_odds, Decimal("2.10"))
 
     def test_exact_event_bytes_are_committed_into_evidence_identity(self) -> None:
         first = self.event("provider-a", "2.00")
@@ -182,7 +206,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
 
     def test_duplicate_source_cannot_gain_consensus_weight(self) -> None:
         with self.assertRaisesRegex(
-            ReferencePriceEvidenceError, "distinct source_id"
+            ReferencePriceEvidenceError, "distinct independent price source_ids"
         ):
             self.build(
                 (
@@ -191,6 +215,83 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                 ),
                 eligible_source_ids=("provider-a", "provider-b"),
             )
+
+    def test_same_bookmaker_through_two_aggregators_cannot_double_count(self) -> None:
+        protocol = self.protocol(
+            ("parlayapi:football", "the-odds-api:football"),
+            eligible_price_source_ids=("pinnacle", "draftkings"),
+            minimum_sources=2,
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "distinct independent price source_ids",
+        ):
+            self.build(
+                (
+                    self.event(
+                        "parlayapi:football",
+                        "2.00",
+                        bookmaker_key="pinnacle",
+                    ),
+                    self.event(
+                        "the-odds-api:football",
+                        "2.02",
+                        bookmaker_key="pinnacle",
+                    ),
+                ),
+                protocol=protocol,
+            )
+
+    def test_two_bookmakers_from_one_aggregator_are_independent_when_bound(self) -> None:
+        protocol = self.protocol(
+            ("parlayapi:football",),
+            eligible_price_source_ids=("draftkings", "pinnacle"),
+            minimum_sources=2,
+        )
+        evidence = self.build(
+            (
+                self.event(
+                    "parlayapi:football",
+                    "2.00",
+                    bookmaker_key="pinnacle",
+                    sequence=1,
+                ),
+                self.event(
+                    "parlayapi:football",
+                    "2.04",
+                    bookmaker_key="draftkings",
+                    sequence=2,
+                ),
+            ),
+            protocol=protocol,
+        )
+
+        self.assertEqual(set(evidence.source_ids), {"parlayapi:football"})
+        self.assertEqual(set(evidence.price_source_ids), {"pinnacle", "draftkings"})
+        self.assertIsNone(evidence.median_decimal_odds)
+        self.assertEqual(evidence.lower_median_decimal_odds, Decimal("2.00"))
+        self.assertEqual(evidence.upper_median_decimal_odds, Decimal("2.04"))
+
+    def test_missing_underlying_price_source_identity_fails_closed(self) -> None:
+        first = self.event("provider-a", "2.00")
+        second = self.event("provider-b", "2.10")
+        second = replace(
+            second,
+            metadata={
+                key: value
+                for key, value in second.metadata.items()
+                if key != "bookmaker_key"
+            },
+        )
+        protocol = self.protocol(
+            ("provider-a", "provider-b"),
+            eligible_price_source_ids=("provider-a", "provider-b"),
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "metadata.bookmaker_key",
+        ):
+            self.build((first, second), protocol=protocol)
 
     def test_market_selection_identity_mismatch_fails_closed(self) -> None:
         with self.assertRaisesRegex(
@@ -340,7 +441,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReferencePriceEvidenceError,
-            "exactly cover frozen eligible source universe",
+            "exactly cover frozen eligible transport-source universe",
         ):
             self.build(
                 (
@@ -369,7 +470,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReferencePriceEvidenceError,
-            "exactly cover frozen eligible source universe",
+            "exactly cover frozen eligible transport-source universe",
         ):
             self.build(
                 (
@@ -418,7 +519,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReferencePriceEvidenceError,
-            "exactly cover frozen eligible source universe",
+            "exactly cover frozen eligible transport-source universe",
         ):
             self.build(
                 (

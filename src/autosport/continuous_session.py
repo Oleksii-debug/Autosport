@@ -1000,6 +1000,7 @@ class ContinuousSessionCoordinator:
             book = self._load_book()
             engine = SettlementEngine()
             for resolution in unique.values():
+                self._require_settlement_causal_for_open_tickets(book, resolution)
                 allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
                 scoped = {
                     quote_key: outcome
@@ -1013,6 +1014,39 @@ class ContinuousSessionCoordinator:
                 book.save(self.paper_book_path)
 
         return settled, tuple(unique)
+
+    @staticmethod
+    def _require_settlement_causal_for_open_tickets(
+        book: PaperBook,
+        resolution: SettlementResolution,
+    ) -> None:
+        available_at = _instant(
+            resolution.available_at,
+            "settlement available_at",
+        )
+        event_parts = {resolution.event_identity}
+        if ":" in resolution.event_identity:
+            event_parts.add(resolution.event_identity.split(":", 1)[1])
+        resolution_quote_keys = set(resolution.quote_outcomes)
+
+        for ticket in book.tickets.values():
+            if ticket.status.value != "open":
+                continue
+            matches_resolution = any(
+                leg.event_id in event_parts
+                and leg.quote_key in resolution_quote_keys
+                for leg in ticket.legs
+            )
+            if not matches_resolution:
+                continue
+            placed_at = _instant(
+                ticket.placed_at,
+                f"ticket {ticket.ticket_id} placed_at",
+            )
+            if available_at < placed_at:
+                raise ContinuousSessionError(
+                    "settlement evidence predates matching open ticket placement"
+                )
 
     @staticmethod
     def _open_quote_keys_for_book(

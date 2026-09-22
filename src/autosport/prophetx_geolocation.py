@@ -291,7 +291,7 @@ def _parse_provider_response(
         raise ProphetXGeolocationError(
             "geolocation location/reason fields must be strings"
         )
-    return payload["success"], sha256(response.body).hexdigest()
+    return payload["success"], _canonical_sha({"success": payload["success"]})
 
 
 def _install_authority():

@@ -18,3 +18,28 @@ if (-not (Test-Path -LiteralPath $skipGateHelper -PathType Leaf)) {
 $builderText = [System.IO.File]::ReadAllText($builderScript)
 $candidateText = ConvertTo-WindowsCandidateCoreText -CoreText $builderText
 Invoke-WindowsCandidateCoreText -CoreText $candidateText
+
+# The canonical candidate path also materializes the stage-neutral one-product
+# release artifact. The legacy package remains only as the already-qualified input
+# consumed by the transition authority and by older downstream checks.
+$materializer = Join-Path $PSScriptRoot 'materialize_stage_neutral_release.ps1'
+if (-not (Test-Path -LiteralPath $materializer -PathType Leaf)) {
+  throw 'Stage-neutral Windows release materializer is missing'
+}
+
+$sourceSha = [string]$env:AUTOSPORT_SOURCE_SHA
+if ([string]::IsNullOrWhiteSpace($sourceSha)) {
+  $repoRoot = Split-Path -Parent $PSScriptRoot
+  $sourceSha = (& git -C $repoRoot rev-parse HEAD 2>&1 | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to resolve exact source SHA for stage-neutral release materialization'
+  }
+}
+if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+  throw 'Stage-neutral release materialization requires a canonical lowercase Git SHA'
+}
+
+& $materializer -SourceSha $sourceSha
+if ($LASTEXITCODE -ne 0) {
+  throw "Stage-neutral Windows release materialization exited with code $LASTEXITCODE"
+}

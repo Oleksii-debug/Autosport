@@ -30,6 +30,19 @@ from .workspace_lock import WorkspaceEconomicLock as _WorkspaceEconomicLock
 _PROCESS_SOURCE_PUBLICATION_LOCK = threading.RLock()
 
 
+def _source_feature_materializer(
+    self,
+    *,
+    lineage_authority,
+):
+    """Return a source-feature writer capability owned by this collector service."""
+
+    return source_authority._materializer_from_headless_collector_service(
+        service=self,
+        lineage_authority=lineage_authority,
+    )
+
+
 class _SerializedSourceFeatureWorkspaceLock(_WorkspaceEconomicLock):
     """Serialize same-process source writers before taking the canonical OS lock."""
 
@@ -58,6 +71,15 @@ class _SerializedSourceFeatureWorkspaceLock(_WorkspaceEconomicLock):
 
 
 def _install_source_runtime_surface() -> None:
+    from . import collector_service as collector_service_module
+
+    # The writer capability is issued only by the canonical source runtime.  Keep
+    # collector_service.py itself untouched so unrelated collector repair lineages
+    # can reconverge independently.
+    collector_service_module.HeadlessCollectorService.source_feature_materializer = (
+        _source_feature_materializer
+    )
+
     # SourceFeatureArtifactAuthority resolves this module global at lock use time.
     # Keep the durable cross-process lock implementation itself unchanged.
     source_authority.WorkspaceEconomicLock = _SerializedSourceFeatureWorkspaceLock

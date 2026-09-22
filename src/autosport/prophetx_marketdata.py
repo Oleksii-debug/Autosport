@@ -115,7 +115,7 @@ def _default_transport(
             )
     except HTTPError as exc:
         raise ProphetXTransportError(f"provider HTTP {int(exc.code)}", int(exc.code)) from exc
-    except URLError as exc:
+    except (URLError, TimeoutError) as exc:
         raise ProphetXTransportError("provider transport unavailable") from exc
 
 

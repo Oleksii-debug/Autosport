@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import replace
 from decimal import Decimal
 
@@ -782,3 +783,39 @@ def test_population_evidence_cannot_be_caller_constructed_or_subset_with_replace
     with pytest.raises(TypeError):
         replace(aggregate, samples=aggregate.samples[:1])
 
+
+
+def test_population_same_object_mutation_revokes_whole_ledger_issuance(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="e" * 64,
+    )
+    original_hash = aggregate.evidence_sha256
+
+    object.__setattr__(
+        aggregate,
+        "evaluation_protocol_sha256",
+        "f" * 64,
+    )
+
+    assert aggregate._evidence_sha256 == original_hash
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by whole-ledger projection",
+    ):
+        aggregate.to_dict()
+
+
+def test_population_copy_cannot_inherit_whole_ledger_issuance(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="1" * 64,
+    )
+    duplicated = copy(aggregate)
+
+    assert duplicated is not aggregate
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by whole-ledger projection",
+    ):
+        _ = duplicated.evidence_sha256

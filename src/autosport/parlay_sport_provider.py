@@ -119,8 +119,8 @@ class ParlayApiSportProvider(ParlayApiTableTennisProvider):
     ) -> list[ProviderQuote]:
         """Reject cross-sport substitution before canonical quote materialization."""
 
-        explicit = event.get("sport_key")
-        if explicit is not None:
+        if "sport_key" in event:
+            explicit = event["sport_key"]
             if type(explicit) is not str or explicit != self.sport_key:
                 raise ProviderPayloadError(
                     "provider event sport_key does not match configured sport scope"

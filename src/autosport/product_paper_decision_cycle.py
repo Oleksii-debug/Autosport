@@ -8,13 +8,16 @@ from threading import Lock
 from typing import Callable
 
 from .decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
+from .json_integrity import strict_json_loads
 from .live_decision_loop import (
     LiveCycleResult,
     LiveDecisionMode,
+    LiveDecisionProgressError,
     LiveIntentFactory,
     LiveIntentProvenance,
     LiveLoopBounds,
     PersistentLiveDecisionLoop,
+    _Progress,
 )
 from .paper import PaperBook
 from .paper_execution_adoption import PaperExecutionAdoptionRuntime
@@ -49,6 +52,26 @@ def _canonical_selector(value: _Selector, field: str) -> _Selector:
     if len(set(value)) != len(value) or value != tuple(sorted(value)):
         raise ValueError(f"{field} must be sorted and unique")
     return value
+
+
+def _verified_live_recovery_cursor(workspace: Path) -> _Progress | None:
+    """Read the canonical live-loop recovery cursor without creating new authority.
+
+    This intentionally reuses the exact schema/parser owned by PersistentLiveDecisionLoop.
+    It is called only while the product composition owns WorkspaceEconomicLock, matching
+    the lock used when the live loop publishes PENDING/APPEND_PENDING/COMMITTED progress.
+    """
+
+    progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+    if not progress_path.exists():
+        return None
+    try:
+        raw = strict_json_loads(progress_path.read_text(encoding="utf-8"))
+        return _Progress.from_dict(raw)
+    except (OSError, TypeError, ValueError, LiveDecisionProgressError) as exc:
+        raise ProductPaperDecisionCycleError(
+            "live decision recovery cursor cannot be verified before PaperBook bootstrap"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +294,12 @@ class ProductPaperDecisionCycle:
             if path.exists():
                 book = PaperBook.load(path)
             else:
+                recovery_cursor = _verified_live_recovery_cursor(self.workspace)
+                if recovery_cursor is not None:
+                    raise ProductPaperDecisionCycleError(
+                        "missing durable PaperBook conflicts with surviving live "
+                        "decision recovery progress; recovery is required"
+                    )
                 if execution_writer_lock_path.exists():
                     raise ProductPaperDecisionCycleError(
                         "missing durable PaperBook cannot be recreated while PAPER "

@@ -600,8 +600,11 @@ def test_invalid_economic_decimal_fails_before_publication(replacement):
         c.read_complete_current_orders()
 
 
-def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions(monkeypatch):
-    c, _ = canonical_client(monkeypatch,
+def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions(
+    monkeypatch,
+):
+    c, _ = canonical_client(
+        monkeypatch,
         balance(),
         bootstrap(
             4,
@@ -640,8 +643,11 @@ def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions(
     assert snapshot.open_positions[0].provider_side == "BACK"
 
 
-def test_partially_matched_order_preserves_live_unmatched_remainder_without_false_single_odds(monkeypatch):
-    c, _ = canonical_client(monkeypatch,
+def test_partially_matched_order_preserves_live_unmatched_remainder_without_false_single_odds(
+    monkeypatch,
+):
+    c, _ = canonical_client(
+        monkeypatch,
         balance(),
         bootstrap(
             1,
@@ -672,8 +678,11 @@ def test_partially_matched_order_preserves_live_unmatched_remainder_without_fals
     assert position.decimal_odds is None
 
 
-def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precision(monkeypatch):
-    c, _ = canonical_client(monkeypatch,
+def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precision(
+    monkeypatch,
+):
+    c, _ = canonical_client(
+        monkeypatch,
         balance(),
         bootstrap(
             1,
@@ -698,8 +707,11 @@ def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precisi
     assert position.decimal_odds is None
 
 
-def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position(monkeypatch):
-    c, _ = canonical_client(monkeypatch,
+def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position(
+    monkeypatch,
+):
+    c, _ = canonical_client(
+        monkeypatch,
         balance(),
         bootstrap(1, order("1", 1, status=3, unmatched="5", matched="0")),
         changed(),
@@ -711,8 +723,11 @@ def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position(monk
     assert snapshot.settled_positions == ()
 
 
-def test_settled_and_void_raw_evidence_are_preserved_but_not_misreported_as_complete_settled_history(monkeypatch):
-    c, _ = canonical_client(monkeypatch,
+def test_settled_and_void_raw_evidence_are_preserved_but_not_misreported_as_complete_settled_history(
+    monkeypatch,
+):
+    c, _ = canonical_client(
+        monkeypatch,
         balance(),
         bootstrap(
             2,

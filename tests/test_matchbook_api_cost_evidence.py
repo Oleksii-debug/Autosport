@@ -21,6 +21,7 @@ from autosport.matchbook_api_cost_evidence import (
     MatchbookBillingPeriod,
     MeterContinuityTruth,
     PolicyAmountTruth,
+    UsageOriginTruth,
     calculate_policy_math,
     configured_billing_period,
     derive_matchbook_api_cost_accrual,
@@ -147,6 +148,7 @@ def test_one_send_counts_once_and_retry_counts_twice() -> None:
     assert snapshot.request_count == 2
     assert m.rolling_emission_sha256 != first
     assert snapshot.continuity_truth is MeterContinuityTruth.PROCESS_LOCAL_ONLY
+    assert snapshot.origin_truth is UsageOriginTruth.UNBOUND_PROCESS_LOCAL
 
 
 def test_fail_before_io_and_sequence_collision_do_not_mutate_meter() -> None:
@@ -275,25 +277,24 @@ def test_remainder_usage_cannot_mint_prorated_gbp() -> None:
         account_currency="GBP",
     )
     assert accrual.policy_gbp_amount is None
-    assert accrual.amount_truth is PolicyAmountTruth.REMAINDER_UNRESOLVED
+    assert accrual.amount_truth is PolicyAmountTruth.USAGE_ORIGIN_UNBOUND
     assert accrual.account_currency_amount is None
+    assert accrual.usage_origin_truth is UsageOriginTruth.UNBOUND_PROCESS_LOCAL
     assert accrual.cash_truth is CashTruth.UNRECONCILED
 
 
-def test_whole_block_zero_is_configured_estimate_not_provider_cash_truth() -> None:
+def test_unbound_zero_usage_cannot_mint_account_wide_zero_cost() -> None:
     accrual = derive_matchbook_api_cost_accrual(
         usage=meter().snapshot(observed_at=START),
         billing_period=period(),
         pricing_policy=policy(),
         account_currency="GBP",
     )
-    assert accrual.policy_gbp_amount == Decimal("0")
-    assert (
-        accrual.amount_truth
-        is PolicyAmountTruth.CONFIGURED_CALENDAR_ESTIMATE_GBP
-    )
+    assert accrual.policy_gbp_amount is None
+    assert accrual.amount_truth is PolicyAmountTruth.USAGE_ORIGIN_UNBOUND
     assert accrual.fx_truth is FxTruth.NOT_NEEDED_GBP
-    assert accrual.account_currency_amount == Decimal("0")
+    assert accrual.account_currency_amount is None
+    assert accrual.usage_origin_truth is UsageOriginTruth.UNBOUND_PROCESS_LOCAL
     assert accrual.cash_truth is CashTruth.UNRECONCILED
     assert accrual.allocation_state == "UNALLOCATED_SHARED_PROVIDER_COST"
 
@@ -361,3 +362,34 @@ def test_currency_and_accrual_tampering_fail_closed() -> None:
         replace(accrual, allocation_state="ALLOCATED")
     with pytest.raises(MatchbookApiCostEvidenceError):
         replace(accrual, completed_blocks=1, completed_block_gbp=Decimal("100"))
+
+def test_caller_mutated_meter_state_cannot_mint_transport_observed_cost() -> None:
+    b = period()
+    p = policy()
+    m = meter(b=b, p=p)
+
+    m._count = 1_000_000
+    m._first_seq = 1
+    m._last_seq = 1_000_000
+    m._first_at = START
+    m._last_at = START
+    m._rolling = "d" * 64
+
+    usage = m.snapshot(observed_at=START)
+    accrual = derive_matchbook_api_cost_accrual(
+        usage=usage,
+        billing_period=b,
+        pricing_policy=p,
+        account_currency="GBP",
+    )
+
+    assert usage.request_count == 1_000_000
+    assert usage.origin_truth is UsageOriginTruth.UNBOUND_PROCESS_LOCAL
+    assert (
+        calculate_policy_math(usage.request_count, p).exact_policy_gbp
+        == Decimal("100")
+    )
+    assert accrual.policy_gbp_amount is None
+    assert accrual.account_currency_amount is None
+    assert accrual.amount_truth is PolicyAmountTruth.USAGE_ORIGIN_UNBOUND
+

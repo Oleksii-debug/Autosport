@@ -100,6 +100,7 @@ def test_positive_ev_lay_fails_closed_before_back_only_execution_bridge() -> Non
         "execution bridge is BACK-only for LAY"
     ]
 
+
 def test_lay_risk_uses_liability_not_order_stake_above_odds_two() -> None:
     # One unit of LAY order stake at odds 3 risks two units of bankroll liability.
     policy, _context = _run("0.25", odds="3.0")

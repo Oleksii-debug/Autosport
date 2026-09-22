@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 from decimal import Decimal, localcontext
 
 from autosport.domain import MarketType
@@ -10,6 +11,7 @@ from autosport.prophetx_marketdata import (
     ProphetXRestMarketProvider,
     ProphetXTransportError,
     _decode_provider_json,
+    _default_transport,
     american_to_decimal,
 )
 from autosport.providers import CanonicalNormalizer, ProviderUnavailableError
@@ -91,6 +93,21 @@ class ProphetXMarketDataTests(unittest.TestCase):
         error = ProphetXTransportError("unavailable", 503)
         self.assertIsInstance(error, ProviderUnavailableError)
         self.assertEqual(error.status_code, 503)
+
+    @patch("autosport.prophetx_marketdata.build_opener")
+    def test_builtin_transport_timeout_is_typed_and_sanitized(self, build_opener):
+        build_opener.return_value.open.side_effect = TimeoutError(
+            "socket timeout secret-provider-detail"
+        )
+        with self.assertRaises(ProphetXTransportError) as caught:
+            _default_transport(
+                "https://api.sandbox.prophetx.dev/partner/v3/affiliate/get_markets"
+                "?event_id=1001&get_all_market=true",
+                {"Authorization": "Bearer should-not-leak"},
+                1.0,
+            )
+        self.assertEqual(str(caught.exception), "provider transport unavailable")
+        self.assertIsNone(caught.exception.status_code)
 
     def test_fixed_read_only_market_endpoint_keeps_token_out_of_url(self):
         provider, calls = self._provider()

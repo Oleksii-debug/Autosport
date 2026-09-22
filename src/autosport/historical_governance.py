@@ -416,6 +416,16 @@ def _frozen_governance_args(
             raise ValueError("frozen governance authority changed during canonical assembly")
 
 
+def _print_governance_fail_closed(machine_status: str, exc: Exception) -> None:
+    """Emit Ukrainian-first operator guidance without changing the machine diagnostic."""
+
+    print(
+        "Не вдалося перевірити права або строки зберігання для історичного корпусу. "
+        "Операцію безпечно зупинено."
+    )
+    print(f"{machine_status} error={exc}")
+
+
 def corpus_main(argv: list[str] | None = None) -> int:
     from .historical_corpus import main as canonical_main
 
@@ -427,7 +437,7 @@ def corpus_main(argv: list[str] | None = None) -> int:
         with _frozen_governance_args(forwarded, binding) as frozen:
             return canonical_main(frozen)
     except (ValueError, OSError) as exc:
-        print(f"historical_corpus=FAIL_CLOSED error={exc}")
+        _print_governance_fail_closed("historical_corpus=FAIL_CLOSED", exc)
         return 3
 
 
@@ -442,5 +452,5 @@ def bundle_corpus_main(argv: list[str] | None = None) -> int:
         with _frozen_governance_args(forwarded, binding) as frozen:
             return canonical_main(frozen)
     except (ValueError, OSError) as exc:
-        print(f"historical_bundle_corpus=FAIL_CLOSED error={exc}")
+        _print_governance_fail_closed("historical_bundle_corpus=FAIL_CLOSED", exc)
         return 3

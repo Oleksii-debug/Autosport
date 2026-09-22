@@ -22,6 +22,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         odds: str,
         observed_ts: str,
         ingest_ts: str | None = None,
+        source_ts: str | None = None,
     ) -> MarketEvent:
         return MarketEvent(
             event_id="event-1",
@@ -32,7 +33,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             source_id="provider-a",
             sequence=sequence,
             status="open",
-            source_ts=observed_ts,
+            source_ts=source_ts or observed_ts,
             ingest_ts=ingest_ts or observed_ts,
         )
 
@@ -178,6 +179,37 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertEqual(len(later.events), 1)
                 self.assertEqual(later.events[0].sequence, 2)
                 self.assertEqual(later.events[0].decimal_odds, Decimal("3.00"))
+            finally:
+                store.close()
+
+    def test_duplicate_provider_sequence_preserves_first_append_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                source_time = "2026-09-16T18:59:55+00:00"
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                    ingest_ts="2026-09-16T19:00:00+00:00",
+                    source_ts=source_time,
+                )
+                retry = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:05+00:00",
+                    ingest_ts="2026-09-16T19:00:06+00:00",
+                    source_ts=source_time,
+                )
+
+                self.assertTrue(store.append(first))
+                self.assertFalse(store.append(retry))
+                rows = store.connection.execute(
+                    "SELECT dedupe_key, append_generation "
+                    "FROM market_event_commit_order"
+                ).fetchall()
+                self.assertEqual(rows, [(first.dedupe_key, 1)])
+                self.assertEqual(len(store.events()), 1)
             finally:
                 store.close()
 

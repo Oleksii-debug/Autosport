@@ -6,19 +6,22 @@ from autosport.paper_strategy import Forecast, PaperValueAgent
 
 
 class _CapturingRiskPolicy:
-    def __init__(self) -> None:
+    def __init__(self, *, allowed: bool = False) -> None:
         self.economic_goal = SimpleNamespace(
             bankroll_id="bankroll-1",
             currency="EUR",
         )
+        self.allowed = allowed
+        self.derived_signal = None
         self.captured_context = None
 
-    def derive_goal_stake(self, _book, _expected_profit_per_unit):
+    def derive_goal_stake(self, _book, expected_profit_per_unit):
+        self.derived_signal = expected_profit_per_unit
         return Decimal("10")
 
     def evaluate(self, _book, _stake, *, context=None):
         self.captured_context = context
-        return SimpleNamespace(allowed=False)
+        return SimpleNamespace(allowed=self.allowed)
 
 
 def _lay_event() -> MarketEvent:
@@ -35,9 +38,13 @@ def _lay_event() -> MarketEvent:
     )
 
 
-def _run(probability: str) -> _CapturingRiskPolicy:
+def _run(
+    probability: str,
+    *,
+    risk_allowed: bool = False,
+) -> tuple[_CapturingRiskPolicy, SimpleNamespace]:
     event = _lay_event()
-    policy = _CapturingRiskPolicy()
+    policy = _CapturingRiskPolicy(allowed=risk_allowed)
     agent = PaperValueAgent(
         {
             event.quote_key: Forecast(
@@ -62,16 +69,29 @@ def _run(probability: str) -> _CapturingRiskPolicy:
     )
 
     agent.on_market_event(event, context)
-    return policy
+    return policy, context
 
 
 def test_negative_ev_lay_does_not_reach_risk_proposal_path() -> None:
     # For a lay at decimal odds 2.0, p=0.75 has EV/stake = 1 - p*odds = -0.50.
-    policy = _run("0.75")
+    policy, _context = _run("0.75")
+    assert policy.derived_signal is None
     assert policy.captured_context is None
 
 
 def test_positive_ev_lay_is_not_rejected_by_back_only_value_sign() -> None:
     # For a lay at decimal odds 2.0, p=0.25 has EV/stake = 1 - p*odds = +0.50.
-    policy = _run("0.25")
+    policy, _context = _run("0.25")
+    assert policy.derived_signal == Decimal("0.50")
     assert policy.captured_context is not None
+
+
+def test_positive_ev_lay_fails_closed_before_back_only_execution_bridge() -> None:
+    policy, context = _run("0.25", risk_allowed=True)
+
+    assert policy.derived_signal == Decimal("0.50")
+    assert policy.captured_context is not None
+    assert context.notes == [
+        "paper-value material action withheld: canonical #623 paper "
+        "execution bridge is BACK-only for LAY"
+    ]

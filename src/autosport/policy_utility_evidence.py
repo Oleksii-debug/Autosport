@@ -175,6 +175,13 @@ class PolicyUtilityEvidence:
             _finite_decimal(self.effective_sample_size, "effective_sample_size")
             if self.effective_sample_size <= 0:
                 raise PolicyUtilityError("effective_sample_size must be positive")
+            if (
+                self.support_count is not None
+                and self.effective_sample_size > Decimal(self.support_count)
+            ):
+                raise PolicyUtilityError(
+                    "effective_sample_size cannot exceed support_count"
+                )
         if self.uncertainty is not None:
             _finite_decimal(self.uncertainty, "uncertainty")
             if self.uncertainty < 0:

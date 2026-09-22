@@ -25,6 +25,7 @@ def _event(
         selection_id=selection_id,
         decimal_odds=Decimal("2.00"),
         observed_ts=T0,
+        ingest_ts=T0,
         source_id="fixture:multisport",
         sequence=sequence,
         sport=sport,

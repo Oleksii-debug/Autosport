@@ -479,8 +479,8 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
 
             verified = verify_source_universe_commitment(
                 store,
-                expected_store_path=store.path,
                 candidate,
+                expected_store_path=store.path,
                 expected_source_id="source-x",
                 expected_start_cycle_seq=1,
                 expected_end_cycle_seq=1,
@@ -517,8 +517,8 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 verify_source_universe_commitment(
                     store,
-                    expected_store_path=store.path,
                     forged,
+                    expected_store_path=store.path,
                     expected_source_id="source-x",
                     expected_start_cycle_seq=1,
                     expected_end_cycle_seq=1,
@@ -559,8 +559,8 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 verify_source_universe_commitment(
                     store,
-                    expected_store_path=store.path,
                     stale,
+                    expected_store_path=store.path,
                     expected_source_id="source-x",
                     expected_start_cycle_seq=1,
                     expected_end_cycle_seq=1,
@@ -586,8 +586,8 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 verify_source_universe_commitment(
                     store,
-                    expected_store_path=store.path,
                     favorable_smaller_window,
+                    expected_store_path=store.path,
                     expected_source_id="source-x",
                     expected_start_cycle_seq=1,
                     expected_end_cycle_seq=2,

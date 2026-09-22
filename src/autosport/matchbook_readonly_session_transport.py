@@ -414,12 +414,18 @@ class MatchbookReadOnlySessionTransport:
             status = _validate_status(self._logout(session.session_token))
         except ProviderUnavailableError as exc:
             status_code, retry_after_seconds = _provider_error_metadata(exc)
+            self._invalidate_generation_after_network_failure(
+                session.generation_id
+            )
             raise MatchbookSessionTransportError(
                 "Matchbook logout transport failed",
                 status_code=status_code,
                 retry_after_seconds=retry_after_seconds,
             ) from None
         except Exception:
+            self._invalidate_generation_after_network_failure(
+                session.generation_id
+            )
             raise MatchbookSessionTransportError(
                 "Matchbook logout transport failed"
             ) from None

@@ -153,9 +153,9 @@ def test_caller_available_state_cannot_mint_runtime_health_authority():
         as_of="2026-09-21T10:03:00+00:00",
     )
     assert not decision.allowed
-    assert decision.lifecycle is CapabilityLifecycleState.CURRENT
+    assert decision.lifecycle is CapabilityLifecycleState.UNKNOWN
     assert decision.availability is CapabilityAvailabilityState.UNKNOWN
-    assert "not AVAILABLE" in decision.reason
+    assert "product-owned provenance authority" in decision.reason
 
 
 @pytest.mark.parametrize(
@@ -365,8 +365,10 @@ def test_transient_outage_does_not_revoke_durable_support():
     )
     decision = _resolve(journal, profile)
     assert not decision.allowed
-    assert decision.lifecycle is CapabilityLifecycleState.CURRENT
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
     assert decision.availability is CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE
+    assert "product-owned upstream authority" in decision.reason
+    assert decision.lifecycle is not CapabilityLifecycleState.REVOKED_OR_UNSUPPORTED
 
 
 def test_later_unsupported_evidence_supersedes_historical_positive():

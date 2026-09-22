@@ -7,12 +7,14 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.prophetx_price_ladder as ladder_module
 from autosport.prophetx_price_ladder import (
     ADAPTER_ID,
     ProphetXPriceLadderClient,
     ProphetXPriceLadderError,
     ProphetXPriceLadderHttpResponse,
     ProphetXPriceLadderTransportError,
+    assert_provider_origin_verified,
 )
 
 
@@ -83,6 +85,40 @@ def test_custom_transport_never_claims_verified_provider_origin():
     snapshot = _client().read_ladder()
     assert snapshot.provider_origin_verified is False
     assert snapshot.current_execution_price_authority is False
+
+
+def test_only_default_fixed_origin_acquisition_can_pass_origin_assertion(monkeypatch):
+    raw = b'{"data":[-110,100,125]}'
+
+    def fixed_transport(url, headers, timeout_seconds, max_response_bytes):
+        assert url == URL
+        assert headers["Authorization"] == f"Bearer {TOKEN}"
+        return _response(raw)
+
+    monkeypatch.setattr(ladder_module, "_default_transport", fixed_transport)
+    snapshot = ProphetXPriceLadderClient(TOKEN, clock=lambda: NOW).read_ladder()
+
+    assert snapshot.provider_origin_verified is True
+    assert_provider_origin_verified(snapshot)
+
+
+def test_custom_or_caller_constructed_snapshot_cannot_launder_provider_origin():
+    custom = _client().read_ladder()
+    with pytest.raises(ProphetXPriceLadderError, match="not issued"):
+        assert_provider_origin_verified(custom)
+
+    forged = ladder_module.ProphetXPriceLadderSnapshot(
+        adapter_id=custom.adapter_id,
+        environment=custom.environment,
+        endpoint=custom.endpoint,
+        prices=custom.prices,
+        observed_at=custom.observed_at,
+        source_payload_sha256=custom.source_payload_sha256,
+        ladder_sha256=custom.ladder_sha256,
+        provider_origin_verified=True,
+    )
+    with pytest.raises(ProphetXPriceLadderError, match="not issued"):
+        assert_provider_origin_verified(forged)
 
 
 def test_semantic_ladder_digest_is_order_independent_but_payload_digest_is_not():

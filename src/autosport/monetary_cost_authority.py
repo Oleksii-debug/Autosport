@@ -924,6 +924,7 @@ def _exact_decimal_sum_is_one(values: tuple[Decimal, ...]) -> bool:
 
     return saw_unit
 
+
 def _sorted_text(values: tuple[str, ...], label: str) -> None:
     for value in values:
         _text(value, label)

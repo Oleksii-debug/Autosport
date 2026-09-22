@@ -85,13 +85,13 @@ class BetdaqSelectionsChangedWireResponse:
 
 def _wire_timestamp(value: str, field: str) -> BetdaqWireTimestamp:
     raw = value.strip()
-    if not raw or raw != value:
-        raise BetdaqSoapProtocolError(f"{field} must be a trimmed ISO-8601 timestamp")
+    if not raw or raw != value or "T" not in raw:
+        raise BetdaqSoapProtocolError(f"{field} must be a trimmed ISO-8601 dateTime")
     candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
     try:
         parsed = datetime.fromisoformat(candidate)
     except ValueError as exc:
-        raise BetdaqSoapProtocolError(f"{field} must be an ISO-8601 timestamp") from exc
+        raise BetdaqSoapProtocolError(f"{field} must be an ISO-8601 dateTime") from exc
     return BetdaqWireTimestamp(
         value=parsed,
         text=raw,

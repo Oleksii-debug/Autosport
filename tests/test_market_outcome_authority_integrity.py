@@ -27,6 +27,7 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
             "eventTypeId": "2593174",
             "marketType": "MATCH_ODDS",
             "status": "OPEN",
+            "complete": True,
             "runners": [{"id": "away"}, {"id": "home"}],
         }
 

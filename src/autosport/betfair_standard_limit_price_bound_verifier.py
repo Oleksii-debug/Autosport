@@ -50,6 +50,7 @@ _EVIDENCE_FIELDS = (
     "write_adapter_id",
     "write_adapter_version",
     "status",
+    "matchme_applicability_proven",
     "zero_adverse_price_deterioration",
     "execution_feasibility_proven",
     "realized_price_exact",

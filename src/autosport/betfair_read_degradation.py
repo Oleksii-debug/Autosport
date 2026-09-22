@@ -34,6 +34,7 @@ class ReadRecoveryAction(str, Enum):
 _BETTING_READ_ONLY_OPERATIONS = frozenset(
     {
         "listEventTypes",
+        "listCompetitions",
         "listEvents",
         "listMarketTypes",
         "listMarketCatalogue",
@@ -71,6 +72,23 @@ _BETTING_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
     "REQUEST_SIZE_EXCEEDS_LIMIT": ReadRecoveryAction.REPAIR_REQUEST,
     "ACCESS_DENIED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
 }
+
+# listCompetitions is part of the canonical multi-sport discovery prefix, but the
+# provider's operation-specific limit documentation does not establish the
+# TOO_MUCH_DATA / REQUEST_SIZE_EXCEEDS_LIMIT / TOO_MANY_REQUESTS cases for it.
+# Keep those claimed codes fail-closed rather than inheriting positive action only
+# from the broader Betting family.
+_LIST_COMPETITIONS_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
+    "INVALID_SESSION_INFORMATION": ReadRecoveryAction.REAUTHENTICATE,
+    "NO_SESSION": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+    "NO_APP_KEY": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+    "INVALID_APP_KEY": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+    "INVALID_INPUT_DATA": ReadRecoveryAction.REPAIR_REQUEST,
+    "SERVICE_BUSY": ReadRecoveryAction.RETRY_WITH_BACKOFF,
+    "TIMEOUT_ERROR": ReadRecoveryAction.RETRY_WITH_BACKOFF,
+    "UNEXPECTED_ERROR": ReadRecoveryAction.RETRY_WITH_BACKOFF,
+    "ACCESS_DENIED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+}
 _ACCOUNT_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
     **_COMMON_ERROR_ACTIONS,
     "SUBSCRIPTION_EXPIRED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
@@ -79,6 +97,8 @@ _ACCOUNT_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
 
 
 def _error_actions_for(operation: str) -> dict[str, ReadRecoveryAction]:
+    if operation == "listCompetitions":
+        return _LIST_COMPETITIONS_ERROR_ACTIONS
     if operation in _BETTING_READ_ONLY_OPERATIONS:
         return _BETTING_ERROR_ACTIONS
     if operation in _ACCOUNT_READ_ONLY_OPERATIONS:

@@ -13,12 +13,14 @@ import hashlib
 import json
 import os
 import stat
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from .json_integrity import strict_json_loads
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 WORKSPACE_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_binding"
@@ -339,36 +341,123 @@ def _sync_existing_lineage(leaf: Path, boundary: Path) -> None:
         current = current.parent
 
 
+class _WorkspaceBindingPublishLock(WorkspaceEconomicLock):
+    """Reuse the hardened workspace lock protocol with blocking binding-publication semantics."""
+
+    FILE_NAME = ".monotonic-workspace-binding-publish.lock"
+
+    @staticmethod
+    def _lock_handle(handle) -> None:  # noqa: ANN001
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                raise WorkspaceEconomicLockError(
+                    "cannot acquire workspace binding publication lock"
+                ) from exc
+            return
+
+        import fcntl
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise WorkspaceEconomicLockError(
+                "cannot acquire workspace binding publication lock"
+            ) from exc
+
+
+def _replace_windows_write_through(source: Path, destination: Path) -> None:
+    """Atomically publish a staged file and flush the Windows rename metadata."""
+
+    import ctypes
+
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    move_file_ex.restype = ctypes.c_int
+    if not move_file_ex(
+        str(source),
+        str(destination),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError()
+
+
+def _durable_replace_staged(source: Path, destination: Path) -> None:
+    """Publish one complete staged file with platform-appropriate metadata durability."""
+
+    if os.name == "nt":
+        _replace_windows_write_through(source, destination)
+        return
+
+    os.replace(source, destination)
+    _fsync_directory(destination.parent)
+
+
 def _durable_exclusive_json_create(
     path: Path, payload: dict[str, object], *, lineage_boundary: Path
 ) -> None:
+    """Publish complete binding JSON without ever exposing a partial final pathname."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     _sync_existing_lineage(path.parent, lineage_boundary)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    if os.name != "nt":
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    created = False
+    temporary: Path | None = None
     try:
-        descriptor = os.open(path, flags, 0o600)
-        created = True
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            descriptor = None
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        _fsync_directory(path.parent)
-    except BaseException:
-        if descriptor is not None:
-            os.close(descriptor)
-        if created:
+
+        try:
+            with _WorkspaceBindingPublishLock(path.parent):
+                try:
+                    os.lstat(path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise WorkspaceBindingIntegrityError(
+                        "cannot inspect workspace binding publication path"
+                    ) from exc
+                else:
+                    raise FileExistsError(f"workspace binding already exists: {path}")
+
+                # The complete, fsynced same-directory file becomes visible in one
+                # pathname transition. The publication lock serializes cooperating
+                # Autosport creators; replacing a concurrently inserted symlink or
+                # hard-link pathname replaces that pathname itself, never its target.
+                _durable_replace_staged(temporary, path)
+                temporary = None
+        except WorkspaceEconomicLockError as exc:
+            raise WorkspaceBindingIntegrityError(
+                "cannot serialize workspace binding publication"
+            ) from exc
+    finally:
+        if temporary is not None:
             try:
-                path.unlink()
-                _fsync_directory(path.parent)
-            except BaseException:
+                temporary.unlink()
+            except FileNotFoundError:
                 pass
-        raise
 
 
 def _read_strict_object(path: Path, expected_keys: frozenset[str]) -> dict[str, object]:

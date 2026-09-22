@@ -152,7 +152,7 @@ def test_known_crossing_blocks_exact_order():
     assert out.authorizes_write is False
 
 
-def test_no_known_conflict_never_becomes_write_authority():
+def test_product_serialization_does_not_erase_external_writer_residual_risk():
     i = intent()
     r = resting()
     out = screen_pre_submit(
@@ -164,7 +164,8 @@ def test_no_known_conflict_never_becomes_write_authority():
     assert out.decision is PreSubmitDecision.NO_KNOWN_CONFLICT_NOT_GUARANTEED
     assert out.authorizes_write is False
     assert out.requires_immediate_recheck_before_submit is True
-    assert out.residual_concurrency_risk is False
+    assert out.writer_coordination is WriterCoordination.PROVEN_PRODUCT_SERIALIZED
+    assert out.residual_concurrency_risk is True
 
 
 def test_external_writer_race_remains_explicit():

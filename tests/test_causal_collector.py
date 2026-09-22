@@ -1313,6 +1313,33 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertIsNotNone(stream)
             self.assertEqual(stream.last_position, 2)
 
+            fresh_applied = []
+
+            def apply_at_six(current, _event):
+                fresh_applied.append(current.delta_id)
+                return DesktopApplicationReceipt(
+                    delta_id=current.delta_id,
+                    canonical_event_digest=current.canonical_event_digest,
+                    receipt_id=f"fresh:{current.delta_id}",
+                    applied_at="2026-01-01T00:00:06+00:00",
+                )
+
+            fresh_consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(root / "fresh-desktop.json"),
+                resolve_event=lambda current: event_payload(
+                    event_id=current.event_id,
+                    odds="1.81" if current.delta_id == "d1r" else "1.80",
+                ),
+                apply_event=apply_at_six,
+                lookup_application_receipt=lambda _current: None,
+            )
+            self.assertEqual(
+                fresh_consumer.drain(as_of="2026-01-01T00:00:06+00:00"),
+                ("d1", "d2", "d1r"),
+            )
+            self.assertEqual(fresh_applied, ["d1", "d2", "d1r"])
+
     def test_crash_before_atomic_replace_preserves_previous_durable_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"

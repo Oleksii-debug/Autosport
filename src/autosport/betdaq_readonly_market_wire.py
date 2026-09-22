@@ -122,6 +122,8 @@ def _safe_text(value: str, field: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field} must be str")
     value = value.strip()
+    if not value:
+        raise BetdaqSoapProtocolError(f"{field} must be a non-empty string")
     if len(value) > _MAX_TEXT or any(not char.isprintable() for char in value):
         raise BetdaqSoapProtocolError(f"{field} contains unsafe text")
     return value

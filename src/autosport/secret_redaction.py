@@ -63,6 +63,10 @@ _URL_USERINFO_RE = re.compile(
 _QUERY_PARAM_RE = re.compile(
     r"(?P<prefix>[?&](?P<key>[^=&#\s]+)=)(?P<value>[^&#\s]*)"
 )
+_AUTHORIZATION_COMMA_VALUE_RE = re.compile(
+    r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
+    r"(?P<value>[A-Za-z][A-Za-z0-9+.-]*\s+[^\r\n]*,[^\r\n]*)"
+)
 _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
@@ -185,6 +189,14 @@ def redact_operator_text(
         return match.group("prefix") + REDACTED
 
     rendered = _QUERY_PARAM_RE.sub(redact_query, rendered)
+    # Multi-parameter Authorization schemes (for example Digest and AWS SigV4)
+    # carry credential material after comma-separated fields. Redact the entire
+    # header value through the current line before the narrower single-token
+    # rule runs, otherwise response/signature tails can survive presentation.
+    rendered = _AUTHORIZATION_COMMA_VALUE_RE.sub(
+        lambda match: match.group("prefix") + REDACTED,
+        rendered,
+    )
     rendered = _AUTHORIZATION_VALUE_RE.sub(
         lambda match: match.group("prefix")
         + _redacted_value_literal(match.group("value")),

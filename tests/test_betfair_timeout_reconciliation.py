@@ -1104,6 +1104,7 @@ def test_provider_evidence_assertion_rejects_fingerprint_rebind(
     ):
         provider_evidence.assert_verified_provider_evidence_authoritative(direct)
 
+
 def test_provider_verifier_rejects_transitive_helper_rebind(
     tmp_path, monkeypatch
 ) -> None:
@@ -1155,5 +1156,30 @@ def test_timeout_authority_rejects_same_function_code_mutation(
             attempt_id="attempt-1",
             expected_profile_sha256=profile.profile_id,
             readback=capture,
+        )
+
+def test_provider_verifier_rejects_readback_origin_method_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        type(capture),
+        "assert_authoritative",
+        lambda self: None,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider readback origin authority method changed",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
         )
 

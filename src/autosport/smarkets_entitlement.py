@@ -41,6 +41,9 @@ class SmarketsPurpose(str, Enum):
     REDISTRIBUTION = "redistribution"
 
 
+_PROVIDER_PROHIBITED_PURPOSES = frozenset({SmarketsPurpose.BENCHMARKING})
+
+
 def _text(v: object, name: str) -> str:
     if type(v) is not str or not v or v != v.strip() or "\x00" in v:
         raise SmarketsEntitlementError(f"{name} must be canonical non-empty text")
@@ -220,6 +223,8 @@ class SmarketsSetupCostObservation:
     observed_at: str
     source_document_sha256: str
     evidence_sha256: str
+    refund_window_days: int | None = None
+    refund_condition: str | None = None
     one_time: bool = True
     applies_per_bet: bool = False
     incurred_cost_authority: bool = False
@@ -232,6 +237,11 @@ class SmarketsSetupCostObservation:
             raise SmarketsEntitlementError("setup-cost schema/source mismatch")
         _money(self.amount, "amount"); _currency(self.currency); _text(self.billing_trigger, "billing_trigger")
         _dt_text(self.observed_at, "observed_at"); _sha(self.source_document_sha256, "source_document_sha256")
+        if (self.refund_window_days is None) != (self.refund_condition is None):
+            raise SmarketsEntitlementError("refund window and condition must be supplied together")
+        if self.refund_window_days is not None:
+            _posint(self.refund_window_days, "refund_window_days")
+            _text(self.refund_condition, "refund_condition")
         if self.one_time is not True or self.applies_per_bet is not False or self.incurred_cost_authority is not False:
             raise SmarketsEntitlementError("setup cost must remain one-time, non-per-bet and non-incurred")
         _sha(self.evidence_sha256, "evidence_sha256")
@@ -243,7 +253,8 @@ class SmarketsSetupCostObservation:
             "schema": "autosport.smarkets_setup_cost_observation", "schema_version": self.schema_version,
             "venue_id": self.venue_id, "source_family": self.source_family, "amount": str(self.amount),
             "currency": self.currency, "billing_trigger": self.billing_trigger, "observed_at": self.observed_at,
-            "source_document_sha256": self.source_document_sha256, "one_time": True,
+            "source_document_sha256": self.source_document_sha256,
+            "refund_window_days": self.refund_window_days, "refund_condition": self.refund_condition, "one_time": True,
             "applies_per_bet": False, "incurred_cost_authority": False,
         }
 
@@ -278,6 +289,10 @@ def issue_smarkets_entitlement_observation(*, account_scope: str, approval_ref: 
     if type(approved_purposes) is not tuple or any(type(x) is not SmarketsPurpose for x in approved_purposes):
         raise SmarketsEntitlementError("approved_purposes must contain exact SmarketsPurpose values")
     purposes = tuple(sorted(set(approved_purposes), key=lambda x: x.value)); _purposes(purposes)
+    prohibited = _PROVIDER_PROHIBITED_PURPOSES.intersection(purposes)
+    if prohibited:
+        names = ",".join(sorted(item.value for item in prohibited))
+        raise SmarketsEntitlementError(f"provider terms prohibit purpose under schema v1: {names}")
     if type(allowed_event_ids) is not tuple:
         raise SmarketsEntitlementError("allowed_event_ids must be tuple")
     if type(allowed_market_ids) is not tuple:
@@ -336,6 +351,7 @@ def evaluate_smarkets_entitlement(observation: SmarketsEntitlementObservation, *
     if (as_of - observed).total_seconds() > max_age_seconds: return out(False, "STALE_EVIDENCE")
     if observation.approval_state is not SmarketsApprovalState.APPROVED:
         return out(False, f"APPROVAL_{observation.approval_state.value.upper()}")
+    if purpose in _PROVIDER_PROHIBITED_PURPOSES: return out(False, "PURPOSE_PROHIBITED_BY_PROVIDER_TERMS")
     if purpose not in observation.approved_purposes: return out(False, "PURPOSE_NOT_APPROVED")
     if not observation.all_events_approved and event_id not in observation.allowed_event_ids:
         return out(False, "EVENT_NOT_APPROVED")
@@ -368,17 +384,25 @@ def resolve_smarkets_entitlement(observations: tuple[SmarketsEntitlementObservat
 
 
 def issue_smarkets_setup_cost_observation(*, amount: Decimal, currency: str, billing_trigger: str,
-    observed_at: datetime, source_document_sha256: str) -> SmarketsSetupCostObservation:
+    observed_at: datetime, source_document_sha256: str, refund_window_days: int | None = None,
+    refund_condition: str | None = None) -> SmarketsSetupCostObservation:
     amount = _money(amount, "amount"); currency = _currency(currency); billing_trigger = _text(billing_trigger, "billing_trigger")
     observed = _dt(_utc(observed_at, "observed_at")); source = _sha(source_document_sha256, "source_document_sha256")
+    if (refund_window_days is None) != (refund_condition is None):
+        raise SmarketsEntitlementError("refund window and condition must be supplied together")
+    if refund_window_days is not None:
+        _posint(refund_window_days, "refund_window_days")
+        refund_condition = _text(refund_condition, "refund_condition")
     partial = {
         "schema": "autosport.smarkets_setup_cost_observation", "schema_version": SCHEMA_VERSION,
         "venue_id": VENUE_ID, "source_family": _COST_FAMILY, "amount": str(amount), "currency": currency,
         "billing_trigger": billing_trigger, "observed_at": observed, "source_document_sha256": source,
+        "refund_window_days": refund_window_days, "refund_condition": refund_condition,
         "one_time": True, "applies_per_bet": False, "incurred_cost_authority": False,
     }
     digest = _digest(partial)
-    result = SmarketsSetupCostObservation(amount, currency, billing_trigger, observed, source, digest)
+    result = SmarketsSetupCostObservation(amount, currency, billing_trigger, observed, source, digest,
+        refund_window_days, refund_condition)
     _register(_ISSUED_COST, result, digest)
     return result
 

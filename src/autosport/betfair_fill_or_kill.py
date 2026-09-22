@@ -13,6 +13,7 @@ _SIDE = "BACK"
 _PERSISTENCE = "LAPSE"
 _TIME_IN_FORCE = "FILL_OR_KILL"
 _HEX = frozenset("0123456789abcdef")
+_MAX_FIXED_POINT_TEXT = 512
 
 
 class BetfairFillOrKillError(RuntimeError):
@@ -42,6 +43,32 @@ def _sha256(value: object, name: str) -> str:
     return raw
 
 
+def _fixed_point_materialization_length(value: Decimal) -> int:
+    """Conservative preflight for format(value, "f") without materializing it."""
+
+    if type(value) is not Decimal or not value.is_finite():
+        raise BetfairFillOrKillError(
+            "fixed-point length preflight requires exact finite Decimal"
+        )
+    sign, digits, exponent = value.as_tuple()
+    digit_count = len(digits)
+    sign_length = 1 if sign else 0
+    if exponent >= 0:
+        return sign_length + digit_count + exponent
+    integer_digits = digit_count + exponent
+    if integer_digits > 0:
+        return sign_length + digit_count + 1
+    return sign_length + 2 + (-integer_digits) + digit_count
+
+
+def _require_fixed_point_bound(value: Decimal, name: str) -> Decimal:
+    if _fixed_point_materialization_length(value) > _MAX_FIXED_POINT_TEXT:
+        raise BetfairFillOrKillError(
+            f"{name} fixed-point representation exceeds resource bound"
+        )
+    return value
+
+
 def _positive_decimal(value: object, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise BetfairFillOrKillError(f"{name} must not use bool/float coercion")
@@ -57,7 +84,7 @@ def _positive_decimal(value: object, name: str) -> Decimal:
         raise BetfairFillOrKillError(f"{name} must be a finite decimal") from exc
     if not parsed.is_finite() or parsed <= 0:
         raise BetfairFillOrKillError(f"{name} must be finite and > 0")
-    return parsed
+    return _require_fixed_point_bound(parsed, name)
 
 
 def _nonnegative_decimal(value: object, name: str) -> Decimal:
@@ -75,12 +102,13 @@ def _nonnegative_decimal(value: object, name: str) -> Decimal:
         raise BetfairFillOrKillError(f"{name} must be a finite decimal") from exc
     if not parsed.is_finite() or parsed < 0:
         raise BetfairFillOrKillError(f"{name} must be finite and >= 0")
-    return parsed
+    return _require_fixed_point_bound(parsed, name)
 
 
 def _decimal_text(value: Decimal) -> str:
     if type(value) is not Decimal or not value.is_finite():
         raise BetfairFillOrKillError("internal decimal must be exact finite Decimal")
+    _require_fixed_point_bound(value, "internal decimal")
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")

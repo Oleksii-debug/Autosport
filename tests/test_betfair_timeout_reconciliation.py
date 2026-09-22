@@ -1091,6 +1091,48 @@ def test_provider_absence_assertion_does_not_trust_rebound_timeout_symbol(
         provider_evidence.assert_verified_provider_evidence_authoritative(direct)
 
 
+def test_provider_absence_assertion_rejects_registered_callback_code_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    direct = provider_evidence.verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=provider_ref,
+    )
+    assert isinstance(direct, VerifiedProviderAbsenceEvidence)
+
+    helper = timeout_resolution.assert_betfair_timeout_absence_authoritative
+
+    def forged_factory():
+        a = object()
+        b = object()
+        c = object()
+        d = object()
+        e = object()
+
+        def forged(_evidence):
+            _ = (a, b, c, d, e)
+            return None
+
+        return forged
+
+    forged = forged_factory()
+    assert len(helper.__code__.co_freevars) == len(forged.__code__.co_freevars)
+    monkeypatch.setattr(helper, "__code__", forged.__code__)
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="timeout absence authority assertion executable code changed",
+    ):
+        provider_evidence.assert_verified_provider_evidence_authoritative(direct)
+
+
 def test_provider_evidence_assertion_rejects_fingerprint_rebind(
     tmp_path, monkeypatch
 ) -> None:

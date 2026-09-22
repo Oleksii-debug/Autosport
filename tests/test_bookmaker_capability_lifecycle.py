@@ -158,6 +158,88 @@ def test_caller_available_state_cannot_mint_runtime_health_authority():
     assert "not AVAILABLE" in decision.reason
 
 
+@pytest.mark.parametrize(
+    ("strength", "source"),
+    [
+        (
+            CapabilityEvidenceStrength.DOCUMENTED_ONLY,
+            CapabilityEvidenceSource.OFFICIAL_DOCUMENT,
+        ),
+        (
+            CapabilityEvidenceStrength.OBSERVED_PUBLIC,
+            CapabilityEvidenceSource.PUBLIC_OBSERVATION,
+        ),
+    ],
+)
+def test_caller_low_grade_evidence_cannot_mint_positive_authority_without_provenance(
+    strength, source
+):
+    profile = _profile()
+    scope = CapabilityScope("betfair", None, "production")
+    evidence = _evidence(
+        profile,
+        strength=strength,
+        source=source,
+        scope=scope,
+    )
+    journal = CapabilityEvidenceJournal()
+    journal.publish(evidence)
+    requirement = CapabilityRequirement(
+        BookmakerCapability.BALANCE_READ,
+        strength,
+        scope,
+        "v1",
+        "api-v1",
+        86400,
+        require_available=False,
+    )
+
+    decision = journal.resolve(
+        requirement,
+        {profile.profile_id: profile},
+        as_of="2026-09-21T10:03:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.UNKNOWN
+    assert decision.availability is CapabilityAvailabilityState.UNKNOWN
+    assert "product-owned provenance authority" in decision.reason
+
+
+def test_low_grade_restart_does_not_strengthen_unproven_provenance():
+    profile = _profile()
+    scope = CapabilityScope("betfair", None, "production")
+    evidence = _evidence(
+        profile,
+        strength=CapabilityEvidenceStrength.DOCUMENTED_ONLY,
+        source=CapabilityEvidenceSource.OFFICIAL_DOCUMENT,
+        scope=scope,
+    )
+    journal = CapabilityEvidenceJournal()
+    journal.publish(evidence)
+    restored = CapabilityEvidenceJournal.from_json(journal.to_json())
+    requirement = CapabilityRequirement(
+        BookmakerCapability.BALANCE_READ,
+        CapabilityEvidenceStrength.DOCUMENTED_ONLY,
+        scope,
+        "v1",
+        "api-v1",
+        86400,
+        require_available=False,
+    )
+
+    decision = restored.resolve(
+        requirement,
+        {profile.profile_id: profile},
+        as_of="2026-09-21T10:03:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.UNKNOWN
+    assert decision.evidence_id == evidence.evidence_id
+    assert "product-owned provenance authority" in decision.reason
+
+
 def test_documented_place_bet_cannot_satisfy_authenticated_requirement():
     profile = _profile(BookmakerCapability.PLACE_BET)
     evidence = _evidence(

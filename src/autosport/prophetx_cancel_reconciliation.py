@@ -8,7 +8,8 @@ from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PROJECTION_AUTHORITY = "STRUCTURAL_ONLY_UNVERIFIED_PROVIDER_ORIGIN"
 
 
 class ProphetXCancelError(ValueError):
@@ -596,6 +597,22 @@ class Projection:
     active_order_identity: str
     evidence_digest: str
 
+    @property
+    def provider_origin_authoritative(self) -> bool:
+        """Structural provider event DTOs are not product-issued origin authority."""
+        return False
+
+    @property
+    def exposure_release_authorized(self) -> bool:
+        """A structural release quantity cannot authorize capital/exposure release."""
+        return False
+
+    def assert_provider_origin_authoritative(self) -> None:
+        raise ProphetXCancelError(
+            "structural cancel projection has no provider-origin authority; "
+            "compose canonical product-issued ProphetX readback evidence first"
+        )
+
     def wire(self) -> dict[str, Any]:
         d = lambda x: None if x is None else _dtext(x)
         return {
@@ -612,6 +629,9 @@ class Projection:
             "requires_readback": self.requires_readback,
             "active_order_identity": self.active_order_identity,
             "evidence_digest": self.evidence_digest,
+            "provider_origin_authority": PROJECTION_AUTHORITY,
+            "provider_origin_authoritative": False,
+            "exposure_release_authorized": False,
         }
 
 
@@ -1039,10 +1059,16 @@ def decode_checkpoint(raw: str) -> Projection:
         "requires_readback",
         "active_order_identity",
         "evidence_digest",
+        "provider_origin_authority",
+        "provider_origin_authoritative",
+        "exposure_release_authorized",
     }
     if (
         set(payload) != expected
         or type(payload["requires_readback"]) is not bool
+        or payload["provider_origin_authority"] != PROJECTION_AUTHORITY
+        or payload["provider_origin_authoritative"] is not False
+        or payload["exposure_release_authorized"] is not False
     ):
         raise ProphetXCancelConflict(
             "checkpoint payload mismatch"

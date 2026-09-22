@@ -232,6 +232,22 @@ def test_invalid_schema_is_rejected(tmp_path):
         OperatorStatusAnnouncementBroker(path)
 
 
+def test_same_column_names_with_wrong_schema_are_rejected(tmp_path):
+    path = tmp_path / "status.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        db.execute("INSERT INTO metadata VALUES('schema_version','1')")
+        db.execute(
+            """CREATE TABLE events(
+                sequence TEXT, event_id TEXT, idempotency_key TEXT, priority TEXT,
+                coalesce_key TEXT, message TEXT, occurred_at TEXT, published_at TEXT,
+                superseded_by TEXT, acknowledged_at TEXT, record_sha256 TEXT
+            )"""
+        )
+        db.commit()
+    with pytest.raises(OperatorStatusIntegrityError, match="schema mismatch"):
+        OperatorStatusAnnouncementBroker(path)
+
 def test_nonfinite_timeout_rejected(tmp_path):
     for value in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="finite positive"):

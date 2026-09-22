@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -12,7 +13,10 @@ from autosport.bookmaker_capability import (
 )
 from autosport.provider_funds_feasibility import (
     ProviderFundsAllocation,
+    ProviderFundsAssessment,
     ProviderFundsFeasibilityError,
+    ProviderFundsFeasibilityReport,
+    ProviderFundsRequirementSemantics,
     ProviderFundsState,
     assess_provider_funds,
 )
@@ -129,9 +133,18 @@ def test_fresh_exact_account_balance_can_only_prove_unreserved_snapshot_sufficie
     assert assessment.available_balance == Decimal("100")
     assert assessment.requested_amount == Decimal("50")
     assert report.all_snapshot_sufficient is True
+    report.assert_authoritative_projection()
     assert report.funds_reserved is False
+    assert report.transfer_authorized is False
+    assert report.requirement_authority_verified is False
     assert report.provider_write_authorized is False
     assert report.real_money_execution is False
+    assert report.allocations[0].required_account_cash == Decimal("50")
+    assert report.allocations[0].requirement_authority_verified is False
+    assert (
+        report.allocations[0].requirement_semantics
+        is ProviderFundsRequirementSemantics.CALLER_ASSERTED_REQUIRED_ACCOUNT_CASH
+    )
 
 
 def test_rich_other_account_cannot_fund_target_account() -> None:
@@ -323,6 +336,8 @@ def test_report_identity_is_deterministic_across_allocation_input_order() -> Non
 
     assert first == second
     assert first.report_sha256 == second.report_sha256
+    assert first.all_snapshot_sufficient is True
+    assert second.all_snapshot_sufficient is True
 
 
 def test_snapshot_subclass_is_rejected_as_positive_authority() -> None:
@@ -397,3 +412,147 @@ def test_report_identity_binds_allocation_ids_not_only_account_aggregate() -> No
     assert first.assessments == second.assessments
     assert first.allocations != second.allocations
     assert first.report_sha256 != second.report_sha256
+
+
+def test_direct_positive_report_construction_cannot_mint_projection_authority() -> None:
+    canonical = assess_provider_funds(
+        (_allocation("leg-1"),),
+        (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
+        decision_ts=_T2,
+        max_balance_age_seconds=Decimal("10"),
+    )
+
+    forged = ProviderFundsFeasibilityReport(
+        decision_ts=canonical.decision_ts,
+        max_balance_age_seconds=canonical.max_balance_age_seconds,
+        allocations=canonical.allocations,
+        assessments=canonical.assessments,
+    )
+
+    assert forged.all_snapshot_sufficient is False
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="not issued by canonical evaluator",
+    ):
+        forged.assert_authoritative_projection()
+
+
+def test_dataclass_replace_loses_positive_projection_authority() -> None:
+    canonical = assess_provider_funds(
+        (_allocation("leg-1"),),
+        (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
+        decision_ts=_T2,
+        max_balance_age_seconds=Decimal("10"),
+    )
+
+    copied = replace(canonical)
+
+    assert copied == canonical
+    assert copied.all_snapshot_sufficient is False
+    with pytest.raises(ProviderFundsFeasibilityError):
+        copied.assert_authoritative_projection()
+
+
+def test_report_rejects_assessment_amount_not_derived_from_allocations() -> None:
+    allocation = _allocation("leg-1", amount="50")
+    forged_assessment = ProviderFundsAssessment(
+        venue_id="A",
+        account_id="acct-a",
+        adapter_id="adapter",
+        currency="EUR",
+        requested_amount=Decimal("1"),
+        state=ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED,
+        reason="forged smaller requirement",
+        available_balance=Decimal("100"),
+        balance_observation_id="obs",
+        balance_source_payload_sha256=_HASH,
+        balance_observed_at=_T1,
+    )
+
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="requested_amount does not match grouped allocation cash",
+    ):
+        ProviderFundsFeasibilityReport(
+            decision_ts=_T2,
+            max_balance_age_seconds=Decimal("10"),
+            allocations=(allocation,),
+            assessments=(forged_assessment,),
+        )
+
+
+def test_known_assessment_state_requires_complete_balance_evidence() -> None:
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="requires exact balance evidence",
+    ):
+        ProviderFundsAssessment(
+            venue_id="A",
+            account_id="acct-a",
+            adapter_id="adapter",
+            currency="EUR",
+            requested_amount=Decimal("50"),
+            state=ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED,
+            reason="forged positive without provider evidence",
+        )
+
+
+def test_assessment_state_must_match_available_balance_arithmetic() -> None:
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="insufficient assessment contradicts",
+    ):
+        ProviderFundsAssessment(
+            venue_id="A",
+            account_id="acct-a",
+            adapter_id="adapter",
+            currency="EUR",
+            requested_amount=Decimal("50"),
+            state=ProviderFundsState.INSUFFICIENT,
+            reason="forged insufficient",
+            available_balance=Decimal("100"),
+            balance_observation_id="obs",
+            balance_source_payload_sha256=_HASH,
+            balance_observed_at=_T1,
+        )
+
+
+def test_mutating_issued_report_payload_revokes_positive_authority() -> None:
+    report = assess_provider_funds(
+        (_allocation("leg-1"),),
+        (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
+        decision_ts=_T2,
+        max_balance_age_seconds=Decimal("10"),
+    )
+    assert report.all_snapshot_sufficient is True
+
+    object.__setattr__(report.assessments[0], "reason", "mutated after issuance")
+
+    assert report.all_snapshot_sufficient is False
+    with pytest.raises(ProviderFundsFeasibilityError):
+        report.assert_authoritative_projection()
+
+
+def test_allocation_amount_is_explicitly_non_authoritative_required_account_cash() -> None:
+    allocation = _allocation("leg-1", amount="25")
+
+    assert allocation.required_account_cash == Decimal("25")
+    assert (
+        allocation.requirement_semantics
+        is ProviderFundsRequirementSemantics.CALLER_ASSERTED_REQUIRED_ACCOUNT_CASH
+    )
+    assert allocation.requirement_authority_verified is False
+
+    with pytest.raises(
+        ProviderFundsFeasibilityError,
+        match="requirement_semantics",
+    ):
+        ProviderFundsAllocation(
+            allocation_id="bad",
+            venue_id="A",
+            account_id="acct-a",
+            adapter_id="adapter",
+            currency="EUR",
+            amount=Decimal("25"),
+            requirement_semantics="stake",  # type: ignore[arg-type]
+        )

@@ -179,9 +179,12 @@ class ProviderHealthAuthority:
     """
 
     def __init__(self, policy: ProviderHealthPolicy | None = None) -> None:
-        self._policy = policy or ProviderHealthPolicy()
-        if type(self._policy) is not ProviderHealthPolicy:
-            raise ProviderHealthError("policy must be ProviderHealthPolicy")
+        if policy is None:
+            self._policy = ProviderHealthPolicy()
+        elif type(policy) is ProviderHealthPolicy:
+            self._policy = policy
+        else:
+            raise ProviderHealthError("policy must be ProviderHealthPolicy or null")
         self._states: dict[str, ProviderHealthState] = {}
         self._events_by_id: dict[tuple[str, str], str] = {}
         self._events_by_sequence: dict[tuple[str, int], str] = {}

@@ -1090,8 +1090,10 @@ class BetfairReplaceSagaStore:
             if len(submitted_events) > 1:
                 raise BetfairReplaceSagaIntegrityError("replace saga has multiple SUBMITTED events")
             submitted_at: str | None = None
+            submitted_index: int | None = None
             if submitted_events:
                 event = submitted_events[0]
+                submitted_index = saga_events.index(event)
                 if set(event["payload"]) != {"submitted_at", "request_sha256"}:
                     raise BetfairReplaceSagaIntegrityError("replace SUBMITTED payload schema invalid")
                 try:
@@ -1115,9 +1117,13 @@ class BetfairReplaceSagaStore:
                     observed = _timestamp(event["payload"]["observed_at"], "observed_at")
                 except ValueError as exc:
                     raise BetfairReplaceSagaIntegrityError("replace UNKNOWN payload invalid") from exc
-                if submitted_at is None:
+                if submitted_at is None or submitted_index is None:
                     raise BetfairReplaceSagaIntegrityError(
                         "replace UNKNOWN requires prior SUBMITTED boundary"
+                    )
+                if saga_events.index(event) <= submitted_index:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "replace UNKNOWN must follow SUBMITTED in journal order"
                     )
                 if _time(observed) < _time(submitted_at):
                     raise BetfairReplaceSagaIntegrityError(
@@ -1133,9 +1139,13 @@ class BetfairReplaceSagaStore:
                 evidence = _provider_evidence_from_dict(event["payload"]["evidence"])
                 if not _same_id_set(intent, evidence.results, attr="bet_id"):
                     raise BetfairReplaceSagaIntegrityError("provider result does not cover exact prepared bet ids")
-                if submitted_at is None:
+                if submitted_at is None or submitted_index is None:
                     raise BetfairReplaceSagaIntegrityError(
                         "provider result requires prior SUBMITTED boundary"
+                    )
+                if saga_events.index(event) <= submitted_index:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "provider result must follow SUBMITTED in journal order"
                     )
                 if _time(evidence.observed_at) < _time(submitted_at):
                     raise BetfairReplaceSagaIntegrityError(
@@ -1149,9 +1159,13 @@ class BetfairReplaceSagaStore:
                 evidence = _reconciliation_from_dict(event["payload"]["evidence"])
                 if not _same_id_set(intent, evidence.results, attr="bet_id"):
                     raise BetfairReplaceSagaIntegrityError("reconciliation does not cover exact prepared bet ids")
-                if submitted_at is None:
+                if submitted_at is None or submitted_index is None:
                     raise BetfairReplaceSagaIntegrityError(
                         "reconciliation requires prior SUBMITTED boundary"
+                    )
+                if saga_events.index(event) <= submitted_index:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "reconciliation must follow SUBMITTED in journal order"
                     )
                 if _time(evidence.observed_at) <= _time(submitted_at):
                     raise BetfairReplaceSagaIntegrityError(

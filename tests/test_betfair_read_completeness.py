@@ -69,13 +69,16 @@ def _rpc_error(message: str, request_id: int) -> bytes:
     ).encode("utf-8")
 
 
-def _client(*outcomes: bytes | BaseException) -> BetfairReadOnlyClient:
+def _client(
+    *outcomes: bytes | BaseException,
+    account_id: str = "acct-1",
+) -> BetfairReadOnlyClient:
     return BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret", "session-secret"),
         transport=FakeTransport(list(outcomes)),
         clock=lambda: NOW,
         venue_id="betfair",
-        account_id="acct-1",
+        account_id=account_id,
     )
 
 
@@ -85,9 +88,12 @@ class FabricatingBetfairReadOnlyClient(BetfairReadOnlyClient):
         raise AssertionError("subclass override must never become completeness authority")
 
 
-def _observer(*outcomes: bytes | BaseException) -> BetfairReadCompletenessObserver:
+def _observer(
+    *outcomes: bytes | BaseException,
+    account_id: str = "acct-1",
+) -> BetfairReadCompletenessObserver:
     return BetfairReadCompletenessObserver(
-        _client(*outcomes),
+        _client(*outcomes, account_id=account_id),
         clock=lambda: NOW,
     )
 
@@ -255,10 +261,37 @@ def test_query_scope_changes_completeness_identity() -> None:
     assert right_result.witness.authoritative
 
 
+
+def test_identical_empty_reads_are_bound_to_distinct_configured_accounts() -> None:
+    payload = _rpc({"currentOrders": [], "moreAvailable": False}, 1)
+    left = _observer(payload, account_id="acct-a").read_current_orders(page_size=10)
+    right = _observer(payload, account_id="acct-b").read_current_orders(page_size=10)
+
+    assert left.authoritative_empty is True
+    assert right.authoritative_empty is True
+    assert left.witness.venue_id == right.witness.venue_id == "betfair"
+    assert left.witness.account_id == "acct-a"
+    assert right.witness.account_id == "acct-b"
+    assert left.witness.adapter_id == right.witness.adapter_id
+    assert left.witness.adapter_version == right.witness.adapter_version
+    assert left.witness.query_sha256 != right.witness.query_sha256
+    assert left.witness.attempt_id != right.witness.attempt_id
+    left.witness.assert_authoritative_for(venue_id="betfair", account_id="acct-a")
+    with pytest.raises(BetfairReadOnlyError, match="account scope mismatch"):
+        left.witness.assert_authoritative_for(
+            venue_id="betfair",
+            account_id="acct-b",
+        )
+
+
 def test_caller_constructed_complete_witness_is_not_authoritative() -> None:
     forged = BetfairReadCompletenessWitness(
         operation="listCurrentOrders",
         completeness=BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
+        venue_id="betfair",
+        account_id="acct-1",
+        adapter_id="betfair-exchange-jsonrpc-readonly",
+        adapter_version="1",
         query_sha256="a" * 64,
         attempt_id="b" * 64,
         started_at=NOW.isoformat(),

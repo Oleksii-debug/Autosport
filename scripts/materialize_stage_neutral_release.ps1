@@ -199,15 +199,21 @@ raise SystemExit(
 )
 '@
 
-    & $pythonExecutable -I -S -B -c $stageNeutralLauncher `
-        $trustedPackageRoot `
-        $legacyPackage `
-        $stageNeutralPackage `
-        $SourceSha `
-        $evidencePath
+    $trustedEvidenceLines = @(
+        & $pythonExecutable -I -S -B -c $stageNeutralLauncher `
+            $trustedPackageRoot `
+            $legacyPackage `
+            $stageNeutralPackage `
+            $SourceSha `
+            $evidencePath
+    )
     if ($LASTEXITCODE -ne 0) {
         throw "Stage-neutral release repack exited with code $LASTEXITCODE"
     }
+    if ($trustedEvidenceLines.Count -ne 1) {
+        throw 'Exact stage-neutral release process did not emit one canonical evidence record.'
+    }
+    $trustedEvidence = ([string]$trustedEvidenceLines[0]) | ConvertFrom-Json
 } finally {
     if (Test-Path -LiteralPath $trustedSourceRoot) {
         Remove-Item -LiteralPath $trustedSourceRoot -Recurse -Force
@@ -221,6 +227,31 @@ foreach ($required in @($stageNeutralPackage, $evidencePath)) {
 }
 
 $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+
+# stdout comes directly from the isolated exact-Git source process. Bind the durable
+# evidence artifact back to that process record so replacing both the ZIP and the
+# evidence file after process exit cannot create a self-consistent false PASS.
+$evidenceBindingFields = @(
+    'status',
+    'source_sha',
+    'legacy_archive_name',
+    'archive_name',
+    'package_prefix',
+    'build_version',
+    'package_sha256',
+    'legacy_package_sha256',
+    'file_count',
+    'real_money_execution',
+    'human_tested',
+    'nvda_verified',
+    'whole_product_complete'
+)
+foreach ($field in $evidenceBindingFields) {
+    if ([string]$evidence.$field -ne [string]$trustedEvidence.$field) {
+        throw "Stage-neutral durable evidence drifted from exact repack process field: $field"
+    }
+}
+
 if ($evidence.status -ne 'PASS') {
     throw 'Stage-neutral release evidence did not record PASS.'
 }
@@ -246,8 +277,11 @@ if (
 }
 
 $packageSha = (Get-FileHash -LiteralPath $stageNeutralPackage -Algorithm SHA256).Hash.ToLowerInvariant()
+if ([string]$trustedEvidence.package_sha256 -ne $packageSha) {
+    throw 'Stage-neutral release package digest does not match exact repack process evidence.'
+}
 if ([string]$evidence.package_sha256 -ne $packageSha) {
-    throw 'Stage-neutral release evidence package digest does not match authored ZIP.'
+    throw 'Stage-neutral release durable evidence package digest does not match authored ZIP.'
 }
 
 Write-Output "stage-neutral-release=PASS source_sha=$SourceSha package_sha256=$packageSha"

@@ -22,6 +22,9 @@ def test_materializer_wires_exact_stage_neutral_release_contract() -> None:
     assert "ls-tree $SourceSha" in script
     assert "cat-file" in script
     assert "-I -S -B -c $stageNeutralLauncher" in script
+    assert "$trustedEvidenceLines = @(" in script
+    assert "evidenceBindingFields" in script
+    assert "package digest does not match exact repack process evidence" in script
     assert 'types.ModuleType("autosport")' in script
     assert "spec_from_file_location" in script
     assert "-m autosport.stage_neutral_release" not in script

@@ -146,7 +146,10 @@ _ISSUED: dict[
 def _decimal_text(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ExecutionCapitalAtRiskError("capital value must be a finite Decimal")
-    text = format(value.normalize(), "f")
+    # Decimal.normalize() obeys the ambient context and can round under low
+    # precision. Formatting the exact coefficient first keeps evidence identity
+    # independent of caller Decimal settings.
+    text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
@@ -168,12 +171,6 @@ def _subtract_nonnegative(left: Decimal, right: Decimal) -> Decimal:
     if result < 0:
         return Decimal(0)
     return result
-
-
-def _multiply(left: Decimal, right: Decimal) -> Decimal:
-    with localcontext() as context:
-        context.prec = _precision(left, right)
-        return left * right
 
 
 def _lay_liability(stake: Decimal, odds: Decimal) -> Decimal:

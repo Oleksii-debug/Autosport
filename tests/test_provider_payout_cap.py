@@ -381,3 +381,13 @@ def test_evidence_digest_is_independent_of_ambient_decimal_context() -> None:
         ).evidence_sha256
 
     assert low_precision == high_precision
+
+
+def test_structural_seal_registry_does_not_retain_evidence_forever() -> None:
+    evidence = _seal(_evidence())
+    weak = ref(evidence)
+
+    del evidence
+    gc.collect()
+
+    assert weak() is None

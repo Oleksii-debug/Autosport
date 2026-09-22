@@ -18,7 +18,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_CEILING, localcontext
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
@@ -487,7 +487,11 @@ def clopper_pearson_upper_bound(
                 low = middle
             else:
                 high = middle
+        # The bisection invariant keeps high on the conservative side.
+        # Final public precision must therefore round outward, never back through
+        # the mathematical endpoint.
         context.prec = 50
+        context.rounding = ROUND_CEILING
         return +high
 
 

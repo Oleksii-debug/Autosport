@@ -31,6 +31,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
             "human_tested": False,
             "nvda_verified": False,
             "v1_ready": False,
+            "whole_product_complete": False,
         }
         audit = {
             "status": "PASS",
@@ -149,6 +150,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
                 "human_tested": False,
                 "nvda_verified": False,
                 "v1_ready": False,
+                "whole_product_complete": False,
             }
             package = root / "legacy-fake.zip"
             with zipfile.ZipFile(package, "w") as archive:

@@ -203,7 +203,7 @@ class MatchbookCatalogPageEvidence:
     entities: tuple[MatchbookCatalogEntity, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, MatchbookCatalogRequest):
+        if type(self.request) is not MatchbookCatalogRequest:
             raise MatchbookCatalogEvidenceError("request is invalid")
         object.__setattr__(self, "observed_at", _iso(self.observed_at))
         if type(self.raw_response_sha256) is not str or len(self.raw_response_sha256) != 64 or any(c not in _HEX for c in self.raw_response_sha256):
@@ -214,7 +214,7 @@ class MatchbookCatalogPageEvidence:
             raise MatchbookCatalogEvidenceError("entities must be tuple")
         seen: set[str] = set()
         for entity in self.entities:
-            if not isinstance(entity, MatchbookCatalogEntity) or entity.resource is not self.request.resource:
+            if type(entity) is not MatchbookCatalogEntity or entity.resource is not self.request.resource:
                 raise MatchbookCatalogEvidenceError("entity does not match request resource")
             if entity.native_id in seen:
                 raise MatchbookCatalogEvidenceError("duplicate provider identity within page")
@@ -267,7 +267,7 @@ def _entity(row: object, request: MatchbookCatalogRequest) -> MatchbookCatalogEn
 
 
 def parse_matchbook_catalog_page(request: MatchbookCatalogRequest, raw_response: bytes, *, observed_at: str) -> MatchbookCatalogPageEvidence:
-    if not isinstance(request, MatchbookCatalogRequest):
+    if type(request) is not MatchbookCatalogRequest:
         raise MatchbookCatalogEvidenceError("request is invalid")
     rows = _rows(_decode(raw_response), request.resource)
     if len(rows) > request.per_page:
@@ -280,7 +280,7 @@ def compose_matchbook_catalog_observation(pages: Sequence[MatchbookCatalogPageEv
     if isinstance(pages, (str, bytes)) or not isinstance(pages, Sequence) or not pages:
         raise MatchbookCatalogEvidenceError("pages must be a non-empty sequence")
     pages = tuple(pages)
-    if any(not isinstance(p, MatchbookCatalogPageEvidence) for p in pages):
+    if any(type(p) is not MatchbookCatalogPageEvidence for p in pages):
         raise MatchbookCatalogEvidenceError("pages contain invalid evidence")
     first = pages[0]
     if first.request.offset != 0:

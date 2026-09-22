@@ -65,8 +65,20 @@ def sample_payload() -> dict:
     }
 
 
+def _sequence_allocator(start: int = 0):
+    current = start
+
+    def allocate(_source_id: str) -> int:
+        nonlocal current
+        current += 1
+        return current
+
+    return allocate
+
+
 def provider(transport, **kwargs):
     clock = kwargs.pop("clock", lambda: OBSERVED)
+    sequence_allocator = kwargs.pop("sequence_allocator", _sequence_allocator())
     return MatchbookReadOnlyProvider(
         "secret-session-token",
         sport_key="soccer",
@@ -74,6 +86,7 @@ def provider(transport, **kwargs):
         sport_ids=(15,),
         transport=transport,
         clock=clock,
+        sequence_allocator=sequence_allocator,
         **kwargs,
     )
 

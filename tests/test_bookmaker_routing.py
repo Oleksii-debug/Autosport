@@ -316,7 +316,6 @@ def test_selected_quotes_must_share_market_selection_identity() -> None:
         _route("10", (a, b))
 
 
-
 def test_exact_accepted_sum_completes_without_ambient_context_rounding() -> None:
     a = _venue("book-a", "acct-a")
     b = _venue("book-b", "acct-b")

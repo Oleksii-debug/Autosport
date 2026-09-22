@@ -268,6 +268,15 @@ def test_fallback_evidence_rejects_non_sha256_provenance() -> None:
         )
 
 
+def test_authority_rejects_hostile_policy_without_calling_bool() -> None:
+    class HostilePolicy:
+        def __bool__(self):
+            raise RuntimeError("caller hook executed")
+
+    with pytest.raises(ProviderHealthError, match="policy"):
+        ProviderHealthAuthority(HostilePolicy())  # type: ignore[arg-type]
+
+
 def test_policy_rejects_bool_and_zero_thresholds() -> None:
     for kwargs in (
         {"operational_failures_to_open": 0},

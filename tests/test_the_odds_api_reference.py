@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
+from urllib.error import HTTPError
 
 import pytest
+
+import autosport.the_odds_api_reference as odds_api_module
 
 from autosport.domain import MarketType
 from autosport.providers import CanonicalNormalizer, ProviderUnavailableError
@@ -498,3 +501,30 @@ def test_historical_navigation_timestamps_must_bracket_returned_snapshot(
     )
     with pytest.raises(TheOddsApiPayloadError, match=message):
         provider.read_batch()
+
+
+def test_default_transport_detaches_secret_bearing_http_error_context(
+    monkeypatch,
+) -> None:
+    leaked_url = (
+        "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+        f"?apiKey={SECRET}"
+    )
+
+    def fail_urlopen(request, timeout):
+        raise HTTPError(leaked_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(odds_api_module, "urlopen", fail_urlopen)
+
+    with pytest.raises(TheOddsApiTransportError) as excinfo:
+        odds_api_module._default_transport(
+            "/v4/sports/basketball_nba/odds",
+            {"markets": "h2h"},
+            SECRET,
+            1.0,
+        )
+
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert SECRET not in str(excinfo.value)

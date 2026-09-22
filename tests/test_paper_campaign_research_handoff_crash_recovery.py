@@ -159,13 +159,18 @@ class PaperCampaignResearchHandoffCrashRecoveryTests(unittest.TestCase):
                 research_supervisor=reopened_supervisor,
             )
 
+            # The accepted supervisor run predates the configured deadline, but
+            # the process itself recovers only after expiry.  This is the exact
+            # cross-store crash window: AgentLoop has no durable research_run_id
+            # yet, so recovery must prove/reuse the already-published run rather
+            # than either rejecting it or creating a new late run.
             first = recovered.finalize_ticket(
                 ticket_id=ticket_id,
-                at=_legacy.T5,
+                at="2026-09-20T04:00:01+00:00",
             )
             second = recovered.finalize_ticket(
                 ticket_id=ticket_id,
-                at=_legacy.T6,
+                at="2026-09-20T04:00:02+00:00",
             )
 
             self.assertEqual(first, second)

@@ -10,8 +10,6 @@ from typing import Iterable, Sequence
 from weakref import ref
 
 from ..betfair_account_readonly import (
-    ADAPTER_ID as BETFAIR_ADAPTER_ID,
-    ADAPTER_VERSION as BETFAIR_ADAPTER_VERSION,
     BetfairMarketBookDepthObservation,
     assert_market_book_depth_authoritative,
 )
@@ -419,12 +417,15 @@ def assess_authoritative_betfair_execution_feasibility(
     decision_at: datetime,
     max_snapshot_age: timedelta,
 ) -> ExecutionFeasibilitySnapshot:
-    """Issue positive feasibility only from provider IO + durable reserved plan.
+    """Resolve provider depth against the durable plan and fail closed on limits.
 
     The receipt must have been minted by the authenticated Betfair read-only
     client. The exact execution plan must already exist in the canonical real
-    execution ledger with the same fingerprint. The result proves only displayed
-    depth at one point in time and is capped at SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY.
+    execution ledger with the same fingerprint. Positive standard-LIMIT
+    feasibility additionally needs canonical provider/account/currency/market
+    admissibility evidence; profile/adapter identity alone is not that authority.
+    Until that authority is composed here, the result remains UNKNOWN_UNPROVEN
+    while preserving the measured displayed-depth diagnostics.
     """
 
     if not isinstance(ledger, RealExecutionLedger):
@@ -461,10 +462,6 @@ def assess_authoritative_betfair_execution_feasibility(
         raise ValueError("execution action expired before feasibility decision")
 
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
-    adapter_scope_matches = (
-        binding.adapter_id == BETFAIR_ADAPTER_ID
-        and binding.adapter_version == BETFAIR_ADAPTER_VERSION
-    )
     action_digest = _canonical_digest(action.to_dict())
     provider_observed_at = _provider_timestamp(receipt.evidence.observed_at)
     request = ExecutionFeasibilityRequest(
@@ -536,7 +533,11 @@ def assess_authoritative_betfair_execution_feasibility(
     )
     limit_evidence = _canonical_digest(
         {
-            "schema": "autosport.execution-feasibility-plan-profile-binding.v1",
+            "schema": (
+                "autosport.execution-feasibility-"
+                "unqualified-provider-limit-evidence.v1"
+            ),
+            "provider_limit_authority_available": False,
             "plan_id": bound.execution_plan.plan_id,
             "plan_fingerprint": bound.execution_plan.fingerprint,
             "venue_id": binding.venue_id,
@@ -552,7 +553,13 @@ def assess_authoritative_betfair_execution_feasibility(
         account_id=action.account_id,
         market_id=action.market_id,
         evidence_digest=limit_evidence,
-        permitted=adapter_scope_matches,
+        # Profile/adapter identity proves implementation compatibility only. It
+        # does not prove current provider/account funds/exposure headroom,
+        # currency/jurisdiction minimum-bet rules, or the market price-ladder
+        # tick contract. Until those canonical authorities are composed, a
+        # positive execution-feasibility verdict would overstate executable
+        # truth, so this authoritative resolver deliberately fails closed.
+        permitted=False,
     )
     result = _assess_execution_feasibility(
         request,

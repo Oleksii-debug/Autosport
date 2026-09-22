@@ -516,11 +516,48 @@ def _market_type(key: str) -> MarketType:
     return MarketType.OTHER
 
 
+def _canonical_decimal_identity(value: Decimal, *, field: str) -> str:
+    """Return one exact numeric identity for equivalent finite Decimal values."""
+
+    if not value.is_finite():
+        raise ProviderPayloadError(f"{field} must be a finite decimal")
+    if value.is_zero():
+        return "0"
+
+    sign, digits_tuple, exponent = value.as_tuple()
+    digits = list(digits_tuple)
+    while digits and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    coefficient = "".join(str(digit) for digit in digits)
+    sign_length = 1 if sign else 0
+    if exponent >= 0:
+        if sign_length + len(coefficient) + exponent > 128:
+            raise ProviderPayloadError(f"{field} canonical identity is too long")
+        body = coefficient + ("0" * exponent)
+    else:
+        decimal_point = len(coefficient) + exponent
+        if decimal_point > 0:
+            body = coefficient[:decimal_point] + "." + coefficient[decimal_point:]
+        else:
+            leading_zeros = -decimal_point
+            if sign_length + 2 + leading_zeros + len(coefficient) > 128:
+                raise ProviderPayloadError(f"{field} canonical identity is too long")
+            body = "0." + ("0" * leading_zeros) + coefficient
+
+    result = ("-" if sign else "") + body
+    if len(result) > 128:
+        raise ProviderPayloadError(f"{field} canonical identity is too long")
+    return result
+
+
 def _market_identity(book_key: str, market_key: str, point: Decimal | None) -> str:
     if point is None or _market_type(market_key) is MarketType.WINNER:
         return f"{book_key}:{market_key}"
-    line = abs(point) if _market_type(market_key) is MarketType.HANDICAP else point
-    return f"{book_key}:{market_key}:{line}"
+    line = point.copy_abs() if _market_type(market_key) is MarketType.HANDICAP else point
+    canonical_line = _canonical_decimal_identity(line, field="market line")
+    return f"{book_key}:{market_key}:{canonical_line}"
 
 
 def _decimal_price(raw: Any) -> Decimal | None:

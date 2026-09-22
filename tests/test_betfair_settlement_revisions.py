@@ -222,6 +222,55 @@ def test_later_void_correction_appends_without_backward_leakage(tmp_path) -> Non
     assert store.as_of("betfair", "acct-1", "bet-777", second.available_at) == second
 
 
+def test_superseded_semantic_revision_cannot_reappear_as_new_current_truth(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    corrected = _ingest(
+        store,
+        ledger,
+        plan,
+        action,
+        _capture(client, provider_ref),
+    ).revision
+
+    transport.provider_status = "SETTLED"
+    transport.profit = 4
+    transport.settled_date = "2026-09-21T19:00:00+00:00"
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="superseded semantic revision",
+    ):
+        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    assert len(store.revisions) == 2
+    assert corrected.previous_revision_id == first.revision_id
+    assert store.current("betfair", "acct-1", "bet-777") == corrected
+
+
+def test_changed_content_at_same_provider_settled_time_fails_closed(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    transport.profit = -1
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="later provider settled_date",
+    ):
+        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    assert store.revisions == (first,)
+    assert store.current("betfair", "acct-1", "bet-777") == first
+
+
 def test_forged_or_mismatched_capture_fails_closed(tmp_path) -> None:
     transport = _Transport()
     ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)

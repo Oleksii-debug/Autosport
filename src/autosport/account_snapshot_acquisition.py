@@ -52,7 +52,7 @@ _ALLOWED_ACCOUNT_CAPABILITIES = frozenset(
         BookmakerCapability.SETTLED_POSITIONS_READ,
     }
 )
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _INTEGRATION_SOURCE_REF = "autosport://betfair-account-readonly/official-api-v1"
 
 
@@ -204,9 +204,9 @@ class AccountSnapshotAcquisitionReceipt:
         _timestamp(self.acquired_at, "acquired_at")
         if self.provider_observed_at is not None:
             _timestamp(self.provider_observed_at, "provider_observed_at")
-        if self.source_authority_proven is not True:
+        if self.source_authority_proven is not False:
             raise AccountSnapshotAcquisitionError(
-                "source_authority_proven must be exactly true for an acquisition receipt"
+                "durable source_authority_proven must be exactly false"
             )
         for field in (
             "provider_account_identity_proven",
@@ -221,7 +221,7 @@ class AccountSnapshotAcquisitionReceipt:
             )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class AuthoritativeAccountSnapshot:
     snapshot: BookmakerAccountSnapshot
     receipt: AccountSnapshotAcquisitionReceipt
@@ -235,6 +235,24 @@ class AuthoritativeAccountSnapshot:
             raise AccountSnapshotAcquisitionError(
                 "receipt must be an exact AccountSnapshotAcquisitionReceipt"
             )
+
+    @property
+    def source_authority_proven(self) -> bool:
+        try:
+            assert_account_snapshot_acquisition_authoritative(self)
+        except AccountSnapshotAcquisitionError:
+            return False
+        return True
+
+
+def assert_account_snapshot_acquisition_authoritative(
+    acquired: AuthoritativeAccountSnapshot,
+) -> None:
+    """Require live provider-origin issuance, not durable local self-attestation."""
+
+    raise AccountSnapshotAcquisitionError(
+        "account snapshot lacks live canonical provider-origin authority"
+    )
 
 
 class BetfairAccountSnapshotAcquirer:
@@ -459,7 +477,9 @@ class _AccountSnapshotStore:
             "source_payload_sha256": snapshot.profile.source_payload_sha256,
             "acquired_at": snapshot.observed_at,
             "provider_observed_at": None,
-            "source_authority_proven": True,
+            # Durable local bytes prove integrity/history only. Remote provider
+            # origin is an ephemeral exact-object capability issued below.
+            "source_authority_proven": False,
             # Betfair account-details does not expose a first-party immutable account id.
             "provider_account_identity_proven": False,
             "grants_execution_authority": False,
@@ -1125,12 +1145,76 @@ def _snapshot_from_payload(payload: dict[str, object]) -> BookmakerAccountSnapsh
 # caller-constructed BookmakerAccountSnapshot to a minting function.
 def _install_account_snapshot_acquisition_authority() -> None:
     issued: dict[int, tuple[object, _AccountSnapshotStore, BetfairReadOnlyClient]] = {}
+    live_issued: dict[str, tuple[object, str]] = {}
     raw_init = BetfairAccountSnapshotAcquirer.__init__
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
     raw_resolve = _AccountSnapshotStore.resolve
     raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
+
+    def live_fingerprint(acquired: AuthoritativeAccountSnapshot) -> str:
+        return _canonical_sha256(
+            {
+                "acquisition_id": acquired.receipt.acquisition_id,
+                "acquisition_request_id_sha256": (
+                    acquired.receipt.acquisition_request_id_sha256
+                ),
+                "snapshot_sha256": acquired.receipt.snapshot_sha256,
+            }
+        )
+
+    def forget_live(acquisition_id: str, reference: object) -> None:
+        current = live_issued.get(acquisition_id)
+        if current is not None and current[0] is reference:
+            live_issued.pop(acquisition_id, None)
+
+    def issue_live(
+        acquired: AuthoritativeAccountSnapshot,
+    ) -> AuthoritativeAccountSnapshot:
+        acquisition_id = acquired.receipt.acquisition_id
+        reference = ref(
+            acquired,
+            lambda current, acquisition_id=acquisition_id: forget_live(
+                acquisition_id, current
+            ),
+        )
+        live_issued[acquisition_id] = (
+            reference,
+            live_fingerprint(acquired),
+        )
+        return acquired
+
+    def current_live(
+        acquisition_id: str,
+    ) -> AuthoritativeAccountSnapshot | None:
+        current = live_issued.get(acquisition_id)
+        if current is None:
+            return None
+        value = current[0]()
+        if value is None:
+            live_issued.pop(acquisition_id, None)
+            return None
+        if (
+            type(value) is not AuthoritativeAccountSnapshot
+            or current[1] != live_fingerprint(value)
+        ):
+            live_issued.pop(acquisition_id, None)
+            return None
+        return value
+
+    def assert_live(
+        acquired: AuthoritativeAccountSnapshot,
+    ) -> None:
+        if type(acquired) is not AuthoritativeAccountSnapshot:
+            raise AccountSnapshotAcquisitionError(
+                "provider-origin authority requires exact acquired snapshot evidence"
+            )
+        current = current_live(acquired.receipt.acquisition_id)
+        if current is not acquired:
+            raise AccountSnapshotAcquisitionError(
+                "account snapshot was not issued by live canonical provider acquisition"
+            )
 
     def state(
         self: BetfairAccountSnapshotAcquirer,
@@ -1228,7 +1312,13 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "acquisition_id cannot be reused for another provider/account/capability scope"
                 )
-            return existing
+            live = current_live(existing.receipt.acquisition_id)
+            if live is not None:
+                return live
+            raise AccountSnapshotAcquisitionError(
+                "durable acquisition cannot reissue provider-origin authority; "
+                "use a new acquisition_id for a new provider read"
+            )
 
         snapshot, integration = raw_read(
             self,
@@ -1236,12 +1326,14 @@ def _install_account_snapshot_acquisition_authority() -> None:
             requested_capabilities,
             canonical_snapshot_read,
         )
-        return raw_record(
-            store,
-            snapshot,
-            integration,
-            requested_capabilities,
-            acquisition_request_id_sha256=acquisition_request_id_sha256,
+        return issue_live(
+            raw_record(
+                store,
+                snapshot,
+                integration,
+                requested_capabilities,
+                acquisition_request_id_sha256=acquisition_request_id_sha256,
+            )
         )
 
     def resolve(
@@ -1277,6 +1369,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 "snapshot does not match durable acquisition receipt"
             )
 
+    globals()["assert_account_snapshot_acquisition_authoritative"] = assert_live
     BetfairAccountSnapshotAcquirer.__init__ = __init__
     BetfairAccountSnapshotAcquirer.acquire = acquire
     BetfairAccountSnapshotAcquirer.resolve = resolve

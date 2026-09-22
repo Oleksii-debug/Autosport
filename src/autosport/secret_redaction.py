@@ -34,6 +34,8 @@ _SENSITIVE_NORMALIZED_KEYS = frozenset(
         "authorization",
         "credential",
         "credentials",
+        "cookie",
+        "setcookie",
     }
 )
 _SENSITIVE_SUFFIXES = (
@@ -83,6 +85,19 @@ _KEY_VALUE_RE = re.compile(
     r")\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]]+)"
 )
+_OVERLAPPING_KEY_VALUE_RE = re.compile(
+    r"(?i)(?P<prefix>(?:"
+    r"\"(?P<double_key>(?:\\.|[^\"\\\r\n])*)\"|"
+    r"'(?P<single_key>(?:\\.|[^'\\\r\n])*)'|"
+    r"(?P<bare_key>[A-Za-z0-9_.\\-]+)"
+    r")\s*[:=]\s*)"
+    r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]\"')]+)"
+)
+_COOKIE_HEADER_RE = re.compile(
+    r"(?i)(?P<prefix>(?<![A-Za-z0-9_.-])(?:set-cookie|cookie)\s*:\s*)"
+    r"(?P<value>[^\r\n]*)"
+)
+
 _SPACED_SENSITIVE_KEY_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>\b(?P<key>"
     r"(?:x[ \t]+)?api[ \t]+key|"
@@ -158,6 +173,36 @@ def _redacted_value_literal(value: str) -> str:
     return REDACTED
 
 
+def _key_value_match_key(match: re.Match[str]) -> str:
+    key = match.group("double_key")
+    if key is None:
+        key = match.group("single_key")
+    if key is None:
+        key = match.group("bare_key")
+    return key
+
+
+def _redact_overlapping_sensitive_key_values(text: str) -> str:
+    """Redact inner credential pairs even when an outer safe pair spans them."""
+
+    rendered = text
+    search_from = 0
+    while True:
+        match = _OVERLAPPING_KEY_VALUE_RE.search(rendered, search_from)
+        if match is None:
+            return rendered
+        if not is_sensitive_key(_key_value_match_key(match)):
+            # Advance from the candidate start, not its end. A non-sensitive
+            # wrapper such as detail="api_key=..." may contain a sensitive pair.
+            search_from = match.start() + 1
+            continue
+        replacement = match.group("prefix") + _redacted_value_literal(
+            match.group("value")
+        )
+        rendered = rendered[: match.start()] + replacement + rendered[match.end() :]
+        search_from = match.start() + len(replacement)
+
+
 def redact_operator_text(
     text: str,
     *,
@@ -203,6 +248,10 @@ def redact_operator_text(
         return match.group("prefix") + REDACTED
 
     rendered = _QUERY_PARAM_RE.sub(redact_query, rendered)
+    rendered = _COOKIE_HEADER_RE.sub(
+        lambda match: match.group("prefix") + REDACTED,
+        rendered,
+    )
     # Multi-parameter Authorization schemes (for example Digest and AWS SigV4)
     # carry credential material after comma-separated fields. Redact the entire
     # header value through the current line before the narrower single-token
@@ -231,13 +280,10 @@ def redact_operator_text(
         rendered,
     )
 
+    rendered = _redact_overlapping_sensitive_key_values(rendered)
+
     def redact_key_value(match: re.Match[str]) -> str:
-        key = match.group("double_key")
-        if key is None:
-            key = match.group("single_key")
-        if key is None:
-            key = match.group("bare_key")
-        if not is_sensitive_key(key):
+        if not is_sensitive_key(_key_value_match_key(match)):
             return match.group(0)
         return match.group("prefix") + _redacted_value_literal(match.group("value"))
 

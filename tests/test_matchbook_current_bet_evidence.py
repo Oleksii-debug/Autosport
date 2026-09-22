@@ -342,6 +342,28 @@ def test_page_numeric_controls_reject_bool_and_float_aliases(
         MatchbookCurrentBetReportPage(**kwargs)  # type: ignore[arg-type]
 
 
+def test_page_pagination_controls_enforce_provider_int32_domain() -> None:
+    int32_max = (1 << 31) - 1
+    page = _page(offset=int32_max, per_page=int32_max, rows=())
+
+    assert page.offset == int32_max
+    assert page.per_page == int32_max
+
+    for field in ("offset", "per_page"):
+        kwargs: dict[str, object] = {
+            "scope": _scope(),
+            "offset": 0,
+            "per_page": 2,
+            "observed_at_utc": OBSERVED,
+            "request_semantics_sha256": REQ_SHA,
+            "raw_response_sha256": RAW_SHA,
+            "rows": (),
+        }
+        kwargs[field] = int32_max + 1
+        with pytest.raises(MatchbookCurrentBetEvidenceError, match="signed int32"):
+            MatchbookCurrentBetReportPage(**kwargs)  # type: ignore[arg-type]
+
+
 def test_scope_rejects_duplicate_filter_ids() -> None:
     with pytest.raises(MatchbookCurrentBetEvidenceError, match="duplicates"):
         _scope(event_ids=("101", "101"))

@@ -451,20 +451,30 @@ def finalize_model_invocation(
     if not isinstance(status, ModelInvocationStatus):
         raise ModelRuntimeContractError("status must be ModelInvocationStatus")
 
-    if status is ModelInvocationStatus.POLICY_BLOCKED and plan.backends[0].mode is not ModelBackendMode.NO_LLM:
-        if attempted_backend_indices:
-            raise ModelRuntimeContractError(
-                "POLICY_BLOCKED must occur before model transport is attempted"
-            )
-    else:
-        _validate_attempt_path(plan, request, attempted_backend_indices)
-
     started = _strict_nonnegative_int(started_monotonic_ns, "started_monotonic_ns")
     completed = _strict_nonnegative_int(completed_monotonic_ns, "completed_monotonic_ns")
     if completed < started:
         raise ModelRuntimeContractError(
             "completed_monotonic_ns cannot precede started_monotonic_ns"
         )
+    deadline_ns = plan.deadline_ms * 1_000_000
+    elapsed_ns = completed - started
+
+    enabled = plan.backends[0].mode is not ModelBackendMode.NO_LLM
+    if status is ModelInvocationStatus.POLICY_BLOCKED and enabled:
+        if attempted_backend_indices:
+            raise ModelRuntimeContractError(
+                "POLICY_BLOCKED must occur before model transport is attempted"
+            )
+    elif enabled and not attempted_backend_indices and status is ModelInvocationStatus.CANCELLED:
+        pass
+    elif enabled and not attempted_backend_indices and status is ModelInvocationStatus.TIMEOUT:
+        if elapsed_ns < deadline_ns:
+            raise ModelRuntimeContractError(
+                "pre-dispatch TIMEOUT requires the model deadline to be exhausted"
+            )
+    else:
+        _validate_attempt_path(plan, request, attempted_backend_indices)
 
     if plan.backends[0].mode is ModelBackendMode.NO_LLM:
         if status is not ModelInvocationStatus.POLICY_BLOCKED:
@@ -476,8 +486,7 @@ def finalize_model_invocation(
                 "NO_LLM POLICY_BLOCKED result must use NO_LLM_DISABLED"
             )
 
-    deadline_ns = plan.deadline_ms * 1_000_000
-    if status is ModelInvocationStatus.SUCCESS and completed - started > deadline_ns:
+    if status is ModelInvocationStatus.SUCCESS and elapsed_ns > deadline_ns:
         raise ModelRuntimeContractError(
             "late model SUCCESS is forbidden; discard payload and record TIMEOUT"
         )

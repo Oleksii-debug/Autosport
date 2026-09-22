@@ -31,10 +31,7 @@ class MatchbookApiGroup(str, Enum):
     NAVIGATION = "NAVIGATION"
     REPORTS = "REPORTS"
     BETTING_WRITE = "BETTING_WRITE"
-    BETTING_READ = "BETTING_READ"
-
-
-EVIDENCE_AS_OF = "2026-09-22"
+    BETTING_READ = "BETTING_READ"\n    DEFAULT = "DEFAULT"\n\n\nEVIDENCE_AS_OF = "2026-09-22"
 _METHOD_RE = re.compile(r"^[A-Z]+$")
 _PLACEHOLDER_RE = re.compile(r"^\\{([a-z][a-z0-9_]*)\\}$")
 

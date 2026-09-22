@@ -173,44 +173,40 @@ def _bound(decision_at: datetime = NOW) -> BoundSupervisedExecutionPlan:
     )
 
 
-class _FakeUrlResponse:
-    def __init__(self, payload: bytes) -> None:
-        self._payload = payload
-
-    def __enter__(self) -> "_FakeUrlResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        return False
-
-    def read(self, limit: int) -> bytes:
-        return self._payload[:limit]
-
-
-def _canonical_client(
-    monkeypatch: pytest.MonkeyPatch,
-    transport: MarketBookTransport,
-) -> BetfairReadOnlyClient:
-    def fake_urlopen(request, timeout: float) -> _FakeUrlResponse:
-        headers = {key.lower(): value for key, value in request.header_items()}
-        payload = transport.post(
-            request.full_url,
-            headers={
-                "X-Application": headers["x-application"],
-                "X-Authentication": headers["x-authentication"],
-            },
-            body=request.data or b"",
-            timeout_seconds=timeout,
-        )
-        return _FakeUrlResponse(payload)
-
-    monkeypatch.setattr(betfair_account_readonly, "urlopen", fake_urlopen)
+def _canonical_client() -> BetfairReadOnlyClient:
     return BetfairReadOnlyClient(
         BetfairSessionCredentials("app-key", "session-token"),
         venue_id="betfair",
         account_id="acct-1",
     )
 
+
+def _synthetic_authoritative_receipt(
+    transport: MarketBookTransport,
+    *,
+    observed_at: datetime | None = None,
+) -> tuple[object, BetfairReadOnlyClient]:
+    """Unit-test the resolver with a receipt issued under the production origin seal.
+
+    Parsing is exercised through an injected non-authoritative transport; the private
+    issuance seam then models the point after successful canonical provider I/O.
+    Production callers cannot obtain positive authority from that injected transport.
+    """
+    observed = observed_at or datetime.now(timezone.utc)
+    parsing_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=transport,
+        clock=lambda: observed,
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    receipt = parsing_client.read_market_book_depth("1.234", 42)
+    canonical_source = _canonical_client()
+    betfair_account_readonly._issue_market_book_depth(
+        receipt,
+        source=canonical_source,
+    )
+    return receipt, canonical_source
 
 def _client(transport: MarketBookTransport) -> BetfairReadOnlyClient:
     return BetfairReadOnlyClient(
@@ -228,13 +224,9 @@ def _reserved_ledger(tmp: str, bound: BoundSupervisedExecutionPlan) -> RealExecu
     return ledger
 
 
-def test_authenticated_market_book_receipt_can_issue_racy_positive_depth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_authenticated_market_book_receipt_can_issue_racy_positive_depth() -> None:
     transport = MarketBookTransport()
-    receipt = _canonical_client(monkeypatch, transport).read_market_book_depth(
-        "1.234", 42
-    )
+    receipt, canonical_source = _synthetic_authoritative_receipt(transport)
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
 
@@ -265,12 +257,10 @@ def test_authenticated_market_book_receipt_can_issue_racy_positive_depth(
     assert result.sufficient is False
 
 
-def test_forged_structurally_equal_receipt_cannot_issue_positive_truth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt = _canonical_client(
-        monkeypatch, MarketBookTransport()
-    ).read_market_book_depth("1.234", 42)
+def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
     forged = replace(receipt)
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
@@ -291,12 +281,10 @@ def test_forged_structurally_equal_receipt_cannot_issue_positive_truth(
             )
 
 
-def test_response_level_delayed_data_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt = _canonical_client(
-        monkeypatch, MarketBookTransport(delayed=True)
-    ).read_market_book_depth("1.234", 42)
+def test_response_level_delayed_data_fails_closed() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport(delayed=True)
+    )
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
 
@@ -314,12 +302,10 @@ def test_response_level_delayed_data_fails_closed(
     assert "DELAYED_SOURCE" in result.reasons
 
 
-def test_non_active_runner_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt = _canonical_client(
-        monkeypatch, MarketBookTransport(selection_status="REMOVED")
-    ).read_market_book_depth("1.234", 42)
+def test_non_active_runner_fails_closed() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport(selection_status="REMOVED")
+    )
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
 
@@ -337,16 +323,13 @@ def test_non_active_runner_fails_closed(
     assert "SELECTION_NOT_ACTIVE" in result.reasons
 
 
-def test_back_uses_available_to_back_not_available_to_lay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt = _canonical_client(
-        monkeypatch,
+def test_back_uses_available_to_back_not_available_to_lay() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport(
             back_sizes=(("2.00", "3"), ("1.99", "100")),
             lay_sizes=(("2.10", "999"),),
-        ),
-    ).read_market_book_depth("1.234", 42)
+        )
+    )
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
 
@@ -365,12 +348,10 @@ def test_back_uses_available_to_back_not_available_to_lay(
     assert "DISPLAYED_DEPTH_INSUFFICIENT" in result.reasons
 
 
-def test_unreserved_bound_plan_cannot_cross_product_authority_seam(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    receipt = _canonical_client(
-        monkeypatch, MarketBookTransport()
-    ).read_market_book_depth("1.234", 42)
+def test_unreserved_bound_plan_cannot_cross_product_authority_seam() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
 
@@ -412,13 +393,13 @@ def test_post_construction_io_origin_swap_cannot_mint_positive_authority(
     mutated_field: str,
 ) -> None:
     transport = MarketBookTransport()
-    client = _canonical_client(monkeypatch, transport)
+    receipt = _client(transport).read_market_book_depth("1.234", 42)
+    client = _canonical_client()
+    betfair_account_readonly._issue_market_book_depth(receipt, source=client)
     if mutated_field == "transport":
         client._transport = transport
     else:
         client._clock = lambda: READ_AT
-
-    receipt = client.read_market_book_depth("1.234", 42)
     decision_at = datetime.now(timezone.utc)
     bound = _bound(decision_at)
 
@@ -435,3 +416,34 @@ def test_post_construction_io_origin_swap_cannot_mint_positive_authority(
                 decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=2),
             )
+
+def test_module_urlopen_swap_invalidates_canonical_provider_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    monkeypatch.setattr(
+        betfair_account_readonly,
+        "urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("patched urlopen must never become canonical provider IO")
+        ),
+    )
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                decision_at=decision_at,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+

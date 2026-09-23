@@ -326,6 +326,7 @@ def test_failed_replace_keeps_last_good_snapshot_loadable_and_aborts_prepare(
     assert tuple(restored.tickets) == (first_ticket.ticket_id,)
     assert restored.balance == Decimal("90")
 
+
 def test_empty_current_schema_snapshot_cannot_bypass_external_witness(
     tmp_path,
     monkeypatch,

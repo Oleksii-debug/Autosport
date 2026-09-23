@@ -961,7 +961,7 @@ class LocalComputeAllocationBasisAuthorityStore:
             self._records = staged
             return record
 
-    def resolve(
+    def resolve_current(
         self,
         *,
         basis_id: str,
@@ -969,11 +969,16 @@ class LocalComputeAllocationBasisAuthorityStore:
         model_id: str,
         config_sha256: str,
         allocation_policy_id: str,
-        decision_at: str,
         bankroll_id: str,
         currency: str,
     ) -> LocalComputeAllocationBasisRecord | None:
-        """Resolve one exact owner-reviewed basis available by decision time."""
+        """Resolve current basis state for a new decision after this lookup.
+
+        This is deliberately not a historical-availability oracle.  A successful
+        lookup proves only that the exact owner-reviewed basis exists now under
+        the current durable EconomicGoal.  Downstream decision authority must
+        bind the returned basis identity before issuing the new decision.
+        """
 
         canonical_basis_id = _text(basis_id, "basis_id")
         canonical_backend = _text(backend_id, "backend_id")
@@ -983,7 +988,6 @@ class LocalComputeAllocationBasisAuthorityStore:
             allocation_policy_id,
             "allocation_policy_id",
         )
-        cutoff = _instant(decision_at, "decision_at")
         canonical_bankroll = _text(bankroll_id, "bankroll_id")
         canonical_currency = _currency(currency)
 
@@ -1012,11 +1016,6 @@ class LocalComputeAllocationBasisAuthorityStore:
                 and record.owner_bankroll_id == goal.bankroll_id
                 and record.owner_goal_sha256 == goal_sha256
                 and record.currency == goal.currency
-                and _instant(
-                    record.available_at,
-                    "available_at",
-                )
-                <= cutoff
             ]
             if len(matches) > 1:
                 raise LocalComputeAllocationBasisError(
@@ -1024,6 +1023,31 @@ class LocalComputeAllocationBasisAuthorityStore:
                 )
             return None if not matches else matches[0]
 
+    def resolve(
+        self,
+        *,
+        basis_id: str,
+        backend_id: str,
+        model_id: str,
+        config_sha256: str,
+        allocation_policy_id: str,
+        decision_at: str,
+        bankroll_id: str,
+        currency: str,
+    ) -> LocalComputeAllocationBasisRecord | None:
+        """Fail closed for timestamp-only historical decision-time resolution.
+
+        Local OS wall time cannot prove that the first durable basis existed at a
+        past decision instant.  Historical positive authority therefore requires
+        a separate durable causal observation/decision witness; this store does
+        not mint one.
+        """
+
+        _instant(decision_at, "decision_at")
+        raise LocalComputeAllocationBasisError(
+            "timestamp-only historical allocation basis resolution requires "
+            "durable causal observation authority"
+        )
 
 __all__ = [
     "LocalComputeAllocationBasisAuthorityStore",

@@ -114,11 +114,23 @@ def capture_historical_matches(
     if _paths_alias(output, evidence):
         raise ValueError("output_path and evidence_path must refer to different files")
 
+    requested_sport_key = provider.sport_key
+    if requested_sport_key != ParlayApiTableTennisProvider.sport_key:
+        raise ProviderPayloadError(
+            "historical match capture requires the canonical table-tennis sport scope"
+        )
     url = historical_match_request_url(
         provider,
         requested_date=requested_date,
         priced_only=priced_only,
     )
+    expected_request_path = (
+        f"/v1/historical/sports/{requested_sport_key}/matches"
+    )
+    if urlsplit(url).path != expected_request_path:
+        raise ProviderPayloadError(
+            "historical match request sport scope changed before dispatch"
+        )
     # Mutable provider fields/methods are not an invocation witness.  In
     # particular, _request/transport/clock can be shadowed or changed around
     # retries.  Keep positive transport/clock authority false until the provider
@@ -126,7 +138,15 @@ def capture_historical_matches(
     product_owned_request_path_verified = False
     product_owned_acquisition_clock_verified = False
     response = provider._request(url)
+    if provider.sport_key != requested_sport_key:
+        raise ProviderPayloadError(
+            "provider sport_key changed during historical match request"
+        )
     captured_at = provider.clock()
+    if provider.sport_key != requested_sport_key:
+        raise ProviderPayloadError(
+            "provider sport_key changed during historical match capture clock read"
+        )
     _parse_timestamp(captured_at, field="captured_at")
 
     window_hours_raw = _header(response.headers, "x-historical-window-hours")
@@ -177,7 +197,7 @@ def capture_historical_matches(
         "schema_version": 1,
         "kind": "parlayapi_historical_match_result_capture",
         "provider": "parlayapi",
-        "sport_key": provider.sport_key,
+        "sport_key": requested_sport_key,
         "request": {
             "url": url,
             "date": requested_date,
@@ -201,7 +221,7 @@ def capture_historical_matches(
                 "schema_version": 1,
                 "kind": "parlayapi_historical_match_result_evidence",
                 "provider": "parlayapi",
-                "sport_key": provider.sport_key,
+                "sport_key": requested_sport_key,
                 "requested_date": requested_date,
                 "priced_only": priced_only,
                 "request_url": url,

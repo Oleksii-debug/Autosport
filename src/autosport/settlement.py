@@ -17,6 +17,16 @@ class SettlementEngine:
 
     outcomes: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Own the constructor handoff. Retaining a caller-owned exact dict would
+        # let that caller rewrite terminal settlement truth later without going
+        # through record() or the serialization boundary.
+        #
+        # Preserve the existing delayed validation contract for malformed
+        # non-dict state: settle_ready()/record() remain the fail-closed ingress.
+        if type(self.outcomes) is dict:
+            self.outcomes = self.outcomes.copy()
+
     @staticmethod
     def _validated_outcomes_snapshot(raw: object) -> dict[str, str]:
         """Snapshot only the canonical public settlement-truth container shape."""

@@ -938,6 +938,10 @@ class ProductDecisionActivationStore:
     FILE_NAME: Final = "product_decision_activation.json"
 
     def __init__(self, workspace: str | Path) -> None:
+        if type(self) is not __class__:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
         if type(self).FILE_NAME != "product_decision_activation.json":
             raise ProductDecisionActivationError(
                 "canonical product decision activation store namespace changed"
@@ -1232,6 +1236,10 @@ class ProductDecisionActivationStore:
     ) -> ProductDecisionActivationBinding:
         """Create once with an independent freshness witness; exact retry is idempotent."""
 
+        if type(self) is not __class__:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
         with WorkspaceEconomicLock(self.workspace):
             observed = self._recover_authority()
             expected = self._derive(
@@ -1330,6 +1338,10 @@ class ProductDecisionActivationStore:
     def load(self) -> ProductDecisionActivationBinding:
         """Load only bytes that still match the independent monotonic witness."""
 
+        if type(self) is not __class__:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
         with WorkspaceEconomicLock(self.workspace):
             # Preserve precise malformed-state diagnostics before freshness
             # adjudication. Structurally valid old/rebound bytes are then rejected
@@ -1353,6 +1365,10 @@ class ProductDecisionActivationStore:
     ) -> ProductDecisionActivationBinding:
         """Re-resolve every child authority and reject START-time drift."""
 
+        if type(self) is not __class__:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
         with WorkspaceEconomicLock(self.workspace):
             if self.path.exists() or self.path.is_symlink():
                 persisted = self._load_local()

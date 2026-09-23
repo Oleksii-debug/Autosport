@@ -939,6 +939,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "request_id": production_request.request_id,
             "decision_input_sha256": production_request.decision_input_sha256,
             "task_class": production_request.required_capability,
+            "data_classification": production_request.data_classification.value,
             "sport_id": "table-tennis",
             "league_id": "league-1",
             "regime_id": production_request.voc_regime_id,

@@ -452,3 +452,41 @@ def test_withdrawal_factor_preserves_legal_xsd_decimal_forms(
     )
     response = parse_list_selections_changed_since_response(_changed(row))
     assert response.selections[0].withdrawal_factor == expected
+
+
+@pytest.mark.parametrize("name", (" Home", "Home "))
+def test_selection_name_rejects_leading_or_trailing_whitespace(name: str) -> None:
+    row = _selection().replace('Name="Home"', f'Name="{name}"')
+    with pytest.raises(BetdaqSoapProtocolError, match="leading or trailing whitespace"):
+        parse_list_selections_changed_since_response(_changed(row))
+
+
+def test_settlement_result_string_rejects_whitespace_identity_alias() -> None:
+    settlement = """
+      <SettlementInformation
+        SettledTime="2026-09-23T01:12:00+00:00"
+        VoidPercentage="0"
+        LeftSideFactor="1.0"
+        RightSideFactor="0.5"
+        SettlementResultString=" Win " />
+    """
+    with pytest.raises(BetdaqSoapProtocolError, match="leading or trailing whitespace"):
+        parse_list_selections_changed_since_response(
+            _changed(_selection(settlement=settlement))
+        )
+
+
+def test_internal_xsd_string_whitespace_is_preserved() -> None:
+    settlement = """
+      <SettlementInformation
+        SettledTime="2026-09-23T01:12:00+00:00"
+        VoidPercentage="0"
+        LeftSideFactor="1.0"
+        RightSideFactor="0.5"
+        SettlementResultString="Dead Heat" />
+    """
+    row = _selection(settlement=settlement).replace('Name="Home"', 'Name="Home Team"')
+    response = parse_list_selections_changed_since_response(_changed(row))
+    item = response.selections[0]
+    assert item.name == "Home Team"
+    assert item.settlement_information[0].settlement_result_string == "Dead Heat"

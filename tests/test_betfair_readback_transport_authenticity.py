@@ -433,6 +433,91 @@ def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
 
 
 
+@pytest.mark.parametrize(
+    "hostile_value",
+    (
+        Decimal("1E+4097"),
+        Decimal("1." + ("1" * 513)),
+    ),
+)
+def test_current_order_rejects_decimal_resource_bomb_before_ratio(
+    hostile_value: Decimal,
+) -> None:
+    action = _action()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+    order = capture.current_pages[0].orders[0]
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="requested_size exceeds provider Decimal resource bounds",
+    ):
+        type(order)(
+            bet_id=order.bet_id,
+            market_id=order.market_id,
+            selection_id=order.selection_id,
+            side=order.side,
+            status=order.status,
+            placed_date=order.placed_date,
+            price=order.price,
+            requested_size=hostile_value,
+            average_price_matched=order.average_price_matched,
+            size_matched=order.size_matched,
+            size_remaining=order.size_remaining,
+            customer_order_ref=order.customer_order_ref,
+            customer_strategy_ref=order.customer_strategy_ref,
+            evidence=order.evidence,
+        )
+
+
+@pytest.mark.parametrize(
+    "hostile_value",
+    (
+        Decimal("1E+4097"),
+        Decimal("1." + ("1" * 513)),
+    ),
+)
+def test_trusted_network_witness_rejects_decimal_resource_bomb_before_ratio(
+    hostile_value: Decimal,
+) -> None:
+    action = _action()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+    matcher = _trusted_capture_matcher()
+    witnesses = _current_capture_witnesses(capture)
+    order = capture.current_pages[0].orders[0]
+    original = order.requested_size
+    raw = witnesses[1][2]["currentOrders"][0]
+    raw_original = raw["priceSize"]["size"]
+
+    object.__setattr__(order, "requested_size", hostile_value)
+    raw["priceSize"]["size"] = hostile_value
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="size exceeds provider Decimal resource bounds",
+        ):
+            matcher(
+                capture,
+                witnesses,
+                venue_id=capture.venue_id,
+                account_id=capture.account_id,
+                action_id=capture.action_id,
+                market_id=capture.market_id,
+                provider_order_ref=capture.provider_order_ref,
+                page_size=capture.page_size,
+            )
+    finally:
+        object.__setattr__(order, "requested_size", original)
+        raw["priceSize"]["size"] = raw_original
+
+
 def test_trusted_json_rejects_stdlib_decoder_class_rebind(monkeypatch) -> None:
     parser = _trusted_json_parser()
 

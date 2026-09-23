@@ -13,6 +13,7 @@
   let ownerReviewEpoch = 0;
   let refreshInFlight = null;
   let refreshPending = false;
+  let stateProjectionEpoch = 0;
 
   function setTextIfChanged(node, value) {
     const text = String(value ?? "");
@@ -237,6 +238,10 @@
     focusOperatorTarget(byId(result.focus_id));
   }
 
+  function invalidateStateProjection() {
+    stateProjectionEpoch += 1;
+  }
+
   async function apiState() {
     if (!globalThis.pywebview || !globalThis.pywebview.api) {
       throw new Error("Внутрішній канал застосунку недоступний.");
@@ -249,22 +254,33 @@
   }
 
   async function dispatch(actionId, payload = {}) {
+    // A state read that began before this command is not allowed to overwrite
+    // the operator-visible result after the command crosses the backend bridge.
+    invalidateStateProjection();
     try {
       const result = await globalThis.pywebview.api.dispatch({
         request_id: requestId(),
         action_id: actionId,
         payload,
       });
+      // Also invalidate reads started while the command was in flight. The
+      // shared refresh loop will skip them and obtain one post-command snapshot.
+      invalidateStateProjection();
       const rejected = !result || result.status !== "completed";
       announce(result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."), rejected);
       focusResult(result);
       await refreshState();
       return result;
     } catch (_error) {
+      invalidateStateProjection();
       announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
       return null;
     }
   }
+
+  // The dedicated emergency-STOP asset reuses this frontend ordering fence.
+  // Backend emergency dispatch remains an independent safety lane.
+  globalThis.autosportDispatch = dispatch;
 
   function renderState(state) {
     latestState = state;
@@ -356,7 +372,15 @@
       do {
         refreshPending = false;
         try {
-          renderState(await apiState());
+          const requestEpoch = stateProjectionEpoch;
+          const state = await apiState();
+          if (requestEpoch === stateProjectionEpoch) {
+            renderState(state);
+          } else {
+            // A mutating action crossed the bridge while this snapshot was in
+            // flight. Never render that causally older view; fetch its successor.
+            refreshPending = true;
+          }
         } catch (_error) {
           announce("Не вдалося оновити стан застосунку.", true);
         }

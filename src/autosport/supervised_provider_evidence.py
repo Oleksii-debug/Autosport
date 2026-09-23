@@ -423,11 +423,17 @@ def verify_betfair_provider_state(
         ]
     ] = []
     for order in current:
-        if order.customer_order_ref == provider_order_ref:
-            candidates.append(("current", None, order))
+        if order.customer_order_ref != provider_order_ref:
+            raise ProviderEvidenceError(
+                "current-order customerOrderRef conflicts with captured execution scope"
+            )
+        candidates.append(("current", None, order))
     for status, order in cleared:
-        if order.customer_order_ref == provider_order_ref:
-            candidates.append(("cleared", status, order))
+        if order.customer_order_ref != provider_order_ref:
+            raise ProviderEvidenceError(
+                "cleared-order customerOrderRef conflicts with captured execution scope"
+            )
+        candidates.append(("cleared", status, order))
 
     for kind, _, order in candidates:
         if (
@@ -568,11 +574,12 @@ def verify_betfair_provider_state(
         readback.provider_order_ref,
     )
 
+
 # Verified provider state is an in-process capability, not a caller assertion.
-# The verifier issues object identities into a non-exported closure and reconciliation
-# rechecks that exact identity plus the immutable payload fingerprint before any ledger
-# transition. A public dataclass constructor or dataclasses.replace() therefore cannot
-# mint provider authority, and there is no importable sentinel/token to reuse.
+# The generic verifier seals exact object identity + immutable payload fingerprint.
+# Absence has one additional requirement: the same object must also have passed the
+# durable Betfair timeout visibility resolver. This prevents a direct complete-empty
+# verifier call from becoming premature NOT_FOUND/retry authority.
 def _install_verified_provider_evidence_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     raw_verify = verify_betfair_provider_state
@@ -620,6 +627,20 @@ def _install_verified_provider_evidence_authority() -> None:
             raise ProviderEvidenceError(
                 "verified provider evidence changed after canonical verification"
             )
+        if isinstance(evidence, VerifiedProviderAbsenceEvidence):
+            # Lazy import avoids a module cycle: timeout resolution depends on this
+            # provider verifier, while absence consumption depends on both authorities.
+            try:
+                from .betfair_timeout_reconciliation import (
+                    BetfairTimeoutResolutionError,
+                    assert_betfair_timeout_absence_authoritative,
+                )
+
+                assert_betfair_timeout_absence_authoritative(evidence)
+            except (ImportError, BetfairTimeoutResolutionError) as exc:
+                raise ProviderEvidenceError(
+                    "verified provider absence lacks durable timeout-horizon authority"
+                ) from exc
 
     globals()["verify_betfair_provider_state"] = authoritative_verify
     globals()[
@@ -629,4 +650,3 @@ def _install_verified_provider_evidence_authority() -> None:
 
 _install_verified_provider_evidence_authority()
 del _install_verified_provider_evidence_authority
-

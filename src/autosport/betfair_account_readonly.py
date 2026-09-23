@@ -15,7 +15,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
@@ -58,16 +58,24 @@ class BetfairHttpTransport(Protocol):
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes: ...
 
 
+class _RejectAuthenticatedRedirects(HTTPRedirectHandler):
+    """Never forward provider credentials to an HTTP redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class UrllibBetfairHttpTransport:
     def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
         if not isinstance(max_response_bytes, int) or isinstance(max_response_bytes, bool) or max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
+        self._opener = build_opener(_RejectAuthenticatedRedirects())
 
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with self._opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None
@@ -172,6 +180,9 @@ class BetfairClearedOrderObservation:
     customer_strategy_ref: str | None
     evidence: BetfairEvidence
     event_id: str | None = None
+    bet_outcome: str | None = None
+    voided_date: str | None = None
+    handicap: Decimal | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.bet_id, "bet_id")
@@ -188,6 +199,11 @@ class BetfairClearedOrderObservation:
         _optional_text(self.customer_order_ref, "customer_order_ref")
         _optional_text(self.customer_strategy_ref, "customer_strategy_ref")
         _optional_text(self.event_id, "event_id")
+        _optional_text(self.bet_outcome, "bet_outcome")
+        if self.voided_date is not None:
+            _iso_timestamp(self.voided_date, "voided_date")
+        if self.handicap is not None:
+            _decimal(self.handicap, "handicap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,7 +380,7 @@ def _execution_request_scope(
     customer_order_ref = provider_order_ref or action_id
     scope: dict[str, object] = {
         "schema": "autosport.betfair_execution_readback_scope",
-        "schema_version": 2 if provider_order_ref is not None else 1,
+        "schema_version": 3 if provider_order_ref is not None else 1,
         "venue_id": venue_id,
         "account_id": account_id,
         "adapter_id": ADAPTER_ID,
@@ -396,6 +412,15 @@ def _execution_request_scope(
     }
     if provider_order_ref is not None:
         scope["provider_order_ref"] = provider_order_ref
+        scope["empty_exact_ref_coherence"] = {
+            "required_when_first_complete_sweep_empty": True,
+            "passes": 2,
+            "surfaces": [
+                "CURRENT",
+                *_EXECUTION_CLEARED_STATUSES,
+            ],
+            "transition_policy": "fail_closed",
+        }
     return scope
 
 
@@ -612,53 +637,91 @@ class BetfairReadOnlyClient:
             # eventId. Empty evidence remains fail-closed.
             market_event = None
 
-        current_pages: list[BetfairCurrentOrderPage] = []
-        offset = 0
-        for _ in range(max_pages):
-            page = self.read_current_orders_page(
-                from_record=offset,
-                record_count=page_size,
-                customer_order_refs=(order_ref,),
-                market_ids=(market,),
-            )
-            current_pages.append(page)
-            if not page.more_available:
-                break
-            if not page.orders:
-                raise BetfairReadOnlyError(
-                    "execution currentOrders cannot advance from an empty page"
-                )
-            offset += len(page.orders)
-        else:
-            raise BetfairReadOnlyError(
-                "execution currentOrders pagination exceeded max_pages"
-            )
-
-        cleared_groups: list[tuple[str, tuple[BetfairClearedOrderPage, ...]]] = []
-        for status in _EXECUTION_CLEARED_STATUSES:
-            pages: list[BetfairClearedOrderPage] = []
+        def read_current_scope() -> list[BetfairCurrentOrderPage]:
+            pages: list[BetfairCurrentOrderPage] = []
             offset = 0
             for _ in range(max_pages):
-                page = self.read_cleared_orders_page(
+                page = self.read_current_orders_page(
                     from_record=offset,
                     record_count=page_size,
-                    bet_status=status,
                     customer_order_refs=(order_ref,),
                     market_ids=(market,),
                 )
                 pages.append(page)
                 if not page.more_available:
-                    break
+                    return pages
                 if not page.orders:
                     raise BetfairReadOnlyError(
-                        f"execution {status} pagination cannot advance from an empty page"
+                        "execution currentOrders cannot advance from an empty page"
                     )
                 offset += len(page.orders)
-            else:
+            raise BetfairReadOnlyError(
+                "execution currentOrders pagination exceeded max_pages"
+            )
+
+        def read_cleared_scope() -> list[
+            tuple[str, tuple[BetfairClearedOrderPage, ...]]
+        ]:
+            groups: list[
+                tuple[str, tuple[BetfairClearedOrderPage, ...]]
+            ] = []
+            for status in _EXECUTION_CLEARED_STATUSES:
+                pages: list[BetfairClearedOrderPage] = []
+                offset = 0
+                for _ in range(max_pages):
+                    page = self.read_cleared_orders_page(
+                        from_record=offset,
+                        record_count=page_size,
+                        bet_status=status,
+                        customer_order_refs=(order_ref,),
+                        market_ids=(market,),
+                    )
+                    pages.append(page)
+                    if not page.more_available:
+                        break
+                    if not page.orders:
+                        raise BetfairReadOnlyError(
+                            f"execution {status} pagination cannot advance from an empty page"
+                        )
+                    offset += len(page.orders)
+                else:
+                    raise BetfairReadOnlyError(
+                        f"execution {status} pagination exceeded max_pages"
+                    )
+                groups.append((status, tuple(pages)))
+            return groups
+
+        current_pages = read_current_scope()
+        cleared_groups = read_cleared_scope()
+
+        first_scope_empty = (
+            not any(page.orders for page in current_pages)
+            and not any(
+                page.orders
+                for _, pages in cleared_groups
+                for page in pages
+            )
+        )
+        if provider_order_ref is not None and first_scope_empty:
+            coherence_current_pages = read_current_scope()
+            if any(page.orders for page in coherence_current_pages):
                 raise BetfairReadOnlyError(
-                    f"execution {status} pagination exceeded max_pages"
+                    "execution readback changed during empty-sweep coherence check"
                 )
-            cleared_groups.append((status, tuple(pages)))
+            coherence_cleared_groups = read_cleared_scope()
+            if any(
+                page.orders
+                for _, pages in coherence_cleared_groups
+                for page in pages
+            ):
+                raise BetfairReadOnlyError(
+                    "execution readback changed during empty-sweep coherence check"
+                )
+            # Seal the latest complete empty observation. The request-scope schema
+            # declares that an exact-ref empty result is issued only after this
+            # second complete current+cleared pass.
+            current_pages = coherence_current_pages
+            cleared_groups = coherence_cleared_groups
 
         if market_event is None:
             event_sources = [
@@ -777,11 +840,14 @@ class BetfairReadOnlyClient:
         )
         if not isinstance(requested_capabilities, frozenset):
             raise TypeError("requested_capabilities must be a frozenset")
+        if BookmakerCapability.BET_READBACK in requested_capabilities:
+            raise BetfairReadOnlyError(
+                "BET_READBACK requires action-bound read_execution_readback evidence"
+            )
         supported = {
             BookmakerCapability.BALANCE_READ,
             BookmakerCapability.OPEN_POSITIONS_READ,
             BookmakerCapability.SETTLED_POSITIONS_READ,
-            BookmakerCapability.BET_READBACK,
         }
         if any(c not in supported for c in requested_capabilities):
             raise BetfairReadOnlyError("requested capability is not implemented by the Betfair account adapter")
@@ -937,6 +1003,9 @@ def _parse_cleared_order(
         _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"),
         evidence,
         _provider_optional_text(raw, "eventId", "event_id"),
+        _provider_optional_text(raw, "betOutcome", "bet_outcome"),
+        _provider_optional_text(raw, "voidedDate", "voided_date"),
+        _provider_optional_number(raw, "handicap", "handicap"),
     )
 
 
@@ -968,6 +1037,21 @@ def _provider_text(value: Mapping[str, object], key: str, field: str) -> str:
 def _provider_optional_text(value: Mapping[str, object], key: str, field: str) -> str | None:
     raw = value.get(key)
     return None if raw is None else _required_text(raw, field)
+
+
+def _provider_optional_number(value: Mapping[str, object], key: str, field: str) -> Decimal | None:
+    raw = value.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, Decimal):
+        result = raw
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        result = Decimal(raw)
+    else:
+        raise BetfairReadOnlyError(
+            f"{field} must be a JSON number decoded without binary float"
+        )
+    return _decimal(result, field)
 
 
 def _provider_int(value: Mapping[str, object], key: str, field: str) -> int:

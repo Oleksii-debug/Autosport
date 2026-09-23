@@ -3,15 +3,18 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 import json
+import http.client as _http_client
 import os
 import pickle
 from pathlib import Path
 import subprocess
 import sys
+import urllib.request as _urllib_request
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from autosport import betfair_account_identity as _identity
 from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
     IDENTITY_SCOPE,
@@ -46,32 +49,62 @@ def _install_details_transport(
     result: dict[str, object] | None = None,
     error_message: str | None = None,
 ) -> None:
+    """Stub below Autosport's product-owned opener/transport boundary."""
     response_result = result or _details_result()
 
     class Response:
+        status = 200
+        code = 200
+        reason = "OK"
+        msg = "OK"
+
         def __init__(self, payload: bytes) -> None:
             self._payload = payload
+
+        def info(self):
+            return {}
+
+        def read(self, limit: int | None = None) -> bytes:
+            if limit is None:
+                return self._payload
+            assert limit >= len(self._payload)
+            return self._payload
+
+        def close(self) -> None:
+            return None
 
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, traceback):
+            self.close()
             return False
 
-        def read(self, limit: int) -> bytes:
-            assert limit >= len(self._payload)
-            return self._payload
-
-    def urlopen(request, timeout: float):
-        assert request.full_url == ACCOUNT_JSON_RPC_ENDPOINT
-        assert timeout > 0
-        assert request.data is not None
-        decoded_request = json.loads(request.data.decode("utf-8"))
+    def fake_request(
+        connection,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        assert method == "POST"
+        assert url.endswith("/exchange/account/json-rpc/v1")
+        assert isinstance(body, bytes)
+        decoded_request = json.loads(body.decode("utf-8"))
         assert decoded_request["method"] == "AccountAPING/v1.0/getAccountDetails"
         assert decoded_request["params"] == {}
-        headers = {key.lower(): value for key, value in request.header_items()}
-        assert headers["x-application"]
-        assert headers["x-authentication"]
+        normalized_headers = {
+            key.lower(): value for key, value in (headers or {}).items()
+        }
+        assert normalized_headers["x-application"]
+        assert normalized_headers["x-authentication"]
+        connection._autosport_k07_request = decoded_request
+        connection._autosport_k07_encode_chunked = encode_chunked
+
+    def fake_getresponse(connection):
+        decoded_request = connection._autosport_k07_request
         if error_message is not None:
             payload = {
                 "jsonrpc": "2.0",
@@ -89,7 +122,8 @@ def _install_details_transport(
         ).encode("utf-8")
         return Response(raw)
 
-    monkeypatch.setattr(_readonly, "urlopen", urlopen)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "request", fake_request)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "getresponse", fake_getresponse)
 
 
 def _client(
@@ -102,6 +136,26 @@ def _client(
         BetfairSessionCredentials(application_key, session_token),
         account_label=account_label,
     )
+
+
+def test_k07_factory_uses_private_no_redirect_opener_not_process_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller_process_opener = object()
+    monkeypatch.setattr(_urllib_request, "_opener", caller_process_opener)
+
+    client = _client()
+    transport = client._transport
+
+    assert isinstance(transport, UrllibBetfairHttpTransport)
+    assert transport._opener is not caller_process_opener
+    redirect_handlers = [
+        handler
+        for handler in transport._opener.handlers
+        if isinstance(handler, _urllib_request.HTTPRedirectHandler)
+    ]
+    assert len(redirect_handlers) == 1
+    assert type(redirect_handlers[0]) is _readonly._RejectAuthenticatedRedirects
 
 
 def test_k07_import_order_does_not_patch_client_constructor() -> None:
@@ -196,6 +250,69 @@ def test_configured_account_label_cannot_mint_or_alias_provider_identity(
     assert a.session_context_id != b.session_context_id
     assert "same-caller-label" not in repr(a)
     assert "same-caller-label" not in a.identity_id
+
+
+def test_module_helper_rebinding_cannot_weaken_k07_identity_integrity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(
+        monkeypatch,
+        result=_details_result(currency_code="EUR"),
+    )
+    client = _client()
+
+    # These names remain public implementation helpers for the DTO, but K07's
+    # authority closure must have pinned its own validation primitives already.
+    monkeypatch.setattr(_identity, "_currency_code", lambda _value: "GBP")
+    monkeypatch.setattr(
+        _identity,
+        "_sha256_hex",
+        lambda _value, _field: "0" * 64,
+    )
+    monkeypatch.setattr(
+        _identity,
+        "_canonical_timestamp",
+        lambda _value: "1900-01-01T00:00:00+00:00",
+    )
+
+    value = resolve_betfair_authenticated_account_identity(client)
+
+    assert value.currency_code == "EUR"
+    assert value.account_details_sha256 != "0" * 64
+    assert value.observed_at != "1900-01-01T00:00:00+00:00"
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+    # Authority integrity must not depend on the public identity_id property's
+    # module-global canonical-json helper after issuance.
+    monkeypatch.setattr(_identity, "_canonical_json", lambda _value: b"forged")
+    object.__setattr__(value, "currency_code", "GBP")
+
+    assert not is_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_identity_class_post_init_rebinding_cannot_mint_altered_k07_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(
+        monkeypatch,
+        result=_details_result(currency_code="EUR"),
+    )
+    client = _client()
+
+    def forged_post_init(value) -> None:
+        object.__setattr__(value, "currency_code", "GBP")
+
+    monkeypatch.setattr(
+        _identity.BetfairAuthenticatedAccountIdentity,
+        "__post_init__",
+        forged_post_init,
+    )
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match="identity implementation changed|identity construction was altered",
+    ):
+        resolve_betfair_authenticated_account_identity(client)
 
 
 def test_personal_developer_identity_never_claims_cross_session_stability(

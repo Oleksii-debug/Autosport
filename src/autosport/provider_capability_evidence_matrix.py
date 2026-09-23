@@ -63,6 +63,13 @@ _REQUIRES_SUPPORTED = frozenset(
 )
 
 
+# Canonical issuance below is an API-level provenance fence in a trusted Python
+# process. Ordinary imports expose neither writable authority registries nor a
+# callable canonical matrix mint. Arbitrary same-interpreter reflection/object-
+# graph/code mutation is outside this boundary; no cryptographic isolation is claimed.
+CAPABILITY_EVIDENCE_TRUST_BOUNDARY = "trusted-process-api-provenance-v1"
+
+
 def _text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ProviderCapabilityEvidenceMatrixError(
@@ -233,11 +240,7 @@ class ProviderCapabilityEvidence:
         }
 
 
-_ISSUED_EVIDENCE: WeakValueDictionary[int, ProviderCapabilityEvidence] = WeakValueDictionary()
-_ISSUED_EVIDENCE_SEALS: dict[int, str] = {}
-
-
-def issue_provider_capability_evidence(
+def _issue_provider_capability_evidence_unsealed(
     *,
     capability: BookmakerCapability,
     profile_state: BookmakerCapabilityState,
@@ -298,33 +301,7 @@ def issue_provider_capability_evidence(
         raise ProviderCapabilityEvidenceMatrixError(
             "observed-operational current authority requires sealed upstream provider verification"
         )
-    issuance_key = id(fact)
-    _ISSUED_EVIDENCE[issuance_key] = fact
-    _ISSUED_EVIDENCE_SEALS[issuance_key] = fact.evidence_id
-    finalize(fact, _ISSUED_EVIDENCE_SEALS.pop, issuance_key, None)
     return fact
-
-
-def _is_product_issued(fact: ProviderCapabilityEvidence) -> bool:
-    issuance_key = id(fact)
-    if _ISSUED_EVIDENCE.get(issuance_key) is not fact:
-        return False
-    original_seal = _ISSUED_EVIDENCE_SEALS.get(issuance_key)
-    if original_seal is None:
-        return False
-    try:
-        return fact.evidence_id == original_seal
-    except (
-        AttributeError,
-        ProviderCapabilityEvidenceMatrixError,
-        TypeError,
-        ValueError,
-    ):
-        return False
-
-
-_ISSUED_MATRICES: WeakValueDictionary[int, object] = WeakValueDictionary()
-_ISSUED_MATRIX_SEALS: dict[int, str] = {}
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -548,34 +525,6 @@ class ProviderCapabilityEvidenceMatrix:
         }
 
 
-def _register_product_matrix(
-    matrix: ProviderCapabilityEvidenceMatrix,
-) -> ProviderCapabilityEvidenceMatrix:
-    issuance_key = id(matrix)
-    _ISSUED_MATRICES[issuance_key] = matrix
-    _ISSUED_MATRIX_SEALS[issuance_key] = matrix.matrix_id
-    finalize(matrix, _ISSUED_MATRIX_SEALS.pop, issuance_key, None)
-    return matrix
-
-
-def _is_product_issued_matrix(matrix: ProviderCapabilityEvidenceMatrix) -> bool:
-    issuance_key = id(matrix)
-    if _ISSUED_MATRICES.get(issuance_key) is not matrix:
-        return False
-    original_seal = _ISSUED_MATRIX_SEALS.get(issuance_key)
-    if original_seal is None:
-        return False
-    try:
-        return matrix.matrix_id == original_seal
-    except (
-        AttributeError,
-        ProviderCapabilityEvidenceMatrixError,
-        TypeError,
-        ValueError,
-    ):
-        return False
-
-
 def _digest(value: dict[str, object]) -> str:
     return sha256(
         json.dumps(
@@ -584,7 +533,7 @@ def _digest(value: dict[str, object]) -> str:
     ).hexdigest()
 
 
-def build_provider_capability_evidence_matrix(
+def _build_provider_capability_evidence_matrix_unsealed(
     profile: BookmakerCapabilityProfile,
     integration: BookmakerIntegrationEvidence,
     *,
@@ -624,19 +573,153 @@ def build_provider_capability_evidence_matrix(
                 integration_evidence_id=integration.evidence_id,
             )
         )
-    return _register_product_matrix(
-        ProviderCapabilityEvidenceMatrix(
-            profile=profile,
-            integration=integration,
+    return ProviderCapabilityEvidenceMatrix(
+        profile=profile,
+        integration=integration,
+        environment=environment,
+        application_mode=application_mode,
+        matrix_version=matrix_version,
+        facts=tuple(facts),
+        as_of=as_of,
+        matrix_ref=matrix_ref,
+        predecessor_matrix_id=predecessor_matrix_id,
+    )
+
+
+def _install_provider_capability_authority():
+    issued_evidence: WeakValueDictionary[int, ProviderCapabilityEvidence] = (
+        WeakValueDictionary()
+    )
+    issued_evidence_seals: dict[int, str] = {}
+    issued_matrices: WeakValueDictionary[int, ProviderCapabilityEvidenceMatrix] = (
+        WeakValueDictionary()
+    )
+    issued_matrix_seals: dict[int, str] = {}
+    raw_issue = _issue_provider_capability_evidence_unsealed
+    raw_build = _build_provider_capability_evidence_matrix_unsealed
+
+    def issue_provider_capability_evidence(
+        *,
+        capability: BookmakerCapability,
+        profile_state: BookmakerCapabilityState,
+        grade: ProviderCapabilityTruthGrade,
+        profile_id: str,
+        integration_evidence_id: str,
+        environment: str | None = None,
+        application_mode: str | None = None,
+        observed_at: str | None = None,
+        expires_at: str | None = None,
+        evidence_ref: str | None = None,
+        evidence_sha256: str | None = None,
+        endpoint_operation: str | None = None,
+        sport_scope: tuple[str, ...] = (),
+        market_scope: tuple[str, ...] = (),
+        quality_constraint: str | None = None,
+    ) -> ProviderCapabilityEvidence:
+        fact = raw_issue(
+            capability=capability,
+            profile_state=profile_state,
+            grade=grade,
+            profile_id=profile_id,
+            integration_evidence_id=integration_evidence_id,
+            environment=environment,
+            application_mode=application_mode,
+            observed_at=observed_at,
+            expires_at=expires_at,
+            evidence_ref=evidence_ref,
+            evidence_sha256=evidence_sha256,
+            endpoint_operation=endpoint_operation,
+            sport_scope=sport_scope,
+            market_scope=market_scope,
+            quality_constraint=quality_constraint,
+        )
+        issuance_key = id(fact)
+        issued_evidence[issuance_key] = fact
+        issued_evidence_seals[issuance_key] = fact.evidence_id
+        finalize(fact, issued_evidence_seals.pop, issuance_key, None)
+        return fact
+
+    def is_product_issued(fact: ProviderCapabilityEvidence) -> bool:
+        if type(fact) is not ProviderCapabilityEvidence:
+            return False
+        issuance_key = id(fact)
+        if issued_evidence.get(issuance_key) is not fact:
+            return False
+        original_seal = issued_evidence_seals.get(issuance_key)
+        if original_seal is None:
+            return False
+        try:
+            return fact.evidence_id == original_seal
+        except (
+            AttributeError,
+            ProviderCapabilityEvidenceMatrixError,
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+    def build_provider_capability_evidence_matrix(
+        profile: BookmakerCapabilityProfile,
+        integration: BookmakerIntegrationEvidence,
+        *,
+        environment: str,
+        application_mode: str,
+        matrix_version: int,
+        as_of: str,
+        matrix_ref: str,
+        evidence: Iterable[ProviderCapabilityEvidence] = (),
+        predecessor_matrix_id: str | None = None,
+    ) -> ProviderCapabilityEvidenceMatrix:
+        matrix = raw_build(
+            profile,
+            integration,
             environment=environment,
             application_mode=application_mode,
             matrix_version=matrix_version,
-            facts=tuple(facts),
             as_of=as_of,
             matrix_ref=matrix_ref,
+            evidence=evidence,
             predecessor_matrix_id=predecessor_matrix_id,
         )
+        issuance_key = id(matrix)
+        issued_matrices[issuance_key] = matrix
+        issued_matrix_seals[issuance_key] = matrix.matrix_id
+        finalize(matrix, issued_matrix_seals.pop, issuance_key, None)
+        return matrix
+
+    def is_product_issued_matrix(matrix: ProviderCapabilityEvidenceMatrix) -> bool:
+        if type(matrix) is not ProviderCapabilityEvidenceMatrix:
+            return False
+        issuance_key = id(matrix)
+        if issued_matrices.get(issuance_key) is not matrix:
+            return False
+        original_seal = issued_matrix_seals.get(issuance_key)
+        if original_seal is None:
+            return False
+        try:
+            return matrix.matrix_id == original_seal
+        except (
+            AttributeError,
+            ProviderCapabilityEvidenceMatrixError,
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+    return (
+        issue_provider_capability_evidence,
+        is_product_issued,
+        build_provider_capability_evidence_matrix,
+        is_product_issued_matrix,
     )
+
+
+(
+    issue_provider_capability_evidence,
+    _is_product_issued,
+    build_provider_capability_evidence_matrix,
+    _is_product_issued_matrix,
+) = _install_provider_capability_authority()
 
 
 def validate_capability_matrix_successor(

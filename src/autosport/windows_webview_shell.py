@@ -259,7 +259,7 @@ class AutosportWebController:
         self.recovery_worker = OneShotRecoveryWorker()
         self.evidence_export_worker = OneShotEvidenceExportWorker()
         self.product_worker = ProductGuiWorker()
-        self.product_runtime_status = "Тривала PAPER-робота не запущена."
+        self.product_runtime_status = "Тривалий імітаційний режим не запущено."
         self._request_results: dict[str, tuple[str, dict[str, Any]]] = {}
         self._pending_dataset_path: Path | None = None
         self._recovery_required_workspaces: set[Path] = set()
@@ -505,17 +505,17 @@ class AutosportWebController:
                 break
             if product_message.kind == "STARTED" and product_message.status is not None:
                 self.product_runtime_status = (
-                    "Тривала PAPER-робота активна: "
+                    "Тривалий імітаційний режим активний: "
                     f"джерело {product_message.status.source_id}; "
                     f"циклів {product_message.status.cycles_completed}."
                 )
                 self._ok(self.product_runtime_status)
             elif product_message.kind == "TICK" and product_message.tick is not None:
                 self.product_runtime_status = (
-                    "PAPER runtime: завершено цикл "
+                    "Тривалий імітаційний режим: завершено цикл "
                     f"{product_message.tick.cycle_index}; "
-                    f"delta {len(product_message.tick.committed_delta_ids)}; "
-                    f"settlement {len(product_message.tick.settled_ticket_ids)}."
+                    f"зафіксовано змін {len(product_message.tick.committed_delta_ids)}; "
+                    f"завершено розрахунків {len(product_message.tick.settled_ticket_ids)}."
                 )
                 self.status = self.product_runtime_status
             elif product_message.kind == "STOPPED" and product_message.status is not None:
@@ -525,7 +525,7 @@ class AutosportWebController:
                     "runtime_error": "аварійне завершення",
                 }.get(product_message.stop_reason, "зупинено")
                 self.product_runtime_status = (
-                    "Тривалу PAPER-роботу зупинено: "
+                    "Тривалий імітаційний режим зупинено: "
                     f"{reason}; циклів {product_message.status.cycles_completed}."
                 )
                 self._ok(self.product_runtime_status)
@@ -534,7 +534,7 @@ class AutosportWebController:
                 self._recovery_required_workspaces.add(Path(self.workspace))
                 error_type = product_message.error_type or "BaseException"
                 self.product_runtime_status = (
-                    "Тривала PAPER-робота завершилась помилкою типу "
+                    "Тривалий імітаційний режим завершився помилкою типу "
                     f"{error_type}. Спочатку відновіть робочу область."
                 )
                 self._fail(self.product_runtime_status)
@@ -865,12 +865,12 @@ class AutosportWebController:
         source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
         if source_factory is None or not source_factory:
             return self._fail(
-                "Тривала PAPER-робота не запущена: "
+                "Тривалий імітаційний режим не запущено: "
                 "AUTOSPORT_PRODUCT_SOURCE_FACTORY не задано."
             )
         if source_factory.strip() != source_factory:
             return self._fail(
-                "Тривала PAPER-робота не запущена: "
+                "Тривалий імітаційний режим не запущено: "
                 "AUTOSPORT_PRODUCT_SOURCE_FACTORY має неоднозначний формат."
             )
         try:
@@ -883,17 +883,17 @@ class AutosportWebController:
         except Exception as exc:
             return self._fail(_safe_exception_text(exc))
         if not started:
-            return self._fail("Тривалу PAPER-роботу вже запущено.")
-        self.product_runtime_status = "Запускається канонічна тривала PAPER-робота…"
+            return self._fail("Тривалий імітаційний режим уже запущено.")
+        self.product_runtime_status = "Запускається канонічний тривалий імітаційний режим…"
         return self._ok(self.product_runtime_status, focus_id="product-runtime-status")
 
     def _action_product_runtime_stop(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not self.product_worker.busy:
-            return self._fail("Тривала PAPER-робота зараз не виконується.")
+            return self._fail("Тривалий імітаційний режим зараз не виконується.")
         if not self.product_worker.request_stop("operator_stop"):
             return self._fail("Не вдалося передати команду STOP.")
         self.product_runtime_status = (
-            "Надіслано команду STOP; очікується безпечне завершення PAPER runtime."
+            "Надіслано команду STOP; очікується безпечне завершення тривалого імітаційного режиму."
         )
         return self._ok(self.product_runtime_status, focus_id="product-runtime-status")
 

@@ -62,7 +62,11 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
+    if text != text.lower():
+        raise CampaignQualificationError(
+            f"{name} must use lowercase canonical SHA-256 hex"
+        )
     if len(text) != 64 or any(ch not in _HEX for ch in text):
         raise CampaignQualificationError(f"{name} must be canonical SHA-256 hex")
     return text
@@ -362,10 +366,41 @@ def assess_campaign_qualification(
     if len({item.checkpoint.sha256 for item in episodes}) != len(episodes):
         blockers.append("episode checkpoints must be unique")
 
+    used_anchors: dict[tuple[str, str, str], str] = {}
+
+    def record_anchor(label: str, anchor: EvidenceAnchor) -> None:
+        key = (
+            anchor.authority_family,
+            anchor.evidence_id,
+            anchor.sha256,
+        )
+        previous = used_anchors.get(key)
+        if previous is not None:
+            blockers.append(
+                f"{label}: reuses evidence anchor already used by {previous}"
+            )
+        else:
+            used_anchors[key] = label
+
     start = _instant(identity.campaign_started_at, "campaign_started_at")
     previous_checkpoint: EvidenceAnchor | None = None
     for item in episodes:
         prefix = f"episode {item.episode_index}: "
+        for role in (
+            "restart_handoff",
+            "observation",
+            "denominator_member",
+            "decision",
+            "paper_action",
+            "terminal_resolution",
+            "cost_evidence",
+            "utility_evidence",
+            "learning_evidence",
+            "checkpoint",
+        ):
+            anchor = getattr(item, role)
+            if anchor is not None:
+                record_anchor(prefix + role, anchor)
         if item.campaign_identity_sha256.lower() != identity_sha:
             blockers.append(prefix + "campaign identity drift")
 
@@ -495,6 +530,9 @@ def assess_campaign_qualification(
             blockers.append(prefix + "checkpoint predates completed learning chain")
 
         previous_checkpoint = item.checkpoint
+
+    record_anchor("campaign stop", evidence.stop)
+    record_anchor("terminal bundle", evidence.terminal_bundle)
 
     last_checkpoint = episodes[-1].checkpoint
     last_checkpoint_at = _instant(last_checkpoint.available_at, "last checkpoint")

@@ -112,3 +112,29 @@ def test_commit_sequence_is_immutable_after_integrity_guard(tmp_path) -> None:
         connection.rollback()
         connection.close()
 
+def _install_predecessor_projection_trigger(path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(f"DROP TRIGGER IF EXISTS {_TRIGGER_NAME}")
+        connection.execute(
+            f"CREATE TRIGGER {_TRIGGER_NAME} BEFORE UPDATE OF "
+            "delta_id, source_id, stream_epoch, cursor_position, revision_number, "
+            "desktop_available_at, collector_committed_at "
+            "ON collector_deltas BEGIN "
+            "SELECT RAISE(ABORT, 'collector delta indexed projections are immutable'); END"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_predecessor_canonical_trigger_upgrades_without_bricking_store(tmp_path) -> None:
+    path = tmp_path / "collector.db"
+    CollectorDeltaStore(path)
+    _install_predecessor_projection_trigger(path)
+
+    CollectorDeltaStore(path)
+
+    sql = " ".join(_trigger_sql(path).split())
+    assert "BEFORE UPDATE OF commit_seq, delta_id, source_id" in sql
+

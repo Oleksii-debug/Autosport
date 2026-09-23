@@ -6,10 +6,17 @@ from autosport import _paper_execution_freshness as freshness
 from autosport import _paper_execution_reality_legacy as legacy
 
 
-def test_observed_future_quote_is_paper_state_error() -> None:
+@pytest.mark.parametrize(
+    "expires_at",
+    (
+        "2026-01-01T00:00:02+00:00",
+        "2025-12-31T23:59:59+00:00",
+    ),
+)
+def test_observed_future_quote_is_paper_state_error(expires_at: str) -> None:
     action = SimpleNamespace(
         quote_observed_at="2026-01-01T00:00:01+00:00",
-        expires_at="2026-01-01T00:00:02+00:00",
+        expires_at=expires_at,
     )
     observation = SimpleNamespace(observed_at="2026-01-01T00:00:00+00:00")
     config = SimpleNamespace(max_quote_age_ms=1_000)

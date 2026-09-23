@@ -204,6 +204,15 @@ def _bounded_response_body(response: object) -> bytes:
     return raw_body
 
 
+def _make_product_redirect_handler_factory() -> type[HTTPRedirectHandler]:
+    """Create a redirect handler class with the original refusal method captured."""
+
+    class ProductRejectRedirects(HTTPRedirectHandler):
+        redirect_request = _RejectRedirects.redirect_request
+
+    return ProductRejectRedirects
+
+
 def _perform_http_json_response(
     url: str,
     timeout: float,
@@ -211,15 +220,22 @@ def _perform_http_json_response(
     opener_factory: Callable[..., Any],
     proxy_handler_factory: Callable[..., Any],
     request_factory: Callable[..., Any],
+    redirect_handler_factory: Callable[..., Any] = _make_product_redirect_handler_factory(),
+    canonical_url_validator: Callable[[str], None] = _canonical_provider_url,
+    bounded_body_reader: Callable[[object], bytes] = _bounded_response_body,
+    json_decoder: Callable[[bytes], Any] = _decode_provider_json,
+    digest_factory: Callable[[bytes], Any] = hashlib.sha256,
 ) -> HttpJsonResponse:
-    """Perform one bounded HTTPS read using explicitly supplied network constructors.
+    """Perform one bounded HTTPS read through explicit, captured dependencies.
 
-    This helper is intentionally not provider-origin authority. Tests may inject fake
-    constructors here, while the product default transport below captures the real
-    urllib constructors once at module initialization.
+    This helper itself is not provider-origin authority. The product default transport
+    closes over the real urllib constructors, while the remaining authority-critical
+    validators/parsers are captured here as function defaults instead of late-bound
+    module globals. Tests can inject a fake network stack only by using a different
+    transport function, which is classified as unverified by TheOddsApiProvider.
     """
 
-    _canonical_provider_url(url)
+    canonical_url_validator(url)
     request = request_factory(
         url,
         headers={
@@ -230,7 +246,10 @@ def _perform_http_json_response(
     )
     http_status: int | None = None
     transport_failed = False
-    opener = opener_factory(proxy_handler_factory({}), _RejectRedirects())
+    opener = opener_factory(
+        proxy_handler_factory({}),
+        redirect_handler_factory(),
+    )
     try:
         with opener.open(request, timeout=timeout) as response:
             final_url = str(response.geturl())
@@ -238,13 +257,13 @@ def _perform_http_json_response(
                 raise TheOddsApiTransportError(
                     "The Odds API final URL does not match the canonical request URL"
                 )
-            raw_body = _bounded_response_body(response)
+            raw_body = bounded_body_reader(response)
             return HttpJsonResponse(
-                payload=_decode_provider_json(raw_body),
+                payload=json_decoder(raw_body),
                 status_code=int(response.status),
                 headers=dict(response.headers.items()),
                 final_url=final_url,
-                body_sha256=hashlib.sha256(raw_body).hexdigest(),
+                body_sha256=digest_factory(raw_body).hexdigest(),
             )
     except HTTPError as exc:
         http_status = int(exc.code)
@@ -286,6 +305,7 @@ _default_transport = _build_product_transport(
     Request,
     _perform_http_json_response,
 )
+
 def _plain_text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise TheOddsApiPayloadError(f"{field} must be a non-empty trimmed string")

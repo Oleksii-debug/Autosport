@@ -201,6 +201,60 @@ def test_identical_reread_is_idempotent_and_restart_safe(tmp_path) -> None:
     assert restarted.current("betfair", "acct-1", "bet-777") == first.revision
 
 
+def test_long_lived_reader_refreshes_after_other_store_commits_correction(
+    tmp_path,
+) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(
+        tmp_path,
+        transport,
+    )
+    path = tmp_path / "settlement.jsonl"
+    long_lived = BetfairSettlementRevisionStore(path)
+
+    first = _ingest(
+        long_lived,
+        ledger,
+        plan,
+        action,
+        _capture(client, provider_ref),
+    ).revision
+
+    independent_writer = BetfairSettlementRevisionStore(path)
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    second = _ingest(
+        independent_writer,
+        ledger,
+        plan,
+        action,
+        _capture(client, provider_ref),
+    ).revision
+
+    assert second.revision_number == 2
+    assert long_lived.current("betfair", "acct-1", "bet-777") == second
+    assert long_lived.revisions == (first, second)
+    assert (
+        long_lived.as_of(
+            "betfair",
+            "acct-1",
+            "bet-777",
+            first.available_at,
+        )
+        == first
+    )
+    assert (
+        long_lived.as_of(
+            "betfair",
+            "acct-1",
+            "bet-777",
+            second.available_at,
+        )
+        == second
+    )
+
+
 def test_later_void_correction_appends_without_backward_leakage(tmp_path) -> None:
     transport = _Transport()
     ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)

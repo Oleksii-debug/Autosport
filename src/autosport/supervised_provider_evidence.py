@@ -451,6 +451,13 @@ def verify_betfair_provider_state(
                 raise ProviderEvidenceError(
                     "provider current order requested price conflicts with execution action"
                 )
+            if (
+                order.requested_size is None
+                or order.requested_size != action.requested_stake
+            ):
+                raise ProviderEvidenceError(
+                    "provider current order requested stake conflicts with execution action"
+                )
         if kind == "cleared":
             assert isinstance(order, BetfairClearedOrderObservation)
             if order.event_id != action.event_id:

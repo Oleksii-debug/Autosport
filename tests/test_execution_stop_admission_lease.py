@@ -117,7 +117,7 @@ def test_admission_lease_rejects_current_unlocked_class_rebind(
 
     with pytest.raises(
         ExecutionStopIntegrityError,
-        match="admission lower dispatch changed",
+        match="admission helper graph changed",
     ):
         with authority.admission_lease():
             pytest.fail("rebound current-state helper yielded an execution lease")
@@ -145,7 +145,7 @@ def test_admission_lease_rejects_operation_lock_class_rebind(
 
     with pytest.raises(
         ExecutionStopIntegrityError,
-        match="admission lower dispatch changed",
+        match="admission helper graph changed",
     ):
         with authority.admission_lease():
             pytest.fail("rebound operation lock yielded an execution lease")

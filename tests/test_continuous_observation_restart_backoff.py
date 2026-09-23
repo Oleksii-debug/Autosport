@@ -116,7 +116,9 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             # One already-durable provider-unavailable failure exists before restart.
             # The next failure is therefore streak 2 and must use the 2-second
             # exponential backoff, not restart at the initial 1-second delay.
-            self.assertEqual(restart_waits, [2.0])
+            # Restart first honors the still-active backoff from the already
+            # durable first outage, then streak 2 earns the normal 2-second wait.
+            self.assertEqual(restart_waits, [1.0, 2.0])
             self.assertEqual(second_provider.calls, 2)
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.successful_cycles, 1)
@@ -307,7 +309,93 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             # Only the immediately preceding provider-unavailable failure belongs to
             # this backoff streak. The earlier validation failure remains durable
             # health history but must not double exponential provider backoff.
-            self.assertEqual(restart_waits, [2.0])
+            self.assertEqual(restart_waits, [1.0, 2.0])
+            self.assertEqual(result.exit_code, 0)
+
+    def test_restart_after_backoff_deadline_calls_provider_without_startup_wait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = _SequenceProvider(
+                [ProviderUnavailableError("provider outage before delayed restart")]
+            )
+
+            with self.assertRaises(SystemExit):
+                run_continuous_observation(
+                    first_provider,
+                    self._config(workspace),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: (_ for _ in ()).throw(
+                        SystemExit("crash during provider backoff")
+                    ),
+                    reporter=None,
+                    run_id="before-deadline-test",
+                )
+
+            waits: list[float] = []
+            restarted = _SequenceProvider(
+                [
+                    ProviderUnavailableError("outage after deadline"),
+                    _empty_batch("recovered-after-deadline"),
+                ]
+            )
+            result = run_continuous_observation(
+                restarted,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: "2026-09-23T20:00:02+00:00",
+                waiter=lambda seconds: waits.append(seconds) or False,
+                reporter=None,
+                run_id="after-deadline-test",
+            )
+
+            # The prior streak-1 deadline was T0+1s and has already elapsed.
+            # Only the newly recorded streak-2 outage waits for 2 seconds.
+            self.assertEqual(waits, [2.0])
+            self.assertEqual(restarted.calls, 2)
+            self.assertEqual(result.exit_code, 0)
+
+    def test_stop_during_restart_backoff_prevents_first_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = _SequenceProvider(
+                [ProviderUnavailableError("provider outage before stopped restart")]
+            )
+
+            with self.assertRaises(SystemExit):
+                run_continuous_observation(
+                    first_provider,
+                    self._config(workspace),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: (_ for _ in ()).throw(
+                        SystemExit("crash during provider backoff")
+                    ),
+                    reporter=None,
+                    run_id="before-stop-test",
+                )
+
+            waits: list[float] = []
+            restarted = _SequenceProvider(
+                [ProviderUnavailableError("must never be called")]
+            )
+            result = run_continuous_observation(
+                restarted,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: waits.append(seconds) or True,
+                reporter=None,
+                run_id="stopped-during-startup-backoff",
+            )
+
+            self.assertEqual(waits, [1.0])
+            self.assertEqual(restarted.calls, 0)
+            self.assertEqual(result.stop_reason, "operator_stop")
             self.assertEqual(result.exit_code, 0)
 
 

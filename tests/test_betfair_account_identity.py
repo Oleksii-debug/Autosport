@@ -330,6 +330,36 @@ def test_personal_developer_identity_never_claims_cross_session_stability(
     assert value.cross_session_equivalence_proven is False
 
 
+@pytest.mark.parametrize(
+    ("attribute", "forged_value"),
+    [
+        ("remote_provider_origin_proven", True),
+        ("provider_account_details_origin_proven", True),
+        ("stable_account_identity_proven", True),
+        ("stable_account_id", "forged-stable-account"),
+        ("cross_session_equivalence_proven", True),
+        ("identity_id", "0" * 64),
+    ],
+)
+def test_authority_projection_rebind_revokes_issued_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    forged_value: object,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+
+    monkeypatch.setattr(
+        BetfairAuthenticatedAccountIdentity,
+        attribute,
+        property(lambda _self, result=forged_value: result),
+    )
+
+    assert getattr(value, attribute) == forged_value
+    assert not is_authoritative_betfair_account_identity(value, client=client)
+
+
 @pytest.mark.parametrize("copy_kind", ["copy", "replace", "pickle"])
 def test_copy_reconstruction_or_pickle_does_not_retain_source_authority(
     monkeypatch: pytest.MonkeyPatch,

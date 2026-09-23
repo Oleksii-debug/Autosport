@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
+
 from autosport.domain import MarketEvent, MarketType
 from autosport.research_strategy import (
     market_event_evidence_hash,
@@ -65,3 +67,33 @@ def test_research_market_snapshot_hash_binds_sport_inside_projection() -> None:
         {lookup_key: tennis},
         (lookup_key,),
     )
+
+@pytest.mark.parametrize(
+    ("field_name", "first_value", "second_value"),
+    [
+        ("competition_id", "league:a", "league:b"),
+        ("market_semantics_id", "soccer:h2h:v1", "soccer:h2h:v2"),
+        ("provider_source_class", "exchange", "sportsbook"),
+        ("exchange_side", "back", "lay"),
+    ],
+)
+def test_research_hashes_bind_concrete_optional_market_identity(
+    field_name: str,
+    first_value: str,
+    second_value: str,
+) -> None:
+    baseline = _event(sport="football")
+    first = replace(baseline, **{field_name: first_value})
+    second = replace(baseline, **{field_name: second_value})
+    lookup_key = "fixed-research-slot"
+
+    assert first.quote_key == second.quote_key or field_name == "exchange_side"
+    assert market_event_evidence_hash(first) != market_event_evidence_hash(second)
+    assert research_market_snapshot_hash(
+        {lookup_key: first},
+        (lookup_key,),
+    ) != research_market_snapshot_hash(
+        {lookup_key: second},
+        (lookup_key,),
+    )
+

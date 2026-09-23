@@ -316,32 +316,21 @@ def run_continuous_observation(
     try:
         store = SQLiteMarketStore(root / "market.db")
         health_store = SourceHealthStore(root / "source_health.json")
+        durable_health = health_store.get(state.source_id)
         if (
-            previous is not None
-            and previous.get("source_id") == state.source_id
-            and previous.get("last_error_kind") == "provider_unavailable"
+            durable_health.status == "failed"
+            and durable_health.last_failure_kind == "provider_unavailable"
         ):
-            persisted_streak = previous.get("provider_unavailable_streak")
-            if type(persisted_streak) is not int or persisted_streak <= 0:
+            if durable_health.consecutive_failure_kind_count <= 0:
                 raise ValueError(
-                    "provider-unavailable restart status has invalid streak"
+                    "typed provider-unavailable health requires positive streak"
                 )
-            durable_health = health_store.get(state.source_id)
-            if (
-                durable_health.status == "failed"
-                and durable_health.consecutive_failures > 0
-            ):
-                if persisted_streak > durable_health.consecutive_failures:
-                    raise ValueError(
-                        "provider-unavailable restart streak exceeds durable "
-                        "source-health failure count"
-                    )
-                # SourceHealthStore counts every consecutive failure class, so it
-                # cannot itself supply the provider-unavailable streak. The loop
-                # status owns that typed streak; durable health only corroborates
-                # that the source is still failed and that the typed count does not
-                # exceed the durable consecutive-failure history.
-                state.provider_unavailable_streak = persisted_streak
+            # Typed provider backoff authority is committed atomically with the
+            # source-health failure transition. The lifecycle status file is only
+            # an operator projection and may legitimately lag after process death.
+            state.provider_unavailable_streak = (
+                durable_health.consecutive_failure_kind_count
+            )
         mirror = MarketMirror.from_store(store)
         mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         publish("running")
@@ -381,8 +370,25 @@ def run_continuous_observation(
                     terminal_exit = 5
                     publish("failed", stop_reason=terminal_reason)
                     break
-                state.provider_unavailable_streak += 1
-                state.health_status = _safe_health_status(health_store, state.source_id, "failed")
+                durable_health = health_store.get(state.source_id)
+                if (
+                    durable_health.status != "failed"
+                    or durable_health.last_failure_kind != "provider_unavailable"
+                    or durable_health.consecutive_failure_kind_count <= 0
+                ):
+                    state.health_status = "unknown"
+                    state.last_error_kind = (
+                        "local_health_failure_while_recording_provider_error"
+                    )
+                    state.last_error = _redacted_error(exc, redact_values)
+                    terminal_reason = state.last_error_kind
+                    terminal_exit = 5
+                    publish("failed", stop_reason=terminal_reason)
+                    break
+                state.provider_unavailable_streak = (
+                    durable_health.consecutive_failure_kind_count
+                )
+                state.health_status = durable_health.status
                 state.last_error_kind = "provider_unavailable"
                 state.last_error = _redacted_error(exc, redact_values)
                 publish("provider_unavailable")

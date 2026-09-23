@@ -42,6 +42,7 @@ def default_workspace() -> Path:
         )
     return home / ".autosport" / "workspace"
 
+
 def default_webview_storage_path() -> Path:
     """Return Autosport-owned per-user browser storage independent of CWD/install path."""
 

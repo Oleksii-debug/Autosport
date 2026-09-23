@@ -1079,6 +1079,7 @@ class TheOddsApiProvider:
                         source_ts=source_ts,
                         metadata=metadata,
                         sport=event_sport,
+                        exchange_side=side,
                     )
 
     def _validate_freshness(

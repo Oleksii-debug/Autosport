@@ -124,6 +124,38 @@ def test_same_correction_is_idempotent_but_conflicting_generation_is_rejected(tm
             ledger.append_correction(conflict)
 
 
+def test_timestamp_aliases_canonicalize_before_identity_and_replay(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    utc_alias = correction(
+        superseded=reward0,
+        corrected=reward1,
+        available_at="2026-09-23T00:00:00+00:00",
+    )
+    offset_alias = correction(
+        superseded=reward0,
+        corrected=reward1,
+        available_at="2026-09-23T02:00:00+02:00",
+    )
+
+    assert utc_alias.corrected_available_at == "2026-09-23T00:00:00Z"
+    assert offset_alias.corrected_available_at == "2026-09-23T00:00:00Z"
+    assert utc_alias == offset_alias
+    assert utc_alias.correction_id == offset_alias.correction_id
+
+    with RewardCorrectionLedger.create(path) as ledger:
+        first = ledger.append_correction(utc_alias)
+        assert ledger.append_correction(offset_alias) == first
+
+    with RewardCorrectionLedger.open(path) as reopened:
+        assert reopened.latest_correction(
+            action_id=sha("action"),
+            transition_id=sha("transition"),
+        ) == utc_alias
+        assert reopened.append_correction(offset_alias) == first
+
+
 def test_second_correction_requires_exact_predecessor_reward_and_causal_time(tmp_path):
     path = tmp_path / "corrections.sqlite3"
     reward0 = ref("learning.reward", "reward-0")

@@ -11,6 +11,7 @@ from autosport.prophetx_account_readonly import (
 )
 from autosport.prophetx_transactions_readonly import (
     ProphetXTransactionQuery, ProphetXTransactionsClient,
+    prophetx_transaction_provider_origin_proven,
 )
 from autosport.prophetx_transactions_transport import (
     TRANSACTIONS_URL, UrllibProphetXTransactionsTransport,
@@ -212,6 +213,32 @@ def test_injected_transport_never_mints_provider_origin():
     assert not c.provider_origin_proven(page)
 
 
+def test_caller_owned_private_attributes_cannot_forge_provider_origin():
+    c, _ = client(payload(row()))
+    page = c.read_page()
+    forged_transport = UrllibProphetXTransactionsTransport()
+    c._transport = forged_transport
+    c._canonical = forged_transport
+    c._issued = {page: "forged"}
+    assert not prophetx_transaction_provider_origin_proven(c, page)
+    assert not c.provider_origin_proven(page)
+
+
+def test_subclass_never_receives_provider_origin_authority(monkeypatch):
+    body = payload(row())
+    def fake_get(self, url, *, headers, timeout_seconds):
+        return ProphetXHttpResponse(200, url, "application/json", "identity", body)
+    monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
+
+    class Subclass(ProphetXTransactionsClient):
+        pass
+
+    c = Subclass(ProphetXSessionToken("secret"), clock=lambda: NOW)
+    page = c.read_page()
+    assert not prophetx_transaction_provider_origin_proven(c, page)
+    assert not c.provider_origin_proven(page)
+
+
 def test_canonical_origin_is_exact_object_only_and_invalidated_on_transport_swap(monkeypatch):
     body = payload(row())
     def fake_get(self, url, *, headers, timeout_seconds):
@@ -219,7 +246,9 @@ def test_canonical_origin_is_exact_object_only_and_invalidated_on_transport_swap
     monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
     c = ProphetXTransactionsClient(ProphetXSessionToken("secret"), clock=lambda: NOW)
     page = c.read_page()
+    assert prophetx_transaction_provider_origin_proven(c, page)
     assert c.provider_origin_proven(page)
+    assert not prophetx_transaction_provider_origin_proven(c, replace(page))
     assert not c.provider_origin_proven(replace(page))
     c._transport = FakeTransport(body)
     assert not c.provider_origin_proven(page)

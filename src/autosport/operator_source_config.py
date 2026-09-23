@@ -117,7 +117,7 @@ def parse_operator_source_config(payload: bytes | bytearray | memoryview) -> Ope
         )
     except OperatorSourceConfigError:
         raise
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
         raise OperatorSourceConfigError("operator source configuration JSON is invalid") from None
     if not isinstance(value, dict):
         raise OperatorSourceConfigError("operator source configuration must be a JSON object")

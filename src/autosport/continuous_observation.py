@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .ingestion import CommittedIngestionHealthError
-from .ingestion_health import IngestionPolicy, SourceHealthStore
+from .ingestion_health import IngestionPolicy, SourceHealthStore, parse_source_timestamp
 from .integrity import atomic_write_json
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror
@@ -252,6 +252,19 @@ def _has_health_persistence_failure_note(exc: BaseException) -> bool:
     )
 
 
+def _provider_backoff_seconds(
+    provider_unavailable_streak: int,
+    config: ContinuousObservationConfig,
+) -> float:
+    if provider_unavailable_streak <= 0:
+        raise ValueError("provider-unavailable backoff requires positive streak")
+    exponent = min(provider_unavailable_streak - 1, 20)
+    return min(
+        config.max_backoff_seconds,
+        config.interval_seconds * (2**exponent),
+    )
+
+
 def run_continuous_observation(
     provider: MarketProvider,
     config: ContinuousObservationConfig,
@@ -317,6 +330,7 @@ def run_continuous_observation(
         store = SQLiteMarketStore(root / "market.db")
         health_store = SourceHealthStore(root / "source_health.json")
         durable_health = health_store.get(state.source_id)
+        restart_backoff_remaining = 0.0
         if (
             durable_health.status == "failed"
             and durable_health.last_failure_kind == "provider_unavailable"
@@ -325,17 +339,61 @@ def run_continuous_observation(
                 raise ValueError(
                     "typed provider-unavailable health requires positive streak"
                 )
+            if durable_health.last_error_at is None:
+                raise ValueError(
+                    "typed provider-unavailable health requires failure timestamp"
+                )
             # Typed provider backoff authority is committed atomically with the
             # source-health failure transition. The lifecycle status file is only
             # an operator projection and may legitimately lag after process death.
             state.provider_unavailable_streak = (
                 durable_health.consecutive_failure_kind_count
             )
+            earned_backoff = _provider_backoff_seconds(
+                state.provider_unavailable_streak,
+                config,
+            )
+            restart_at = parse_source_timestamp(started_at)
+            failure_at = parse_source_timestamp(durable_health.last_error_at)
+            elapsed_wall = (restart_at - failure_at).total_seconds()
+            # A wall-clock rollback cannot prove that any part of the earned
+            # provider backoff elapsed, so it must not shorten the restart delay.
+            causally_elapsed = max(0.0, elapsed_wall)
+            restart_backoff_remaining = max(
+                0.0,
+                earned_backoff - causally_elapsed,
+            )
         mirror = MarketMirror.from_store(store)
         mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         publish("running")
 
-        while True:
+        enter_loop = True
+        if restart_backoff_remaining > 0:
+            if stopper.is_set():
+                terminal_reason = "operator_stop"
+                enter_loop = False
+            else:
+                remaining_runtime = config.max_runtime_seconds - (
+                    monotonic() - started_monotonic
+                )
+                if remaining_runtime <= 0:
+                    terminal_reason = "max_runtime"
+                    enter_loop = False
+                else:
+                    startup_wait = min(
+                        restart_backoff_remaining,
+                        remaining_runtime,
+                    )
+                    if wait(startup_wait):
+                        terminal_reason = "operator_stop"
+                        enter_loop = False
+                    elif startup_wait >= remaining_runtime:
+                        # The bounded runtime expires no later than the backoff
+                        # deadline, so first provider I/O is not permitted.
+                        terminal_reason = "max_runtime"
+                        enter_loop = False
+
+        while enter_loop:
             elapsed = monotonic() - started_monotonic
             if stopper.is_set():
                 terminal_reason = "operator_stop"
@@ -401,10 +459,11 @@ def run_continuous_observation(
                     terminal_reason = "max_runtime_after_provider_unavailable"
                     terminal_exit = 4 if state.successful_cycles == 0 else 0
                     break
-                exponent = min(state.provider_unavailable_streak - 1, 20)
                 backoff = min(
-                    config.max_backoff_seconds,
-                    config.interval_seconds * (2**exponent),
+                    _provider_backoff_seconds(
+                        state.provider_unavailable_streak,
+                        config,
+                    ),
                     remaining,
                 )
                 if wait(backoff):

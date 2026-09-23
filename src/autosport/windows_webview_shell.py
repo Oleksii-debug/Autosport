@@ -260,6 +260,12 @@ class AutosportWebController:
         self.evidence_export_worker = OneShotEvidenceExportWorker()
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
+        # Request identity/replay bookkeeping is intentionally separate from the
+        # ordinary controller lock. Reservations are brief; handlers never run
+        # while this lock is held, so the emergency lane can preserve one global
+        # request-id namespace without waiting for unrelated backend work.
+        self._request_replay_lock = threading.RLock()
+        self._request_identities: dict[str, str] = {}
         self._request_results: dict[str, tuple[str, dict[str, Any]]] = {}
         self._pending_dataset_path: Path | None = None
         self._recovery_required_workspaces: set[Path] = set()
@@ -1000,6 +1006,48 @@ class AutosportWebController:
         self.manual_status = text("ui.windows.manual_calculation.status.cleared")
         return self._ok(self.manual_status, focus_id="332")
 
+    def _reserve_request_identity(
+        self,
+        request_id: str,
+        command_identity: str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        with self._request_replay_lock:
+            previous_identity = self._request_identities.get(request_id)
+            previous = self._request_results.get(request_id)
+            if previous_identity is None:
+                self._request_identities[request_id] = command_identity
+            return (
+                previous_identity,
+                None if previous is None else dict(previous[1]),
+            )
+
+    def _release_request_identity(
+        self,
+        request_id: str,
+        command_identity: str,
+    ) -> None:
+        with self._request_replay_lock:
+            if (
+                self._request_identities.get(request_id) == command_identity
+                and request_id not in self._request_results
+            ):
+                del self._request_identities[request_id]
+
+    def _store_request_result(
+        self,
+        request_id: str,
+        command_identity: str,
+        result: Mapping[str, Any],
+    ) -> None:
+        with self._request_replay_lock:
+            if self._request_identities.get(request_id) != command_identity:
+                raise RuntimeError("request identity reservation changed during dispatch")
+            self._request_results[request_id] = (command_identity, dict(result))
+            while len(self._request_results) > _REQUEST_REPLAY_LIMIT:
+                oldest = next(iter(self._request_results))
+                del self._request_results[oldest]
+                self._request_identities.pop(oldest, None)
+
     def _reject_bridge_command(
         self,
         request_id: str,
@@ -1082,31 +1130,39 @@ class AutosportWebController:
             )
         with self._lock:
             self._bridge_validation_error = ""
-            previous = self._request_results.get(request_id)
-            if previous is not None:
-                previous_identity, previous_result = previous
+            previous_identity, previous_result = self._reserve_request_identity(
+                request_id,
+                command_identity,
+            )
+            if previous_identity is not None:
                 if previous_identity != command_identity:
                     return self._reject_bridge_command(
                         request_id,
                         "Повторний ідентифікатор належить іншій команді.",
                     )
-                return dict(previous_result)
+                if previous_result is not None:
+                    return previous_result
+                return self._reject_bridge_command(
+                    request_id,
+                    "Команда з цим ідентифікатором уже виконується.",
+                )
 
-            if self._closing:
-                response = self._fail("Автоспорт завершує роботу.")
-            else:
-                try:
-                    response = handler(payload)
-                except BaseException as exc:
-                    if not isinstance(exc, Exception):
-                        raise
-                    response = self._fail(_safe_exception_text(exc))
-            result = {"request_id": request_id, **response}
-            self._request_results[request_id] = (command_identity, dict(result))
-            while len(self._request_results) > _REQUEST_REPLAY_LIMIT:
-                oldest = next(iter(self._request_results))
-                del self._request_results[oldest]
-            return result
+            try:
+                if self._closing:
+                    response = self._fail("Автоспорт завершує роботу.")
+                else:
+                    try:
+                        response = handler(payload)
+                    except BaseException as exc:
+                        if not isinstance(exc, Exception):
+                            raise
+                        response = self._fail(_safe_exception_text(exc))
+                result = {"request_id": request_id, **response}
+                self._store_request_result(request_id, command_identity, result)
+                return result
+            except BaseException:
+                self._release_request_identity(request_id, command_identity)
+                raise
 
     @staticmethod
     def _wait_for_terminal_worker(worker: Any) -> None:

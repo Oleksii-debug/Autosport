@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from autosport.domain import TicketLeg
+from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 
 
@@ -510,3 +510,104 @@ def test_exact_serialized_candidate_rejects_post_validation_ticket_history_delet
 
     assert calls >= 2
     assert path.read_bytes() == durable_before
+
+
+def test_private_causal_history_rejects_coherent_winner_to_loss_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+    winning_key = ticket.legs[0].quote_key
+    book.settle(
+        ticket.ticket_id,
+        {winning_key},
+        settled_at="2026-09-23T02:00:00+00:00",
+    )
+    book.save(path)
+    durable_winner = path.read_bytes()
+    assert ticket.status is TicketStatus.WON
+    assert ticket.payout == Decimal("20")
+    assert book.balance == Decimal("110")
+
+    # Rewrite every public field needed for a structurally coherent LOST history.
+    # Opening economics and settlement timestamp remain valid, so ordinary replay
+    # alone can accept this forged historical outcome.
+    ticket.status = TicketStatus.LOST
+    ticket.payout = Decimal("0")
+    book.balance = Decimal("90")
+    book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
+
+    with pytest.raises(
+        ValueError,
+        match="causal history changed outside product-issued transitions",
+    ):
+        book.save(path)
+
+    assert path.read_bytes() == durable_winner
+
+
+def test_exact_candidate_rejects_post_validation_settlement_history_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+    book.settle(
+        ticket.ticket_id,
+        {ticket.legs[0].quote_key},
+        settled_at="2026-09-23T02:00:00+00:00",
+    )
+    book.save(path)
+    durable_winner = path.read_bytes()
+
+    import autosport.paper as paper_module
+
+    original_binding = paper_module._snapshot_authority_binding
+    calls = 0
+
+    def _rewrite_after_initial_validation(target):
+        nonlocal calls
+        binding = original_binding(target)
+        if target is book:
+            calls += 1
+            if calls == 2:
+                ticket.status = TicketStatus.LOST
+                ticket.payout = Decimal("0")
+                book.balance = Decimal("90")
+                book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
+        return binding
+
+    monkeypatch.setattr(
+        paper_module,
+        "_snapshot_authority_binding",
+        _rewrite_after_initial_validation,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "serialized candidate causal history differs from "
+            "product-issued authority"
+        ),
+    ):
+        book.save(path)
+
+    assert calls >= 2
+    assert path.read_bytes() == durable_winner

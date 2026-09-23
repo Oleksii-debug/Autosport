@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+import hmac
 import json
 import math
-from secrets import token_hex
+from secrets import token_bytes, token_hex
 from typing import Callable, Protocol
 import xml.etree.ElementTree as ET
 
@@ -25,6 +26,8 @@ _SCHEMA = "autosport.betdaq-odds-ladder-acquisition-v1"
 _ACQ_PREFIX = "betdaq-ladder-acq:"
 _CANONICAL_POST = UrllibBetdaqSoapTransport.post
 _CANONICAL_URLOPEN = _account_readonly.urlopen
+_CANONICAL_REQUEST = _account_readonly.Request
+_CREDENTIAL_CONTEXT_HMAC_KEY = token_bytes(32)
 _ORIGIN_WITNESS = object()
 _CLOCK_WITNESS = object()
 
@@ -426,6 +429,7 @@ def _canonical_transport(transport: object) -> bool:
         getattr(post, "__self__", None) is transport
         and getattr(post, "__func__", None) is _CANONICAL_POST
         and _account_readonly.urlopen is _CANONICAL_URLOPEN
+        and _account_readonly.Request is _CANONICAL_REQUEST
     )
 
 
@@ -456,6 +460,24 @@ def _soap_request(
     return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
 
 
+def _credential_context_sha256(credentials: BetdaqCredentials) -> str:
+    """Opaque process-local binding; never persist or hash raw credentials directly."""
+    material = json.dumps(
+        {
+            "endpoint": BETDAQ_ODDS_LADDER_ENDPOINT,
+            "version": credentials.version,
+            "language_code": credentials.language_code,
+            "username": credentials.username,
+            "password": credentials.password,
+            "application_identifier": credentials.application_identifier,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.digest(_CREDENTIAL_CONTEXT_HMAC_KEY, material, "sha256").hex()
+
+
 def _request_fingerprint(
     request: BetdaqOddsLadderRequest,
     credentials: BetdaqCredentials,
@@ -469,6 +491,7 @@ def _request_fingerprint(
             "price_format": request.price_format,
             "api_version": credentials.version,
             "language_code": credentials.language_code,
+            "credential_context_sha256": _credential_context_sha256(credentials),
         }
     )
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from urllib.error import HTTPError
+
 import runpy
 import tempfile
 from pathlib import Path
@@ -24,6 +28,20 @@ _HELPERS = runpy.run_path(
 _prepared = _HELPERS["_prepared"]
 READBACK_AT = _HELPERS["READBACK_AT"]
 SUBMITTED_AT = _HELPERS["SUBMITTED_AT"]
+
+
+def _start_redirect_test_server(
+    handler_type: type[BaseHTTPRequestHandler],
+) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_type)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _stop_redirect_test_server(server: ThreadingHTTPServer) -> None:
+    server.shutdown()
+    server.server_close()
 
 
 def _forged_http_post(
@@ -500,4 +518,64 @@ def test_private_redirect_policy_shadow_fails_before_durable_attempt() -> None:
             assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
         finally:
             redirect_handler.redirect_request = original
+
+@pytest.mark.parametrize("status_code", (301, 302, 303, 307, 308))
+def test_private_provider_opener_does_not_reach_redirect_sink(
+    status_code: int,
+) -> None:
+    sink_requests: list[tuple[str, dict[str, str]]] = []
+
+    class SinkHandler(BaseHTTPRequestHandler):
+        def _record(self) -> None:
+            size = int(self.headers.get("Content-Length", "0"))
+            if size:
+                self.rfile.read(size)
+            sink_requests.append((self.command, dict(self.headers.items())))
+            self.send_response(200)
+            self.end_headers()
+
+        do_GET = _record
+        do_POST = _record
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    sink = _start_redirect_test_server(SinkHandler)
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            size = int(self.headers.get("Content-Length", "0"))
+            if size:
+                self.rfile.read(size)
+            self.send_response(status_code)
+            self.send_header(
+                "Location",
+                f"http://127.0.0.1:{sink.server_address[1]}/credential-sink",
+            )
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    redirect = _start_redirect_test_server(RedirectHandler)
+    try:
+        url = f"http://127.0.0.1:{redirect.server_address[1]}/placeOrders"
+        with pytest.raises(HTTPError) as exc_info:
+            betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_POST(
+                betfair_supervised_execution.UrllibBetfairHttpTransport(),
+                url,
+                headers={
+                    "X-Application": "app-secret",
+                    "X-Authentication": "session-secret",
+                    "Content-Type": "application/json",
+                },
+                body=b"{}",
+                timeout_seconds=2.0,
+            )
+    finally:
+        _stop_redirect_test_server(redirect)
+        _stop_redirect_test_server(sink)
+
+    assert exc_info.value.code == status_code
+    assert sink_requests == []
 

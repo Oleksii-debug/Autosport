@@ -169,12 +169,28 @@ def test_non_success_base_return_status_fails_closed_before_markets() -> None:
     assert exc.value.scope == "response"
 
 
-def test_market_level_return_code_fails_whole_wire_response() -> None:
-    payload = _response(market_attrs='ReturnCode="16"')
+def test_rc016_unavailable_market_preserves_valid_sibling_market() -> None:
+    unavailable = f'''<MarketPrices xmlns="{API}" Id="9002" ReturnCode="16" />'''
+    response = parse_get_prices_response(_response(result_extra=unavailable))
+
+    assert [market.market_id for market in response.markets] == [9001]
+    assert len(response.unavailable_markets) == 1
+    assert response.unavailable_markets[0].market_id == 9002
+    assert response.unavailable_markets[0].return_code == 16
+
+
+def test_non_rc016_market_level_return_code_still_fails_whole_response() -> None:
+    payload = _response(market_attrs='ReturnCode="17"')
     with pytest.raises(BetdaqProviderStatusError) as exc:
         parse_get_prices_response(payload)
-    assert exc.value.code == 16
+    assert exc.value.code == 17
     assert exc.value.scope == "market 9001"
+
+
+def test_rc016_cannot_carry_partial_price_children() -> None:
+    payload = _response(market_attrs='ReturnCode="16"')
+    with pytest.raises(BetdaqSoapProtocolError, match="RC016 unavailable market"):
+        parse_get_prices_response(payload)
 
 
 def test_soap11_fault_is_typed_and_does_not_parse_partial_payload() -> None:
@@ -233,6 +249,49 @@ def test_nonfinite_or_invalid_economic_fields_fail_closed() -> None:
         )
 
 
+def test_multi_level_prices_preserve_documented_provider_competitiveness_order() -> None:
+    response = parse_get_prices_response(
+        _response(
+            price_nodes=(
+                '<ForSidePrices Price="3.00" Stake="5" />'
+                '<ForSidePrices Price="2.50" Stake="7" />'
+                '<AgainstSidePrices Price="2.10" Stake="4" />'
+                '<AgainstSidePrices Price="2.20" Stake="6" />'
+            )
+        )
+    )
+
+    selection = response.markets[0].selections[0]
+    assert [level.price for level in selection.for_side_prices] == [
+        Decimal("3.00"),
+        Decimal("2.50"),
+    ]
+    assert [level.price for level in selection.against_side_prices] == [
+        Decimal("2.10"),
+        Decimal("2.20"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "price_nodes",
+    [
+        (
+            '<ForSidePrices Price="2.00" Stake="5" />'
+            '<ForSidePrices Price="2.50" Stake="7" />'
+        ),
+        (
+            '<AgainstSidePrices Price="2.20" Stake="5" />'
+            '<AgainstSidePrices Price="2.10" Stake="7" />'
+        ),
+    ],
+)
+def test_provider_competitiveness_order_violation_fails_closed(
+    price_nodes: str,
+) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="competitiveness order"):
+        parse_get_prices_response(_response(price_nodes=price_nodes))
+
+
 def test_duplicate_price_level_is_rejected_not_double_counted() -> None:
     payload = _response(
         price_nodes=(
@@ -281,6 +340,26 @@ def test_naive_or_malformed_start_time_is_rejected() -> None:
         )
 
 
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement", "message"),
+    [
+        ('Name="Match Winner – Women"', 'Name="   "', "market Name"),
+        ('Name="Player A"', 'Name="\t "', "selection Name"),
+        ('Description="Success"', 'Description="   "', "ReturnStatus Description"),
+        ('CallId="call-123"', 'CallId="  "', "ReturnStatus CallId"),
+    ],
+)
+def test_whitespace_only_provider_text_fails_closed(
+    needle: str,
+    replacement: str,
+    message: str,
+) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match=message):
+        parse_get_prices_response(_response().replace(needle, replacement, 1))
+
+
 def test_dtd_and_entity_declarations_are_forbidden() -> None:
     payload = '<!DOCTYPE x [<!ENTITY boom "boom">]>' + _response()
     with pytest.raises(BetdaqSoapProtocolError, match="DTD/entity"):
@@ -296,3 +375,30 @@ def test_unexpected_child_cannot_leak_partial_success() -> None:
     )
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected child"):
         parse_get_prices_response(payload)
+
+@pytest.mark.parametrize("provider_side", ["ForSidePrices", "AgainstSidePrices"])
+def test_non_nil_price_level_unknown_attributes_fail_closed(provider_side: str) -> None:
+    price_nodes = (
+        f'<{provider_side} Price="2.00" Stake="12.34" '
+        'FutureSemanticField="provider-value" />'
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_prices_response(_response(price_nodes=price_nodes))
+
+def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
+    result_extra = _response().replace(
+        "<GetPricesResult>",
+        '<GetPricesResult FutureSemanticField="provider-value">',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="must not contain attributes"):
+        parse_get_prices_response(result_extra)
+
+    status_extra = _response().replace(
+        'CallId="call-123"',
+        'CallId="call-123" FutureSemanticField="provider-value"',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_prices_response(status_extra)
+

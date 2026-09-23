@@ -15,6 +15,7 @@ WSSE_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecu
 WSU_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 _MAX_XML_BYTES: Final = 4 * 1024 * 1024
 _MAX_TEXT: Final = 512
+_RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE: Final = 16
 
 
 class BetdaqWireError(ValueError):
@@ -95,6 +96,14 @@ class BetdaqMarketPrices:
 
 
 @dataclass(frozen=True, slots=True)
+class BetdaqUnavailableMarket:
+    """One requested market that BETDAQ explicitly marked unavailable via RC016."""
+
+    market_id: int
+    return_code: int
+
+
+@dataclass(frozen=True, slots=True)
 class BetdaqGetPricesWireResponse:
     return_code: int
     return_description: str
@@ -102,6 +111,7 @@ class BetdaqGetPricesWireResponse:
     provider_created_at: datetime | None
     provider_created_at_text: str | None
     markets: tuple[BetdaqMarketPrices, ...]
+    unavailable_markets: tuple[BetdaqUnavailableMarket, ...]
 
 
 def _tag(namespace: str, local: str) -> str:
@@ -112,6 +122,8 @@ def _safe_text(value: str, field: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field} must be str")
     value = value.strip()
+    if not value:
+        raise BetdaqSoapProtocolError(f"{field} must be a non-empty string")
     if len(value) > _MAX_TEXT or any(not char.isprintable() for char in value):
         raise BetdaqSoapProtocolError(f"{field} contains unsafe text")
     return value
@@ -268,6 +280,13 @@ def _parse_price_level(
             raise BetdaqSoapProtocolError("nil price level must be empty")
         return None
 
+    unexpected_attributes = sorted(set(element.attrib) - {"Price", "Stake"})
+    if unexpected_attributes:
+        raise BetdaqSoapProtocolError(
+            f"{provider_side} price level contains unexpected attribute(s): "
+            + ", ".join(unexpected_attributes)
+        )
+
     price_text = _optional_attr(element, "Price")
     stake_text = _optional_attr(element, "Stake")
     if price_text is None or stake_text is None:
@@ -328,9 +347,11 @@ def _parse_selection(element: ET.Element) -> BetdaqSelectionPrices:
                 "Selections contains an unexpected child element or namespace"
             )
 
-    def reject_duplicate_levels(
+    def validate_provider_order(
         levels: list[BetdaqPriceLevel],
         side: str,
+        *,
+        descending: bool,
     ) -> None:
         seen: set[Decimal] = set()
         for level in levels:
@@ -339,9 +360,14 @@ def _parse_selection(element: ET.Element) -> BetdaqSelectionPrices:
                     f"duplicate {side} price level would double-count liquidity"
                 )
             seen.add(level.price)
+        prices = [level.price for level in levels]
+        if prices != sorted(prices, reverse=descending):
+            raise BetdaqSoapProtocolError(
+                f"{side} price levels violate provider competitiveness order"
+            )
 
-    reject_duplicate_levels(for_prices, "FOR")
-    reject_duplicate_levels(against_prices, "AGAINST")
+    validate_provider_order(for_prices, "FOR", descending=True)
+    validate_provider_order(against_prices, "AGAINST", descending=False)
     return BetdaqSelectionPrices(
         selection_id=selection_id,
         name=name,
@@ -353,10 +379,24 @@ def _parse_selection(element: ET.Element) -> BetdaqSelectionPrices:
     )
 
 
-def _parse_market(element: ET.Element) -> BetdaqMarketPrices:
+def _parse_market(element: ET.Element) -> BetdaqMarketPrices | BetdaqUnavailableMarket:
     return_code_raw = _optional_attr(element, "ReturnCode")
     if return_code_raw is not None:
         return_code = _integer(return_code_raw, "MarketPrices ReturnCode")
+        if return_code == _RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE:
+            market_id = _integer(
+                _required_attr(element, "Id"),
+                "RC016 market Id",
+                minimum=0,
+            )
+            if list(element):
+                raise BetdaqSoapProtocolError(
+                    "RC016 unavailable market must not carry price children"
+                )
+            return BetdaqUnavailableMarket(
+                market_id=market_id,
+                return_code=return_code,
+            )
         if return_code != 0:
             market_hint = _optional_attr(element, "Id")
             scope = (
@@ -493,11 +533,23 @@ def parse_get_prices_response(
         _tag(EXTERNAL_API_NS, "GetPricesResult"),
         "GetPricesResult",
     )
+    if result.attrib:
+        raise BetdaqSoapProtocolError(
+            "GetPricesResult must not contain attributes"
+        )
     return_status = _one_child(
         result,
         _tag(EXTERNAL_API_NS, "ReturnStatus"),
         "ReturnStatus",
     )
+    unexpected_status_attributes = sorted(
+        set(return_status.attrib) - {"Code", "Description", "CallId"}
+    )
+    if unexpected_status_attributes:
+        raise BetdaqSoapProtocolError(
+            "ReturnStatus contains unexpected attribute(s): "
+            + ", ".join(unexpected_status_attributes)
+        )
     return_code = _integer(
         _required_attr(return_status, "Code"),
         "ReturnStatus Code",
@@ -516,6 +568,7 @@ def parse_get_prices_response(
         )
 
     markets: list[BetdaqMarketPrices] = []
+    unavailable_markets: list[BetdaqUnavailableMarket] = []
     seen_market_ids: set[int] = set()
     for child in list(result):
         if child is return_status:
@@ -530,7 +583,10 @@ def parse_get_prices_response(
                 "duplicate market Id in one GetPrices response"
             )
         seen_market_ids.add(market.market_id)
-        markets.append(market)
+        if isinstance(market, BetdaqUnavailableMarket):
+            unavailable_markets.append(market)
+        else:
+            markets.append(market)
 
     return BetdaqGetPricesWireResponse(
         return_code=return_code,
@@ -539,4 +595,5 @@ def parse_get_prices_response(
         provider_created_at=provider_created_at,
         provider_created_at_text=provider_created_at_text,
         markets=tuple(markets),
+        unavailable_markets=tuple(unavailable_markets),
     )

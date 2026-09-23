@@ -563,12 +563,18 @@ def _leg_payload(leg: TicketLeg) -> dict[str, object]:
         raise ValueError("joint stress requires exact TicketLeg values")
     quote_key = _text(leg.quote_key, "ticket leg quote_key")
     odds = _finite_decimal(leg.locked_odds, "ticket leg locked_odds")
+    exchange_side = leg.exchange_side
+    if exchange_side == "lay":
+        raise ValueError(
+            "joint stress LAY ticket economics require canonical LAY settlement support"
+        )
     return {
         "quote_key": quote_key,
         "event_id": _text(leg.event_id, "ticket leg event_id"),
         "market_id": _text(leg.market_id, "ticket leg market_id"),
         "selection_id": _text(leg.selection_id, "ticket leg selection_id"),
         "sport": leg.sport,
+        "exchange_side": exchange_side,
         "locked_odds": _decimal_text(odds),
     }
 

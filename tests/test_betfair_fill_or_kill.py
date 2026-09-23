@@ -58,6 +58,57 @@ class BetfairFillOrKillTests(unittest.TestCase):
         )
         self.assertEqual(len(request.request_projection_sha256), 64)
 
+    def test_limit_price_must_be_on_official_betfair_classic_odds_ladder(self):
+        valid = (
+            "1.01",
+            "1.76",
+            "2",
+            "2.02",
+            "3",
+            "3.05",
+            "4",
+            "4.1",
+            "6",
+            "6.2",
+            "10",
+            "10.5",
+            "20",
+            "21",
+            "30",
+            "32",
+            "50",
+            "55",
+            "100",
+            "110",
+            "1000",
+            Decimal("2.0200"),
+        )
+        for price in valid:
+            with self.subTest(valid=price):
+                request = self._request(limit_price=price)
+                self.assertEqual(request.limit_price, Decimal(str(price)))
+
+        invalid = (
+            "1.00",
+            "1.76000003",
+            "2.01",
+            "3.01",
+            "4.01",
+            "6.01",
+            "10.01",
+            "20.01",
+            "30.01",
+            "50.01",
+            "100.01",
+            "1000.01",
+        )
+        for price in invalid:
+            with self.subTest(invalid=price), self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "Betfair Classic odds ladder",
+            ):
+                self._request(limit_price=price)
+
     def test_rejects_standard_limit_persist_lay_or_non_limit(self):
         cases = (
             ({"time_in_force": "GOOD_TILL_CANCELLED"}, "FILL_OR_KILL"),

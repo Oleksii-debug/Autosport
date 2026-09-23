@@ -11,6 +11,19 @@ from autosport.provider_time_freshness import (
 )
 
 
+
+
+class _LyingDuration(timedelta):
+    def __lt__(self, other: object) -> bool:
+        return False
+
+
+class _LyingDecision(datetime):
+    def __sub__(self, other: object) -> timedelta:
+        return timedelta(0)
+
+
+
 class ProviderTimeFreshnessTests(unittest.TestCase):
     @staticmethod
     def evidence(**changes: object) -> ProviderTimeEvidence:
@@ -182,6 +195,40 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         for field, value in cases:
             with self.subTest(field=field, value=value), self.assertRaises((TypeError, ValueError)):
                 self.evidence(**{field: value})
+
+
+    def test_rejects_caller_owned_temporal_subclasses(self) -> None:
+        evidence = self.evidence(
+            source_updated_at="2026-09-21T11:59:50+00:00",
+            received_wall_at="2026-09-21T11:59:50.250000+00:00",
+        )
+        lying_limit = _LyingDuration(seconds=1)
+        self.assertFalse(lying_limit < timedelta(0))
+        self.assertFalse(timedelta(seconds=10) > lying_limit)
+
+        with self.assertRaisesRegex(TypeError, "max_quote_age must be an exact timedelta"):
+            self.assess(evidence, max_quote_age=lying_limit)
+
+        with self.assertRaisesRegex(
+            TypeError, "max_source_clock_skew must be an exact timedelta"
+        ):
+            self.assess(
+                evidence,
+                max_source_clock_skew=_LyingDuration(milliseconds=100),
+            )
+
+        lying_decision = _LyingDecision(
+            2026,
+            9,
+            21,
+            12,
+            0,
+            1,
+            tzinfo=timezone.utc,
+        )
+        self.assertEqual(lying_decision - datetime(2026, 9, 21, 11, 59, 50, tzinfo=timezone.utc), timedelta(0))
+        with self.assertRaisesRegex(TypeError, "decision_at must be an exact datetime"):
+            self.assess(evidence, decision_at=lying_decision)
 
     def test_decision_and_policy_boundaries_must_be_explicit_and_valid(self) -> None:
         evidence = self.evidence()

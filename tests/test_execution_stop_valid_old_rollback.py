@@ -178,3 +178,37 @@ def test_process_environment_root_retarget_cannot_reauthorize_valid_old_armed(
     assert not caller_root_a.exists()
     assert not caller_root_b.exists()
 
+
+def test_admission_lease_rejects_product_root_selector_class_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _initialized(tmp_path / "execution-stop.jsonl")
+    authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-root-selector-guard",
+        expected_revision=1,
+        command_id="arm-root-selector-guard",
+    )
+    forged_calls: list[str] = []
+
+    def forged_root() -> Path:
+        forged_calls.append("called")
+        return tmp_path / "forged-authority-root"
+
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "_product_monotonic_authority_root",
+        staticmethod(forged_root),
+    )
+
+    with pytest.raises(
+        ExecutionStopAuthorityError,
+        match="canonical execution admission helper graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("rebound product root selector yielded an execution lease")
+
+    assert forged_calls == []
+

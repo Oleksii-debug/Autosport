@@ -66,6 +66,9 @@ class BetfairDiscoveryExchange:
     _method_snapshot: str = field(init=False, repr=False, compare=False)
     _canonical_request_json_snapshot: str = field(init=False, repr=False, compare=False)
     _canonical_filter_json_snapshot: str = field(init=False, repr=False, compare=False)
+    _raw_response_sha256_snapshot: str = field(init=False, repr=False, compare=False)
+    _raw_response_size_bytes_snapshot: int = field(init=False, repr=False, compare=False)
+    _observed_at_utc_snapshot: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.request) is not BetfairCatalogRequest:
@@ -104,6 +107,21 @@ class BetfairDiscoveryExchange:
             "_canonical_filter_json_snapshot",
             canonical_filter_json,
         )
+        object.__setattr__(
+            self,
+            "_raw_response_sha256_snapshot",
+            sha256(self.raw_response).hexdigest(),
+        )
+        object.__setattr__(
+            self,
+            "_raw_response_size_bytes_snapshot",
+            len(self.raw_response),
+        )
+        object.__setattr__(
+            self,
+            "_observed_at_utc_snapshot",
+            _utc_text(self.observed_at),
+        )
 
     @property
     def method(self) -> str:
@@ -127,15 +145,15 @@ class BetfairDiscoveryExchange:
 
     @property
     def raw_response_sha256(self) -> str:
-        return sha256(self.raw_response).hexdigest()
+        return self._raw_response_sha256_snapshot
 
     @property
     def raw_response_size_bytes(self) -> int:
-        return len(self.raw_response)
+        return self._raw_response_size_bytes_snapshot
 
     @property
     def observed_at_utc(self) -> str:
-        return _utc_text(self.observed_at)
+        return self._observed_at_utc_snapshot
 
     def evidence_projection(self) -> dict[str, object]:
         return {
@@ -172,8 +190,28 @@ class BetfairDiscoveryAcquisitionEvidence:
     competition_exchange: BetfairDiscoveryExchange | None = None
     competitions: tuple[BetfairCompetition, ...] = ()
     selected_competition_id: str | None = None
+    _event_type_inventory_json_snapshot: str = field(
+        init=False, repr=False, compare=False
+    )
+    _market_type_inventory_json_snapshot: str = field(
+        init=False, repr=False, compare=False
+    )
+    _competition_inventory_json_snapshot: str = field(
+        init=False, repr=False, compare=False
+    )
+    _semantic_identity_sha256_snapshot: str = field(
+        init=False, repr=False, compare=False
+    )
+    _acquisition_evidence_sha256_snapshot: str = field(
+        init=False, repr=False, compare=False
+    )
+    _projection_json_snapshot: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if type(self) is not BetfairDiscoveryAcquisitionEvidence:
+            raise BetfairDiscoveryProvenanceError(
+                "acquisition evidence must use the exact canonical runtime type"
+            )
         _token(self.discovery_run_id, "discovery_run_id")
         if type(self.visibility_scope) is not BetfairDiscoveryVisibilityScope:
             raise BetfairDiscoveryProvenanceError(
@@ -230,11 +268,7 @@ class BetfairDiscoveryAcquisitionEvidence:
             )
         market_codes = tuple(item.market_type_code for item in self.market_types)
         _unique(market_codes, "market_type_code")
-        if (
-            not isinstance(self.max_age_seconds, int)
-            or isinstance(self.max_age_seconds, bool)
-            or self.max_age_seconds <= 0
-        ):
+        if type(self.max_age_seconds) is not int or self.max_age_seconds <= 0:
             raise BetfairDiscoveryProvenanceError(
                 "max_age_seconds must be a positive integer policy value"
             )
@@ -304,6 +338,124 @@ class BetfairDiscoveryAcquisitionEvidence:
                         "listMarketTypes request must be scoped to exactly the selected competitionId"
                     )
 
+        event_type_inventory = [
+            {"event_type_id": item.event_type_id, "market_count": item.market_count}
+            for item in sorted(self.event_types, key=lambda item: item.event_type_id)
+        ]
+        market_type_inventory = [
+            {
+                "market_type_code": item.market_type_code,
+                "market_count": item.market_count,
+            }
+            for item in sorted(
+                self.market_types,
+                key=lambda item: item.market_type_code,
+            )
+        ]
+        competition_inventory = [
+            {
+                "competition_id": item.competition_id,
+                "market_count": item.market_count,
+            }
+            for item in sorted(
+                self.competitions,
+                key=lambda item: item.competition_id,
+            )
+        ]
+        visibility_projection = self.visibility_scope.projection()
+        event_type_exchange_projection = self.event_type_exchange.evidence_projection()
+        market_type_exchange_projection = self.market_type_exchange.evidence_projection()
+        competition_exchange_projection = (
+            None
+            if self.competition_exchange is None
+            else self.competition_exchange.evidence_projection()
+        )
+
+        semantic_payload: dict[str, object] = {
+            "provider_id": PROVIDER_ID,
+            "selected_event_type_id": self.selected_event_type_id,
+            "market_type_codes": sorted(
+                item.market_type_code for item in self.market_types
+            ),
+        }
+        if self.selected_competition_id is not None:
+            semantic_payload["selected_competition_id"] = self.selected_competition_id
+        semantic_identity_sha256 = _sha256_text(
+            _canonical_json(semantic_payload, "semantic_identity")
+        )
+
+        acquisition_payload: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "provider_id": PROVIDER_ID,
+            "discovery_run_id": self.discovery_run_id,
+            "visibility_scope": visibility_projection,
+            "event_type_exchange": event_type_exchange_projection,
+            "event_types": event_type_inventory,
+            "selected_event_type_id": self.selected_event_type_id,
+            "market_type_exchange": market_type_exchange_projection,
+            "market_types": market_type_inventory,
+            "max_age_seconds": self.max_age_seconds,
+        }
+        if competition_exchange_projection is not None:
+            acquisition_payload["competition_exchange"] = competition_exchange_projection
+            acquisition_payload["competitions"] = competition_inventory
+            acquisition_payload["selected_competition_id"] = self.selected_competition_id
+        acquisition_evidence_sha256 = _sha256_text(
+            _canonical_json(acquisition_payload, "acquisition_evidence")
+        )
+
+        projection: dict[str, object] = {
+            "schema_version": SCHEMA_VERSION,
+            "provider_id": PROVIDER_ID,
+            "discovery_run_id": self.discovery_run_id,
+            "visibility_scope": visibility_projection,
+            "selected_event_type_id": self.selected_event_type_id,
+            "semantic_identity_sha256": semantic_identity_sha256,
+            "acquisition_evidence_sha256": acquisition_evidence_sha256,
+            "event_type_inventory": event_type_inventory,
+            "market_type_inventory": market_type_inventory,
+            "event_type_exchange": event_type_exchange_projection,
+            "market_type_exchange": market_type_exchange_projection,
+            "max_age_seconds": self.max_age_seconds,
+            "grants_freshness_authority": False,
+            "grants_execution_authority": False,
+        }
+        if competition_exchange_projection is not None:
+            projection["competition_inventory"] = competition_inventory
+            projection["competition_exchange"] = competition_exchange_projection
+            projection["selected_competition_id"] = self.selected_competition_id
+
+        object.__setattr__(
+            self,
+            "_event_type_inventory_json_snapshot",
+            _canonical_json(event_type_inventory, "event_type_inventory"),
+        )
+        object.__setattr__(
+            self,
+            "_market_type_inventory_json_snapshot",
+            _canonical_json(market_type_inventory, "market_type_inventory"),
+        )
+        object.__setattr__(
+            self,
+            "_competition_inventory_json_snapshot",
+            _canonical_json(competition_inventory, "competition_inventory"),
+        )
+        object.__setattr__(
+            self,
+            "_semantic_identity_sha256_snapshot",
+            semantic_identity_sha256,
+        )
+        object.__setattr__(
+            self,
+            "_acquisition_evidence_sha256_snapshot",
+            acquisition_evidence_sha256,
+        )
+        object.__setattr__(
+            self,
+            "_projection_json_snapshot",
+            _canonical_json(projection, "projection"),
+        )
+
     @property
     def provider_id(self) -> str:
         return PROVIDER_ID
@@ -317,85 +469,28 @@ class BetfairDiscoveryAcquisitionEvidence:
 
     def event_type_inventory_projection(self) -> list[dict[str, object]]:
         """Provider-native event-type identity/count inventory bound into this acquisition."""
-        return [
-            {"event_type_id": item.event_type_id, "market_count": item.market_count}
-            for item in sorted(self.event_types, key=lambda x: x.event_type_id)
-        ]
+        return json.loads(self._event_type_inventory_json_snapshot)
 
     def market_type_inventory_projection(self) -> list[dict[str, object]]:
         """Provider-native market-type identity/count inventory bound into this acquisition."""
-        return [
-            {"market_type_code": item.market_type_code, "market_count": item.market_count}
-            for item in sorted(self.market_types, key=lambda x: x.market_type_code)
-        ]
+        return json.loads(self._market_type_inventory_json_snapshot)
 
     def competition_inventory_projection(self) -> list[dict[str, object]]:
         """Provider-native competition identity/count inventory bound into this acquisition."""
-        return [
-            {"competition_id": item.competition_id, "market_count": item.market_count}
-            for item in sorted(self.competitions, key=lambda x: x.competition_id)
-        ]
+        return json.loads(self._competition_inventory_json_snapshot)
 
     @property
     def semantic_identity_sha256(self) -> str:
         """Provider-native identity only; not evidence that a current acquisition occurred."""
-        payload = {
-            "provider_id": self.provider_id,
-            "selected_event_type_id": self.selected_event_type_id,
-            "market_type_codes": sorted(
-                item.market_type_code for item in self.market_types
-            ),
-        }
-        if self.selected_competition_id is not None:
-            payload["selected_competition_id"] = self.selected_competition_id
-        return _sha256_text(_canonical_json(payload, "semantic_identity"))
+        return self._semantic_identity_sha256_snapshot
 
     @property
     def acquisition_evidence_sha256(self) -> str:
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "provider_id": self.provider_id,
-            "discovery_run_id": self.discovery_run_id,
-            "visibility_scope": self.visibility_scope.projection(),
-            "event_type_exchange": self.event_type_exchange.evidence_projection(),
-            "event_types": self.event_type_inventory_projection(),
-            "selected_event_type_id": self.selected_event_type_id,
-            "market_type_exchange": self.market_type_exchange.evidence_projection(),
-            "market_types": self.market_type_inventory_projection(),
-            "max_age_seconds": self.max_age_seconds,
-        }
-        if self.competition_exchange is not None:
-            payload["competition_exchange"] = self.competition_exchange.evidence_projection()
-            payload["competitions"] = self.competition_inventory_projection()
-            payload["selected_competition_id"] = self.selected_competition_id
-        return _sha256_text(_canonical_json(payload, "acquisition_evidence"))
+        return self._acquisition_evidence_sha256_snapshot
 
     def projection(self) -> dict[str, object]:
         """Durable compact projection; raw provider bytes remain external evidence."""
-        projection: dict[str, object] = {
-            "schema_version": SCHEMA_VERSION,
-            "provider_id": self.provider_id,
-            "discovery_run_id": self.discovery_run_id,
-            "visibility_scope": self.visibility_scope.projection(),
-            "selected_event_type_id": self.selected_event_type_id,
-            "semantic_identity_sha256": self.semantic_identity_sha256,
-            "acquisition_evidence_sha256": self.acquisition_evidence_sha256,
-            "event_type_inventory": self.event_type_inventory_projection(),
-            "market_type_inventory": self.market_type_inventory_projection(),
-            "event_type_exchange": self.event_type_exchange.evidence_projection(),
-            "market_type_exchange": self.market_type_exchange.evidence_projection(),
-            "max_age_seconds": self.max_age_seconds,
-            "grants_freshness_authority": False,
-            "grants_execution_authority": False,
-        }
-        if self.competition_exchange is not None:
-            projection["competition_inventory"] = self.competition_inventory_projection()
-            projection["competition_exchange"] = (
-                self.competition_exchange.evidence_projection()
-            )
-            projection["selected_competition_id"] = self.selected_competition_id
-        return projection
-
+        return json.loads(self._projection_json_snapshot)
 
 def build_betfair_discovery_acquisition_evidence(
     *,

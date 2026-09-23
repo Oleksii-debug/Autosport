@@ -7,6 +7,7 @@ from unittest import mock
 
 from autosport.causal_collector import CollectorDeltaStore
 from autosport.source_universe_commitment import (
+    SourceUniverseCommitmentError,
     build_source_universe_commitment,
     verify_source_universe_commitment,
 )
@@ -66,7 +67,10 @@ class SourceUniverseClassReadSeamTests(unittest.TestCase):
                 "_connect",
                 redirected_connect,
             ):
-                with self.assertRaisesRegex(TypeError, "class-rebound"):
+                with self.assertRaisesRegex(
+                    SourceUniverseCommitmentError,
+                    "class-rebound",
+                ):
                     verify_source_universe_commitment(
                         canonical,
                         favorable,

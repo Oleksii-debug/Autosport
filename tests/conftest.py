@@ -140,31 +140,3 @@ def _legacy_provider_semantic_fixture_bridge(request):
         yield
     finally:
         _set_legacy_provider_semantic_bypass_for_tests(False)
-
-
-@pytest.fixture(autouse=True)
-def _betfair_supervised_execution_network_origin_bridge(request, monkeypatch):
-    """Keep #1212's trusted fake network seam inside the canonical origin fence."""
-
-    module = request.module
-    if module is None:
-        return
-    module_name = module.__name__.rsplit(".", 1)[-1]
-    if module_name != "test_betfair_supervised_execution":
-        return
-
-    # The module's own autouse fixture installs the network-free fake on the
-    # canonical Betfair transport module. Ensure that happens first even if
-    # conftest fixture ordering changes, then bind only this test's captured
-    # expected origin to the exact fake. Separate hostile-rebind suites remain
-    # untouched and production still captures the real urlopen at import time.
-    request.getfixturevalue("_canonical_write_network_seam")
-
-    import autosport.betfair_account_readonly as betfair_account_readonly
-    import autosport.betfair_supervised_execution as betfair_supervised_execution
-
-    monkeypatch.setattr(
-        betfair_supervised_execution,
-        "_CANONICAL_URLLIB_BETFAIR_URLOPEN",
-        betfair_account_readonly.urlopen,
-    )

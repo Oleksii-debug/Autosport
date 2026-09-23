@@ -109,6 +109,9 @@ class BetdaqOrderSettlementObservation:
     order_commission: Decimal | None
     market_commission: Decimal | None
     market_settled_at: str | None
+    currency: str | None
+    denomination_proven: bool
+    scalar_economic_use_proven: bool
     final_settlement_proven: bool
     evidence: BetdaqEconomicEvidence
 
@@ -137,6 +140,27 @@ class BetdaqOrderSettlementObservation:
                 _finite_decimal(value, field)
         if self.market_settled_at is not None:
             _timestamp(self.market_settled_at, "market_settled_at")
+        if self.currency is not None:
+            if (
+                type(self.currency) is not str
+                or not self.currency
+                or self.currency != self.currency.strip()
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "settlement currency must be non-empty trimmed text when proven"
+                )
+        if type(self.denomination_proven) is not bool:
+            raise BetdaqEconomicReadbackError("denomination_proven must be bool")
+        if type(self.scalar_economic_use_proven) is not bool:
+            raise BetdaqEconomicReadbackError("scalar_economic_use_proven must be bool")
+        if self.denomination_proven is not (self.currency is not None):
+            raise BetdaqEconomicReadbackError(
+                "denomination_proven must match independently bound settlement currency"
+            )
+        if self.scalar_economic_use_proven and not self.denomination_proven:
+            raise BetdaqEconomicReadbackError(
+                "scalar economic use requires independently proven denomination"
+            )
         expected_final = (
             self.order_status_code in {4, 5}
             and self.gross_settlement_amount is not None
@@ -147,6 +171,10 @@ class BetdaqOrderSettlementObservation:
         if self.final_settlement_proven is not expected_final:
             raise BetdaqEconomicReadbackError(
                 "final_settlement_proven does not match exact provider settlement evidence"
+            )
+        if self.scalar_economic_use_proven and not self.final_settlement_proven:
+            raise BetdaqEconomicReadbackError(
+                "scalar economic use requires final provider settlement evidence"
             )
 
     def canonical_dict(self) -> dict[str, object]:
@@ -172,6 +200,9 @@ class BetdaqOrderSettlementObservation:
             "order_commission": _optional_decimal_text(self.order_commission),
             "market_commission": _optional_decimal_text(self.market_commission),
             "market_settled_at": self.market_settled_at,
+            "currency": self.currency,
+            "denomination_proven": self.denomination_proven,
+            "scalar_economic_use_proven": self.scalar_economic_use_proven,
             "final_settlement_proven": self.final_settlement_proven,
             "evidence_id": self.evidence.evidence_id,
         }
@@ -387,6 +418,10 @@ class BetdaqEconomicReadbackClient:
             order_commission=order_commission,
             market_commission=market_commission,
             market_settled_at=market_settled_at,
+            # GetOrderDetails has no Currency field in the generated settlement shape.
+            currency=None,
+            denomination_proven=False,
+            scalar_economic_use_proven=False,
             final_settlement_proven=final,
             evidence=evidence,
         )
@@ -482,8 +517,6 @@ class BetdaqEconomicReadbackClient:
             )
             observed_at = client._observed_at()
         except Exception:
-            # Provider/parser diagnostics are normalized. Never expose payload,
-            # credentials or transport exception text from a secure request.
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic response failed canonical validation"
             ) from None

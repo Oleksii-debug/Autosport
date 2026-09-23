@@ -16,11 +16,12 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import hmac
+from math import isfinite
 from secrets import token_bytes, token_hex
 from threading import Lock, RLock
 from typing import Callable, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -61,10 +62,30 @@ _ACCOUNT_CONTEXT_PREFIX = "betdaq-auth-context:"
 _ACCOUNT_CONTEXT_SCOPE = "AUTHENTICATED_CREDENTIAL_APPLICATION_CONTEXT"
 _PROCESS_HMAC_KEY = token_bytes(32)
 _ACCOUNT_CONTEXT_LOCK = RLock()
+_MAX_SOAP_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class BetdaqAccountReadOnlyError(RuntimeError):
     """BETDAQ read-only transport, protocol, or evidence error."""
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Refuse redirects before credential-bearing SOAP can leave the fixed origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise BetdaqAccountReadOnlyError("BETDAQ secure read redirect refused")
+
+
+_CANONICAL_SECURE_OPENER = build_opener(
+    ProxyHandler({}),
+    _NoRedirectHandler(),
+)
+
+
+def urlopen(request: Request, *, timeout: float):
+    """Open only through the product-owned, proxy-free, no-redirect HTTPS stack."""
+
+    return _CANONICAL_SECURE_OPENER.open(request, timeout=timeout)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -206,11 +227,15 @@ class UrllibBetdaqSoapTransport:
         request = Request(url, data=body, headers=headers, method="POST")
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
-                payload = response.read()
-        except (HTTPError, URLError, OSError, TimeoutError) as exc:
+                payload = response.read(_MAX_SOAP_RESPONSE_BYTES + 1)
+        except (HTTPError, URLError, OSError, TimeoutError):
             raise BetdaqAccountReadOnlyError("BETDAQ secure read transport failed") from None
         if type(payload) is not bytes:
             raise BetdaqAccountReadOnlyError("BETDAQ transport returned non-bytes payload")
+        if len(payload) > _MAX_SOAP_RESPONSE_BYTES:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ secure read response exceeds bounded size"
+            )
         return payload
 
 
@@ -456,12 +481,17 @@ class BetdaqAccountReadOnlyClient:
         if (
             not isinstance(timeout_seconds, (int, float))
             or isinstance(timeout_seconds, bool)
-            or timeout_seconds <= 0
         ):
-            raise ValueError("timeout_seconds must be positive")
+            raise ValueError("timeout_seconds must be a positive finite number")
+        try:
+            normalized_timeout = float(timeout_seconds)
+        except (OverflowError, ValueError):
+            raise ValueError("timeout_seconds must be a positive finite number") from None
+        if not isfinite(normalized_timeout) or normalized_timeout <= 0:
+            raise ValueError("timeout_seconds must be a positive finite number")
         self._credentials = credentials
         self._transport = transport or UrllibBetdaqSoapTransport()
-        self._timeout_seconds = float(timeout_seconds)
+        self._timeout_seconds = normalized_timeout
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._venue_id = _required_text(venue_id, "venue_id")
         # Retained only as a human/configuration label for API compatibility. It is

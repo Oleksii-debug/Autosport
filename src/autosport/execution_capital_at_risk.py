@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import weakref
 from dataclasses import dataclass
@@ -168,6 +169,7 @@ class ExecutionCapitalAtRiskEvidence:
     REJECTED/RECONCILED_NOT_FOUND facts as provider-origin capital-release proof.
     """
 
+    ledger_source_sha256: str
     snapshot_sha256: str
     event_count: int
     plan_id: str
@@ -188,11 +190,16 @@ class ExecutionCapitalAtRiskEvidence:
             raise ExecutionCapitalAtRiskError(
                 "event_count must be a non-negative integer"
             )
-        for name in ("snapshot_sha256", "plan_id", "plan_fingerprint"):
+        for name in ("ledger_source_sha256", "snapshot_sha256", "plan_id", "plan_fingerprint"):
             value = getattr(self, name)
             if type(value) is not str or not value.strip():
                 raise ExecutionCapitalAtRiskError(f"{name} must be non-empty text")
-        for name in ("snapshot_sha256", "plan_fingerprint", "evidence_sha256"):
+        for name in (
+            "ledger_source_sha256",
+            "snapshot_sha256",
+            "plan_fingerprint",
+            "evidence_sha256",
+        ):
             value = getattr(self, name)
             if (
                 len(value) != 64
@@ -295,6 +302,10 @@ class ExecutionCapitalAtRiskEvidence:
             raise ExecutionCapitalAtRiskError(
                 "capital-at-risk evidence identity is invalid"
             )
+        if _ledger_source_sha256(ledger) != self.ledger_source_sha256:
+            raise ExecutionCapitalAtRiskStale(
+                "capital-at-risk evidence belongs to a different execution ledger source"
+            )
         snapshot = _VERIFIED_SNAPSHOT(ledger)
         if (
             snapshot.sha256 != self.snapshot_sha256
@@ -318,6 +329,15 @@ _ISSUED: dict[
 
 
 _MAX_EXACT_PRECISION = 4096
+
+
+def _ledger_source_sha256(ledger: RealExecutionLedger) -> str:
+    """Return restart-stable trusted-process identity for one ledger pathname."""
+
+    canonical_path = os.path.normcase(
+        os.path.realpath(os.path.abspath(os.fspath(ledger.path)))
+    )
+    return hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -517,7 +537,8 @@ def _attempt_payload(value: AttemptCapitalAtRisk) -> dict[str, Any]:
 def _evidence_payload(value: ExecutionCapitalAtRiskEvidence) -> dict[str, Any]:
     return {
         "schema": "autosport.execution_capital_at_risk",
-        "schema_version": 1,
+        "schema_version": 2,
+        "ledger_source_sha256": value.ledger_source_sha256,
         "snapshot_sha256": value.snapshot_sha256,
         "event_count": value.event_count,
         "plan_id": value.plan_id,
@@ -576,6 +597,7 @@ def resolve_execution_capital_at_risk(
     if not isinstance(plan_id, str) or not plan_id.strip():
         raise ValueError("plan_id must be non-empty text")
 
+    ledger_source_sha256 = _ledger_source_sha256(ledger)
     view: VerifiedExecutionPlanView = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
     attempts = tuple(_attempt_risk(item) for item in view.attempts)
     account_ids = {item.account_id for item in attempts}
@@ -597,6 +619,7 @@ def resolve_execution_capital_at_risk(
     )
 
     provisional = ExecutionCapitalAtRiskEvidence(
+        ledger_source_sha256=ledger_source_sha256,
         snapshot_sha256=view.snapshot_sha256,
         event_count=view.event_count,
         plan_id=view.plan.plan_id,
@@ -610,6 +633,7 @@ def resolve_execution_capital_at_risk(
         evidence_sha256="0" * 64,
     )
     evidence = ExecutionCapitalAtRiskEvidence(
+        ledger_source_sha256=provisional.ledger_source_sha256,
         snapshot_sha256=provisional.snapshot_sha256,
         event_count=provisional.event_count,
         plan_id=provisional.plan_id,
@@ -623,6 +647,10 @@ def resolve_execution_capital_at_risk(
         evidence_sha256=_evidence_digest(provisional),
     )
 
+    if _ledger_source_sha256(ledger) != ledger_source_sha256:
+        raise ExecutionCapitalAtRiskStale(
+            "execution ledger source changed during capital-at-risk resolution"
+        )
     after = _VERIFIED_SNAPSHOT(ledger)
     if (
         after.sha256 != view.snapshot_sha256

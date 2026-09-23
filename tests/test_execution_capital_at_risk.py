@@ -305,6 +305,31 @@ def test_evidence_becomes_stale_after_any_later_ledger_append(tmp_path) -> None:
         before.assert_issued_current(ledger)
 
 
+def test_byte_identical_clone_cannot_validate_evidence_from_other_ledger_source(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    clone_path = tmp_path / "cloned-execution.jsonl"
+    clone_path.write_bytes(ledger.path.read_bytes())
+    cloned = RealExecutionLedger(clone_path)
+
+    _attempt(ledger, plan, submit=False)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskStale,
+        match="changed after capital-at-risk resolution",
+    ):
+        evidence.assert_issued_current(ledger)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskStale,
+        match="different execution ledger source",
+    ):
+        evidence.assert_issued_current(cloned)
+
+
 def test_caller_copy_cannot_mint_issued_risk_evidence(tmp_path) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)

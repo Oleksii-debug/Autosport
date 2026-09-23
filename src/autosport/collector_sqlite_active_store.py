@@ -469,6 +469,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         source_id = _text(source_id, "source_id")
         connection = self._connect()
         try:
+            self._require_verified_commit_order(connection, source_id)
             row = connection.execute(
                 "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
                 "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
@@ -504,6 +505,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_verified_commit_order(connection, source_id)
             current = connection.execute(
                 "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
                 "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
@@ -513,7 +515,6 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 connection.commit()
                 return int(current["generation"])
 
-            self._require_verified_commit_order(connection, source_id)
             latest = connection.execute(
                 f"SELECT {_DELTA_SELECT_COLUMNS} FROM collector_deltas "
                 "WHERE source_id=? ORDER BY commit_seq DESC LIMIT 1",

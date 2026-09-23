@@ -122,3 +122,40 @@ def test_direct_construction_round_trip_preserves_valid_timestamp_lexemes() -> N
     assert restored.observed_ts == "2026-09-23T12:00:00+02:00"
     assert restored.source_ts == "2026-09-23T09:59:59Z"
     assert restored.ingest_ts == "2026-09-23T10:00:01Z"
+
+
+
+@pytest.mark.parametrize(
+    "invalid_metadata",
+    [
+        {1: "non-string-key"},
+        {"nonfinite": float("nan")},
+        {"nonjson": object()},
+    ],
+)
+def test_direct_construction_rejects_non_persistable_metadata(
+    invalid_metadata: object,
+) -> None:
+    with pytest.raises(ValueError, match="metadata"):
+        _direct_event(metadata=invalid_metadata)
+
+
+def test_direct_construction_rejects_cyclic_metadata() -> None:
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+
+    with pytest.raises(ValueError, match="cyclic JSON container"):
+        _direct_event(metadata=cyclic)
+
+
+def test_direct_construction_metadata_round_trip_matches_persisted_reader() -> None:
+    metadata = {
+        "model": "champion-a",
+        "features": [1, True, None, {"edge": 0.125}],
+    }
+
+    event = _direct_event(metadata=metadata)
+    restored = MarketEvent.from_dict(event.to_dict())
+
+    assert restored.metadata == metadata
+    assert restored == event

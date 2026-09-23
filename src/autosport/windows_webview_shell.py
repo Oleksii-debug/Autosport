@@ -1229,14 +1229,21 @@ class AutosportWebBridge:
             )
 
     def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+        # Validate the exact bound document under the trust lock, but do not hold
+        # that lock while backend work runs. Ordinary commands remain serialized
+        # by AutosportWebController._lock; releasing this outer lock also keeps a
+        # trusted emergency STOP from queueing behind an unrelated slow command.
         with self._trust_lock:
             self._assert_trusted_session_locked()
-            return self._controller.dispatch(raw)
+        return self._controller.dispatch(raw)
 
     def get_state(self) -> dict[str, Any]:
+        # State reads may wait for the ordinary controller lock. They must not
+        # monopolize the document-trust lock while doing so, otherwise a trusted
+        # emergency STOP call could be delayed behind a polling request.
         with self._trust_lock:
             self._assert_trusted_session_locked()
-            return {"ok": True, "state": self._controller.state()}
+        return {"ok": True, "state": self._controller.state()}
 
     def close(self) -> None:
         with self._trust_lock:

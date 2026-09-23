@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -119,6 +120,28 @@ def _context(
             sport="football",
         )
     }
+
+
+class _SwitchingContextMapping(Mapping[int, BetdaqMarketContext]):
+    """Expose valid context once, then poison a repeated authority read."""
+
+    def __init__(self, value: BetdaqMarketContext) -> None:
+        self.value = value
+        self.reads = 0
+
+    def __getitem__(self, key: int) -> BetdaqMarketContext:
+        if key != 9001:
+            raise KeyError(key)
+        self.reads += 1
+        if self.reads == 1:
+            return self.value
+        return object()  # type: ignore[return-value]
+
+    def __iter__(self):
+        return iter((9001,))
+
+    def __len__(self) -> int:
+        return 1
 
 
 def test_projects_distinct_back_and_lay_without_mutating_native_selection_id() -> None:
@@ -291,6 +314,22 @@ def test_context_must_exactly_cover_response_market_scope(
             observed_ts=OBSERVED_TS,
             sequence=107,
         )
+
+
+def test_market_context_is_snapshotted_once_before_identity_projection() -> None:
+    mapping = _SwitchingContextMapping(_context()[9001])
+
+    batch = project_betdaq_get_prices(
+        response=_response(),
+        market_context=mapping,
+        observed_ts=OBSERVED_TS,
+        sequence=107,
+    )
+
+    assert mapping.reads == 1
+    assert {quote.provider_event_id for quote in batch.quotes} == {"event-501"}
+    assert {quote.sport for quote in batch.quotes} == {"football"}
+    assert {quote.market_type for quote in batch.quotes} == {MarketType.WINNER}
 
 
 def test_invalid_market_evidence_fails_closed_without_attribute_leak() -> None:

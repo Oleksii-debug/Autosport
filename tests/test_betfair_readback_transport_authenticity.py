@@ -256,6 +256,33 @@ def test_private_opener_handler_method_rebind_fails_before_network() -> None:
     assert called is False
 
 
+def test_trusted_network_witness_rejects_envelope_account_relabel() -> None:
+    action = _action()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+    matcher = _trusted_capture_matcher()
+    witnesses = _current_capture_witnesses(capture)
+    original_account = capture.account_id
+
+    object.__setattr__(capture, "account_id", "forged-account")
+    try:
+        assert not matcher(
+            capture,
+            witnesses,
+            venue_id=capture.venue_id,
+            account_id=original_account,
+            action_id=capture.action_id,
+            market_id=capture.market_id,
+            provider_order_ref=capture.provider_order_ref,
+            page_size=capture.page_size,
+        )
+    finally:
+        object.__setattr__(capture, "account_id", original_account)
+
+
 def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
     action = _action()
     capture = _capture(
@@ -269,6 +296,8 @@ def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
     assert matcher(
         capture,
         witnesses,
+        venue_id=capture.venue_id,
+        account_id=capture.account_id,
         action_id=capture.action_id,
         market_id=capture.market_id,
         provider_order_ref=capture.provider_order_ref,
@@ -286,7 +315,9 @@ def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
         assert not matcher(
             capture,
             witnesses,
-            action_id=capture.action_id,
+            venue_id=capture.venue_id,
+        account_id=capture.account_id,
+        action_id=capture.action_id,
             market_id=capture.market_id,
             provider_order_ref=capture.provider_order_ref,
             page_size=capture.page_size,

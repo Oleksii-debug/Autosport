@@ -106,10 +106,10 @@ def test_caller_selected_arbitrary_ledger_root_cannot_mint_positive_reroute(tmp_
         Decimal("50.00"),
     )
 
-    # This path is deliberately caller-created and has no product-workspace/root
-    # authority.  Its bytes are internally canonical only because the same public
-    # ledger API was used to manufacture them.
-    forged = RealExecutionLedger(tmp_path / "caller-controlled" / "real-execution.jsonl")
+    # This exact-type ledger lives at a caller-selected path with no product
+    # workspace/root authority. Its bytes are internally canonical only because
+    # the same public ledger API was used to manufacture them.
+    forged = RealExecutionLedger(tmp_path / "caller-controlled-real-execution.jsonl")
     forged.reserve_plan(_plan(initial))
     _ack(
         forged,

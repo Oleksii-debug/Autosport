@@ -36,22 +36,34 @@ _VOC_CURRENT_CONTEXT_FIELDS_V1 = frozenset(
         "contradiction_state",
     }
 )
-_VOC_CURRENT_CONTEXT_FIELDS_V2 = {
-    "request_id",
-    "decision_input_sha256",
-    "task_class",
-    "data_classification",
-    "sport_id",
-    "league_id",
-    "regime_id",
-    "urgency_id",
-    "contradiction_state",
-}
-_VOC_CURRENT_CONTEXT_FIELDS = frozenset(_VOC_CURRENT_CONTEXT_FIELDS_V2)
+_VOC_CURRENT_CONTEXT_FIELDS_V2 = frozenset(
+    {
+        "request_id",
+        "decision_input_sha256",
+        "task_class",
+        "data_classification",
+        "sport_id",
+        "league_id",
+        "regime_id",
+        "urgency_id",
+        "contradiction_state",
+    }
+)
+_VOC_CURRENT_CONTEXT_FIELDS_V3 = frozenset(
+    {
+        *_VOC_CURRENT_CONTEXT_FIELDS_V2,
+        "routing_policy_id",
+        "routing_policy_version",
+        "cloud_permission",
+        "cloud_backend_id",
+    }
+)
+_VOC_CURRENT_CONTEXT_FIELDS = _VOC_CURRENT_CONTEXT_FIELDS_V3
 _VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS = frozenset(
     {
         _VOC_CURRENT_CONTEXT_FIELDS_V1,
-        _VOC_CURRENT_CONTEXT_FIELDS,
+        _VOC_CURRENT_CONTEXT_FIELDS_V2,
+        _VOC_CURRENT_CONTEXT_FIELDS_V3,
     }
 )
 

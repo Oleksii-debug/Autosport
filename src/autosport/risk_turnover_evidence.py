@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
 from typing import Final
 
-from .economic_goal import EconomicGoalContract
+from .economic_goal_provenance import provenance_for
+from .economic_goal_store import EconomicGoalStore
 from .paper import PaperBook
 from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
 
@@ -200,6 +201,7 @@ class PaperDayTurnoverEvidence:
 
     goal_id: str
     goal_revision: int
+    goal_contract_sha256: str
     bankroll_id: str
     currency: str
     day_key: str
@@ -303,6 +305,7 @@ class PaperDayTurnoverEvidence:
                 "residual headroom conflicts with turnover/cap truth"
             )
         for name, digest in (
+            ("goal_contract_sha256", self.goal_contract_sha256),
             ("window_state_sha256", self.window_state_sha256),
             ("constituent_sha256", self.constituent_sha256),
             ("evidence_sha256", self.evidence_sha256),
@@ -338,7 +341,7 @@ class PaperDayTurnoverResolver:
         cls,
         *,
         book: PaperBook,
-        goal: EconomicGoalContract,
+        goal_store: EconomicGoalStore,
         window_store: ProductDayRiskWindowStore,
         window_evidence: ProductDayRiskWindow,
     ) -> PaperDayTurnoverEvidence:
@@ -346,9 +349,9 @@ class PaperDayTurnoverResolver:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "book must be canonical PaperBook"
             )
-        if type(goal) is not EconomicGoalContract:
+        if type(goal_store) is not EconomicGoalStore:
             raise PaperDayTurnoverEvidenceIncompleteError(
-                "goal must be canonical EconomicGoalContract"
+                "goal_store must be canonical EconomicGoalStore"
             )
         if type(window_store) is not ProductDayRiskWindowStore:
             raise PaperDayTurnoverEvidenceIncompleteError(
@@ -358,6 +361,21 @@ class PaperDayTurnoverResolver:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "window_evidence must be canonical ProductDayRiskWindow"
             )
+        if (
+            goal_store.workspace.expanduser().resolve(strict=False)
+            != window_store.workspace
+        ):
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "economic goal and risk day authority must share one canonical workspace"
+            )
+
+        try:
+            goal = goal_store.load()
+            goal_provenance = provenance_for(goal)
+        except (OSError, TypeError, ValueError) as exc:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "durable EconomicGoal authority cannot be re-resolved"
+            ) from exc
 
         try:
             PaperBook._validate_loaded_state(book)
@@ -434,6 +452,7 @@ class PaperDayTurnoverResolver:
             "scope_class": _SCOPE_CLASS,
             "goal_id": goal.goal_id,
             "goal_revision": goal.revision,
+            "goal_contract_sha256": goal_provenance.contract_sha256,
             "bankroll_id": goal.bankroll_id,
             "currency": goal.currency,
             "day_key": current_window.day_key,
@@ -454,6 +473,7 @@ class PaperDayTurnoverResolver:
         return PaperDayTurnoverEvidence(
             goal_id=goal.goal_id,
             goal_revision=goal.revision,
+            goal_contract_sha256=goal_provenance.contract_sha256,
             bankroll_id=goal.bankroll_id,
             currency=goal.currency,
             day_key=current_window.day_key,
@@ -477,7 +497,7 @@ class PaperDayTurnoverResolver:
         candidate: PaperDayTurnoverEvidence,
         *,
         book: PaperBook,
-        goal: EconomicGoalContract,
+        goal_store: EconomicGoalStore,
         window_store: ProductDayRiskWindowStore,
         window_evidence: ProductDayRiskWindow,
     ) -> PaperDayTurnoverEvidence:
@@ -487,7 +507,7 @@ class PaperDayTurnoverResolver:
             )
         current = cls.resolve(
             book=book,
-            goal=goal,
+            goal_store=goal_store,
             window_store=window_store,
             window_evidence=window_evidence,
         )

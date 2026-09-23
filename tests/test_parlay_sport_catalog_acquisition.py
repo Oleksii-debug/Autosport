@@ -385,6 +385,45 @@ class ParlaySportCatalogAcquisitionTests(unittest.TestCase):
         self.assertNotIn(fake_transport, during)
         self.assertEqual(fake_transport.calls, [])
 
+    def test_public_acquirer_captures_authority_validators_against_module_rebind(self):
+        implementation = next(
+            cell.cell_contents
+            for cell in (acquire_parlay_sport_catalog.__closure__ or ())
+            if getattr(cell.cell_contents, "__name__", "")
+            == "_acquire_parlay_sport_catalog_impl"
+        )
+        defaults = implementation.__kwdefaults__
+        self.assertIsNotNone(defaults)
+        original_validator = acquisition_module._validate_raw_response
+        original_digest_factory = acquisition_module.hashlib.sha256
+        self.assertIs(defaults["raw_response_validator"], original_validator)
+        self.assertIs(defaults["digest_factory"], original_digest_factory)
+
+        fake_validator = lambda *_args, **_kwargs: response(
+            body=b'[{"key":"forged"}]'
+        )
+        fake_digest_factory = lambda _payload: None
+        with (
+            mock.patch.object(
+                acquisition_module,
+                "_validate_raw_response",
+                fake_validator,
+            ),
+            mock.patch.object(
+                acquisition_module.hashlib,
+                "sha256",
+                fake_digest_factory,
+            ),
+        ):
+            self.assertIs(
+                implementation.__kwdefaults__["raw_response_validator"],
+                original_validator,
+            )
+            self.assertIs(
+                implementation.__kwdefaults__["digest_factory"],
+                original_digest_factory,
+            )
+
     def test_product_transport_captures_lower_network_dependencies(self):
         product_transport = acquisition_module._default_transport
         captured = tuple(

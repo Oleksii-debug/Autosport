@@ -108,7 +108,9 @@ def test_webview_dynamic_projection_preserves_nvda_navigation_contract() -> None
     assert '<p id="live-status" role="status"' not in html
     assert '<p id="manual-status" role="status" aria-live="polite">' in html
 
-    assert 'dispatch("replay.run")' in javascript
+    assert 'dispatch("replay.run", {' in javascript
+    assert 'dataset_path: byId("dataset-path").value' in javascript
+    assert 'research_plan_path: byId("research-plan-path").value' in javascript
     assert 'dispatch("recovery.run")' in javascript
     assert 'byId(102).addEventListener("click"' in javascript
     assert 'byId(108).addEventListener("click"' in javascript

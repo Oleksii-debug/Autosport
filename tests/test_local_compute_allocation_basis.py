@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,11 +31,6 @@ def _store(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
     authority_root = tmp_path / "authority"
     goal_store = _goal(workspace)
-    monkeypatch.setattr(
-        subject,
-        "_authority_now",
-        lambda: "2026-09-23T10:00:00Z",
-    )
     store = subject.LocalComputeAllocationBasisAuthorityStore(
         workspace,
         authority_root=authority_root,
@@ -68,7 +64,7 @@ def _review(
 def _resolve(
     store: subject.LocalComputeAllocationBasisAuthorityStore,
     *,
-    decision_at: str = "2026-09-23T12:00:00Z",
+    decision_at: str = "2099-01-01T00:00:00Z",
     allocation_policy_id: str = "full-cost-per-request-v1",
 ):
     return store.resolve(
@@ -100,7 +96,10 @@ def test_owner_review_persists_exact_document_goal_and_derived_amount(
 
     assert record.amount_per_request == Decimal("0.125")
     assert record.currency == "USD"
-    assert record.available_at == "2026-09-23T10:00:00Z"
+    published_at = datetime.fromisoformat(
+        record.available_at.replace("Z", "+00:00")
+    )
+    assert published_at <= datetime.now(published_at.tzinfo)
     assert record.owner_review_sha256 == review.review_sha256
     assert (
         base64.b64decode(record.measurement_document_b64)
@@ -196,11 +195,16 @@ def test_bare_digest_or_historical_timestamp_is_not_publish_authority(
         store.publish_owner_basis(review, confirmed=False)
 
     record = store.publish_owner_basis(review, confirmed=True)
+    published_at = datetime.fromisoformat(
+        record.available_at.replace("Z", "+00:00")
+    )
+    before_publication = (
+        published_at - timedelta(microseconds=1)
+    ).isoformat()
 
-    assert record.available_at == "2026-09-23T10:00:00Z"
     assert _resolve(
         store,
-        decision_at="2026-09-23T09:59:59Z",
+        decision_at=before_publication,
     ) is None
 
 
@@ -210,7 +214,7 @@ def test_measurement_period_cannot_end_after_owner_confirmation(
     _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
     review = _review(
         store,
-        measurement_period_end="2026-09-24T00:00:00Z",
+        measurement_period_end="2099-01-01T00:00:00Z",
     )
 
     with pytest.raises(
@@ -220,36 +224,75 @@ def test_measurement_period_cannot_end_after_owner_confirmation(
         store.publish_owner_basis(review, confirmed=True)
 
 
-@pytest.mark.parametrize(
-    "later_clock",
-    ("2026-09-23T09:00:00Z", "2026-09-23T10:00:00Z"),
-)
-def test_product_clock_must_strictly_advance_for_later_owner_basis(
-    tmp_path, monkeypatch, later_clock
+@pytest.mark.parametrize("offset_seconds", (0, -1))
+def test_publication_time_validation_requires_strict_advance(
+    tmp_path, monkeypatch, offset_seconds
 ):
     _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
     first = store.publish_owner_basis(_review(store), confirmed=True)
-    before = store.path.read_bytes()
-
-    monkeypatch.setattr(
-        subject,
-        "_authority_now",
-        lambda: later_clock,
+    first_at = datetime.fromisoformat(
+        first.available_at.replace("Z", "+00:00")
     )
-    later_review = _review(
-        store,
-        basis_id="basis-local-b-2026-09",
-        measurement_source_id="owner-reviewed-local-cost-ledger-b-2026-09",
-    )
+    candidate = (
+        first_at + timedelta(seconds=offset_seconds)
+    ).isoformat()
 
     with pytest.raises(
         subject.LocalComputeAllocationBasisError,
         match="product clock did not advance",
     ):
-        store.publish_owner_basis(later_review, confirmed=True)
+        subject._validate_publication_available_at((first,), candidate)
 
-    assert store.path.read_bytes() == before
-    assert _resolve(store) == first
+
+def test_clock_module_rebind_cannot_backdate_first_owner_basis(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
+    review = _review(store)
+    fake_clock_calls: list[str] = []
+
+    def forged_clock() -> str:
+        fake_clock_calls.append("called")
+        return "2026-09-21T10:00:00Z"
+
+    monkeypatch.setattr(
+        subject,
+        "_authoritative_utc_now",
+        forged_clock,
+    )
+
+    with pytest.raises(
+        subject.LocalComputeAllocationBasisError,
+        match="product clock authority changed",
+    ):
+        store.publish_owner_basis(review, confirmed=True)
+
+    assert fake_clock_calls == []
+    assert not store.path.exists()
+
+
+def test_clock_code_mutation_cannot_backdate_first_owner_basis(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
+    review = _review(store)
+    clock = subject._CANONICAL_AUTHORITY_NOW
+    original_code = clock.__code__
+
+    def forged_clock() -> str:
+        return "2026-09-21T10:00:00Z"
+
+    try:
+        clock.__code__ = forged_clock.__code__
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="product clock authority changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        clock.__code__ = original_code
+
+    assert not store.path.exists()
 
 
 def test_per_request_amount_must_have_exact_finite_decimal_representation(
@@ -288,11 +331,6 @@ def test_basis_id_is_idempotent_for_same_review_but_immutable_on_change(
     first_review = _review(store)
     first = store.publish_owner_basis(first_review, confirmed=True)
 
-    monkeypatch.setattr(
-        subject,
-        "_authority_now",
-        lambda: "2026-09-23T11:00:00Z",
-    )
     assert store.publish_owner_basis(first_review, confirmed=True) == first
 
     changed = _review(store, total_allocable_cost=Decimal("15"))

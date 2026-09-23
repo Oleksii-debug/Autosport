@@ -101,7 +101,12 @@ class RewardCorrectionAssertion:
         if not isinstance(self.superseded_reward,EvidenceRef) or not isinstance(self.corrected_reward,EvidenceRef): raise RewardCorrectionError("reward references must be EvidenceRef")
         if self.superseded_reward==self.corrected_reward: raise RewardCorrectionError("correction must produce a distinct reward identity")
         if self.superseded_reward.authority_family!=self.corrected_reward.authority_family: raise RewardCorrectionError("reward correction cannot change reward authority family")
-        _dec("corrected_reward_value",self.corrected_reward_value); _time("corrected_available_at",self.corrected_available_at)
+        _dec("corrected_reward_value",self.corrected_reward_value)
+        object.__setattr__(
+            self,
+            "corrected_available_at",
+            _tid("corrected_available_at",self.corrected_available_at),
+        )
         if not isinstance(self.correction_source,EvidenceRef): raise RewardCorrectionError("correction_source must be EvidenceRef")
         if isinstance(self.generation,bool) or not isinstance(self.generation,int) or self.generation<=0: raise RewardCorrectionError("generation must be a positive integer")
         if self.generation==1:

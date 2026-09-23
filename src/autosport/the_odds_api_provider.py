@@ -37,9 +37,22 @@ class TheOddsApiPayloadError(ValueError):
 class TheOddsApiTransportError(ProviderUnavailableError):
     """Typed transport/auth/quota/provider-unavailable failure."""
 
-    def __init__(self, message: str, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        *,
+        provider_error_code: str | None = None,
+        quota_remaining: int | None = None,
+        quota_used: int | None = None,
+        quota_last: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.provider_error_code = provider_error_code
+        self.quota_remaining = quota_remaining
+        self.quota_used = quota_used
+        self.quota_last = quota_last
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +189,61 @@ def _decode_provider_json(raw: bytes) -> Any:
         raise TheOddsApiPayloadError("provider returned invalid JSON") from exc
 
 
+def _failure_error_code(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("error_code")
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > 128
+        or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+            for character in value
+        )
+    ):
+        return None
+    return value
+
+
+def _failure_quota_header(
+    headers: Mapping[str, str],
+    name: str,
+) -> int | None:
+    wanted = name.lower()
+    raw: str | None = None
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            raw = str(value)
+            break
+    if (
+        raw is None
+        or not raw
+        or len(raw) > 32
+        or not raw.isascii()
+        or not raw.isdigit()
+    ):
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return None
+    return parsed
+
+
+def _failure_evidence(
+    payload: object,
+    headers: Mapping[str, str],
+) -> tuple[str | None, int | None, int | None, int | None]:
+    return (
+        _failure_error_code(payload),
+        _failure_quota_header(headers, "x-requests-remaining"),
+        _failure_quota_header(headers, "x-requests-used"),
+        _failure_quota_header(headers, "x-requests-last"),
+    )
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     """Reject redirects before a credential-bearing second HTTP hop."""
 
@@ -247,6 +315,10 @@ def _perform_http_json_response(
         method="GET",
     )
     http_status: int | None = None
+    provider_error_code: str | None = None
+    quota_remaining: int | None = None
+    quota_used: int | None = None
+    quota_last: int | None = None
     transport_failed = False
     opener = opener_factory(
         proxy_handler_factory({}),
@@ -269,12 +341,37 @@ def _perform_http_json_response(
             )
     except HTTPError as exc:
         http_status = int(exc.code)
+        failure_headers = (
+            {}
+            if exc.headers is None
+            else dict(exc.headers.items())
+        )
+        failure_payload: object = None
+        if getattr(exc, "fp", None) is not None:
+            try:
+                failure_body = bounded_body_reader(exc)
+                failure_payload = json_decoder(failure_body)
+            except (OSError, TypeError, ValueError):
+                # The request already failed. Malformed/oversized failure bodies
+                # cannot become success or leak the credential-bearing URL.
+                failure_payload = None
+        (
+            provider_error_code,
+            quota_remaining,
+            quota_used,
+            quota_last,
+        ) = _failure_evidence(failure_payload, failure_headers)
     except (URLError, TimeoutError, OSError):
         transport_failed = True
 
     if http_status is not None:
         raise TheOddsApiTransportError(
-            f"The Odds API HTTP {http_status}", http_status
+            f"The Odds API HTTP {http_status}",
+            http_status,
+            provider_error_code=provider_error_code,
+            quota_remaining=quota_remaining,
+            quota_used=quota_used,
+            quota_last=quota_last,
         )
     if transport_failed:
         raise TheOddsApiTransportError("The Odds API transport unavailable")
@@ -788,8 +885,19 @@ class TheOddsApiProvider:
         if type(response) is not HttpJsonResponse:
             raise TypeError("transport must return HttpJsonResponse")
         if response.status_code != 200:
+            (
+                provider_error_code,
+                quota_remaining,
+                quota_used,
+                quota_last,
+            ) = _failure_evidence(response.payload, response.headers)
             raise TheOddsApiTransportError(
-                f"The Odds API HTTP {response.status_code}", response.status_code
+                f"The Odds API HTTP {response.status_code}",
+                response.status_code,
+                provider_error_code=provider_error_code,
+                quota_remaining=quota_remaining,
+                quota_used=quota_used,
+                quota_last=quota_last,
             )
         if provider_origin_verified and response.final_url != url:
             raise TheOddsApiTransportError(

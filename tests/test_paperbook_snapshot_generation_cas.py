@@ -292,3 +292,69 @@ def test_save_and_open_ticket_are_linearized_on_same_paperbook(
     after_open = PaperBook.load(path)
     assert after_open.balance == Decimal("90")
     assert tuple(after_open.tickets) == (opened_ticket_ids[0],)
+
+
+def test_private_opening_authority_rejects_coherent_visible_stake_witness_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg("selection-1")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+    durable_before = path.read_bytes()
+
+    # Rewriting both caller-visible values defeats the old field-to-field guard,
+    # and balance=80 keeps lifecycle replay coherent with the forged stake=20.
+    ticket.stake = Decimal("20")
+    ticket._opening_stake = Decimal("20")
+    book.balance = Decimal("80")
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.save(path)
+
+    assert path.read_bytes() == durable_before
+
+
+def test_verified_load_private_authority_rejects_visible_leg_witness_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    original = PaperBook("100")
+    original_ticket = original.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    original.save(path)
+    durable_before = path.read_bytes()
+
+    restored = PaperBook.load(path)
+    ticket = restored.tickets[original_ticket.ticket_id]
+    inflated = _leg("selection-1", "100")
+    assert inflated.quote_key == ticket.legs[0].quote_key
+
+    # A verified load must install product-private opening authority from the
+    # externally witnessed bytes before caller-visible _opening_* can be trusted.
+    ticket.legs = (inflated,)
+    ticket._opening_legs = (inflated,)
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        restored.save(path)
+
+    assert path.read_bytes() == durable_before

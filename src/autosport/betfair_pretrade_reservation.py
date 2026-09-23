@@ -50,9 +50,10 @@ _ACTIVE_STATES = frozenset(
         AttemptState.PARTIAL,
     }
 )
-# Generic ledger RECONCILED_NOT_FOUND is not provider-origin absence
-# authority. Keep all local capital held until a stronger Betfair witness is
-# composed into this serialized transition.
+_LEDGER_NOT_FOUND_STATES = frozenset({AttemptState.RECONCILED_NOT_FOUND})
+# Generic ledger RECONCILED_NOT_FOUND is chronology/state, not provider-origin
+# absence authority. Keep all local capital held until a stronger Betfair
+# witness is composed into this serialized transition.
 _RELEASE_STATES: frozenset[AttemptState] = frozenset()
 _RESERVATION_FIELDS = frozenset(
     {
@@ -818,7 +819,7 @@ def _immutable_key(item: BetfairExposureReservation) -> tuple[object, ...]:
 
 def _require_nonrollback(previous: AttemptState, current: AttemptState) -> None:
     allowed = {
-        AttemptState.RESERVED: _ACTIVE_STATES | _RELEASE_STATES,
+        AttemptState.RESERVED: _ACTIVE_STATES | _LEDGER_NOT_FOUND_STATES,
         AttemptState.SUBMITTED: {
             AttemptState.SUBMITTED,
             AttemptState.UNKNOWN,

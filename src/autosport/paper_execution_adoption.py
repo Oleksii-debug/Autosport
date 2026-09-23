@@ -552,6 +552,10 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "accepted-equivalent durable attempt lacks execution truth"
                 )
+            if action.side != "BACK" or attempt.side != action.side:
+                raise PaperExecutionAdoptionError(
+                    "accepted-equivalent PAPER adoption requires exact BACK execution side"
+                )
             expected.open_ticket(
                 [
                     TicketLeg(
@@ -560,6 +564,7 @@ class PaperExecutionAdoptionRuntime:
                         selection_id=attempt.selection_id,
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
+                        exchange_side="back",
                         market_semantics_id=binding.market_semantics_id,
                     )
                 ],

@@ -174,7 +174,11 @@ def worst_case_incremental_exposure(action: ExecutionAction) -> Decimal:
             )
         with localcontext() as context:
             context.prec = max(50, precision)
-            return stake * (odds - Decimal("1"))
+            liability = stake * (odds - Decimal("1"))
+        return _bounded_decimal_shape(
+            liability,
+            "worst_case_incremental_exposure",
+        )
     raise BetfairPreTradeReservationError(
         "only BACK/LAY exposure is supported"
     )

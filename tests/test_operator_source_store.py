@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.operator_source_store as operator_source_store
 from autosport.operator_source_config import OperatorSourceSelectionState
 from autosport.operator_source_store import (
     OperatorSourceConfigStore,
@@ -95,6 +96,66 @@ def test_oversized_file_fails_before_json_decode(tmp_path: Path):
     path.write_bytes(b"x" * 4097)
     with pytest.raises(OperatorSourceStoreError, match="size"):
         OperatorSourceConfigStore(path).read()
+
+
+def test_strict_json_recursion_failure_is_corruption_not_crash(
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    store.write_source_id("betfair-exchange")
+
+    def raise_recursion(*args, **kwargs):
+        raise RecursionError("decoder recursion limit exceeded")
+
+    monkeypatch.setattr(operator_source_store, "strict_json_loads", raise_recursion)
+
+    with pytest.raises(OperatorSourceStoreError, match="corrupt"):
+        store.read()
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.runtime_authorized is False
+
+
+def test_canonical_reencode_recursion_failure_is_integrity_error(
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    store.write_source_id("betfair-exchange")
+
+    def raise_recursion(*args, **kwargs):
+        raise RecursionError("encoder recursion limit exceeded")
+
+    monkeypatch.setattr(operator_source_store.json, "dumps", raise_recursion)
+
+    with pytest.raises(OperatorSourceStoreError, match="integrity validation"):
+        store.read()
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.runtime_authorized is False
+
+
+def test_bounded_deep_persisted_json_is_invalid_not_restart_crash(tmp_path: Path):
+    path = tmp_path / "operator-source.json"
+    depth = 1024
+    nested = "[" * depth + "0" + "]" * depth
+    payload = (
+        '{"integrity_sha256":"x","schema":"autosport.operator-source-config",'
+        '"schema_version":1,"source_id":' + nested + "}"
+    )
+    assert len(payload.encode("utf-8")) < 4096
+    path.write_text(payload, encoding="utf-8")
+
+    store = OperatorSourceConfigStore(path)
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.runtime_authorized is False
 
 
 def test_conflicting_admin_override_remains_explicit_conflict(tmp_path: Path):

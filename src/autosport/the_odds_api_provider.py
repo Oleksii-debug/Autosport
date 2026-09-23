@@ -767,9 +767,9 @@ class TheOddsApiProvider:
             response, provider_origin_verified = self._request(
                 self._current_url()
             )
-            clock = self.clock
-            receipt_clock_verified = self._receipt_clock_is_product_owned(clock)
-            observed_at = _timestamp(clock(), "observed_at")
+            observed_at, receipt_clock_verified = self._capture_receipt_time(
+                self.clock
+            )
             evidence = self._request_evidence(
                 "current",
                 observed_at,
@@ -819,9 +819,9 @@ class TheOddsApiProvider:
         response, provider_origin_verified = self._request(
             self._historical_url(requested_at)
         )
-        clock = self.clock
-        receipt_clock_verified = self._receipt_clock_is_product_owned(clock)
-        observed_at = _timestamp(clock(), "observed_at")
+        observed_at, receipt_clock_verified = self._capture_receipt_time(
+            self.clock
+        )
         if _datetime(requested_at) > _datetime(observed_at):
             raise TheOddsApiPayloadError(
                 "historical requested_at cannot be later than local receipt time"
@@ -908,11 +908,36 @@ class TheOddsApiProvider:
         self._pending_quality_flags = ()
 
     @staticmethod
-    def _receipt_clock_is_product_owned(
+    def _capture_receipt_time(
         clock: Clock,
         product_clock: Clock = utc_now_iso,
-    ) -> bool:
-        return clock is product_clock
+        product_clock_code: object = utc_now_iso.__code__,
+        product_clock_datetime: object = utc_now_iso.__globals__["datetime"],
+        product_clock_timezone: object = utc_now_iso.__globals__["timezone"],
+    ) -> tuple[str, bool]:
+        """Capture receipt time without laundering a mutated product clock."""
+
+        def product_clock_is_intact() -> bool:
+            product_globals = getattr(product_clock, "__globals__", None)
+            return (
+                clock is product_clock
+                and getattr(product_clock, "__code__", None) is product_clock_code
+                and isinstance(product_globals, dict)
+                and product_globals.get("datetime") is product_clock_datetime
+                and product_globals.get("timezone") is product_clock_timezone
+            )
+
+        product_owned = clock is product_clock
+        if product_owned and not product_clock_is_intact():
+            raise TheOddsApiTransportError(
+                "The Odds API receipt clock authority changed before capture"
+            )
+        observed_at = _timestamp(clock(), "observed_at")
+        if product_owned and not product_clock_is_intact():
+            raise TheOddsApiTransportError(
+                "The Odds API receipt clock authority changed during capture"
+            )
+        return observed_at, product_owned
 
     def _request(
         self,

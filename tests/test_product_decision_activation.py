@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -38,6 +39,12 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.workspace = self.test_root / "workspace"
         self.workspace.mkdir()
         self.authority_root = self.test_root / "machine-authority"
+        self._authority_env = mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(self.authority_root)},
+        )
+        self._authority_env.start()
+        self.addCleanup(self._authority_env.stop)
         self.registry = ScientificRegistry.initialize_pristine(
             self.workspace / "scientific_registry.json"
         )
@@ -68,10 +75,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         )
         self._write_composition(source_id="provider-a", bankroll="1000")
         self._write_risk(self.risk, self.goal)
-        self.store = ProductDecisionActivationStore(
-            self.workspace,
-            authority_root=self.authority_root,
-        )
+        self.store = ProductDecisionActivationStore(self.workspace)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -222,10 +226,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
                 self._initialize()
 
         self.assertTrue(self.store.path.exists())
-        reopened = ProductDecisionActivationStore(
-            self.workspace,
-            authority_root=self.authority_root,
-        )
+        reopened = ProductDecisionActivationStore(self.workspace)
         recovered = reopened.initialize_owner(
             scientific_registry=self.registry,
             strategy_version_id=self.STRATEGY_ID,

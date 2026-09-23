@@ -5,7 +5,7 @@ from hashlib import sha256
 from io import BytesIO
 import pickle
 import traceback
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -420,6 +420,51 @@ def test_rate_limit_is_unavailable_not_empty_success(monkeypatch) -> None:
 
     with pytest.raises(SmarketsSessionContextError, match=r"HTTP 429"):
         open_smarkets_authenticated_session("token-A")
+
+
+def test_initial_accounts_http_error_cannot_leak_session_secret_through_cause(
+    monkeypatch,
+) -> None:
+    secret = "initial-account-http-secret-sentinel"
+
+    def fail_accounts(request, timeout):
+        raise HTTPError(
+            SMARKETS_ACCOUNTS_ENDPOINT,
+            429,
+            f"provider echoed {secret}",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(session_context, "_open_accounts_request", fail_accounts)
+
+    with pytest.raises(SmarketsSessionContextError) as caught:
+        open_smarkets_authenticated_session(secret)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "HTTP 429" in str(caught.value)
+    assert secret not in str(caught.value)
+    assert secret not in rendered
+    assert caught.value.__cause__ is None
+
+
+def test_initial_accounts_transport_error_cannot_leak_session_secret_through_cause(
+    monkeypatch,
+) -> None:
+    secret = "initial-account-transport-secret-sentinel"
+
+    def fail_accounts(request, timeout):
+        raise URLError(f"transport echoed {secret}")
+
+    monkeypatch.setattr(session_context, "_open_accounts_request", fail_accounts)
+
+    with pytest.raises(SmarketsSessionContextError) as caught:
+        open_smarkets_authenticated_session(secret)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert str(caught.value) == "Smarkets accounts HTTPS acquisition failed"
+    assert secret not in rendered
+    assert caught.value.__cause__ is None
 
 
 def test_redirected_accounts_response_is_rejected(monkeypatch) -> None:

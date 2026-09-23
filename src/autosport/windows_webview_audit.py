@@ -58,12 +58,23 @@ _REQUIRED_CONTROLS = {
     "334": "textarea",
     "335": "button",
     "336": "button",
+    "product-source-select": "select",
+    "product-source-save": "button",
+    "product-source-status": "input",
     "product-runtime-start": "button",
     "product-runtime-stop": "button",
     "product-runtime-status": "input",
     "emergency-stop-action": "button",
 }
-_READONLY_CONTROLS = {"202", "205", "302", "306", "334", "product-runtime-status"}
+_READONLY_CONTROLS = {
+    "202",
+    "205",
+    "302",
+    "306",
+    "334",
+    "product-source-status",
+    "product-runtime-status",
+}
 _LIST_CONTROLS = {"203", "204", "304", "307"}
 _TABLE_CONTROLS = {"201"}
 _DYNAMICALLY_DISABLED_CONTROLS = {"product-runtime-stop"}

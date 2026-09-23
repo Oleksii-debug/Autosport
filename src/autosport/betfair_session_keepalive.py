@@ -255,6 +255,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 _CANONICAL_TRANSPORT_POST = UrllibBetfairKeepAliveTransport.post_keep_alive
+_CANONICAL_TRANSPORT_POST_CODE = getattr(_CANONICAL_TRANSPORT_POST, "__code__", None)
 _CANONICAL_BUILD_OPENER = build_opener
 _CANONICAL_HTTPS_HANDLER = HTTPSHandler
 _CANONICAL_REDIRECT_HANDLER = HTTPRedirectHandler
@@ -350,6 +351,11 @@ def _canonical_network_transport(transport: object) -> bool:
         return False
     if type(transport).post_keep_alive is not _CANONICAL_TRANSPORT_POST:
         return False
+    if (
+        getattr(type(transport).post_keep_alive, "__code__", None)
+        is not _CANONICAL_TRANSPORT_POST_CODE
+    ):
+        return False
     if build_opener is not _CANONICAL_BUILD_OPENER:
         return False
     if HTTPSHandler is not _CANONICAL_HTTPS_HANDLER:
@@ -388,6 +394,7 @@ def _build_keepalive_authority_runtime():
     jurisdiction_require = require_authoritative_betfair_authenticated_jurisdiction
     endpoint_table = _KEEPALIVE_ENDPOINTS
     canonical_transport_post = transport_type.post_keep_alive
+    canonical_transport_post_code = getattr(canonical_transport_post, "__code__", None)
     canonical_observation_init = observation_type.__init__
     canonical_observation_post_init = observation_type.__post_init__
     canonical_build_opener = build_opener
@@ -485,6 +492,9 @@ def _build_keepalive_authority_runtime():
             and BetfairLoginJurisdiction is login_jurisdiction_type
             and BetfairSessionKeepAliveObservation is observation_type
             and UrllibBetfairKeepAliveTransport is transport_type
+            and transport_type.post_keep_alive is canonical_transport_post
+            and getattr(transport_type.post_keep_alive, "__code__", None)
+            is canonical_transport_post_code
             and require_authoritative_betfair_authenticated_jurisdiction
             is jurisdiction_require
             and _KEEPALIVE_ENDPOINTS is endpoint_table
@@ -500,6 +510,11 @@ def _build_keepalive_authority_runtime():
         if type(transport) is not transport_type:
             return False
         if type(transport).post_keep_alive is not canonical_transport_post:
+            return False
+        if (
+            getattr(type(transport).post_keep_alive, "__code__", None)
+            is not canonical_transport_post_code
+        ):
             return False
         if build_opener is not canonical_build_opener:
             return False

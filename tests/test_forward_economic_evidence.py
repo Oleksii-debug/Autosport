@@ -397,6 +397,67 @@ def test_fixed_risk_unit_rejects_excess_downside_exposure(side, odds, stake):
     assert acc.steps == ()
 
 
+def test_lay_risk_unit_rejects_subcontext_exact_liability_above_limit():
+    acc = ForwardEconomicEvidenceAccumulator(
+        protocol(risk_unit_currency=Decimal("1"))
+    )
+    obs = observation(0)
+    odds = "2." + ("0" * 79) + "1"
+    challenger = outcome(
+        "challenger",
+        obs,
+        side=BetSide.LAY,
+        pnl="0",
+        odds=odds,
+        stake="1",
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    with localcontext() as context:
+        context.prec = 80
+        rounded_liability = (
+            (challenger.accepted_odds - Decimal(1))
+            * challenger.accepted_stake
+        )
+    assert rounded_liability == Decimal(1)
+
+    with pytest.raises(ForwardEconomicEvidenceError, match="fixed risk unit"):
+        acc.record(obs, resolver_for([(obs, challenger, champion)]))
+
+    assert acc.steps == ()
+
+
+def test_back_wager_pnl_rejects_value_above_exact_subcontext_payoff_bound():
+    obs = observation(0)
+    odds = Decimal("2." + ("0" * 79) + "6")
+    impossible_pnl = Decimal("1." + ("0" * 79) + "8")
+
+    with localcontext() as context:
+        context.prec = 80
+        rounded_high = (odds - Decimal(1)) * Decimal(1)
+    assert impossible_pnl <= rounded_high
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="wager P&L is outside accepted side/odds/stake bounds",
+    ):
+        ResolvedPolicyOutcome(
+            policy_id="challenger",
+            sequence=obs.sequence,
+            universe_event_sha256=obs.universe_event_sha256,
+            decision_sha256=obs.challenger_decision_sha256,
+            decision_committed_at=T0 + timedelta(minutes=2),
+            side=BetSide.BACK,
+            accepted_odds=odds,
+            accepted_stake=Decimal(1),
+            net_pnl_currency=impossible_pnl,
+            execution_evidence_sha256=SHA_C,
+            execution_accepted_at=T0 + timedelta(minutes=3),
+            settlement_evidence_sha256=SHA_D,
+            settlement_available_at=T0 + timedelta(hours=1),
+        )
+
+
 def test_none_outcome_cannot_carry_money_or_execution_claims():
     obs = observation(0)
     none = outcome("challenger", obs, side=BetSide.NONE, pnl="0")

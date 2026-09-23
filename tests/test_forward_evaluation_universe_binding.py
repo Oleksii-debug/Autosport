@@ -5,6 +5,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from autosport._provider_evaluation_semantic_gate import (
+    _set_legacy_provider_semantic_bypass_for_tests,
+)
 import autosport.provider_observation_authority as provider_module
 from autosport.evaluation_universe import (
     AttritionReason,
@@ -202,19 +205,26 @@ def _stored_universe(tmp_path, monkeypatch, *, empty: bool) -> ProviderEvaluatio
         _empty_row(snapshot, member) if empty else _candidate_row(snapshot, member)
         for member in members
     )
-    universe = build_frozen_universe_from_complete_game_board(
-        snapshot=snapshot,
-        event_lifecycle=lifecycle,
-        authority_id="provider-intake-1",
-        session_id="session-1",
-        universe_id="universe-1",
-        campaign_id="campaign-1",
-        research_protocol_id="protocol-1",
-        protocol_sha256=PROTOCOL_SHA,
-        evaluation_not_before=EVALUATION_NOT_BEFORE,
-        frozen_at=FROZEN_AT,
-        rows=rows,
-    )
+    # #1185 tests the forward receipt/store binding, not the independent #662
+    # product-semantic origin gate.  Use that gate's explicit legacy-fixture
+    # compatibility hook only while constructing this provider-universe fixture.
+    _set_legacy_provider_semantic_bypass_for_tests(True)
+    try:
+        universe = build_frozen_universe_from_complete_game_board(
+            snapshot=snapshot,
+            event_lifecycle=lifecycle,
+            authority_id="provider-intake-1",
+            session_id="session-1",
+            universe_id="universe-1",
+            campaign_id="campaign-1",
+            research_protocol_id="protocol-1",
+            protocol_sha256=PROTOCOL_SHA,
+            evaluation_not_before=EVALUATION_NOT_BEFORE,
+            frozen_at=FROZEN_AT,
+            rows=rows,
+        )
+    finally:
+        _set_legacy_provider_semantic_bypass_for_tests(False)
     workspace = tmp_path / "workspace"
     authority_root = tmp_path / "authority"
     store = ProviderEvaluationUniverseStore(

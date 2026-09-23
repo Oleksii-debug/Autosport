@@ -105,7 +105,8 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertEqual(quote.metadata["market_sid"], "market-88")
         self.assertEqual(quote.metadata["outcome_sid"], "outcome-99")
         self.assertFalse(quote.metadata["coverage_complete"])
-        self.assertEqual(quote.metadata["request"]["quota"]["remaining"], 499)
+        self.assertNotIn("quota", quote.metadata["request"])
+        self.assertEqual(provider.last_request_evidence.quota_remaining, 499)
         terms = quote.metadata["terms"]
         self.assertEqual(terms["last_updated"], "2026-08-31")
         self.assertTrue(
@@ -140,7 +141,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
 
         self.assertEqual(quote.observed_ts, "2026-09-22T14:00:01+00:00")
         self.assertEqual(
-            quote.metadata["request"]["observed_at"],
+            provider.last_request_evidence.observed_at,
             "2026-09-22T14:00:01+00:00",
         )
 
@@ -433,7 +434,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(TheOddsApiPayloadError, "historical snapshot"):
             provider.read_historical_snapshot("2026-09-22T12:42:00Z")
 
-    def test_historical_correction_changes_deterministic_sequence(self):
+    def test_historical_same_snapshot_correction_keeps_one_source_sequence(self):
         payloads = iter(
             [
                 {
@@ -482,7 +483,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertNotEqual(first.batch.cursor, second.batch.cursor)
         self.assertEqual(first.batch.cursor, "1" * 64)
         self.assertEqual(second.batch.cursor, "2" * 64)
-        self.assertNotEqual(
+        self.assertEqual(
             first.batch.quotes[0].sequence,
             second.batch.quotes[0].sequence,
         )
@@ -629,7 +630,8 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertFalse(request["provider_origin_verified"])
         self.assertFalse(request["receipt_clock_verified"])
         self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
-        self.assertEqual(request["response_sha256"], expected)
+        self.assertNotIn("response_sha256", request)
+        self.assertEqual(provider.last_request_evidence.response_sha256, expected)
         self.assertEqual(batch.cursor, expected)
         self.assertEqual(batch.quotes[0].decimal_odds, Decimal("2.10"))
 
@@ -737,7 +739,8 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertFalse(request["receipt_clock_verified"])
         self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
         self.assertIn("UNVERIFIED_RECEIPT_CLOCK", batch.quality_flags)
-        self.assertEqual(request["response_sha256"], digest)
+        self.assertNotIn("response_sha256", request)
+        self.assertEqual(provider.last_request_evidence.response_sha256, digest)
 
     def test_mutated_module_authority_symbols_cannot_launder_injected_seams(self):
         digest = "b" * 64
@@ -772,7 +775,8 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertFalse(request["receipt_clock_verified"])
         self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
         self.assertIn("UNVERIFIED_RECEIPT_CLOCK", batch.quality_flags)
-        self.assertEqual(request["response_sha256"], digest)
+        self.assertNotIn("response_sha256", request)
+        self.assertEqual(provider.last_request_evidence.response_sha256, digest)
 
     def test_response_rejects_event_outside_explicit_event_ids_scope(self):
         provider = TheOddsApiProvider(

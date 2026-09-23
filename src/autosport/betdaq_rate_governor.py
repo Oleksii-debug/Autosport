@@ -1229,19 +1229,33 @@ def resolve_betdaq_rate_governor(
         for observation in blacklist_store.observations().values():
             if observation.operation_id is None:
                 continue
+            blocked_until = _parse_utc_text(
+                observation.blocked_until, "blocked_until"
+            )
+            observed_at = _parse_utc_text(
+                observation.observed_at, "observed_at"
+            )
             durable_remaining = max(
                 0.0,
-                (
-                    _parse_utc_text(
-                        observation.blocked_until, "blocked_until"
-                    )
-                    - wall_now
-                ).total_seconds(),
+                (blocked_until - wall_now).total_seconds(),
             )
-            if durable_remaining > 0:
+            observed_relative_horizon = max(
+                0.0,
+                (blocked_until - observed_at).total_seconds(),
+            )
+            # A process restart loses the prior monotonic epoch. UTC time may
+            # conservatively lengthen a provider fence, but it cannot prove
+            # elapsed RemainingMS after a forward clock discontinuity. Replay
+            # at least the full observed relative horizon on the new monotonic
+            # clock so restart never shortens positive blacklist evidence.
+            restart_remaining = max(
+                durable_remaining,
+                observed_relative_horizon,
+            )
+            if restart_remaining > 0:
                 runtime.blacklist_blocked_until[
                     observation.operation_id
-                ] = now + durable_remaining
+                ] = now + restart_remaining
         governor = BetdaqRateGovernor(
             root,
             policy,

@@ -93,6 +93,7 @@ class HeartbeatProviderEvidence:
             raise BetdaqHeartbeatSafetyError("heartbeat evidence method is not canonical")
         _instant(self.observed_at, "observed_at")
         _digest_text(self.response_sha256, "response_sha256")
+        _provider_return_code(self.provider_return_code)
         if self.provider_performed_at is not None:
             _instant(self.provider_performed_at, "provider_performed_at")
         if self.performed_action is not None and not isinstance(
@@ -157,6 +158,7 @@ class HeartbeatEvent:
             self.performed_action, HeartbeatAction
         ):
             raise BetdaqHeartbeatSafetyError("performed_action is not canonical")
+        _provider_return_code(self.provider_return_code)
         if self.response_sha256 is not None:
             _digest_text(self.response_sha256, "response_sha256")
         if self.previous_event_sha256 is not None:
@@ -221,6 +223,14 @@ def _threshold(value: object) -> int:
     ):
         raise BetdaqHeartbeatSafetyError(
             "threshold_ms must be a positive signed 32-bit integer"
+        )
+    return value
+
+
+def _provider_return_code(value: object) -> int | None:
+    if value is not None and type(value) is not int:
+        raise BetdaqHeartbeatSafetyError(
+            "provider_return_code must be a canonical integer or null"
         )
     return value
 

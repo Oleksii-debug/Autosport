@@ -149,10 +149,16 @@ def _write_snapshot(
     return market, evidence, event
 
 
-def _write_results(root: Path, events: tuple[MarketEvent, ...], *, suffix: str) -> Path:
+def _write_results(
+    root: Path,
+    events: tuple[MarketEvent, ...],
+    *,
+    suffix: str,
+    outcome: str = "win",
+) -> Path:
     path = root / f"results-{suffix}.json"
     source_record = root / f"result-source-{suffix}.json"
-    outcomes = {event.quote_key: "win" for event in events}
+    outcomes = {event.quote_key: outcome for event in events}
     source_record.write_text(
         json.dumps(
             {
@@ -252,13 +258,20 @@ def _assemble(
     *,
     output_name: str,
     governance_suffix: str,
+    result_outcome: str = "win",
+    result_suffix: str | None = None,
 ) -> dict:
     market, evidence, event = snapshot
     source_id = event.source_id
     proof = _write_governance(root, (source_id,), suffix=governance_suffix)
     assemble_historical_corpus(
         [(market, evidence)],
-        results_path=_write_results(root, (event,), suffix=output_name),
+        results_path=_write_results(
+            root,
+            (event,),
+            suffix=result_suffix or output_name,
+            outcome=result_outcome,
+        ),
         governance_proof_path=proof,
         output_dir=root / output_name,
         name=f"{event.sport} governed historical fixture",
@@ -426,6 +439,47 @@ def test_governance_drift_changes_only_governance_and_qualified_identity(tmp_pat
         first_provenance["qualified_corpus_identity"]
         != second_provenance["qualified_corpus_identity"]
     )
+
+
+def test_qualified_corpus_identity_binds_sealed_terminal_outcomes(
+    tmp_path: Path,
+) -> None:
+    snapshot = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="outcome-identity",
+        event_id="event-outcome-identity",
+    )
+
+    first_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="outcome-corpus-win",
+        governance_suffix="outcome-shared",
+        result_outcome="win",
+        result_suffix="outcome-shared",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="outcome-corpus-loss",
+        governance_suffix="outcome-shared",
+        result_outcome="loss",
+        result_suffix="outcome-shared",
+    )
+
+    first = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first["content_identity_scope"] == "market_snapshot_only"
+    assert second["content_identity_scope"] == "market_snapshot_only"
+    assert first["content_identity"] == second["content_identity"]
+    assert first["acquisition_identity"] == second["acquisition_identity"]
+    assert first["governance_identity"] == second["governance_identity"]
+    assert first["outcome_identity"] != second["outcome_identity"]
+    assert first["qualified_corpus_identity"] != second["qualified_corpus_identity"]
+    assert first_manifest["results_sha256"] != second_manifest["results_sha256"]
+    assert first_manifest["import_identity"] != second_manifest["import_identity"]
 
 
 def test_invalid_provider_response_digest_cannot_enter_acquisition_identity(tmp_path: Path) -> None:

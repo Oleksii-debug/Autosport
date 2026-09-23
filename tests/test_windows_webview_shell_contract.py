@@ -80,20 +80,35 @@ def test_packaged_interactive_entry_no_longer_imports_legacy_tk_operator_shell()
     assert "from autosport.windows_gui import main as gui_main" not in source
     assert "install_compact_windows_layout()" not in source
 
+
 def test_webview_dynamic_projection_preserves_nvda_navigation_contract() -> None:
-    javascript = (
-        _ROOT / "src" / "autosport" / "windows_web" / "app.js"
-    ).read_text(encoding="utf-8")
+    index = _ROOT / "src" / "autosport" / "windows_web" / "index.html"
+    html = index.read_text(encoding="utf-8")
+    javascript = index.with_name("app.js").read_text(encoding="utf-8")
 
     assert 'event.ctrlKey && event.altKey' not in javascript
-    assert 'key === "r"' not in javascript
+    for marker in (
+        'key === "r"',
+        'key === "o"',
+        'key === "e"',
+        'key === "l"',
+        'event.key === "F6"',
+        'event.key === "F7"',
+        'event.key === "F9"',
+        'event.key === "F10"',
+    ):
+        assert marker not in javascript
     assert "replaceChildren()" not in javascript
     assert "setTextIfChanged(statusNode" in javascript
     assert "setTextIfChanged(errorNode" in javascript
     assert "syncTextChildren(node, values" in javascript
+    assert 'setTextIfChanged(byId("live-status"), state.live_status || "")' in javascript
+    assert 'setTextIfChanged(byId("manual-status"), state.manual.status || "")' in javascript
+    assert 'byId("manual-status").textContent = state.manual.status || ""' not in javascript
+    assert '<p id="live-status" role="status"' not in html
+    assert '<p id="manual-status" role="status" aria-live="polite">' in html
 
     assert 'dispatch("replay.run")' in javascript
     assert 'dispatch("recovery.run")' in javascript
     assert 'byId(102).addEventListener("click"' in javascript
     assert 'byId(108).addEventListener("click"' in javascript
-

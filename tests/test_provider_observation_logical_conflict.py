@@ -68,15 +68,15 @@ def test_complete_board_rejects_conflicting_combined_rows_for_one_market() -> No
         )
 
 
-def test_complete_board_accepts_documented_per_outcome_rows_for_one_market() -> None:
+def test_complete_board_accepts_team_per_outcome_rows_for_one_market() -> None:
     rows = [
         {
             "event_id": "event-1",
             "bookmaker": "bovada",
             "kind": "game",
             "market_key": "h2h",
-            "outcome": "Player A",
-            "price_american": -110,
+            "team": "Player A",
+            "price": -110,
             "last_update": "2026-09-23T01:00:00Z",
         },
         {
@@ -84,8 +84,8 @@ def test_complete_board_accepts_documented_per_outcome_rows_for_one_market() -> 
             "bookmaker": "bovada",
             "kind": "game",
             "market_key": "h2h",
-            "outcome": "Player B",
-            "price_american": 105,
+            "team": "Player B",
+            "price": 105,
             "last_update": "2026-09-23T01:00:00Z",
         },
     ]
@@ -99,7 +99,7 @@ def test_complete_board_accepts_documented_per_outcome_rows_for_one_market() -> 
     assert len(snapshot.row_sha256s) == 2
 
 
-def test_complete_board_rejects_conflicting_rows_for_same_outcome() -> None:
+def test_complete_board_accepts_outcome_alias_rows_for_one_market() -> None:
     rows = [
         {
             "event_id": "event-1",
@@ -108,6 +108,35 @@ def test_complete_board_rejects_conflicting_rows_for_same_outcome() -> None:
             "market_key": "h2h",
             "outcome": "Player A",
             "price_american": -110,
+        },
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "outcome": "Player B",
+            "price_american": 105,
+        },
+    ]
+
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at="2026-09-23T01:00:02Z",
+        frame_json=json.dumps(_frame(rows)),
+    )
+
+    assert len(snapshot.row_sha256s) == 2
+
+
+def test_complete_board_rejects_conflicting_rows_for_same_team_outcome() -> None:
+    rows = [
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "team": "Player A",
+            "price": -110,
             "last_update": "2026-09-23T01:00:00Z",
         },
         {
@@ -115,8 +144,8 @@ def test_complete_board_rejects_conflicting_rows_for_same_outcome() -> None:
             "bookmaker": "bovada",
             "kind": "game",
             "market_key": "h2h",
-            "outcome": "Player A",
-            "price_american": -105,
+            "team": "Player A",
+            "price": -105,
             "last_update": "2026-09-23T01:00:01Z",
         },
     ]
@@ -124,6 +153,30 @@ def test_complete_board_rejects_conflicting_rows_for_same_outcome() -> None:
     with pytest.raises(
         ProviderObservationIntegrityError,
         match="conflicting rows for one logical provider row",
+    ):
+        CompleteGameBoardSnapshot(
+            request=_request(),
+            captured_at="2026-09-23T01:00:02Z",
+            frame_json=json.dumps(_frame(rows)),
+        )
+
+
+def test_complete_board_rejects_conflicting_per_outcome_aliases() -> None:
+    rows = [
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "team": "Player A",
+            "outcome": "Player B",
+            "price": -110,
+        }
+    ]
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="conflicting per-outcome identity aliases",
     ):
         CompleteGameBoardSnapshot(
             request=_request(),

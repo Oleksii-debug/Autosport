@@ -60,6 +60,10 @@ class _FakeWebview:
         self.api = None
         self.requested_gui: str | None = None
         self.bridge_rejected_after_navigation = False
+        self.settings = {
+            "WEBVIEW2_RUNTIME_PATH": None,
+            "REMOTE_DEBUGGING_PORT": None,
+        }
 
     def create_window(self, *args, **kwargs):
         self.api = kwargs["js_api"]

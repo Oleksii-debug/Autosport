@@ -348,7 +348,7 @@ class SmarketsAccountActivityPageEvidence:
     rows: tuple[SmarketsAccountActivityRow, ...]
     pagination_present: bool
     next_page_query: str | None
-    query_exhausted: bool
+    request_page_chain_exhausted: bool
     evidence_sha256: str
 
     def to_canonical_dict(self) -> dict[str, object]:
@@ -368,7 +368,7 @@ class SmarketsAccountActivityPageEvidence:
             "rows": [row.to_canonical_dict() for row in self.rows],
             "pagination_present": self.pagination_present,
             "next_page_query": self.next_page_query,
-            "query_exhausted": self.query_exhausted,
+            "request_page_chain_exhausted": self.request_page_chain_exhausted,
         }
 
 
@@ -661,7 +661,7 @@ def parse_smarkets_account_activity_page(
 
     pagination_present = "pagination" in parsed
     next_page_query: str | None = None
-    query_exhausted = False
+    request_page_chain_exhausted = False
     if pagination_present:
         pagination = _object(parsed["pagination"], "pagination")
         if set(pagination) != {"next_page"}:
@@ -670,7 +670,7 @@ def parse_smarkets_account_activity_page(
             )
         next_page = pagination["next_page"]
         if next_page is None:
-            query_exhausted = limit != 0
+            request_page_chain_exhausted = limit != 0
         else:
             next_page_query = _validate_next_page(
                 next_page,
@@ -692,7 +692,7 @@ def parse_smarkets_account_activity_page(
         rows=rows,
         pagination_present=pagination_present,
         next_page_query=next_page_query,
-        query_exhausted=query_exhausted,
+        request_page_chain_exhausted=request_page_chain_exhausted,
         evidence_sha256="",
     )
     evidence_sha256 = _page_digest(provisional)
@@ -710,7 +710,7 @@ def parse_smarkets_account_activity_page(
         rows=provisional.rows,
         pagination_present=provisional.pagination_present,
         next_page_query=provisional.next_page_query,
-        query_exhausted=provisional.query_exhausted,
+        request_page_chain_exhausted=provisional.request_page_chain_exhausted,
         evidence_sha256=evidence_sha256,
     )
 

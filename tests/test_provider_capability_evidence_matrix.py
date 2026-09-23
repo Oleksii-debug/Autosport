@@ -3,6 +3,7 @@ import pickle
 
 import pytest
 
+import autosport.provider_capability_evidence_matrix as capability_module
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
@@ -114,6 +115,21 @@ def matrix(*, p=None, facts=(), version=1, predecessor=None, as_of=T3, environme
         evidence=facts,
         predecessor_matrix_id=predecessor,
     )
+
+
+def test_authority_state_exposes_no_module_level_registry_or_matrix_mint():
+    assert (
+        capability_module.CAPABILITY_EVIDENCE_TRUST_BOUNDARY
+        == "trusted-process-api-provenance-v1"
+    )
+    for name in (
+        "_ISSUED_EVIDENCE",
+        "_ISSUED_EVIDENCE_SEALS",
+        "_ISSUED_MATRICES",
+        "_ISSUED_MATRIX_SEALS",
+        "_register_product_matrix",
+    ):
+        assert not hasattr(capability_module, name)
 
 
 def test_supported_profile_alone_stays_unproven_and_never_authorizes_execution():

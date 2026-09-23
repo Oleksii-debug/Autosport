@@ -112,6 +112,12 @@ _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD_CODE: Final = getattr(
 # runtime without changing the registry file, so it is never positive START authority.
 _CANONICAL_SCIENTIFIC_REGISTRY_CLASS: Final = ScientificRegistry
 _CANONICAL_SCIENTIFIC_REGISTRY_SCHEMA_VERSION: Final = ScientificRegistry.SCHEMA_VERSION
+_CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY: Final = ScientificRegistry._validate_entry
+_CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY_CODE: Final = getattr(
+    _CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY,
+    "__code__",
+    None,
+)
 _SCIENTIFIC_REGISTRY_ENTRY_FIELDS: Final = frozenset(
     {
         "record_type",
@@ -502,10 +508,23 @@ def _validated_scientific_registry_records(
 ) -> list[dict[str, object]]:
     """Read START scientific authority directly from exact durable registry bytes."""
 
+    live_validate_entry = getattr(
+        _CANONICAL_SCIENTIFIC_REGISTRY_CLASS,
+        "_validate_entry",
+        None,
+    )
     if (
         ScientificRegistry is not _CANONICAL_SCIENTIFIC_REGISTRY_CLASS
         or _CANONICAL_SCIENTIFIC_REGISTRY_CLASS.SCHEMA_VERSION
         != _CANONICAL_SCIENTIFIC_REGISTRY_SCHEMA_VERSION
+        or _CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY_CODE is None
+        or live_validate_entry is not _CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY
+        or getattr(
+            live_validate_entry,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY_CODE
     ):
         raise ProductDecisionActivationError(
             "canonical ScientificRegistry authority changed"
@@ -523,6 +542,12 @@ def _validated_scientific_registry_records(
     records: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for raw in state["records"]:
+        try:
+            _CANONICAL_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY(raw)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProductDecisionActivationError(
+                "scientific registry entry failed canonical validation"
+            ) from exc
         if type(raw) is not dict or frozenset(raw) != _SCIENTIFIC_REGISTRY_ENTRY_FIELDS:
             raise ProductDecisionActivationError(
                 "scientific registry entry fields mismatch"

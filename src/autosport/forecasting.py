@@ -16,6 +16,7 @@ from .causal_integrity import (
     contains_forbidden_future_key,
     freeze_canonical_json_object,
 )
+from .domain import _canonical_semantic_identity
 
 
 _ALLOWED_SPLITS = {"validation", "holdout"}
@@ -65,6 +66,7 @@ class ForecastRecord:
     market_snapshot_hash: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
     forecast_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         probability = Decimal(str(self.probability))
@@ -73,6 +75,15 @@ class ForecastRecord:
         object.__setattr__(self, "uncertainty", uncertainty)
         if not self.quote_key or not self.model_id or not self.model_version or not self.strategy_version:
             raise ValueError("forecast identities must not be empty")
+        if self.market_semantics_id is not None:
+            object.__setattr__(
+                self,
+                "market_semantics_id",
+                _canonical_semantic_identity(
+                    self.market_semantics_id,
+                    "market_semantics_id",
+                ),
+            )
         if not probability.is_finite():
             raise ValueError("probability must be finite")
         if not uncertainty.is_finite():
@@ -126,7 +137,7 @@ class ForecastRecord:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "forecast_id": self.forecast_id,
             "quote_key": self.quote_key,
             "probability": str(self.probability),
@@ -141,6 +152,11 @@ class ForecastRecord:
             "market_snapshot_hash": self.market_snapshot_hash,
             "provenance": _json_provenance(self.provenance),
         }
+        # Preserve the exact legacy/no-semantics serialization and digest.
+        # A concrete rule identity is additive authority; None is not a new byte.
+        if self.market_semantics_id is not None:
+            payload["market_semantics_id"] = self.market_semantics_id
+        return payload
 
 
 class JsonlForecastLedger:

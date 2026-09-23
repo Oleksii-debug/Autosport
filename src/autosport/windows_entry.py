@@ -143,15 +143,9 @@ def _run_interactive_gui() -> int:
         return 2
 
     try:
-        _probe_workspace_writable(workspace)
-    except OSError as exc:
-        _show_workspace_access_error(workspace, exc)
-        return 2
+        from autosport.webview2_runtime_deployment import ensure_webview2_runtime
 
-    try:
-        from autosport.webview2_runtime_preflight import probe_webview2_runtime
-
-        runtime_preflight = probe_webview2_runtime()
+        runtime_preflight = ensure_webview2_runtime()
     except Exception:
         _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
         return 3
@@ -159,6 +153,12 @@ def _run_interactive_gui() -> int:
     if runtime_preflight.available is not True:
         _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
         return 3
+
+    try:
+        _probe_workspace_writable(workspace)
+    except OSError as exc:
+        _show_workspace_access_error(workspace, exc)
+        return 2
 
     from autosport.windows_webview_emergency_stop import EmergencyStopWebController
     from autosport.windows_webview_shell import (

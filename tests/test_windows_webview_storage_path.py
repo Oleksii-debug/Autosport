@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections import UserDict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,6 +190,52 @@ def test_empty_webview_environment_overrides_do_not_retarget_release(
         "gui": "edgechromium",
         "storage_path": str(tmp_path / "Local" / "Autosport" / "webview2"),
     }
+
+
+def test_pywebview_userdict_settings_shape_allows_canonical_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    _clear_webview2_environment_overrides(monkeypatch)
+
+    calls: dict[str, object] = {}
+    fake = _fake_webview(calls)
+    fake.settings = UserDict(
+        {
+            "WEBVIEW2_RUNTIME_PATH": None,
+            "REMOTE_DEBUGGING_PORT": None,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert launch_windows_shell(_Bridge()) == 0
+    assert "create_window" in calls
+    assert calls["start"] == {
+        "gui": "edgechromium",
+        "storage_path": str(tmp_path / "Local" / "Autosport" / "webview2"),
+    }
+
+
+def test_pywebview_settings_missing_controlled_key_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    _clear_webview2_environment_overrides(monkeypatch)
+
+    calls: dict[str, object] = {}
+    fake = _fake_webview(calls)
+    fake.settings = UserDict({"WEBVIEW2_RUNTIME_PATH": None})
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="не може підтвердити параметри pywebview",
+    ):
+        launch_windows_shell(_Bridge())
+
+    assert calls == {}
 
 
 @pytest.mark.parametrize(

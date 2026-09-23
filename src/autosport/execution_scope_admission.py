@@ -52,7 +52,8 @@ class ExecutionAdmissionBlocker(str, Enum):
     SETTLEMENT_RULE_UNPROVEN = "SETTLEMENT_RULE_UNPROVEN"
     ECONOMIC_RISK_GATES_UNPROVEN = "ECONOMIC_RISK_GATES_UNPROVEN"
     DISPATCH_REQUEST_UNBOUND = "DISPATCH_REQUEST_UNBOUND"
-    PRODUCT_SUPERVISED_ACTION_UNPROVEN = "PRODUCT_SUPERVISED_ACTION_UNPROVEN"\n    SINGLE_USE_RESTART_UNPROVEN = "SINGLE_USE_RESTART_UNPROVEN"
+    PRODUCT_SUPERVISED_ACTION_UNPROVEN = "PRODUCT_SUPERVISED_ACTION_UNPROVEN"
+    SINGLE_USE_RESTART_UNPROVEN = "SINGLE_USE_RESTART_UNPROVEN"
 
 
 def _text(value: object, field: str) -> str:
@@ -287,8 +288,12 @@ class ExecutionScopePreAdmission:
                 "provider_action_documented": self.provider_action_documented,
                 "governance_automation_permitted": self.governance_automation_permitted,
                 "integration_channel_bound": self.integration_channel_bound,
-                "product_supervised_action_issued": (\n                    self.product_supervised_action_issued\n                ),
-                "provider_write_entitlement_proven": (\n                    self.provider_write_entitlement_proven\n                ),
+                "product_supervised_action_issued": (
+                    self.product_supervised_action_issued
+                ),
+                "provider_write_entitlement_proven": (
+                    self.provider_write_entitlement_proven
+                ),
                 "authenticated_context_proven": self.authenticated_context_proven,
                 "current_scope_capability_proven": self.current_scope_capability_proven,
                 "market_data_mode_suitable": self.market_data_mode_suitable,

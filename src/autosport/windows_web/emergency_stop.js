@@ -27,7 +27,7 @@
       const result = await dispatch(
         "emergency_stop.activate",
         {},
-        { globalAnnouncement: false },
+        { globalAnnouncement: false, resultFocus: false },
       );
       if (result === null) {
         setStatus(

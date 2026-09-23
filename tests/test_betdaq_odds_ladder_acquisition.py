@@ -134,6 +134,19 @@ def _canonical_observation(
     return observation, calls
 
 
+def _white_box_positive_observation(monkeypatch: pytest.MonkeyPatch):
+    """Exercise downstream use policy without treating fake network as live origin."""
+    observation, calls = _canonical_observation(monkeypatch)
+    return (
+        replace(
+            observation,
+            _origin_witness=ladder_acq._ORIGIN_WITNESS,
+            _clock_witness=ladder_acq._CLOCK_WITNESS,
+        ),
+        calls,
+    )
+
+
 def test_request_is_exact_readonly_decimal_ladder_call() -> None:
     transport = RecordingTransport([_response()])
     acquirer = BetdaqOddsLadderAcquirer(
@@ -287,18 +300,29 @@ def test_provider_message_time_is_preserved_but_never_relabelled_freshness() -> 
     assert observation.provider_freshness_proven is False
 
 
-def test_canonical_https_transport_can_mint_narrow_origin_witness(
+def test_monkeypatched_urlopen_cannot_mint_provider_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observation, calls = _canonical_observation(monkeypatch)
 
-    assert observation.provider_origin_verified is True
+    assert observation.provider_origin_verified is False
     assert observation.receipt_clock_verified is True
     assert len(calls) == 1
     request, timeout = calls[0]
     assert request.full_url == BETDAQ_ODDS_LADDER_ENDPOINT
     assert timeout == 10.0
+    with pytest.raises(BetdaqOddsLadderUseError, match="provider origin"):
+        qualify_exact_price_for_local_use(
+            observation,
+            Decimal("2.00"),
+            max_age_seconds=60,
+        )
 
+
+def test_narrow_use_evidence_never_claims_provider_freshness_or_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation, _ = _white_box_positive_observation(monkeypatch)
     use = qualify_exact_price_for_local_use(
         observation,
         Decimal("2.00"),
@@ -310,11 +334,10 @@ def test_canonical_https_transport_can_mint_narrow_origin_witness(
     assert use.provider_freshness_proven is False
     assert use.write_permission_proven is False
 
-
 def test_off_ladder_price_is_rejected_without_rounding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observation, _ = _canonical_observation(monkeypatch)
+    observation, _ = _white_box_positive_observation(monkeypatch)
     with pytest.raises(BetdaqOddsLadderUseError, match="not present"):
         qualify_exact_price_for_local_use(
             observation,
@@ -345,7 +368,7 @@ def _retime_positive_observation(observation, observed_at: str):
 def test_stale_and_clock_rollback_observations_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observation, _ = _canonical_observation(monkeypatch)
+    observation, _ = _white_box_positive_observation(monkeypatch)
 
     stale = _retime_positive_observation(observation, "2020-01-01T00:00:00Z")
     with pytest.raises(BetdaqOddsLadderUseError, match="use horizon"):
@@ -367,7 +390,7 @@ def test_stale_and_clock_rollback_observations_fail_closed(
 def test_restart_restore_preserves_history_but_not_live_use_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observation, _ = _canonical_observation(monkeypatch)
+    observation, _ = _white_box_positive_observation(monkeypatch)
     record = observation.to_safe_record()
     assert record["historical_provider_origin_verified"] is True
     assert record["historical_receipt_clock_verified"] is True

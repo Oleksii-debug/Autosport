@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import runpy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -329,6 +329,7 @@ def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
             original,
         )
 
+
 def test_trusted_network_witness_rejects_status_remaining_contradiction() -> None:
     action = _action()
     capture = _capture(
@@ -368,6 +369,7 @@ def test_trusted_network_witness_rejects_status_remaining_contradiction() -> Non
     finally:
         object.__setattr__(order, "status", original_status)
 
+
 def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
     action = _action()
     capture = _capture(
@@ -382,10 +384,6 @@ def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
     requested = Decimal("1")
     matched = Decimal("0.50000000000000000000000000005")
     remaining = Decimal("0.5")
-    # Under the default Decimal context the inexact addition rounds back to 1.
-    # The authority projection must nevertheless reject the exact over-allocation.
-    assert matched + remaining == requested
-
     original = (
         order.requested_size,
         order.size_matched,
@@ -399,20 +397,24 @@ def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
     raw["sizeMatched"] = matched
     raw["sizeRemaining"] = remaining
     try:
-        with pytest.raises(
-            BetfairReadOnlyError,
-            match="size_matched plus size_remaining cannot exceed requested_size",
-        ):
-            matcher(
-                capture,
-                witnesses,
-                venue_id=capture.venue_id,
-                account_id=capture.account_id,
-                action_id=capture.action_id,
-                market_id=capture.market_id,
-                provider_order_ref=capture.provider_order_ref,
-                page_size=capture.page_size,
-            )
+        with localcontext() as context:
+            context.prec = 28
+            # Context-sensitive addition rounds the exact overage back to 1.
+            assert matched + remaining == requested
+            with pytest.raises(
+                BetfairReadOnlyError,
+                match="size_matched plus size_remaining cannot exceed requested_size",
+            ):
+                matcher(
+                    capture,
+                    witnesses,
+                    venue_id=capture.venue_id,
+                    account_id=capture.account_id,
+                    action_id=capture.action_id,
+                    market_id=capture.market_id,
+                    provider_order_ref=capture.provider_order_ref,
+                    page_size=capture.page_size,
+                )
     finally:
         object.__setattr__(order, "requested_size", original[0])
         object.__setattr__(order, "size_matched", original[1])

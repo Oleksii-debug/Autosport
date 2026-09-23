@@ -171,6 +171,34 @@ def test_measurement_period_cannot_end_after_owner_confirmation(
         store.publish_owner_basis(review, confirmed=True)
 
 
+def test_product_clock_rollback_cannot_backdate_later_owner_basis(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
+    first = store.publish_owner_basis(_review(store), confirmed=True)
+    before = store.path.read_bytes()
+
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: "2026-09-23T09:00:00Z",
+    )
+    later_review = _review(
+        store,
+        basis_id="basis-local-b-2026-09",
+        measurement_source_id="owner-reviewed-local-cost-ledger-b-2026-09",
+    )
+
+    with pytest.raises(
+        subject.LocalComputeAllocationBasisError,
+        match="product clock regressed",
+    ):
+        store.publish_owner_basis(later_review, confirmed=True)
+
+    assert store.path.read_bytes() == before
+    assert _resolve(store) == first
+
+
 def test_per_request_amount_must_have_exact_finite_decimal_representation(
     tmp_path, monkeypatch
 ):

@@ -13,6 +13,7 @@ from pathlib import Path
 import autosport.product_decision_activation as activation_module
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
+from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperExecutionModelConfig,
@@ -70,6 +71,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
             bankroll_id="bankroll-main",
             currency="EUR",
         )
+        EconomicGoalStore(self.workspace).initialize_owner(self.goal)
         self.risk = PaperRiskPolicy(economic_goal=self.goal)
         self.execution = PaperExecutionModelConfig(
             model_id="paper-execution",
@@ -312,6 +314,33 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         with self.assertRaises((ProductDecisionActivationError, ValueError)):
             self._verify()
+
+    def test_matching_risk_file_cannot_promote_non_durable_owner_goal(self) -> None:
+        forged_goal = replace(
+            self.goal,
+            revision=self.goal.revision + 1,
+            max_stake_fraction=Decimal("0.01"),
+        )
+        forged_risk = PaperRiskPolicy(economic_goal=forged_goal)
+        self._write_risk(forged_risk, forged_goal)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "durable authority owner EconomicGoalContract",
+        ):
+            self.store.initialize_owner(
+                scientific_registry=self.registry,
+                strategy_version_id=self.STRATEGY_ID,
+                economic_goal=forged_goal,
+                risk_policy=forged_risk,
+                execution_config=self.execution,
+            )
+
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(
+            EconomicGoalStore(self.workspace).load(),
+            self.goal,
+        )
 
     def test_same_goal_labels_with_changed_semantics_are_rejected(self) -> None:
         self._initialize()

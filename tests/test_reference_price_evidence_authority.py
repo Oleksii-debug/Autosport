@@ -57,7 +57,7 @@ def _build(events: tuple[MarketEvent, ...]):
     protocol = ReferencePriceProtocol(
         eligible_source_ids=source_ids,
         eligible_price_source_ids=price_source_ids,
-        target_source_id="target-provider",
+        target_price_source_id="target-provider",
         target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
         price_semantics="best_available_to_back",
         max_age_seconds=30,

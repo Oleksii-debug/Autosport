@@ -14,6 +14,7 @@ from typing import Final
 
 CORRECTION_SCHEMA: Final = "autosport.reward_correction_ledger"
 CORRECTION_SCHEMA_VERSION: Final = 1
+_MAX_FIXED_DECIMAL_CHARS: Final = 512
 
 class RewardCorrectionError(ValueError): pass
 
@@ -44,8 +45,22 @@ def _dec(name: str, value: object) -> Decimal:
     if not isinstance(value,Decimal) or not value.is_finite(): raise RewardCorrectionError(f"{name} must be a finite exact Decimal")
     return value
 
+def _fixed_decimal_length(value: Decimal) -> int:
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise RewardCorrectionError("finite Decimal must have an integer exponent")
+    digit_count = len(digits)
+    sign_count = 1 if sign else 0
+    if exponent >= 0:
+        return sign_count + digit_count + exponent
+    return sign_count + max(digit_count + exponent, 1) + 1 + (-exponent)
+
 def _decimal_text(name: str, value: object) -> str:
     exact = _dec(name, value)
+    if _fixed_decimal_length(exact) > _MAX_FIXED_DECIMAL_CHARS:
+        raise RewardCorrectionError(
+            f"{name} fixed-point text exceeds {_MAX_FIXED_DECIMAL_CHARS} characters"
+        )
     text = format(exact, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")

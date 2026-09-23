@@ -125,8 +125,27 @@ CREATE TRIGGER corrections_no_delete BEFORE DELETE ON corrections BEGIN SELECT R
 CREATE TRIGGER invalidations_no_update BEFORE UPDATE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END;
 CREATE TRIGGER invalidations_no_delete BEFORE DELETE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END;
 """
-_TRIGGERS={"artifacts_no_update","artifacts_no_delete","dependencies_no_update","dependencies_no_delete","corrections_no_update","corrections_no_delete","invalidations_no_update","invalidations_no_delete"}
+_TRIGGER_SQL={
+    "artifacts_no_update": "CREATE TRIGGER artifacts_no_update BEFORE UPDATE ON artifacts BEGIN SELECT RAISE(ABORT,'reward correction artifacts are immutable'); END",
+    "artifacts_no_delete": "CREATE TRIGGER artifacts_no_delete BEFORE DELETE ON artifacts BEGIN SELECT RAISE(ABORT,'reward correction artifacts are immutable'); END",
+    "dependencies_no_update": "CREATE TRIGGER dependencies_no_update BEFORE UPDATE ON dependencies BEGIN SELECT RAISE(ABORT,'reward correction dependencies are immutable'); END",
+    "dependencies_no_delete": "CREATE TRIGGER dependencies_no_delete BEFORE DELETE ON dependencies BEGIN SELECT RAISE(ABORT,'reward correction dependencies are immutable'); END",
+    "corrections_no_update": "CREATE TRIGGER corrections_no_update BEFORE UPDATE ON corrections BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END",
+    "corrections_no_delete": "CREATE TRIGGER corrections_no_delete BEFORE DELETE ON corrections BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END",
+    "invalidations_no_update": "CREATE TRIGGER invalidations_no_update BEFORE UPDATE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END",
+    "invalidations_no_delete": "CREATE TRIGGER invalidations_no_delete BEFORE DELETE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END",
+}
+_TRIGGERS=set(_TRIGGER_SQL)
 _INDEXES={"dependencies_by_dependency","invalidations_by_artifact","corrections_by_superseded","corrections_by_corrected"}
+
+def _normalized_trigger_sql(value:object):
+    if not isinstance(value,str): return None
+    return " ".join(value.strip().rstrip(";").split())
+
+def _is_canonical_trigger_sql(name:str,value:object):
+    expected=_TRIGGER_SQL.get(name)
+    if expected is None: return False
+    return _normalized_trigger_sql(value)==_normalized_trigger_sql(expected)
 
 def _discard_owned_ledger_path(path:Path):
     try: path.unlink(missing_ok=True)
@@ -255,8 +274,8 @@ class RewardCorrectionLedger:
     def verify_integrity(self):
         try:
             if dict(self._connection.execute("SELECT key,value FROM metadata"))!={"schema":CORRECTION_SCHEMA,"schema_version":str(CORRECTION_SCHEMA_VERSION)}: raise RewardCorrectionError("reward correction metadata mismatch")
-            triggers={r[0] for r in self._connection.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
-            if triggers!=_TRIGGERS: raise RewardCorrectionError("reward correction immutability triggers mismatch")
+            triggers={r[0]:r[1] for r in self._connection.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'")}
+            if set(triggers)!=_TRIGGERS or any(not _is_canonical_trigger_sql(name,triggers[name]) for name in _TRIGGERS): raise RewardCorrectionError("reward correction immutability triggers mismatch")
             indexes={r[0] for r in self._connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL")}
             if indexes!=_INDEXES: raise RewardCorrectionError("reward correction performance indexes mismatch")
             arts={}

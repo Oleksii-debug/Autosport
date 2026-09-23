@@ -664,6 +664,40 @@ def test_restart_seeds_active_durable_blacklist_into_new_monotonic_horizon(
     )
 
 
+def test_restart_after_forward_wall_jump_replays_full_relative_blacklist_horizon(
+    tmp_path: Path,
+) -> None:
+    configured = policy(("GetPrices", 3, 0))
+    governor, _, wall, workspace, authority_root = make_ready(
+        tmp_path, configured
+    )
+    governor.observe_blacklist(
+        api_name="GetPrices",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    wall.advance(3600.0)
+    simulate_process_restart(workspace)
+    new_clock = FakeClock(10.0)
+    reopened = resolve_betdaq_rate_governor(
+        workspace,
+        configured,
+        clock=new_clock,
+        wall_clock=wall,
+        authority_root=authority_root,
+    )
+
+    assert reopened.blacklist_status("GetPrices") is BetdaqBlacklistStatus.BLACKLISTED
+    new_clock.advance(59.0)
+    assert reopened.blacklist_status("GetPrices") is BetdaqBlacklistStatus.BLACKLISTED
+    new_clock.advance(1.0)
+    assert (
+        reopened.blacklist_status("GetPrices")
+        is BetdaqBlacklistStatus.EXPIRED_OBSERVATION
+    )
+
+
 def test_legacy_changeorder_blacklist_alias_fences_actual_update_operation(
     tmp_path: Path,
 ) -> None:

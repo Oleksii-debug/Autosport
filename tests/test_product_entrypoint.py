@@ -196,6 +196,72 @@ class SupportedProductEntrypointTests(unittest.TestCase):
         self.assertEqual(lines.count("AUTOSPORT RECORD"), 1)
         self.assertEqual(lines.count("END AUTOSPORT RECORD"), 1)
 
+    def test_text_formatter_preserves_distinct_mapping_key_identities(self) -> None:
+        first = _format_text_record(
+            {
+                "kind": "product_tick",
+                "paper_only": True,
+                "real_money_execution": False,
+                "value": {
+                    1: "integer",
+                    "1": "string",
+                    None: "none",
+                    "null": "string-null",
+                    2.5: "float",
+                    "2.5": "string-float",
+                },
+            }
+        )
+        second = _format_text_record(
+            {
+                "kind": "product_tick",
+                "paper_only": True,
+                "real_money_execution": False,
+                "value": {
+                    "2.5": "string-float",
+                    2.5: "float",
+                    "null": "string-null",
+                    None: "none",
+                    "1": "string",
+                    1: "integer",
+                },
+            }
+        )
+
+        self.assertEqual(first, second)
+        self.assertIn('value[int=1]: "integer"', first)
+        self.assertIn('value.1: "string"', first)
+        self.assertIn('value[null]: "none"', first)
+        self.assertIn('value.null: "string-null"', first)
+        self.assertIn('value[float=2.5]: "float"', first)
+        self.assertIn('value["2.5"]: "string-float"', first)
+        labels = [
+            line.split(": ", 1)[0]
+            for line in first.splitlines()
+            if ": " in line
+        ]
+        self.assertEqual(len(labels), len(set(labels)))
+
+    def test_text_formatter_rejects_non_finite_or_non_json_mapping_keys(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mapping float keys must be finite"):
+            _format_text_record(
+                {
+                    "kind": "product_tick",
+                    "paper_only": True,
+                    "real_money_execution": False,
+                    "value": {float("nan"): "ambiguous"},
+                }
+            )
+
+        with self.assertRaisesRegex(TypeError, "mapping keys must be"):
+            _format_text_record(
+                {
+                    "kind": "product_tick",
+                    "paper_only": True,
+                    "real_money_execution": False,
+                    "value": {(1, 2): "not-json-object-compatible"},
+                }
+            )
 
     def test_text_formatter_escapes_unicode_controls_but_preserves_readable_unicode(self) -> None:
         text = _format_text_record(

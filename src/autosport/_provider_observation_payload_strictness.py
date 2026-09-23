@@ -4,7 +4,8 @@ Provider frame payloads stay extensible and are content-bound by ``frame_sha256`
 The Autosport-owned request/evidence envelopes are versioned schemas, so accepting
 unknown keys would let modified persisted bytes normalize to the same checked state.
 A replacement ``current_game_board`` also represents one current value per logical
-provider market; conflicting rows for the same logical identity fail closed.
+provider row; conflicting rows for the same exact row identity fail closed while
+documented per-outcome rows for one market remain distinct.
 """
 
 from __future__ import annotations
@@ -52,14 +53,14 @@ def _strict_snapshot_from_payload(cls, payload: Mapping[str, object]):
 
 
 def _strict_snapshot_validate_frame(self, frame: Mapping[str, object]) -> None:
-    """Reject two distinct current rows for one provider market identity."""
+    """Reject distinct current values for one exact provider row identity."""
 
     _ORIGINAL_SNAPSHOT_VALIDATE_FRAME(self, frame)
     rows = frame.get("data")
     if not isinstance(rows, list):
         return
 
-    logical_rows: set[tuple[object, object, object, object]] = set()
+    logical_rows: set[tuple[object, object, object, object, object]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -68,10 +69,11 @@ def _strict_snapshot_validate_frame(self, frame: Mapping[str, object]) -> None:
             row.get("bookmaker"),
             row.get("kind"),
             row.get("market_key"),
+            row.get("outcome"),
         )
         if logical_identity in logical_rows:
             raise authority.ProviderObservationIntegrityError(
-                "provider snapshot contains conflicting rows for one logical market"
+                "provider snapshot contains conflicting rows for one logical provider row"
             )
         logical_rows.add(logical_identity)
 

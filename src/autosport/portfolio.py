@@ -48,7 +48,14 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
 
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
-) -> tuple[str, Decimal, tuple[TicketLeg, ...], str, TicketStatus]:
+) -> tuple[
+    str,
+    Decimal,
+    tuple[TicketLeg, ...],
+    str,
+    TicketStatus,
+    tuple[str, ...],
+]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
     return (
@@ -57,6 +64,7 @@ def _analysis_ticket_fingerprint(
         ticket.legs,
         ticket.placed_at,
         ticket.status,
+        ticket.provider_source_ids,
     )
 
 
@@ -79,7 +87,14 @@ def _snapshot_open_tickets_for_analysis(
     for ticket in source_tickets:
         fingerprint = _analysis_ticket_fingerprint(ticket)
         captured.append(fingerprint)
-        ticket_id, stake, legs, placed_at, status = fingerprint
+        (
+            ticket_id,
+            stake,
+            legs,
+            placed_at,
+            status,
+            provider_source_ids,
+        ) = fingerprint
         if status is not TicketStatus.OPEN:
             continue
         snapshots.append(
@@ -89,6 +104,7 @@ def _snapshot_open_tickets_for_analysis(
                 legs=tuple(legs),
                 placed_at=placed_at,
                 status=TicketStatus.OPEN,
+                provider_source_ids=tuple(provider_source_ids),
             )
         )
 

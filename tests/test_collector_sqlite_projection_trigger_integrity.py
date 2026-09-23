@@ -61,7 +61,7 @@ def test_pre_marker_same_name_trigger_is_reconciled_and_replaced(tmp_path) -> No
     CollectorDeltaStore(path)
 
     sql = " ".join(_trigger_sql(path).split())
-    assert "BEFORE UPDATE OF delta_id, source_id, stream_epoch" in sql
+    assert "BEFORE UPDATE OF commit_seq, delta_id, source_id, stream_epoch" in sql
     assert "SELECT RAISE(ABORT, 'collector delta indexed projections are immutable')" in sql
     assert "AFTER UPDATE ON collector_deltas BEGIN SELECT 1" not in sql
 

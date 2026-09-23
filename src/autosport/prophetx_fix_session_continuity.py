@@ -531,10 +531,22 @@ class ProphetXFixContinuityStore:
                 "caller local_sequence_store_lost flag cannot authorize sequence reset"
             )
 
+        checkpoint_time = _time(checkpoint.updated_at, "checkpoint updated_at")
+        observed_time = _time(observed, "observed_at")
+        if observed_time < checkpoint_time:
+            raise ProphetXFixEvidenceConflict(
+                "reconnect observation time rolls back durable checkpoint"
+            )
+
         if disconnected_since is not None:
             disconnected = _canonical_time(disconnected_since, "disconnected_since")
-            if _time(disconnected, "disconnected_since") > _time(observed, "observed_at"):
+            disconnected_time = _time(disconnected, "disconnected_since")
+            if disconnected_time > observed_time:
                 raise ProphetXFixContractError("disconnected_since is in the future")
+            if disconnected_time < checkpoint_time:
+                raise ProphetXFixEvidenceConflict(
+                    "disconnected_since predates durable checkpoint"
+                )
             if (
                 _time(observed, "observed_at") - _time(disconnected, "disconnected_since")
                 > _PROVIDER_RESEND_WINDOW

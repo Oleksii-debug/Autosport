@@ -523,3 +523,51 @@ def test_store_rejects_unknown_schema_version() -> None:
             conn.commit()
         with pytest.raises(ProphetXFixContractError, match="schema version"):
             ProphetXFixContinuityStore(path)
+
+
+def test_reconnect_observation_cannot_roll_back_durable_checkpoint_time() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
+        identity = ident()
+        checkpoint = store.initialize_session(identity, observed_at=T0)
+        store.checkpoint_sequences(
+            identity,
+            expected_revision=checkpoint.revision,
+            next_expected_inbound=42,
+            next_outbound=17,
+            observed_at=T2,
+        )
+        with pytest.raises(
+            ProphetXFixEvidenceConflict,
+            match="observation time rolls back",
+        ):
+            store.plan_reconnect(
+                identity,
+                provider_logon_msg_seq_num=1,
+                observed_at=T1,
+                disconnected_since=T0,
+            )
+
+
+def test_disconnect_start_cannot_predate_newer_durable_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
+        identity = ident()
+        checkpoint = store.initialize_session(identity, observed_at=T0)
+        store.checkpoint_sequences(
+            identity,
+            expected_revision=checkpoint.revision,
+            next_expected_inbound=42,
+            next_outbound=17,
+            observed_at=T2,
+        )
+        with pytest.raises(
+            ProphetXFixEvidenceConflict,
+            match="predates durable checkpoint",
+        ):
+            store.plan_reconnect(
+                identity,
+                provider_logon_msg_seq_num=42,
+                observed_at="2026-09-23T00:03:00+00:00",
+                disconnected_since=T1,
+            )

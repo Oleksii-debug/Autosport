@@ -997,6 +997,14 @@ class LocalComputeTariffAuthorityStore:
             ) from exc
         return goal, _goal_sha256(goal)
 
+    def _basis_authority(self) -> LocalComputeAllocationBasisAuthorityStore:
+        authority = self._basis_store
+        if type(authority) is not LocalComputeAllocationBasisAuthorityStore:
+            raise LocalComputeTariffError(
+                "local compute allocation basis authority instance is not canonical"
+            )
+        return authority
+
     def publish_allocation_basis(
         self,
         *,
@@ -1011,7 +1019,7 @@ class LocalComputeTariffAuthorityStore:
         """Create one re-resolvable product-owned allocation basis."""
 
         return LocalComputeAllocationBasisAuthorityStore.publish_basis(
-            self._basis_store,
+            self._basis_authority(),
             basis_id=basis_id,
             backend_id=backend_id,
             model_id=model_id,
@@ -1047,7 +1055,7 @@ class LocalComputeTariffAuthorityStore:
         canonical_basis_id = _text(allocation_basis_id, "allocation_basis_id")
         recorded_at = _time(_authority_now(), "recorded_at")
         basis = LocalComputeAllocationBasisAuthorityStore.resolve(
-            self._basis_store,
+            self._basis_authority(),
             basis_id=canonical_basis_id,
             backend_id=canonical_backend,
             model_id=canonical_model,
@@ -1257,7 +1265,7 @@ class LocalComputeTariffAuthorityStore:
         if resolved is None:
             return None
         basis = LocalComputeAllocationBasisAuthorityStore.resolve(
-            self._basis_store,
+            self._basis_authority(),
             basis_id=resolved.allocation_basis_id,
             backend_id=resolved.backend_id,
             model_id=resolved.model_id,

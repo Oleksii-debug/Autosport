@@ -31,6 +31,17 @@
     if (document.activeElement !== node && node.value !== text) node.value = text;
   }
 
+  function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop) {
+    const focused = document.activeElement;
+    startButton.disabled = canStart !== true;
+    stopButton.disabled = canStop !== true;
+    if (focused === startButton && startButton.disabled && !stopButton.disabled) {
+      stopButton.focus();
+    } else if (focused === stopButton && stopButton.disabled && !startButton.disabled) {
+      startButton.focus();
+    }
+  }
+
   function requestId() {
     if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
       return globalThis.crypto.randomUUID();
@@ -227,8 +238,12 @@
       byId("product-runtime-status"),
       productRuntime.status || "Тривала симуляційна робота не запущена.",
     );
-    byId("product-runtime-start").disabled = productRuntime.can_start !== true;
-    byId("product-runtime-stop").disabled = productRuntime.can_stop !== true;
+    syncRuntimeActionAvailability(
+      byId("product-runtime-start"),
+      byId("product-runtime-stop"),
+      productRuntime.can_start,
+      productRuntime.can_stop,
+    );
 
     const busy = state.busy && Object.values(state.busy).some(Boolean);
     [101, 102, 103, 104, 105, 106, 107, 108, 109].forEach((id) => {

@@ -279,6 +279,42 @@ def test_issuer_fails_closed_if_venue_identity_is_rebound(monkeypatch):
         )
 
 
+def test_issuer_fails_closed_if_transport_code_is_mutated(monkeypatch):
+    canonical_post = subject.UrllibBetfairKeepAliveTransport.post_keep_alive
+
+    def forged_post(
+        self,
+        endpoint,
+        *,
+        application_key,
+        session_token,
+        timeout_seconds,
+    ):
+        return json.dumps(
+            {
+                "token": session_token,
+                "product": application_key,
+                "status": "SUCCESS",
+                "error": "",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    monkeypatch.setattr(canonical_post, "__code__", forged_post.__code__)
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session")
+    )
+
+    with pytest.raises(
+        BetfairSessionKeepAliveError,
+        match="canonical authenticated-session authority binding changed",
+    ):
+        keep_alive_betfair_session(
+            _forged_jurisdiction(),
+            client=client,
+        )
+
+
 def test_issuer_fails_closed_if_json_decoder_is_rebound(monkeypatch):
     class ForgedDecoder:
         def __init__(self, *args, **kwargs):

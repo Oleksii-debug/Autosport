@@ -286,10 +286,16 @@ def _goal_sha256(goal: object) -> str:
     )
 
 
-def _authority_now() -> str:
-    """Product clock seam. Tests may patch this private function."""
+def _authoritative_utc_now() -> str:
+    """Read product-owned UTC wall time for causal publication authority."""
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+_CANONICAL_AUTHORITY_NOW: Final = _authoritative_utc_now
+_CANONICAL_AUTHORITY_NOW_CODE: Final = _CANONICAL_AUTHORITY_NOW.__code__
+_CANONICAL_AUTHORITY_NOW_DATETIME: Final = datetime
+_CANONICAL_AUTHORITY_NOW_TIMEZONE: Final = timezone
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +651,24 @@ def _state_payload(
     }
 
 
+def _validate_publication_available_at(
+    records: tuple[LocalComputeAllocationBasisRecord, ...],
+    available_at: str,
+) -> datetime:
+    """Validate causal append order without exposing a writable clock seam."""
+
+    available_instant = _instant(available_at, "available_at")
+    if (
+        records
+        and available_instant
+        <= _instant(records[-1].available_at, "available_at")
+    ):
+        raise LocalComputeAllocationBasisError(
+            "product clock did not advance before allocation basis publication"
+        )
+    return available_instant
+
+
 class LocalComputeAllocationBasisAuthorityStore:
     """Creation-only owner-reviewed basis store with rollback fencing."""
 
@@ -833,16 +857,35 @@ class LocalComputeAllocationBasisAuthorityStore:
                     "basis_id is immutable"
                 )
 
-            available_at = _time(_authority_now(), "available_at")
-            available_instant = _instant(available_at, "available_at")
+            clock_globals = getattr(
+                _CANONICAL_AUTHORITY_NOW,
+                "__globals__",
+                {},
+            )
             if (
-                self._records
-                and available_instant
-                <= _instant(self._records[-1].available_at, "available_at")
+                _authoritative_utc_now is not _CANONICAL_AUTHORITY_NOW
+                or getattr(
+                    _CANONICAL_AUTHORITY_NOW,
+                    "__code__",
+                    None,
+                )
+                is not _CANONICAL_AUTHORITY_NOW_CODE
+                or clock_globals.get("datetime")
+                is not _CANONICAL_AUTHORITY_NOW_DATETIME
+                or clock_globals.get("timezone")
+                is not _CANONICAL_AUTHORITY_NOW_TIMEZONE
             ):
                 raise LocalComputeAllocationBasisError(
-                    "product clock did not advance before allocation basis publication"
+                    "product clock authority changed"
                 )
+            available_at = _time(
+                _CANONICAL_AUTHORITY_NOW(),
+                "available_at",
+            )
+            available_instant = _validate_publication_available_at(
+                self._records,
+                available_at,
+            )
             if _instant(
                 review.measurement_period_end,
                 "measurement_period_end",

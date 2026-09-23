@@ -651,6 +651,7 @@ def assemble_historical_corpus(
                 "source_id": f"parlayapi:{evidence['sport_key']}",
                 "product_kind": "POINT_IN_TIME_ODDS",
                 "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
+                "response_digest_semantics": "canonical_json_payload_not_raw_response_bytes",
                 "quote_count": int(evidence["quote_count"]),
                 "snapshot_timestamp_fallback_count": int(
                     evidence.get("snapshot_timestamp_fallback_count", 0)
@@ -985,6 +986,9 @@ def assemble_historical_corpus(
                     "governance_identity": governance_identity,
                     "qualified_corpus_identity": qualified_corpus_identity,
                     "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
+                    "canonical_response_payload_digest_bound": True,
+                    "raw_response_bytes_bound": False,
+                    "normalized_request_scope_bound": False,
                     "provider_response_metadata_bound": False,
                     "prospective_authority": False,
                     "raw_redistribution_authority": proof["redistribution_verified"] is True

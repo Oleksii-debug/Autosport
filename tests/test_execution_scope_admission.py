@@ -363,6 +363,14 @@ def test_assessment_cannot_be_replaced_into_positive_execution_admission() -> No
     assert replaced.execution_admitted is False
     assert replaced.assessment_sha256 == assessment.assessment_sha256
 
+    structurally_invalid = replace(
+        assessment,
+        supervised_action_binding_structurally_valid=False,
+    )
+    assert structurally_invalid.product_supervised_action_issued is False
+    assert structurally_invalid.execution_admitted is False
+    assert structurally_invalid.assessment_sha256 != assessment.assessment_sha256
+
 
 def test_scope_is_bound_to_exact_profile_and_integration_evidence() -> None:
     profile = _profile()

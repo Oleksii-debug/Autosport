@@ -475,3 +475,47 @@ def test_exact_store_instance_load_rebinding_cannot_replace_durable_authority(
             opportunities=opportunities,
         )
 
+
+
+def test_coherent_backing_substitution_cannot_retarget_resolved_store_authority(
+    tmp_path, monkeypatch
+):
+    protocol = _protocol()
+    canonical_store = _stored_universe(
+        tmp_path / "canonical",
+        monkeypatch,
+        empty=False,
+    )
+    alternate_store = _stored_universe(
+        tmp_path / "alternate",
+        monkeypatch,
+        empty=True,
+    )
+
+    canonical_before = resolve_forward_universe_members(
+        store=canonical_store,
+        protocol=protocol,
+    )
+    alternate = resolve_forward_universe_members(
+        store=alternate_store,
+        protocol=protocol,
+    )
+    assert len(canonical_before) == 2
+    assert len(alternate) == 1
+    assert canonical_store.authority_id == alternate_store.authority_id
+    assert canonical_store.source_id == alternate_store.source_id
+
+    canonical_store._store = alternate_store._store
+    canonical_store._intake = alternate_store._intake
+
+    # The exact outer object, campaign, scientific protocol, authority label and
+    # source label are unchanged.  Replacing the durable backing must not let
+    # that object silently become authority for a different frozen membership.
+    with pytest.raises(
+        ForwardEvaluationUniverseBindingError,
+        match="backing|locator|authority",
+    ):
+        resolve_forward_universe_members(
+            store=canonical_store,
+            protocol=protocol,
+        )

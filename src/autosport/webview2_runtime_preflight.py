@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
@@ -22,6 +23,14 @@ MICROSOFT_WEBVIEW2_DISTRIBUTION_DOC = (
 )
 MICROSOFT_WOW64_REGISTRY_VIEW_DOC = (
     "https://learn.microsoft.com/windows/win32/winprog64/accessing-an-alternate-registry-view"
+)
+
+WEBVIEW2_RELEASE_ENVIRONMENT_OVERRIDES = (
+    "PYWEBVIEW_GUI",
+    "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+    "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE",
+    "WEBVIEW2_CHANNEL_SEARCH_KIND",
 )
 
 _VERSION_RE = re.compile(
@@ -47,6 +56,36 @@ class RegistryObservationStatus(str, Enum):
 class RegistryView(str, Enum):
     PROCESS_DEFAULT = "PROCESS_DEFAULT"
     WOW64_32 = "WOW64_32"
+
+
+class WebView2ReleaseEnvironmentError(RuntimeError):
+    """Unsupported process environment can redirect the qualified WebView2 runtime."""
+
+
+@dataclass(frozen=True)
+class WebView2ReleaseEnvironment:
+    blocked_names: tuple[str, ...]
+
+    @property
+    def safe(self) -> bool:
+        return not self.blocked_names
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "blocked_names": list(self.blocked_names),
+            "kind": "webview2_release_environment",
+            "safe": self.safe,
+            "schema_version": 1,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
 
 
 @dataclass(frozen=True)
@@ -131,6 +170,37 @@ class WebView2RuntimePreflight:
             separators=(",", ":"),
             allow_nan=False,
         )
+
+
+def evaluate_webview2_release_environment(
+    environment: Mapping[str, str] | None = None,
+) -> WebView2ReleaseEnvironment:
+    """Inspect only release-relevant override names and never retain their values."""
+
+    source = os.environ if environment is None else environment
+    blocked: list[str] = []
+    for name in WEBVIEW2_RELEASE_ENVIRONMENT_OVERRIDES:
+        value = source.get(name)
+        if value is None or value == "":
+            continue
+        if type(value) is not str:
+            raise TypeError("WebView2 release environment values must be text")
+        blocked.append(name)
+    return WebView2ReleaseEnvironment(blocked_names=tuple(blocked))
+
+
+def require_webview2_release_environment(
+    environment: Mapping[str, str] | None = None,
+) -> WebView2ReleaseEnvironment:
+    """Fail closed before probing/installing a runtime under unsupported overrides."""
+
+    result = evaluate_webview2_release_environment(environment)
+    if not result.safe:
+        names = ", ".join(result.blocked_names)
+        raise WebView2ReleaseEnvironmentError(
+            "Unsupported WebView2 release environment override(s): " + names
+        )
+    return result
 
 
 def _parse_version(value: str, *, allow_zero: bool) -> tuple[int, int, int, int]:

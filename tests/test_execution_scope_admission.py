@@ -263,7 +263,10 @@ def test_other_action_kind_cannot_reuse_place_bet_capability() -> None:
     )
 
     assert assessment.provider_action_documented is False
-    assert ExecutionAdmissionBlocker.ACTION_NOT_DOCUMENTED in assessment.blocking_reasons
+    assert (
+        ExecutionAdmissionBlocker.ACTION_NOT_DOCUMENTED
+        in assessment.blocking_reasons
+    )
     assert assessment.execution_admitted is False
 
 

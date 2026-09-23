@@ -703,6 +703,10 @@ class PaperExecutionAdoptionRuntime:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"
             )
+        if action.side != "BACK" or attempt.side != action.side:
+            raise PaperExecutionAdoptionError(
+                "accepted-equivalent PAPER adoption requires exact BACK execution side"
+            )
         marker = f"{self._TICKET_MARKER}{attempt.attempt_id}"
         matches = [
             ticket
@@ -734,6 +738,7 @@ class PaperExecutionAdoptionRuntime:
                     selection_id=attempt.selection_id,
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
+                    exchange_side="back",
                     market_semantics_id=binding.market_semantics_id,
                 )
             ],
@@ -779,5 +784,8 @@ class PaperExecutionAdoptionRuntime:
             and leg.selection_id == attempt.selection_id
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
+            and action.side == "BACK"
+            and attempt.side == action.side
+            and leg.exchange_side == "back"
             and leg.market_semantics_id == binding.market_semantics_id
         )

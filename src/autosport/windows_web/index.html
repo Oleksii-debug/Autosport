@@ -82,9 +82,9 @@
 
     <section id="emergency-stop-panel" aria-labelledby="emergency-stop-heading">
       <h2 id="emergency-stop-heading">Аварійний STOP виконання</h2>
-      <p id="emergency-stop-boundary">Цей STOP блокує нові виконання через канонічну durable execution authority. Він не доводить, що вже запущений worker або feed завершився.</p>
+      <p id="emergency-stop-boundary">Цей STOP блокує допуск нових виконань через канонічний стійкий журнал заборони. Він не доводить завершення вже запущеного процесу або потоку даних.</p>
       <button id="emergency-stop-action" type="button" aria-describedby="emergency-stop-boundary emergency-stop-status">Активувати аварійний STOP</button>
-      <p id="emergency-stop-status" role="status" aria-live="assertive" aria-atomic="true" tabindex="-1">Аварійний STOP доступний. Активація блокує нові виконання.</p>
+      <p id="emergency-stop-status" role="status" aria-live="assertive" aria-atomic="true" tabindex="-1">Аварійний STOP доступний. Активація блокує допуск нових виконань.</p>
     </section>
 
     <section id="live-market" aria-labelledby="live-heading">

@@ -120,7 +120,8 @@ def _ledger_with_outcomes():
     for index, (row, stage) in enumerate(zip(rows, outcome_stages), start=1):
         events.append(_event(row, FunnelStage.ATTEMPTED, index))
         events.append(_event(row, stage, index))
-    # Later funnel enrichment must not erase the immutable attempt outcome.
+    # The accepted row later moved on. Projection must retain its original
+    # immutable attempt outcome rather than looking only at the current stage.
     events.append(
         SimpleNamespace(
             row_id=rows[0].row_id,
@@ -165,7 +166,7 @@ def test_projection_preserves_frozen_denominator_and_all_attempt_outcomes():
         Decimal("1"),
         Decimal("0.5"),
         Decimal("0"),
-        Decimal("0"),
+        None,
     ]
     assert [sample.price_movement for sample in report.samples] == [
         PriceMovement.HIGHER_ODDS,
@@ -175,6 +176,9 @@ def test_projection_preserves_frozen_denominator_and_all_attempt_outcomes():
     ]
     assert report.price_observation_count == 2
     assert report.price_observation_missing_count == 2
+    assert report.fill_observation_count == 3
+    assert report.fill_observation_missing_count == 1
+    assert report.fill_ratio.count == 3
 
 
 def test_projection_never_promotes_paper_model_fields_to_real_latency_or_live_economics():

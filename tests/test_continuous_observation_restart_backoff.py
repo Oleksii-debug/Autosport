@@ -208,5 +208,88 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             self.assertEqual(second_result.exit_code, 0)
 
 
+    def test_mixed_failure_history_does_not_inflate_provider_backoff_on_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            validation_provider = _SequenceProvider(
+                [ValueError("invalid provider payload before outage")]
+            )
+            validation_result = run_continuous_observation(
+                validation_provider,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: False,
+                reporter=None,
+                run_id="validation-before-outage",
+            )
+            self.assertEqual(validation_result.exit_code, 3)
+
+            before_outage = SourceHealthStore(
+                workspace / "source_health.json"
+            ).get(_SequenceProvider.source_id)
+            self.assertEqual(before_outage.consecutive_failures, 1)
+
+            outage_provider = _SequenceProvider(
+                [ProviderUnavailableError("provider outage before second crash")]
+            )
+
+            def crash_during_outage_backoff(seconds: float) -> bool:
+                self.assertEqual(seconds, 1.0)
+                raise SystemExit("simulated crash after mixed failure history")
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "simulated crash after mixed failure history",
+            ):
+                run_continuous_observation(
+                    outage_provider,
+                    self._config(workspace),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=crash_during_outage_backoff,
+                    reporter=None,
+                    run_id="outage-before-second-crash",
+                )
+
+            mixed_health = SourceHealthStore(
+                workspace / "source_health.json"
+            ).get(_SequenceProvider.source_id)
+            self.assertEqual(mixed_health.consecutive_failures, 2)
+
+            mixed_status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(mixed_status["last_error_kind"], "provider_unavailable")
+            self.assertEqual(mixed_status["provider_unavailable_streak"], 1)
+
+            restart_waits: list[float] = []
+            restarted_provider = _SequenceProvider(
+                [
+                    ProviderUnavailableError("same outage continues after restart"),
+                    _empty_batch("recovered-after-mixed-history"),
+                ]
+            )
+            result = run_continuous_observation(
+                restarted_provider,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: restart_waits.append(seconds) or False,
+                reporter=None,
+                run_id="restart-after-mixed-history",
+            )
+
+            # Only the immediately preceding provider-unavailable failure belongs to
+            # this backoff streak. The earlier validation failure remains durable
+            # health history but must not double exponential provider backoff.
+            self.assertEqual(restart_waits, [2.0])
+            self.assertEqual(result.exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

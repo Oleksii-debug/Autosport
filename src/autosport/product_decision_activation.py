@@ -42,6 +42,7 @@ _BINDING_FIELDS: Final = frozenset(
         "strategy_environment_sha256",
         "strategy_config_sha256",
         "strategy_model_version_id",
+        "strategy_model_record_sha256",
         "registry_prefix_record_count",
         "registry_prefix_sha256",
         "economic_goal_contract_sha256",
@@ -225,7 +226,7 @@ def _registry_strategy_prefix(
     workspace: Path,
     registry: ScientificRegistry,
     strategy_version_id: str,
-) -> tuple[dict[str, object], int, str, str]:
+) -> tuple[dict[str, object], int, str, str, str | None]:
     if type(registry) is not ScientificRegistry:
         raise ProductDecisionActivationError(
             "scientific_registry must be the canonical ScientificRegistry"
@@ -265,11 +266,48 @@ def _registry_strategy_prefix(
         raise ProductDecisionActivationError(
             "activation StrategyVersion is absent from registry sequence"
         )
+    strategy_payload = dict(entry.payload)
+    model_record_sha256: str | None = None
+    model_version_id = strategy_payload.get("model_version_id")
+    if model_version_id is not None:
+        model_version_id = _text(
+            model_version_id,
+            "strategy model_version_id",
+        )
+        model_entry = canonical.get("ModelVersion", model_version_id)
+        if model_entry is None:
+            raise ProductDecisionActivationError(
+                "activation StrategyVersion references a missing ModelVersion"
+            )
+        model_index = next(
+            (
+                i
+                for i, raw in enumerate(records)
+                if type(raw) is dict
+                and raw.get("record_type") == "ModelVersion"
+                and raw.get("record_id") == model_version_id
+            ),
+            None,
+        )
+        if model_index is None or model_index >= index:
+            raise ProductDecisionActivationError(
+                "activation ModelVersion was not durable before StrategyVersion"
+            )
+        model_record_sha256 = _sha256(
+            model_entry.record_sha256,
+            "strategy model record_sha256",
+        )
     prefix = {
         "schema_version": ScientificRegistry.SCHEMA_VERSION,
         "records": records[: index + 1],
     }
-    return dict(entry.payload), index + 1, _digest(prefix), entry.record_sha256
+    return (
+        strategy_payload,
+        index + 1,
+        _digest(prefix),
+        entry.record_sha256,
+        model_record_sha256,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +318,7 @@ class ProductDecisionActivationBinding:
     strategy_environment_sha256: str
     strategy_config_sha256: str
     strategy_model_version_id: str | None
+    strategy_model_record_sha256: str | None
     registry_prefix_record_count: int
     registry_prefix_sha256: str
     economic_goal_contract_sha256: str
@@ -324,6 +363,17 @@ class ProductDecisionActivationBinding:
         ):
             _sha256(getattr(self, name), name)
         _optional_text(self.strategy_model_version_id, "strategy_model_version_id")
+        if self.strategy_model_record_sha256 is not None:
+            _sha256(
+                self.strategy_model_record_sha256,
+                "strategy_model_record_sha256",
+            )
+        if (self.strategy_model_version_id is None) != (
+            self.strategy_model_record_sha256 is None
+        ):
+            raise ProductDecisionActivationError(
+                "model version and model record provenance must be bound together"
+            )
         _positive_int(self.registry_prefix_record_count, "registry_prefix_record_count")
         _positive_int(self.goal_revision, "goal_revision")
         if (
@@ -413,7 +463,13 @@ class ProductDecisionActivationStore:
                 "intent producer must come from the closed product registry"
             )
 
-        strategy, prefix_count, prefix_sha, record_sha = _registry_strategy_prefix(
+        (
+            strategy,
+            prefix_count,
+            prefix_sha,
+            record_sha,
+            model_record_sha,
+        ) = _registry_strategy_prefix(
             self.workspace, scientific_registry, strategy_version_id
         )
         source_sha = _sha256(
@@ -452,6 +508,7 @@ class ProductDecisionActivationStore:
             strategy_environment_sha256=environment_sha,
             strategy_config_sha256=config_sha,
             strategy_model_version_id=model_version_id,
+            strategy_model_record_sha256=model_record_sha,
             registry_prefix_record_count=prefix_count,
             registry_prefix_sha256=prefix_sha,
             economic_goal_contract_sha256=goal.contract_sha256,

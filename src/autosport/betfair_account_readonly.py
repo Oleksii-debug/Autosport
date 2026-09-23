@@ -1176,6 +1176,623 @@ def _install_execution_readback_authority() -> None:
     private_opener_type = type(private_opener)
     private_opener_open = private_opener_type.open
     private_opener_open_code = private_opener_open.__code__
+    private_opener_internal_open = private_opener_type._open
+    private_opener_internal_open_code = private_opener_internal_open.__code__
+    private_opener_call_chain = private_opener_type._call_chain
+    private_opener_call_chain_code = private_opener_call_chain.__code__
+    private_opener_error = private_opener_type.error
+    private_opener_error_code = private_opener_error.__code__
+    private_opener_handlers = tuple(private_opener.handlers)
+
+    sealed_error_type = BetfairReadOnlyError
+    sealed_evidence_type = BetfairEvidence
+    sealed_rpc_result_type = _RpcResult
+    sealed_current_order_type = BetfairCurrentOrderObservation
+    sealed_cleared_order_type = BetfairClearedOrderObservation
+    sealed_current_page_type = BetfairCurrentOrderPage
+    sealed_cleared_page_type = BetfairClearedOrderPage
+    sealed_market_event_type = BetfairMarketEventObservation
+    sealed_envelope_type = BetfairExecutionReadbackEnvelope
+    sealed_decimal_type = Decimal
+    sealed_json_loads = json.loads
+    sealed_json_decode_error = json.JSONDecodeError
+    sealed_sha256 = sha256
+    sealed_list_current = _LIST_CURRENT_ORDERS
+    sealed_list_cleared = _LIST_CLEARED_ORDERS
+    sealed_list_market = _LIST_MARKET_CATALOGUE
+    sealed_cleared_statuses = tuple(_EXECUTION_CLEARED_STATUSES)
+
+    def capture_opener_dispatch() -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
+        records: list[tuple[str, object, tuple[object, ...]]] = []
+        for map_name in ("handle_open", "process_request", "process_response"):
+            mapping = getattr(private_opener, map_name, None)
+            if type(mapping) is not dict:
+                return None
+            for key, handlers in mapping.items():
+                if type(key) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append((map_name, key, tuple(handlers)))
+
+        error_mapping = getattr(private_opener, "handle_error", None)
+        if type(error_mapping) is not dict:
+            return None
+        for protocol, by_code in error_mapping.items():
+            if type(protocol) not in (str, int) or type(by_code) is not dict:
+                return None
+            for code, handlers in by_code.items():
+                if type(code) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append(
+                    (f"handle_error:{protocol}", code, tuple(handlers))
+                )
+        records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
+        return tuple(records)
+
+    private_opener_dispatch = capture_opener_dispatch()
+    if private_opener_dispatch is None:
+        raise RuntimeError("canonical Betfair private opener graph is invalid")
+
+    def opener_graph_matches() -> bool:
+        if (
+            type(private_opener) is not private_opener_type
+            or getattr(private_opener_type, "open", None) is not private_opener_open
+            or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
+            or getattr(private_opener_type, "_open", None) is not private_opener_internal_open
+            or getattr(private_opener_internal_open, "__code__", None)
+            is not private_opener_internal_open_code
+            or getattr(private_opener_type, "_call_chain", None)
+            is not private_opener_call_chain
+            or getattr(private_opener_call_chain, "__code__", None)
+            is not private_opener_call_chain_code
+            or getattr(private_opener_type, "error", None) is not private_opener_error
+            or getattr(private_opener_error, "__code__", None) is not private_opener_error_code
+        ):
+            return False
+        private_state = getattr(private_opener, "__dict__", None)
+        if type(private_state) is not dict or any(
+            name in private_state for name in ("open", "_open", "_call_chain", "error")
+        ):
+            return False
+        handlers = getattr(private_opener, "handlers", None)
+        if type(handlers) is not list or len(handlers) != len(private_opener_handlers):
+            return False
+        if any(
+            current is not expected
+            for current, expected in zip(handlers, private_opener_handlers)
+        ):
+            return False
+        current_dispatch = capture_opener_dispatch()
+        if current_dispatch is None or len(current_dispatch) != len(private_opener_dispatch):
+            return False
+        for current, expected in zip(current_dispatch, private_opener_dispatch):
+            if current[0] != expected[0] or current[1] != expected[1]:
+                return False
+            if len(current[2]) != len(expected[2]) or any(
+                current_handler is not expected_handler
+                for current_handler, expected_handler in zip(current[2], expected[2])
+            ):
+                return False
+        return True
+
+    def trusted_json(payload: bytes) -> object:
+        def reject_duplicate_pairs(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise sealed_error_type(
+                        "Betfair JSON contains duplicate object key"
+                    )
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> object:
+            raise sealed_error_type(
+                "Betfair JSON contains non-standard numeric constant"
+            )
+
+        try:
+            return sealed_json_loads(
+                payload.decode("utf-8"),
+                parse_float=sealed_decimal_type,
+                object_pairs_hook=reject_duplicate_pairs,
+                parse_constant=reject_constant,
+            )
+        except sealed_error_type:
+            raise
+        except (UnicodeDecodeError, sealed_json_decode_error):
+            raise sealed_error_type(
+                "Betfair response is not valid UTF-8 JSON"
+            ) from None
+
+    def trusted_mapping(value: object, field: str) -> dict[str, object]:
+        if type(value) is not dict or any(type(key) is not str for key in value):
+            raise sealed_error_type(f"{field} must be a JSON object")
+        return value
+
+    def trusted_sequence(value: object, field: str) -> list[object]:
+        if type(value) is not list:
+            raise sealed_error_type(f"{field} must be a JSON array")
+        return value
+
+    def trusted_text(value: object, field: str) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise sealed_error_type(
+                f"{field} must be a non-empty trimmed string"
+            )
+        return value
+
+    def trusted_optional_text(value: object, field: str) -> str | None:
+        return None if value is None else trusted_text(value, field)
+
+    def trusted_positive_int(value: object, field: str) -> int:
+        if type(value) is not int or value <= 0:
+            raise sealed_error_type(f"{field} must be a positive integer")
+        return value
+
+    def trusted_number(
+        value: dict[str, object],
+        key: str,
+        field: str,
+        *,
+        positive: bool = False,
+        nonnegative: bool = False,
+    ) -> Decimal:
+        if key not in value:
+            raise sealed_error_type(f"{field} is missing from provider response")
+        raw = value[key]
+        if type(raw) is sealed_decimal_type:
+            result = raw
+        elif type(raw) is int:
+            result = sealed_decimal_type(raw)
+        else:
+            raise sealed_error_type(
+                f"{field} must be a JSON number decoded without binary float"
+            )
+        if not result.is_finite():
+            raise sealed_error_type(f"{field} must be finite")
+        if positive and result <= 0:
+            raise sealed_error_type(f"{field} must be positive")
+        if nonnegative and result < 0:
+            raise sealed_error_type(f"{field} must be non-negative")
+        return result
+
+    def trusted_provider_text(
+        value: dict[str, object],
+        key: str,
+        field: str,
+    ) -> str:
+        if key not in value:
+            raise sealed_error_type(
+                f"{field} is missing from provider response"
+            )
+        return trusted_text(value[key], field)
+
+    def trusted_provider_int(
+        value: dict[str, object],
+        key: str,
+        field: str,
+    ) -> int:
+        if key not in value:
+            raise sealed_error_type(
+                f"{field} is missing from provider response"
+            )
+        return trusted_positive_int(value[key], field)
+
+    def trusted_provider_bool(value: dict[str, object], key: str) -> bool:
+        raw = value.get(key)
+        if type(raw) is not bool:
+            raise sealed_error_type(f"{key} must be bool")
+        return raw
+
+    def trusted_iso(value: object, field: str) -> str:
+        text = trusted_text(value, field)
+        try:
+            parsed = sealed_datetime.fromisoformat(text)
+        except ValueError:
+            raise sealed_error_type(f"{field} must be ISO-8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise sealed_error_type(
+                f"{field} must include timezone offset"
+            )
+        return text
+
+    def trusted_evidence_tuple(evidence: object) -> tuple[str, str]:
+        if type(evidence) is not sealed_evidence_type:
+            raise sealed_error_type(
+                "Betfair response evidence is not canonical"
+            )
+        observed_at = trusted_iso(
+            getattr(evidence, "observed_at", None),
+            "observed_at",
+        )
+        digest = getattr(evidence, "source_payload_sha256", None)
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise sealed_error_type(
+                "source_payload_sha256 must be lowercase 64-character SHA-256"
+            )
+        return observed_at, digest
+
+    def trusted_current_order_projection(
+        raw_value: object,
+        evidence: object,
+        index: int,
+    ) -> tuple[object, ...]:
+        raw = trusted_mapping(raw_value, f"currentOrders[{index}]")
+        price_size = raw.get("priceSize")
+        price = requested_size = None
+        if price_size is not None:
+            price_map = trusted_mapping(
+                price_size, f"currentOrders[{index}].priceSize"
+            )
+            price = trusted_number(
+                price_map, "price", "price", positive=True
+            )
+            requested_size = trusted_number(
+                price_map, "size", "size", nonnegative=True
+            )
+        side = trusted_provider_text(raw, "side", "side")
+        if side not in {"BACK", "LAY"}:
+            raise sealed_error_type("side must be BACK or LAY")
+        status = trusted_provider_text(raw, "status", "status")
+        if status not in {"EXECUTABLE", "EXECUTION_COMPLETE"}:
+            raise sealed_error_type(
+                "status must be EXECUTABLE or EXECUTION_COMPLETE"
+            )
+        placed_date = trusted_iso(
+            raw.get("placedDate"), "placed_date"
+        )
+        average_price_matched = trusted_number(
+            raw,
+            "averagePriceMatched",
+            "average_price_matched",
+            nonnegative=True,
+        )
+        size_matched = trusted_number(
+            raw, "sizeMatched", "size_matched", nonnegative=True
+        )
+        size_remaining = trusted_number(
+            raw, "sizeRemaining", "size_remaining", nonnegative=True
+        )
+        if (
+            requested_size is not None
+            and size_matched + size_remaining > requested_size
+        ):
+            raise sealed_error_type(
+                "size_matched plus size_remaining cannot exceed requested_size"
+            )
+        return (
+            trusted_provider_text(raw, "betId", "bet_id"),
+            trusted_provider_text(raw, "marketId", "market_id"),
+            trusted_provider_int(raw, "selectionId", "selection_id"),
+            side,
+            status,
+            placed_date,
+            price,
+            requested_size,
+            average_price_matched,
+            size_matched,
+            size_remaining,
+            trusted_optional_text(
+                raw.get("customerOrderRef"), "customer_order_ref"
+            ),
+            trusted_optional_text(
+                raw.get("customerStrategyRef"), "customer_strategy_ref"
+            ),
+            trusted_evidence_tuple(evidence),
+        )
+
+    def actual_current_order_projection(order: object) -> tuple[object, ...]:
+        if type(order) is not sealed_current_order_type:
+            raise sealed_error_type(
+                "currentOrders contains non-canonical order"
+            )
+        return (
+            order.bet_id,
+            order.market_id,
+            order.selection_id,
+            order.side,
+            order.status,
+            order.placed_date,
+            order.price,
+            order.requested_size,
+            order.average_price_matched,
+            order.size_matched,
+            order.size_remaining,
+            order.customer_order_ref,
+            order.customer_strategy_ref,
+            trusted_evidence_tuple(order.evidence),
+        )
+
+    def trusted_cleared_order_projection(
+        raw_value: object,
+        evidence: object,
+        index: int,
+        status: str,
+    ) -> tuple[object, ...]:
+        raw = trusted_mapping(raw_value, f"clearedOrders[{index}]")
+        side = trusted_provider_text(raw, "side", "side")
+        if side not in {"BACK", "LAY"}:
+            raise sealed_error_type("side must be BACK or LAY")
+        placed_date = trusted_iso(
+            raw.get("placedDate"), "placed_date"
+        )
+        settled_date = trusted_iso(
+            raw.get("settledDate"), "settled_date"
+        )
+        if (
+            sealed_datetime.fromisoformat(settled_date)
+            < sealed_datetime.fromisoformat(placed_date)
+        ):
+            raise sealed_error_type(
+                "settled_date must not predate placed_date"
+            )
+        return (
+            trusted_provider_text(raw, "betId", "bet_id"),
+            trusted_provider_text(raw, "marketId", "market_id"),
+            trusted_provider_int(raw, "selectionId", "selection_id"),
+            side,
+            status,
+            placed_date,
+            settled_date,
+            trusted_number(
+                raw, "priceRequested", "price_requested", positive=True
+            ),
+            trusted_number(
+                raw, "priceMatched", "price_matched", nonnegative=True
+            ),
+            trusted_number(
+                raw, "sizeSettled", "size_settled", nonnegative=True
+            ),
+            trusted_number(raw, "profit", "profit"),
+            trusted_optional_text(
+                raw.get("customerOrderRef"), "customer_order_ref"
+            ),
+            trusted_optional_text(
+                raw.get("customerStrategyRef"), "customer_strategy_ref"
+            ),
+            trusted_optional_text(raw.get("eventId"), "event_id"),
+            trusted_evidence_tuple(evidence),
+        )
+
+    def actual_cleared_order_projection(order: object) -> tuple[object, ...]:
+        if type(order) is not sealed_cleared_order_type:
+            raise sealed_error_type(
+                "clearedOrders contains non-canonical order"
+            )
+        return (
+            order.bet_id,
+            order.market_id,
+            order.selection_id,
+            order.side,
+            order.bet_status,
+            order.placed_date,
+            order.settled_date,
+            order.price_requested,
+            order.price_matched,
+            order.size_settled,
+            order.profit,
+            order.customer_order_ref,
+            order.customer_strategy_ref,
+            order.event_id,
+            trusted_evidence_tuple(order.evidence),
+        )
+
+    def trusted_capture_matches(
+        capture: BetfairExecutionReadbackEnvelope,
+        witnesses: list[object],
+        *,
+        action_id: str,
+        market_id: str,
+        provider_order_ref: str | None,
+        page_size: int,
+    ) -> bool:
+        if type(capture) is not sealed_envelope_type:
+            return False
+        order_ref = provider_order_ref or action_id
+        expected_methods = [sealed_list_market]
+        expected_methods.extend(
+            sealed_list_current for _ in capture.current_pages
+        )
+        for status, pages in capture.cleared_pages_by_status:
+            if status not in sealed_cleared_statuses:
+                return False
+            expected_methods.extend(
+                sealed_list_cleared for _ in pages
+            )
+        if len(witnesses) != len(expected_methods):
+            return False
+        if any(
+            type(witness) is not tuple or len(witness) != 4
+            for witness in witnesses
+        ):
+            return False
+        if tuple(witness[0] for witness in witnesses) != tuple(expected_methods):
+            return False
+
+        position = 0
+        method, params, result, evidence = witnesses[position]
+        position += 1
+        if params != {
+            "filter": {"marketIds": [market_id]},
+            "marketProjection": ["EVENT"],
+            "maxResults": 1,
+        }:
+            return False
+        rows = trusted_sequence(result, "listMarketCatalogue result")
+        market_projection: tuple[str, str, tuple[str, str]] | None
+        if len(rows) == 1:
+            row = trusted_mapping(rows[0], "marketCatalogue[0]")
+            returned_market = trusted_provider_text(
+                row, "marketId", "market_id"
+            )
+            if returned_market != market_id:
+                return False
+            event = trusted_mapping(
+                row.get("event"), "marketCatalogue[0].event"
+            )
+            market_projection = (
+                returned_market,
+                trusted_provider_text(event, "id", "event_id"),
+                trusted_evidence_tuple(evidence),
+            )
+        elif len(rows) == 0:
+            market_projection = None
+        else:
+            return False
+
+        current_offset = 0
+        for page in capture.current_pages:
+            if type(page) is not sealed_current_page_type:
+                return False
+            _, params, result, evidence = witnesses[position]
+            position += 1
+            if params != {
+                "orderProjection": "ALL",
+                "fromRecord": current_offset,
+                "recordCount": page_size,
+                "customerOrderRefs": [order_ref],
+                "marketIds": [market_id],
+            }:
+                return False
+            report = trusted_mapping(
+                result, "listCurrentOrders result"
+            )
+            raw_orders = trusted_sequence(
+                report.get("currentOrders"), "currentOrders"
+            )
+            expected_orders = tuple(
+                trusted_current_order_projection(raw, evidence, index)
+                for index, raw in enumerate(raw_orders)
+            )
+            actual_orders = tuple(
+                actual_current_order_projection(order)
+                for order in page.orders
+            )
+            if expected_orders != actual_orders:
+                return False
+            more_available = trusted_provider_bool(
+                report, "moreAvailable"
+            )
+            if (
+                page.from_record != current_offset
+                or page.record_count != page_size
+                or page.more_available is not more_available
+                or trusted_evidence_tuple(page.evidence)
+                != trusted_evidence_tuple(evidence)
+            ):
+                return False
+            if more_available:
+                if not raw_orders:
+                    return False
+                current_offset += len(raw_orders)
+
+        cleared_event_sources: list[
+            tuple[str, tuple[str, str], str]
+        ] = []
+        if tuple(
+            status for status, _ in capture.cleared_pages_by_status
+        ) != sealed_cleared_statuses:
+            return False
+        for status, pages in capture.cleared_pages_by_status:
+            cleared_offset = 0
+            for page in pages:
+                if type(page) is not sealed_cleared_page_type:
+                    return False
+                _, params, result, evidence = witnesses[position]
+                position += 1
+                if params != {
+                    "betStatus": status,
+                    "groupBy": "BET",
+                    "fromRecord": cleared_offset,
+                    "recordCount": page_size,
+                    "customerOrderRefs": [order_ref],
+                    "marketIds": [market_id],
+                }:
+                    return False
+                report = trusted_mapping(
+                    result, "listClearedOrders result"
+                )
+                raw_orders = trusted_sequence(
+                    report.get("clearedOrders"), "clearedOrders"
+                )
+                expected_orders = tuple(
+                    trusted_cleared_order_projection(
+                        raw, evidence, index, status
+                    )
+                    for index, raw in enumerate(raw_orders)
+                )
+                actual_orders = tuple(
+                    actual_cleared_order_projection(order)
+                    for order in page.orders
+                )
+                if expected_orders != actual_orders:
+                    return False
+                for projected in expected_orders:
+                    event_id = projected[13]
+                    if event_id is not None:
+                        cleared_event_sources.append(
+                            (
+                                event_id,
+                                projected[14],
+                                status,
+                            )
+                        )
+                more_available = trusted_provider_bool(
+                    report, "moreAvailable"
+                )
+                if (
+                    page.from_record != cleared_offset
+                    or page.record_count != page_size
+                    or page.more_available is not more_available
+                    or trusted_evidence_tuple(page.evidence)
+                    != trusted_evidence_tuple(evidence)
+                ):
+                    return False
+                if more_available:
+                    if not raw_orders:
+                        return False
+                    cleared_offset += len(raw_orders)
+
+        if position != len(witnesses):
+            return False
+        if type(capture.market_event) is not sealed_market_event_type:
+            return False
+        if market_projection is not None:
+            expected_market_event = (
+                market_projection[0],
+                market_projection[1],
+                "market_catalogue",
+                market_projection[2],
+            )
+        else:
+            event_ids = {
+                event_id
+                for event_id, _, _ in cleared_event_sources
+            }
+            if len(event_ids) != 1 or not cleared_event_sources:
+                return False
+            event_id, event_evidence, event_status = (
+                cleared_event_sources[0]
+            )
+            expected_market_event = (
+                market_id,
+                event_id,
+                f"cleared:{event_status}",
+                event_evidence,
+            )
+        actual_market_event = (
+            capture.market_event.market_id,
+            capture.market_event.event_id,
+            capture.market_event.source,
+            trusted_evidence_tuple(capture.market_event.evidence),
+        )
+        return actual_market_event == expected_market_event
 
     def trusted_record(
         self: BetfairReadOnlyClient,
@@ -1203,6 +1820,10 @@ def _install_execution_readback_authority() -> None:
         body: bytes,
         timeout_seconds: float,
     ) -> bytes:
+        if not opener_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair private opener dispatch changed"
+            )
         request = sealed_request_type(
             url,
             data=body,
@@ -1217,13 +1838,17 @@ def _install_execution_readback_authority() -> None:
             ) as response:
                 payload = response.read(transport._max_response_bytes + 1)
         except sealed_http_error as exc:
-            raise BetfairReadOnlyError(
+            raise sealed_error_type(
                 f"Betfair HTTP request failed with status {exc.code}"
             ) from None
         except (sealed_url_error, TimeoutError, OSError):
-            raise BetfairReadOnlyError("Betfair network request failed") from None
+            raise sealed_error_type("Betfair network request failed") from None
+        if not opener_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair private opener dispatch changed"
+            )
         if len(payload) > transport._max_response_bytes:
-            raise BetfairReadOnlyError("Betfair response exceeded the size limit")
+            raise sealed_error_type("Betfair response exceeded the size limit")
         return payload
 
     def authoritative_init(
@@ -1290,6 +1915,7 @@ def _install_execution_readback_authority() -> None:
             or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
             or getattr(private_opener_type, "open", None) is not private_opener_open
             or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
+            or not opener_graph_matches()
         ):
             return False
         instance_dict = getattr(transport, "__dict__", {})
@@ -1305,7 +1931,7 @@ def _install_execution_readback_authority() -> None:
         session = active_capture_session.get()
         tracking = (
             isinstance(session, list)
-            and len(session) == 4
+            and len(session) == 5
             and session[0] is self
         )
         if tracking:
@@ -1322,10 +1948,13 @@ def _install_execution_readback_authority() -> None:
             or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
             or getattr(private_opener_type, "open", None) is not private_opener_open
             or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
+            or not opener_graph_matches()
         ):
-            raise BetfairReadOnlyError(
+            raise sealed_error_type(
                 "canonical Betfair network authority changed"
             )
+
+        exchange: list[tuple[bytes, bytes]] = []
 
         def post(
             url: str,
@@ -1334,13 +1963,15 @@ def _install_execution_readback_authority() -> None:
             body: bytes,
             timeout_seconds: float,
         ) -> bytes:
-            return canonical_network_post(
+            payload = canonical_network_post(
                 transport,
                 url,
                 headers=headers,
                 body=body,
                 timeout_seconds=timeout_seconds,
             )
+            exchange.append((body, payload))
+            return payload
 
         result = raw_rpc_with_post(
             self,
@@ -1352,9 +1983,84 @@ def _install_execution_readback_authority() -> None:
                 sealed_timezone_utc
             ).isoformat(),
         )
+        if len(exchange) != 1:
+            raise sealed_error_type(
+                "canonical Betfair RPC did not produce one network exchange"
+            )
+        request_body, response_body = exchange[0]
+        request_document = trusted_mapping(
+            trusted_json(request_body),
+            "JSON-RPC request",
+        )
+        if (
+            request_document.get("jsonrpc") != "2.0"
+            or request_document.get("method") != method
+            or request_document.get("params") != dict(params)
+        ):
+            raise sealed_error_type(
+                "canonical Betfair RPC request bytes changed"
+            )
+        request_id = request_document.get("id")
+        if type(request_id) is not int:
+            raise sealed_error_type(
+                "canonical Betfair RPC request id is invalid"
+            )
+
+        response_document = trusted_mapping(
+            trusted_json(response_body),
+            "JSON-RPC response",
+        )
+        if response_document.get("jsonrpc") != "2.0":
+            raise sealed_error_type(
+                "Betfair response has invalid jsonrpc version"
+            )
+        if response_document.get("id") != request_id:
+            raise sealed_error_type(
+                "Betfair response id does not match request id"
+            )
+        if (
+            "error" in response_document
+            and response_document["error"] is not None
+        ):
+            raise sealed_error_type(
+                "Betfair JSON-RPC returned an error"
+            )
+        if "result" not in response_document:
+            raise sealed_error_type(
+                "Betfair response is missing result"
+            )
+        if type(result) is not sealed_rpc_result_type:
+            raise sealed_error_type(
+                "canonical Betfair RPC result type changed"
+            )
+        evidence_tuple = trusted_evidence_tuple(result.evidence)
+        if evidence_tuple[1] != sealed_sha256(response_body).hexdigest():
+            raise sealed_error_type(
+                "Betfair response evidence is not bound to network bytes"
+            )
+        trusted_result = sealed_rpc_result_type(
+            response_document["result"],
+            result.evidence,
+        )
+        if (
+            type(trusted_result) is not sealed_rpc_result_type
+            or trusted_result.result is not response_document["result"]
+            or trusted_result.evidence is not result.evidence
+        ):
+            raise sealed_error_type(
+                "canonical Betfair RPC result construction changed"
+            )
         if tracking:
             session[2] = int(session[2]) + 1
-        return result
+            session[4].append(
+                (
+                    method,
+                    request_document["params"],
+                    trusted_result.result,
+                    trusted_result.evidence,
+                )
+            )
+        return trusted_result
 
     authoritative_rpc_code = authoritative_rpc.__code__
 
@@ -1368,7 +2074,7 @@ def _install_execution_readback_authority() -> None:
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
         trusted_at_start = has_trusted_transport(self)
-        session: list[object] = [self, 0, 0, False]
+        session: list[object] = [self, 0, 0, False, []]
         context_token = active_capture_session.set(session)
         try:
             capture = raw_read(
@@ -1399,6 +2105,15 @@ def _install_execution_readback_authority() -> None:
             and session[1] == expected_rpc_count
             and session[2] == expected_rpc_count
             and session[3] is False
+            and type(session[4]) is list
+            and trusted_capture_matches(
+                capture,
+                session[4],
+                action_id=action_id,
+                market_id=market_id,
+                provider_order_ref=provider_order_ref,
+                page_size=page_size,
+            )
             and has_trusted_transport(self)
         ):
             issued[capture_id] = (

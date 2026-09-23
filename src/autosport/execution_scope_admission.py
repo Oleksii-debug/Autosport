@@ -288,6 +288,9 @@ class ExecutionScopePreAdmission:
                 "provider_action_documented": self.provider_action_documented,
                 "governance_automation_permitted": self.governance_automation_permitted,
                 "integration_channel_bound": self.integration_channel_bound,
+                "supervised_action_binding_structurally_valid": (
+                    self.supervised_action_binding_structurally_valid
+                ),
                 "product_supervised_action_issued": (
                     self.product_supervised_action_issued
                 ),

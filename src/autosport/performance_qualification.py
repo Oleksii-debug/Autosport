@@ -60,7 +60,20 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
                 )
             active_containers.add(marker)
             try:
-                return {key: detach(item) for key, item in value.items()}
+                detached: dict[str, object] = {}
+                for key, item in value.items():
+                    if type(key) is not str:
+                        raise PerformanceQualificationError(
+                            "endurance report object keys must be strings"
+                        )
+                    try:
+                        key.encode("utf-8", errors="strict")
+                    except UnicodeEncodeError as exc:
+                        raise PerformanceQualificationError(
+                            "endurance report object keys must be valid UTF-8"
+                        ) from exc
+                    detached[key] = detach(item)
+                return detached
             finally:
                 active_containers.remove(marker)
 

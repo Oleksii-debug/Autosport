@@ -259,9 +259,17 @@ def test_backfilled_question_hypothesis_protocol_lineage_fails_closed(tmp_path):
     binding = ScientificProtocolBinding(
         research_protocol_id="late-protocol",
         research_question_id=question.question_id,
-        research_question_sha256=_payload_sha(question),
+        research_question_sha256=(
+            _payload_sha(question)
+            if research_question_sha256 is None
+            else research_question_sha256
+        ),
         hypothesis_id=hypothesis.hypothesis_id,
-        hypothesis_sha256=_payload_sha(hypothesis),
+        hypothesis_sha256=(
+            _payload_sha(hypothesis)
+            if hypothesis_sha256 is None
+            else hypothesis_sha256
+        ),
         inclusion_criteria="frozen",
         exclusion_criteria="invalid provenance",
         lawful_source_requirements="lawful fixture",
@@ -417,6 +425,8 @@ def _append_negative_result_chronology_fixture(
     experiment_created_at,
     experiment_completed_at,
     notes,
+    research_question_sha256=None,
+    hypothesis_sha256=None,
 ):
     question = ResearchQuestion(
         f"{prefix}-question",
@@ -531,3 +541,50 @@ def test_declared_lineage_chronology_compares_timezone_offsets_by_utc_instant(
     )
 
     assert [hit.experiment_id for hit in hits] == [experiment.experiment_id]
+
+
+@pytest.mark.parametrize(
+    ("sha_field", "mismatched_sha", "message"),
+    [
+        ("research_question_sha256", "f" * 64, "research question hash"),
+        ("hypothesis_sha256", "e" * 64, "hypothesis hash"),
+    ],
+)
+def test_negative_result_retrieval_rejects_mismatched_frozen_lineage_hash(
+    tmp_path,
+    sha_field,
+    mismatched_sha,
+    message,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / f"scientific_registry_{sha_field}.json"
+    )
+    kwargs = {
+        "research_question_sha256": None,
+        "hypothesis_sha256": None,
+    }
+    kwargs[sha_field] = mismatched_sha
+    experiment = _append_negative_result_chronology_fixture(
+        registry,
+        prefix=f"hash-{sha_field}",
+        question_at="2026-01-01T06:00:00+00:00",
+        hypothesis_at="2026-01-01T06:30:00+00:00",
+        protocol_at="2026-01-01T07:00:00+00:00",
+        experiment_created_at="2026-01-01T07:30:00+00:00",
+        experiment_completed_at="2026-01-01T08:00:00+00:00",
+        notes="frozen lineage hash marker",
+        **kwargs,
+    )
+
+    assert registry.causal_precedes(
+        "ResearchProtocol",
+        f"hash-{sha_field}-protocol",
+        "Experiment",
+        experiment.experiment_id,
+    )
+    with pytest.raises(RuntimeError, match=message):
+        search_negative_results(
+            registry,
+            "frozen lineage hash marker",
+            as_of="2026-01-01T09:00:00+00:00",
+        )

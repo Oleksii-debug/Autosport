@@ -35,13 +35,13 @@ from .providers import ProviderUnavailableError
 
 
 _CALLS_AND_FEES_URL: Final = "https://api.betdaq.com/v2.0/Docs/CallsAndFees.aspx"
-_POLICY_SCHEMA: Final = "autosport.betdaq.rate-governor.v1"
-_BLACKLIST_SCHEMA: Final = "autosport.betdaq.rate-governor.blacklist.v1"
-_BLACKLIST_AUTHORITY_DOMAIN: Final = "autosport.betdaq-rate-governor.blacklist.v1"
+_POLICY_SCHEMA: Final = "autosport.betdaq.rate-governor.v2"
+_BLACKLIST_SCHEMA: Final = "autosport.betdaq.rate-governor.blacklist.v2"
+_BLACKLIST_AUTHORITY_DOMAIN: Final = "autosport.betdaq-rate-governor.blacklist.v2"
 _BLACKLIST_FILE: Final = "betdaq-rate-governor-blacklist.json"
 _MIN_WINDOW_SECONDS: Final = 60.0
 _DEFAULT_COMBINED_PER_MINUTE: Final = 300
-_DEFAULT_METHOD_PER_MINUTE: Final[dict[str, int]] = {
+_DEFAULT_RATE_POLICY_PER_MINUTE: Final[dict[str, int]] = {
     "PlaceOrdersNoReceipt": 100,
     "PlaceOrdersWithReceipt": 20,
     "ChangeOrderNoReceipt": 100,
@@ -51,12 +51,28 @@ _DEFAULT_METHOD_PER_MINUTE: Final[dict[str, int]] = {
     "GetPrices": 130,
     "ListOrdersChangedSince": 130,
 }
+_OPERATION_TO_RATE_POLICY_KEY: Final[dict[str, str]] = {
+    "PlaceOrdersNoReceipt": "PlaceOrdersNoReceipt",
+    "PlaceOrdersWithReceipt": "PlaceOrdersWithReceipt",
+    "UpdateOrdersNoReceipt": "ChangeOrderNoReceipt",
+    "GetEventSubTreeNoSelections": "GetEventSubTreeNoSelections",
+    "GetEventSubTreeWithSelections": "GetEventSubTreeWithSelections",
+    "ListBootstrapOrders": "ListBootstrapOrders",
+    "GetPrices": "GetPrices",
+    "ListOrdersChangedSince": "ListOrdersChangedSince",
+}
+_PROVIDER_API_NAME_TO_OPERATION_ID: Final[dict[str, str]] = {
+    alias.casefold(): operation_id
+    for operation_id, rate_policy_key in _OPERATION_TO_RATE_POLICY_KEY.items()
+    for alias in (operation_id, rate_policy_key)
+}
 _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
     json.dumps(
         {
             "source": _CALLS_AND_FEES_URL,
             "tier": "DEFAULT",
-            "methods": _DEFAULT_METHOD_PER_MINUTE,
+            "rate_policy": _DEFAULT_RATE_POLICY_PER_MINUTE,
+            "operation_to_rate_policy_key": _OPERATION_TO_RATE_POLICY_KEY,
             "combined": _DEFAULT_COMBINED_PER_MINUTE,
             "any_axis": "UNKNOWN_UNMODELED",
         },
@@ -206,19 +222,27 @@ def _digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _provider_operation_id(api_name: object) -> str | None:
+    raw = _canonical_text(api_name, "api_name")
+    return _PROVIDER_API_NAME_TO_OPERATION_ID.get(raw.casefold())
+
+
 @dataclass(frozen=True, slots=True)
 class BetdaqMethodRatePolicy:
     method: str
     capacity: int
     safety_reserve: int = 0
+    rate_policy_key: str = field(init=False)
 
     def __post_init__(self) -> None:
         method = _canonical_text(self.method, "method")
-        documented = _DEFAULT_METHOD_PER_MINUTE.get(method)
-        if documented is None:
+        rate_policy_key = _OPERATION_TO_RATE_POLICY_KEY.get(method)
+        if rate_policy_key is None:
             raise BetdaqRateGovernorError(
-                f"{method} has no exact documented BETDAQ method-rate mapping"
+                f"{method} has no exact BETDAQ transport-to-rate-policy mapping"
             )
+        documented = _DEFAULT_RATE_POLICY_PER_MINUTE[rate_policy_key]
+        object.__setattr__(self, "rate_policy_key", rate_policy_key)
         if isinstance(self.capacity, bool) or type(self.capacity) is not int:
             raise BetdaqRateGovernorError("capacity must be an integer")
         if self.capacity <= 0 or self.capacity > documented:
@@ -310,7 +334,8 @@ class BetdaqRatePolicy:
                 "tier": self.tier.value,
                 "methods": [
                     {
-                        "method": item.method,
+                        "operation_id": item.method,
+                        "rate_policy_key": item.rate_policy_key,
                         "capacity": item.capacity,
                         "safety_reserve": item.safety_reserve,
                     }
@@ -332,20 +357,22 @@ def default_betdaq_rate_policy(
     combined_safety_reserve: int = 0,
 ) -> BetdaqRatePolicy:
     reserves = {} if safety_reserve_by_method is None else dict(safety_reserve_by_method)
-    unknown = set(reserves) - set(_DEFAULT_METHOD_PER_MINUTE)
+    unknown = set(reserves) - set(_OPERATION_TO_RATE_POLICY_KEY)
     if unknown:
         raise BetdaqRateGovernorError(
-            "safety reserve includes method without exact documented mapping"
+            "safety reserve includes operation without exact documented mapping"
         )
     return BetdaqRatePolicy(
         policy_revision=policy_revision,
         methods=tuple(
             BetdaqMethodRatePolicy(
-                method=method,
-                capacity=capacity,
-                safety_reserve=reserves.get(method, 0),
+                method=operation_id,
+                capacity=_DEFAULT_RATE_POLICY_PER_MINUTE[rate_policy_key],
+                safety_reserve=reserves.get(operation_id, 0),
             )
-            for method, capacity in sorted(_DEFAULT_METHOD_PER_MINUTE.items())
+            for operation_id, rate_policy_key in sorted(
+                _OPERATION_TO_RATE_POLICY_KEY.items()
+            )
         ),
         combined_capacity=_DEFAULT_COMBINED_PER_MINUTE,
         combined_safety_reserve=combined_safety_reserve,
@@ -355,12 +382,28 @@ def default_betdaq_rate_policy(
 @dataclass(frozen=True, slots=True)
 class BetdaqBlacklistObservation:
     api_name: str
+    operation_id: str | None
     observed_at: str
     blocked_until: str
     provider_observation_sha256: str
 
     def __post_init__(self) -> None:
-        _canonical_text(self.api_name, "api_name")
+        raw = _canonical_text(self.api_name, "api_name")
+        resolved = _provider_operation_id(raw)
+        if self.operation_id is None:
+            if resolved is not None:
+                raise BetdaqRateGovernorError(
+                    "known provider api_name must bind canonical operation_id"
+                )
+        else:
+            operation_id = _canonical_text(self.operation_id, "operation_id")
+            if (
+                operation_id not in _OPERATION_TO_RATE_POLICY_KEY
+                or resolved != operation_id
+            ):
+                raise BetdaqRateGovernorError(
+                    "provider api_name does not match canonical operation_id"
+                )
         observed = _parse_utc_text(self.observed_at, "observed_at")
         blocked = _parse_utc_text(self.blocked_until, "blocked_until")
         if blocked < observed:
@@ -372,13 +415,24 @@ class BetdaqBlacklistObservation:
             "provider_observation_sha256",
         )
 
-    def payload(self) -> dict[str, str]:
+    @property
+    def mapped(self) -> bool:
+        return self.operation_id is not None
+
+    def payload(self) -> dict[str, object]:
         return {
             "api_name": self.api_name,
+            "operation_id": self.operation_id,
             "observed_at": self.observed_at,
             "blocked_until": self.blocked_until,
             "provider_observation_sha256": self.provider_observation_sha256,
         }
+
+
+def _blacklist_observation_key(observation: BetdaqBlacklistObservation) -> str:
+    if observation.operation_id is not None:
+        return observation.operation_id
+    return "UNMAPPED:" + observation.api_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +443,7 @@ class BetdaqRateAdmission:
     documented_policy_sha256: str
     tier: BetdaqRateTier
     method: str
+    rate_policy_key: str
     priority: BetdaqRatePriority
     sequence: int
     admitted_monotonic: float
@@ -407,6 +462,10 @@ class BetdaqRateAdmission:
     multi_process_safe: bool = field(init=False, default=False)
 
     @property
+    def operation_id(self) -> str:
+        return self.method
+
+    @property
     def receipt_sha256(self) -> str:
         return _digest(
             {
@@ -415,7 +474,8 @@ class BetdaqRateAdmission:
                 "policy_fingerprint": self.policy_fingerprint,
                 "documented_policy_sha256": self.documented_policy_sha256,
                 "tier": self.tier.value,
-                "method": self.method,
+                "operation_id": self.operation_id,
+                "rate_policy_key": self.rate_policy_key,
                 "priority": self.priority.value,
                 "sequence": self.sequence,
                 "admitted_monotonic": self.admitted_monotonic,
@@ -450,6 +510,7 @@ class _RuntimeState:
     wall_clock: WallClock
     methods: dict[str, _Window]
     combined: _Window
+    blacklist_blocked_until: dict[str, float]
     last_monotonic: float
     clock_failed_closed: bool
     sequence: int = 0
@@ -482,7 +543,7 @@ class _BlacklistStore:
     def _empty_body() -> dict[str, object]:
         return {
             "schema": _BLACKLIST_SCHEMA,
-            "version": 1,
+            "version": 2,
             "observations": [],
         }
 
@@ -508,7 +569,7 @@ class _BlacklistStore:
             raise BetdaqRateGovernorError(
                 "BETDAQ blacklist state schema is invalid"
             )
-        if raw.get("schema") != _BLACKLIST_SCHEMA or raw.get("version") != 1:
+        if raw.get("schema") != _BLACKLIST_SCHEMA or raw.get("version") != 2:
             raise BetdaqRateGovernorError(
                 "BETDAQ blacklist state schema/version mismatch"
             )
@@ -518,10 +579,11 @@ class _BlacklistStore:
                 "BETDAQ blacklist observations must be a list"
             )
         seen: set[str] = set()
-        canonical: list[dict[str, str]] = []
+        canonical: list[dict[str, object]] = []
         for item in observations:
             if type(item) is not dict or set(item) != {
                 "api_name",
+                "operation_id",
                 "observed_at",
                 "blocked_until",
                 "provider_observation_sha256",
@@ -531,22 +593,29 @@ class _BlacklistStore:
                 )
             observation = BetdaqBlacklistObservation(
                 api_name=item["api_name"],
+                operation_id=item["operation_id"],
                 observed_at=item["observed_at"],
                 blocked_until=item["blocked_until"],
                 provider_observation_sha256=item[
                     "provider_observation_sha256"
                 ],
             )
-            if observation.api_name in seen:
+            identity = _blacklist_observation_key(observation)
+            if identity in seen:
                 raise BetdaqRateGovernorError(
-                    "BETDAQ blacklist API identity is duplicated"
+                    "BETDAQ blacklist canonical API identity is duplicated"
                 )
-            seen.add(observation.api_name)
+            seen.add(identity)
             canonical.append(observation.payload())
-        canonical.sort(key=lambda item: item["api_name"])
+        canonical.sort(
+            key=lambda item: (
+                str(item["operation_id"] or ""),
+                str(item["api_name"]),
+            )
+        )
         body: dict[str, object] = {
             "schema": _BLACKLIST_SCHEMA,
-            "version": 1,
+            "version": 2,
             "observations": canonical,
         }
         state_sha = _sha256(raw.get("state_sha256"), "state_sha256")
@@ -646,17 +715,19 @@ class _BlacklistStore:
                 ) from exc
             values = body["observations"]
             assert isinstance(values, list)
-            return {
-                item["api_name"]: BetdaqBlacklistObservation(
+            result: dict[str, BetdaqBlacklistObservation] = {}
+            for item in values:
+                observation = BetdaqBlacklistObservation(
                     api_name=item["api_name"],
+                    operation_id=item["operation_id"],
                     observed_at=item["observed_at"],
                     blocked_until=item["blocked_until"],
                     provider_observation_sha256=item[
                         "provider_observation_sha256"
                     ],
                 )
-                for item in values
-            }
+                result[_blacklist_observation_key(observation)] = observation
+            return result
 
     def extend(
         self,
@@ -679,14 +750,24 @@ class _BlacklistStore:
                     "BETDAQ blacklist state is not current authority"
                 ) from exc
 
-            rows = {
-                item["api_name"]: dict(item)
-                for item in body["observations"]
-            }
-            existing_raw = rows.get(observation.api_name)
+            rows: dict[str, dict[str, object]] = {}
+            for item in body["observations"]:
+                existing_observation = BetdaqBlacklistObservation(
+                    api_name=item["api_name"],
+                    operation_id=item["operation_id"],
+                    observed_at=item["observed_at"],
+                    blocked_until=item["blocked_until"],
+                    provider_observation_sha256=item[
+                        "provider_observation_sha256"
+                    ],
+                )
+                rows[_blacklist_observation_key(existing_observation)] = dict(item)
+            identity = _blacklist_observation_key(observation)
+            existing_raw = rows.get(identity)
             if existing_raw is not None:
                 existing = BetdaqBlacklistObservation(
                     api_name=existing_raw["api_name"],
+                    operation_id=existing_raw["operation_id"],
                     observed_at=existing_raw["observed_at"],
                     blocked_until=existing_raw["blocked_until"],
                     provider_observation_sha256=existing_raw[
@@ -699,10 +780,10 @@ class _BlacklistStore:
                     observation.blocked_until, "new blocked_until"
                 ):
                     return existing
-            rows[observation.api_name] = observation.payload()
+            rows[identity] = observation.payload()
             new_body: dict[str, object] = {
                 "schema": _BLACKLIST_SCHEMA,
-                "version": 1,
+                "version": 2,
                 "observations": [
                     rows[name] for name in sorted(rows)
                 ],
@@ -772,19 +853,47 @@ class BetdaqRateGovernor:
     def documented_policy_sha256(self) -> str:
         return _POLICY_SOURCE_SHA256
 
-    def blacklist_status(self, api_name: str) -> BetdaqBlacklistStatus:
-        name = _canonical_text(api_name, "api_name")
-        observations = self._blacklist_store.observations()
-        observation = observations.get(name)
+    def _blacklist_state(
+        self,
+        operation_id: str,
+        *,
+        now_monotonic: float,
+    ) -> tuple[BetdaqBlacklistStatus, float]:
+        observation = self._blacklist_store.observations().get(operation_id)
         if observation is None:
-            return BetdaqBlacklistStatus.UNKNOWN
-        now = _utc(self._runtime.wall_clock(), "wall_clock")
-        blocked_until = _parse_utc_text(
-            observation.blocked_until, "blocked_until"
+            return BetdaqBlacklistStatus.UNKNOWN, 0.0
+        wall_now = _utc(self._runtime.wall_clock(), "wall_clock")
+        wall_remaining = max(
+            0.0,
+            (
+                _parse_utc_text(observation.blocked_until, "blocked_until")
+                - wall_now
+            ).total_seconds(),
         )
-        if blocked_until > now:
-            return BetdaqBlacklistStatus.BLACKLISTED
-        return BetdaqBlacklistStatus.EXPIRED_OBSERVATION
+        monotonic_remaining = max(
+            0.0,
+            self._runtime.blacklist_blocked_until.get(
+                operation_id, now_monotonic
+            )
+            - now_monotonic,
+        )
+        retry_after = max(wall_remaining, monotonic_remaining)
+        if retry_after > 0:
+            return BetdaqBlacklistStatus.BLACKLISTED, retry_after
+        return BetdaqBlacklistStatus.EXPIRED_OBSERVATION, 0.0
+
+    def blacklist_status(self, api_name: str) -> BetdaqBlacklistStatus:
+        raw_name = _canonical_text(api_name, "api_name")
+        operation_id = _provider_operation_id(raw_name)
+        if operation_id is None:
+            return BetdaqBlacklistStatus.UNKNOWN
+        with _REGISTRY_LOCK:
+            now = self._now(operation_id)
+            status, _ = self._blacklist_state(
+                operation_id,
+                now_monotonic=now,
+            )
+            return status
 
     def observe_blacklist(
         self,
@@ -794,6 +903,7 @@ class BetdaqRateGovernor:
         provider_observation_sha256: str,
     ) -> BetdaqBlacklistObservation:
         name = _canonical_text(api_name, "api_name")
+        operation_id = _provider_operation_id(name)
         if (
             isinstance(remaining_ms, bool)
             or type(remaining_ms) is not int
@@ -810,11 +920,23 @@ class BetdaqRateGovernor:
         blocked = observed + timedelta(milliseconds=remaining_ms)
         observation = BetdaqBlacklistObservation(
             api_name=name,
+            operation_id=operation_id,
             observed_at=_utc_text(observed),
             blocked_until=_utc_text(blocked),
             provider_observation_sha256=digest,
         )
-        return self._blacklist_store.extend(observation)
+        persisted = self._blacklist_store.extend(observation)
+        if operation_id is not None:
+            with _REGISTRY_LOCK:
+                now = self._now(operation_id)
+                relative_until = now + (remaining_ms / 1000.0)
+                self._runtime.blacklist_blocked_until[operation_id] = max(
+                    self._runtime.blacklist_blocked_until.get(
+                        operation_id, relative_until
+                    ),
+                    relative_until,
+                )
+        return persisted
 
     def admit(
         self,
@@ -851,20 +973,15 @@ class BetdaqRateGovernor:
                     retry_after_seconds=cold_blocked_until - now,
                 )
 
-            status = self.blacklist_status(name)
+            status, blacklist_retry = self._blacklist_state(
+                name,
+                now_monotonic=now,
+            )
             if status is BetdaqBlacklistStatus.BLACKLISTED:
-                observation = self._blacklist_store.observations()[name]
-                wall_now = _utc(self._runtime.wall_clock(), "wall_clock")
-                retry = (
-                    _parse_utc_text(
-                        observation.blocked_until, "blocked_until"
-                    )
-                    - wall_now
-                ).total_seconds()
                 raise BetdaqRateDeferred(
                     method=name,
                     reason="provider_api_blacklisted",
-                    retry_after_seconds=max(0.0, retry),
+                    retry_after_seconds=blacklist_retry,
                 )
 
             method_limit = method_policy.capacity
@@ -924,6 +1041,7 @@ class BetdaqRateGovernor:
                 documented_policy_sha256=_POLICY_SOURCE_SHA256,
                 tier=BetdaqRateTier.DEFAULT,
                 method=name,
+                rate_policy_key=method_policy.rate_policy_key,
                 priority=priority,
                 sequence=self._runtime.sequence,
                 admitted_monotonic=now,
@@ -1066,6 +1184,7 @@ def resolve_betdaq_rate_governor(
                 admitted_at=deque(),
                 blocked_until=cold_until,
             ),
+            blacklist_blocked_until={},
             last_monotonic=now,
             clock_failed_closed=False,
         )

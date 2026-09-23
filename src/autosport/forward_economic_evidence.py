@@ -207,6 +207,9 @@ class AlphaAllocation:
     def __post_init__(self) -> None:
         _text(self.challenger_id, "challenger_id")
         alpha = _positive_decimal(self.alpha, "alpha")
+        # Alpha reaches exact Fraction arithmetic below. Reuse the canonical
+        # Decimal representation bound before any rational materialization.
+        _decimal_text(alpha)
         if alpha >= 1:
             raise ForwardEconomicEvidenceError("alpha must be less than one")
 
@@ -227,6 +230,9 @@ class FamilywiseAlphaRegistry:
     def __post_init__(self) -> None:
         _text(self.family_id, "family_id")
         total = _positive_decimal(self.total_alpha, "total_alpha")
+        # total_alpha is also converted to Fraction for the family budget.
+        # Reject attacker-sized compact Decimal representations first.
+        _decimal_text(total)
         if total >= 1:
             raise ForwardEconomicEvidenceError("total_alpha must be less than one")
         _instant(self.sealed_at, "sealed_at")

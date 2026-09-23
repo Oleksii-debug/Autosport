@@ -119,7 +119,7 @@ def test_module_opener_swap_cannot_mint_login_origin(monkeypatch, tmp_path):
     key.write_text("not a real key", encoding="utf-8")
     secrets = BetfairNonInteractiveLoginSecrets("app", "user", "password", cert, key)
     monkeypatch.setattr(subject, "build_opener", lambda *args, **kwargs: None)
-    with pytest.raises(BetfairSessionOriginError, match="transport origin"):
+    with pytest.raises(BetfairSessionOriginError, match="canonical Betfair login authority binding changed"):
         login_betfair_noninteractive(
             secrets,
             jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
@@ -133,7 +133,7 @@ def test_ssl_context_factory_swap_cannot_mint_login_origin(monkeypatch, tmp_path
     key.write_text("not a real key", encoding="utf-8")
     secrets = BetfairNonInteractiveLoginSecrets("app", "user", "password", cert, key)
     monkeypatch.setattr(subject.ssl, "create_default_context", lambda: object())
-    with pytest.raises(BetfairSessionOriginError, match="transport origin"):
+    with pytest.raises(BetfairSessionOriginError, match="canonical Betfair login authority binding changed"):
         login_betfair_noninteractive(
             secrets,
             jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,

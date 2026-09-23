@@ -76,8 +76,6 @@ def test_small_profile_proves_closed_durable_counts_and_restart_projection() -> 
         assert elapsed > 0
 
 
-
-
 def test_projection_snapshot_is_order_independent_and_content_exact() -> None:
     normalizer = CanonicalNormalizer()
     quotes = _build_quotes(2)

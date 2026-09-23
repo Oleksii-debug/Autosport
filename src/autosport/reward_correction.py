@@ -5,7 +5,7 @@ rewrite historical records, authorize promotion, or widen execution authority.
 """
 from __future__ import annotations
 
-import hashlib, json, sqlite3
+import hashlib, json, os, sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -128,6 +128,22 @@ CREATE TRIGGER invalidations_no_delete BEFORE DELETE ON invalidations BEGIN SELE
 _TRIGGERS={"artifacts_no_update","artifacts_no_delete","dependencies_no_update","dependencies_no_delete","corrections_no_update","corrections_no_delete","invalidations_no_update","invalidations_no_delete"}
 _INDEXES={"dependencies_by_dependency","invalidations_by_artifact","corrections_by_superseded","corrections_by_corrected"}
 
+def _discard_owned_ledger_path(path:Path):
+    try: path.unlink(missing_ok=True)
+    except OSError: pass
+
+def _reserve_new_ledger_path(path:Path):
+    try:
+        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    except FileExistsError as exc:
+        raise RewardCorrectionError("reward correction ledger already exists") from exc
+    except OSError as exc:
+        raise RewardCorrectionError("cannot reserve reward correction ledger path") from exc
+    try: os.close(fd)
+    except OSError as exc:
+        _discard_owned_ledger_path(path)
+        raise RewardCorrectionError("cannot reserve reward correction ledger path") from exc
+
 class RewardCorrectionLedger:
     def __init__(self,path:Path,connection:sqlite3.Connection): self.path=path; self._connection=connection
     @staticmethod
@@ -138,13 +154,17 @@ class RewardCorrectionLedger:
     @classmethod
     def create(cls,path:str|Path):
         path=Path(path)
-        if path.exists(): raise RewardCorrectionError("reward correction ledger already exists")
         if not path.parent.is_dir(): raise RewardCorrectionError("reward correction ledger parent must already exist")
-        c=cls._connect(path)
+        _reserve_new_ledger_path(path)
+        c=None
         try:
+            c=cls._connect(path)
             c.executescript(_SCHEMA); c.executemany("INSERT INTO metadata VALUES (?,?)",(("schema",CORRECTION_SCHEMA),("schema_version",str(CORRECTION_SCHEMA_VERSION))))
             obj=cls(path,c); obj.verify_integrity(); return obj
-        except Exception: c.close(); path.unlink(missing_ok=True); raise
+        except Exception:
+            if c is not None: c.close()
+            _discard_owned_ledger_path(path)
+            raise
     @classmethod
     def open(cls,path:str|Path):
         path=Path(path)

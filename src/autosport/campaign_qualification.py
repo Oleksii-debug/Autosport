@@ -366,21 +366,23 @@ def assess_campaign_qualification(
     if len({item.checkpoint.sha256 for item in episodes}) != len(episodes):
         blockers.append("episode checkpoints must be unique")
 
-    used_anchors: dict[tuple[str, str, str], str] = {}
+    used_anchor_identities: dict[tuple[str, str], tuple[str, str]] = {}
 
     def record_anchor(label: str, anchor: EvidenceAnchor) -> None:
-        key = (
-            anchor.authority_family,
-            anchor.evidence_id,
-            anchor.sha256,
-        )
-        previous = used_anchors.get(key)
-        if previous is not None:
+        key = (anchor.authority_family, anchor.evidence_id)
+        previous = used_anchor_identities.get(key)
+        if previous is None:
+            used_anchor_identities[key] = (anchor.sha256, label)
+            return
+        previous_sha, previous_label = previous
+        if anchor.sha256 == previous_sha:
             blockers.append(
-                f"{label}: reuses evidence anchor already used by {previous}"
+                f"{label}: reuses evidence anchor already used by {previous_label}"
             )
         else:
-            used_anchors[key] = label
+            blockers.append(
+                f"{label}: evidence identity already used by {previous_label} with different SHA-256"
+            )
 
     start = _instant(identity.campaign_started_at, "campaign_started_at")
     previous_checkpoint: EvidenceAnchor | None = None

@@ -453,12 +453,7 @@ class ProductDecisionActivationStore:
 
     FILE_NAME: Final = "product_decision_activation.json"
 
-    def __init__(
-        self,
-        workspace: str | Path,
-        *,
-        authority_root: str | Path | None = None,
-    ) -> None:
+    def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).absolute().resolve(strict=False)
         self.path = self.workspace / self.FILE_NAME
         try:
@@ -466,7 +461,6 @@ class ProductDecisionActivationStore:
                 workspace=self.workspace,
                 domain=_ACTIVATION_AUTHORITY_DOMAIN,
                 key=self.FILE_NAME,
-                authority_root=authority_root,
             )
         except MonotonicWorkspaceAuthorityError as exc:
             raise ProductDecisionActivationError(

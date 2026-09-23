@@ -33,7 +33,10 @@ class TheOddsApiFailureTaxonomyTests(unittest.TestCase):
                     {
                         "message": "SECRET_PROVIDER_MESSAGE_MUST_NOT_BE_RETAINED",
                         "error_code": error_code,
-                        "details_url": "https://the-odds-api.com/liveapi/guides/v4/api-error-codes.html",
+                        "details_url": (
+                            "https://the-odds-api.com/liveapi/guides/v4/"
+                            "api-error-codes.html"
+                        ),
                     },
                     status,
                     headers,

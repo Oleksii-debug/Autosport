@@ -14,6 +14,7 @@ _PERSISTENCE = "LAPSE"
 _TIME_IN_FORCE = "FILL_OR_KILL"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_TEXT = 512
+_MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
 
 
 class BetfairFillOrKillError(RuntimeError):
@@ -172,9 +173,15 @@ def _positive_selection(value: object) -> str:
         raise BetfairFillOrKillError(
             "selection_id must be canonical positive integer text"
         )
-    if int(raw) <= 0:
+    if (
+        len(raw) > len(_MAX_BETFAIR_SELECTION_ID)
+        or (
+            len(raw) == len(_MAX_BETFAIR_SELECTION_ID)
+            and raw > _MAX_BETFAIR_SELECTION_ID
+        )
+    ):
         raise BetfairFillOrKillError(
-            "selection_id must be canonical positive integer text"
+            "selection_id exceeds Betfair signed-long domain"
         )
     return raw
 
@@ -319,7 +326,7 @@ class BetfairFillOrKillImmediateReport:
             object.__setattr__(self, "bet_id", _text(self.bet_id, "bet_id"))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class BetfairFillOrKillStructuralEvidence:
     """Structural FOK semantics only; this object grants no execution authority."""
 
@@ -333,10 +340,27 @@ class BetfairFillOrKillStructuralEvidence:
     unmatched_remainder: Decimal
     unmatched_remainder_terminal_by_fok_contract: bool
     aggregate_vwap_limit_satisfied: bool | None
-    per_fragment_price_floor_proven: bool = False
-    provider_origin_verified: bool = False
-    grants_execution_authority: bool = False
-    grants_real_money_authority: bool = False
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise BetfairFillOrKillError(
+            "structural FOK evidence must be produced by lifecycle inspection"
+        )
+
+    @property
+    def per_fragment_price_floor_proven(self) -> bool:
+        return False
+
+    @property
+    def provider_origin_verified(self) -> bool:
+        return False
+
+    @property
+    def grants_execution_authority(self) -> bool:
+        return False
+
+    @property
+    def grants_real_money_authority(self) -> bool:
+        return False
 
     @property
     def evidence_id(self) -> str:
@@ -366,6 +390,39 @@ class BetfairFillOrKillStructuralEvidence:
                 "grants_real_money_authority": self.grants_real_money_authority,
             }
         )
+
+
+def _make_structural_evidence(
+    *,
+    request_projection_sha256: str,
+    response_sha256: str,
+    outcome: FillOrKillStructuralOutcome,
+    requested_size: Decimal,
+    min_fill_size: Decimal | None,
+    size_matched: Decimal,
+    matched_vwap: Decimal,
+    unmatched_remainder: Decimal,
+    unmatched_remainder_terminal_by_fok_contract: bool,
+    aggregate_vwap_limit_satisfied: bool | None,
+) -> BetfairFillOrKillStructuralEvidence:
+    evidence = object.__new__(BetfairFillOrKillStructuralEvidence)
+    for name, value in (
+        ("request_projection_sha256", request_projection_sha256),
+        ("response_sha256", response_sha256),
+        ("outcome", outcome),
+        ("requested_size", requested_size),
+        ("min_fill_size", min_fill_size),
+        ("size_matched", size_matched),
+        ("matched_vwap", matched_vwap),
+        ("unmatched_remainder", unmatched_remainder),
+        (
+            "unmatched_remainder_terminal_by_fok_contract",
+            unmatched_remainder_terminal_by_fok_contract,
+        ),
+        ("aggregate_vwap_limit_satisfied", aggregate_vwap_limit_satisfied),
+    ):
+        object.__setattr__(evidence, name, value)
+    return evidence
 
 
 def inspect_betfair_fill_or_kill_lifecycle(
@@ -424,7 +481,7 @@ def inspect_betfair_fill_or_kill_lifecycle(
         request.requested_size,
         report.size_matched,
     )
-    return BetfairFillOrKillStructuralEvidence(
+    return _make_structural_evidence(
         request_projection_sha256=request.request_projection_sha256,
         response_sha256=report.response_sha256,
         outcome=outcome,

@@ -488,3 +488,42 @@ def test_create_race_cannot_unlink_existing_winner(tmp_path, monkeypatch):
     with RewardCorrectionLedger.open(path) as reopened:
         reopened.verify_integrity()
 
+@pytest.mark.parametrize(
+    "value",
+    ("1E+512", "1E-512", "0E-512", "-0E-512"),
+)
+def test_extreme_decimal_scale_is_rejected_before_fixed_point_materialization(
+    tmp_path, value
+):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    candidate = correction(superseded=reward0, corrected=reward1, value=value)
+
+    with RewardCorrectionLedger.create(path) as ledger:
+        with pytest.raises(RewardCorrectionError, match="fixed-point text exceeds"):
+            ledger.append_correction(candidate)
+        assert ledger.latest_correction(
+            action_id=sha("action"), transition_id=sha("transition")
+        ) is None
+
+
+def test_decimal_resource_bound_preserves_normal_canonicalization(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    candidate = correction(
+        superseded=reward0,
+        corrected=reward1,
+        value="123.450000",
+    )
+
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_correction(candidate)
+
+    raw = sqlite3.connect(path)
+    assert raw.execute(
+        "SELECT corrected_reward_value FROM corrections"
+    ).fetchone()[0] == "123.45"
+    raw.close()
+

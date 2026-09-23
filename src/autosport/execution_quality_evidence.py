@@ -446,18 +446,23 @@ def project_paper_execution_quality(
     fill_observations = tuple(
         sample.fill_ratio for sample in ordered if sample.fill_ratio is not None
     )
+    attempted_count = len(attempted_rows)
+    if len(ordered) > attempted_count:
+        raise EvaluationUniverseIntegrityError(
+            "PAPER outcome observations exceed the durable attempted denominator"
+        )
     return PaperExecutionQualityReport(
         ledger_sha256=ledger.ledger_sha256,
         universe_sha256=ledger.universe.universe_sha256,
         frozen_denominator_rows=len(ledger.universe.rows),
         execution_model_eligible_rows=len(eligible_rows),
-        attempted_rows=len(attempted_rows),
+        attempted_rows=attempted_count,
         outcome_observation_rows=len(ordered),
         outcome_counts=tuple(sorted(counts.items())),
         price_observation_count=len(price_observations),
-        price_observation_missing_count=len(ordered) - len(price_observations),
+        price_observation_missing_count=attempted_count - len(price_observations),
         fill_observation_count=len(fill_observations),
-        fill_observation_missing_count=len(ordered) - len(fill_observations),
+        fill_observation_missing_count=attempted_count - len(fill_observations),
         real_latency_observation_count=0,
         clock_status=ClockStatus.CLOCK_DOMAIN_UNPROVEN,
         quality_status=(

@@ -579,6 +579,34 @@ def test_sync_can_skip_intermediate_unknown_observation_when_ledger_is_terminal(
     assert store.active_reserved_amount() == Decimal("0")
 
 
+
+def test_refreshing_funds_evidence_in_same_context_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    store = _store(tmp_path)
+
+    first = store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+    refreshed = store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    assert refreshed == first
+    assert store.active_reserved_amount() == Decimal("25")
+
+
 def test_copied_funds_precheck_cannot_mint_reservation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

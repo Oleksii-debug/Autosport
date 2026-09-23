@@ -6,7 +6,7 @@ time, and the parsed provider-native inventory into deterministic evidence.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 import json
@@ -63,38 +63,55 @@ class BetfairDiscoveryExchange:
     request: BetfairCatalogRequest
     raw_response: bytes
     observed_at: datetime
+    _method_snapshot: str = field(init=False, repr=False, compare=False)
+    _canonical_request_json_snapshot: str = field(init=False, repr=False, compare=False)
+    _canonical_filter_json_snapshot: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, BetfairCatalogRequest):
+        if type(self.request) is not BetfairCatalogRequest:
             raise BetfairDiscoveryProvenanceError(
-                "request must be a canonical BetfairCatalogRequest"
+                "request must be an exact canonical BetfairCatalogRequest"
             )
-        if not isinstance(self.raw_response, bytes):
+        if type(self.raw_response) is not bytes:
             raise BetfairDiscoveryProvenanceError("raw_response must be immutable bytes")
         if not self.raw_response:
             raise BetfairDiscoveryProvenanceError("raw_response must not be empty")
         _require_utc(self.observed_at, "observed_at")
-        _canonical_json(self.request.rpc_params(), "request.params")
 
-    @property
-    def method(self) -> str:
-        return self.request.method
-
-    @property
-    def canonical_request_json(self) -> str:
-        return _canonical_json(
-            {"method": self.request.method, "params": self.request.rpc_params()},
+        params = self.request.rpc_params()
+        canonical_request_json = _canonical_json(
+            {"method": self.request.method, "params": params},
             "request",
         )
-
-    @property
-    def canonical_filter_json(self) -> str:
-        market_filter = self.request.rpc_params().get("filter")
+        market_filter = params.get("filter")
         if not isinstance(market_filter, Mapping):
             raise BetfairDiscoveryProvenanceError(
                 "canonical discovery request is missing filter mapping"
             )
-        return _canonical_json(market_filter, "request.filter")
+        canonical_filter_json = _canonical_json(market_filter, "request.filter")
+        object.__setattr__(self, "_method_snapshot", self.request.method)
+        object.__setattr__(
+            self,
+            "_canonical_request_json_snapshot",
+            canonical_request_json,
+        )
+        object.__setattr__(
+            self,
+            "_canonical_filter_json_snapshot",
+            canonical_filter_json,
+        )
+
+    @property
+    def method(self) -> str:
+        return self._method_snapshot
+
+    @property
+    def canonical_request_json(self) -> str:
+        return self._canonical_request_json_snapshot
+
+    @property
+    def canonical_filter_json(self) -> str:
+        return self._canonical_filter_json_snapshot
 
     @property
     def request_sha256(self) -> str:
@@ -154,15 +171,15 @@ class BetfairDiscoveryAcquisitionEvidence:
 
     def __post_init__(self) -> None:
         _token(self.discovery_run_id, "discovery_run_id")
-        if not isinstance(self.visibility_scope, BetfairDiscoveryVisibilityScope):
+        if type(self.visibility_scope) is not BetfairDiscoveryVisibilityScope:
             raise BetfairDiscoveryProvenanceError(
                 "visibility_scope must be BetfairDiscoveryVisibilityScope"
             )
-        if not isinstance(self.event_type_exchange, BetfairDiscoveryExchange):
+        if type(self.event_type_exchange) is not BetfairDiscoveryExchange:
             raise BetfairDiscoveryProvenanceError(
                 "event_type_exchange must be BetfairDiscoveryExchange"
             )
-        if not isinstance(self.market_type_exchange, BetfairDiscoveryExchange):
+        if type(self.market_type_exchange) is not BetfairDiscoveryExchange:
             raise BetfairDiscoveryProvenanceError(
                 "market_type_exchange must be BetfairDiscoveryExchange"
             )
@@ -184,15 +201,15 @@ class BetfairDiscoveryAcquisitionEvidence:
             raise BetfairDiscoveryProvenanceError("market_types must be a tuple")
         if not isinstance(self.competitions, tuple):
             raise BetfairDiscoveryProvenanceError("competitions must be a tuple")
-        if any(not isinstance(item, BetfairEventType) for item in self.event_types):
+        if any(type(item) is not BetfairEventType for item in self.event_types):
             raise BetfairDiscoveryProvenanceError(
                 "event_types must contain canonical BetfairEventType values"
             )
-        if any(not isinstance(item, BetfairMarketType) for item in self.market_types):
+        if any(type(item) is not BetfairMarketType for item in self.market_types):
             raise BetfairDiscoveryProvenanceError(
                 "market_types must contain canonical BetfairMarketType values"
             )
-        if any(not isinstance(item, BetfairCompetition) for item in self.competitions):
+        if any(type(item) is not BetfairCompetition for item in self.competitions):
             raise BetfairDiscoveryProvenanceError(
                 "competitions must contain canonical BetfairCompetition values"
             )
@@ -235,7 +252,7 @@ class BetfairDiscoveryAcquisitionEvidence:
                     "competition-scoped listMarketTypes requires listCompetitions acquisition evidence"
                 )
         else:
-            if not isinstance(self.competition_exchange, BetfairDiscoveryExchange):
+            if type(self.competition_exchange) is not BetfairDiscoveryExchange:
                 raise BetfairDiscoveryProvenanceError(
                     "competition_exchange must be BetfairDiscoveryExchange"
                 )

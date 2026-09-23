@@ -424,6 +424,10 @@ class ProviderCapabilityEvidenceMatrix:
     def fact_for(self, capability: BookmakerCapability) -> ProviderCapabilityEvidence:
         if type(capability) is not BookmakerCapability:
             raise ProviderCapabilityEvidenceMatrixError("capability must be exact enum")
+        if not _is_product_issued_matrix(self):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "capability matrix must be product-issued exact object with unchanged payload"
+            )
         return next(fact for fact in self.facts if fact.capability is capability)
 
     def qualifies(

@@ -353,6 +353,11 @@ def test_same_product_matrix_as_of_mutation_revokes_qualification():
         accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
         at_time=T4,
     )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="product-issued exact object with unchanged payload",
+    ):
+        issued_matrix.fact_for(BookmakerCapability.BALANCE_READ)
 
 
 def test_same_product_matrix_fact_substitution_revokes_qualification():

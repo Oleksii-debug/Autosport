@@ -6,6 +6,7 @@ import pytest
 
 from autosport.forward_economic_evidence import (
     ForwardEconomicEvidenceError,
+    _decimal_text,
     _exact_decimal_sum,
 )
 
@@ -42,3 +43,31 @@ def test_exact_money_oversized_significand_fails_closed() -> None:
     with pytest.raises(ForwardEconomicEvidenceError):
         _exact_decimal_sum(oversized, Decimal("0"))
 
+
+@pytest.mark.parametrize(
+    "value",
+    ("1E+6000", "-1E+6000", "1E-6000", "-1E-6000"),
+)
+def test_decimal_text_extreme_scale_fails_closed_before_fixed_point_expansion(
+    value: str,
+) -> None:
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="canonical decimal text exceeds resource bound",
+    ):
+        _decimal_text(Decimal(value))
+
+
+@pytest.mark.parametrize(
+    "zero",
+    ("0E-1000000", "-0E-1000000", "0E+1000000"),
+)
+def test_decimal_text_zero_short_circuits_extreme_scale(zero: str) -> None:
+    assert _decimal_text(Decimal(zero)) == "0"
+
+
+def test_decimal_text_resource_guard_preserves_existing_canonical_values() -> None:
+    assert _decimal_text(Decimal("1E+100")) == "1" + ("0" * 100)
+    assert _decimal_text(Decimal("1E-50")) == "0." + ("0" * 49) + "1"
+    assert _decimal_text(Decimal("1.2300")) == "1.23"
+    assert _decimal_text(Decimal("123.00")) == "123"

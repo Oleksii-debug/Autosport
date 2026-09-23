@@ -13,6 +13,7 @@ from typing import Protocol
 
 _DECIMAL_PRECISION = 80
 _MAX_EXACT_MONEY_COEFFICIENT_DIGITS = 512
+_MAX_CANONICAL_DECIMAL_TEXT_CHARS = 512
 
 
 class ForwardEconomicEvidenceError(ValueError):
@@ -134,10 +135,38 @@ def _exact_decimal_sum(*values: Decimal) -> Decimal:
 
 def _decimal_text(value: Decimal) -> str:
     value = _decimal(value, "decimal")
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return "0" if text in ("", "-0") else text
+    decimal_tuple = value.as_tuple()
+    exponent = decimal_tuple.exponent
+    if type(exponent) is not int:
+        raise ForwardEconomicEvidenceError(
+            "canonical decimal text requires a finite integral exponent"
+        )
+    if value.is_zero():
+        return "0"
+
+    # Match the existing fixed-point canonicalization without first expanding a
+    # compact Decimal into an attacker-sized string.  Only fractional trailing
+    # zeroes are discarded; integer zeroes remain part of the exact value text.
+    digits = decimal_tuple.digits
+    while exponent < 0 and len(digits) > 1 and digits[-1] == 0:
+        digits = digits[:-1]
+        exponent += 1
+
+    point = len(digits) + exponent
+    sign_chars = 1 if decimal_tuple.sign else 0
+    if exponent >= 0:
+        fixed_text_chars = sign_chars + len(digits) + exponent
+    elif point > 0:
+        fixed_text_chars = sign_chars + len(digits) + 1
+    else:
+        fixed_text_chars = sign_chars + 2 - point + len(digits)
+    if fixed_text_chars > _MAX_CANONICAL_DECIMAL_TEXT_CHARS:
+        raise ForwardEconomicEvidenceError(
+            "canonical decimal text exceeds resource bound"
+        )
+
+    canonical_value = Decimal((decimal_tuple.sign, digits, exponent))
+    return format(canonical_value, "f")
 
 
 def _instant_text(value: datetime) -> str:

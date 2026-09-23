@@ -538,6 +538,10 @@ def assess_campaign_qualification(
 
     last_checkpoint = episodes[-1].checkpoint
     last_checkpoint_at = _instant(last_checkpoint.available_at, "last checkpoint")
+    first_observation_at = _instant(
+        episodes[0].observation.available_at,
+        "first observation",
+    )
     stop_at = _instant(evidence.stop.available_at, "stop.available_at")
     bundle_at = _instant(evidence.terminal_bundle.available_at, "terminal_bundle.available_at")
 
@@ -545,8 +549,8 @@ def assess_campaign_qualification(
         blockers.append("durable STOP predates the final campaign checkpoint")
     if bundle_at < stop_at:
         blockers.append("terminal evidence bundle predates durable STOP")
-    if (last_checkpoint_at - start).total_seconds() < MIN_MULTIDAY_SECONDS:
-        blockers.append("campaign does not span the minimum 24-hour multi-day interval")
+    if (last_checkpoint_at - first_observation_at).total_seconds() < MIN_MULTIDAY_SECONDS:
+        blockers.append("observed evidence does not span the minimum 24-hour multi-day interval")
 
     expected_bundle = structural_terminal_bundle_sha256(
         identity,

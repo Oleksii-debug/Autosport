@@ -515,6 +515,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             "request_id": value.request_id,
             "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
             "regime_id": value.voc_regime_id,
@@ -595,6 +596,66 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("non-public", decision.reason)
+
+    def test_cloud_requires_product_owned_matching_data_classification(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-data-classification")
+
+        mismatched_request = request(request_id="req-classification-mismatch")
+        mismatched_request = self.canonical_request(
+            mismatched_request,
+            observation,
+            context_overrides={
+                "data_classification": DataClassification.PRIVATE.value,
+            },
+        )
+        mismatched = self.route_compute(
+            mismatched_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(mismatched.tier, ComputeTier.LOCAL)
+        self.assertIn("data classification does not match", mismatched.reason)
+
+        legacy_request = request(request_id="req-classification-legacy")
+        legacy_context = {
+            "request_id": legacy_request.request_id,
+            "decision_input_sha256": legacy_request.decision_input_sha256,
+            "task_class": legacy_request.required_capability,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": legacy_request.voc_regime_id,
+            "urgency_id": legacy_request.voc_urgency_id,
+            "contradiction_state": legacy_request.voc_contradiction_state,
+        }
+        legacy_digest = hashlib.sha256(
+            json.dumps(
+                legacy_context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._canonical_voc.publish_context(legacy_digest, legacy_context)
+        legacy_request = replace(
+            legacy_request,
+            decision_evidence_sha256=legacy_digest,
+        )
+        legacy = self.route_compute(
+            legacy_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(legacy.tier, ComputeTier.LOCAL)
+        self.assertIn("lacks data classification", legacy.reason)
 
     def test_cloud_requires_positive_fresh_measured_paired_voc(self):
         decision = self.route_compute(

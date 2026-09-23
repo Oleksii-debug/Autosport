@@ -587,7 +587,7 @@ class TheOddsApiProvider:
                 self._current_url()
             )
             clock = self.clock
-            receipt_clock_verified = clock is utc_now_iso
+            receipt_clock_verified = self._receipt_clock_is_product_owned(clock)
             observed_at = _timestamp(clock(), "observed_at")
             evidence = self._request_evidence(
                 "current",
@@ -639,7 +639,7 @@ class TheOddsApiProvider:
             self._historical_url(requested_at)
         )
         clock = self.clock
-        receipt_clock_verified = clock is utc_now_iso
+        receipt_clock_verified = self._receipt_clock_is_product_owned(clock)
         observed_at = _timestamp(clock(), "observed_at")
         if _datetime(requested_at) > _datetime(observed_at):
             raise TheOddsApiPayloadError(
@@ -723,9 +723,20 @@ class TheOddsApiProvider:
         self._pending_cursor = None
         self._pending_quality_flags = ()
 
-    def _request(self, url: str) -> tuple[HttpJsonResponse, bool]:
+    @staticmethod
+    def _receipt_clock_is_product_owned(
+        clock: Clock,
+        product_clock: Clock = utc_now_iso,
+    ) -> bool:
+        return clock is product_clock
+
+    def _request(
+        self,
+        url: str,
+        product_transport: Transport = _default_transport,
+    ) -> tuple[HttpJsonResponse, bool]:
         transport = self.transport
-        provider_origin_verified = transport is _default_transport
+        provider_origin_verified = transport is product_transport
         response = transport(url, self.timeout_seconds)
         if type(response) is not HttpJsonResponse:
             raise TypeError("transport must return HttpJsonResponse")

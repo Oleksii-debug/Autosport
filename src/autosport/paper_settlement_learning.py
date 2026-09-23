@@ -1048,22 +1048,30 @@ class PaperSettlementLearningBridge:
             raise PaperSettlementLearningBridgeError(
                 "ACKED reward invalidation conflicts are incomplete"
             )
-        seen: set[str] = set()
+        incoming: dict[str, str] = {}
+        for resolution in resolutions:
+            for quote_key, outcome in resolution.quote_outcomes.items():
+                previous_incoming = incoming.get(quote_key)
+                if previous_incoming is not None and previous_incoming != outcome:
+                    raise PaperSettlementLearningBridgeError(
+                        "ACKED reward invalidation evidence conflicts internally"
+                    )
+                incoming[quote_key] = outcome
+        expected_conflicts = [
+            {
+                "quote_key": quote_key,
+                "previous_outcome": previous,
+                "replacement_outcome": incoming[quote_key],
+            }
+            for quote_key, previous in sorted(sealed.items())
+            if quote_key in incoming and incoming[quote_key] != previous
+        ]
+        if not expected_conflicts or conflicts != expected_conflicts:
+            raise PaperSettlementLearningBridgeError(
+                "ACKED reward invalidation conflicts differ from source evidence"
+            )
         for conflict in conflicts:
-            if type(conflict) is not dict or set(conflict) != {
-                "quote_key",
-                "previous_outcome",
-                "replacement_outcome",
-            }:
-                raise PaperSettlementLearningBridgeError(
-                    "ACKED reward invalidation conflict schema mismatch"
-                )
             quote_key = _text(conflict["quote_key"], "invalidation quote_key")
-            if quote_key in seen:
-                raise PaperSettlementLearningBridgeError(
-                    "ACKED reward invalidation repeats quote identity"
-                )
-            seen.add(quote_key)
             previous = conflict["previous_outcome"]
             replacement_outcome = conflict["replacement_outcome"]
             if (
@@ -1071,6 +1079,7 @@ class PaperSettlementLearningBridge:
                 or replacement_outcome not in {"win", "loss", "void"}
                 or previous == replacement_outcome
                 or sealed.get(quote_key) != previous
+                or incoming.get(quote_key) != replacement_outcome
             ):
                 raise PaperSettlementLearningBridgeError(
                     "ACKED reward invalidation conflict is not canonical"

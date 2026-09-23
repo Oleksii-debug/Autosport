@@ -119,6 +119,32 @@ def _canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _market_semantic_content_sha256(
+    events: Sequence[tuple[MarketEvent, dict[str, Any]]],
+) -> str:
+    """Hash provider market semantics without product-local acquisition time.
+
+    Historical capture deliberately stamps captured_at into ingest_ts on every
+    persisted MarketEvent. That timestamp belongs to acquisition provenance,
+    not to provider market content. Keep the exact market artifact SHA bound
+    elsewhere, while the CONTENT axis removes only this product-local field
+    from the canonical parsed event representation.
+    """
+
+    semantic_rows: list[dict[str, Any]] = []
+    for event, _raw in events:
+        row = event.to_dict()
+        row.pop("ingest_ts", None)
+        semantic_rows.append(row)
+    return _canonical_json_sha256(
+        {
+            "schema_version": 1,
+            "kind": "parlay_historical_market_semantic_content",
+            "rows": semantic_rows,
+        }
+    )
+
+
 def _timestamp(value: Any, *, field: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty ISO-8601 timestamp")
@@ -731,6 +757,7 @@ def assemble_historical_corpus(
             "historical snapshots mix legacy/unproven or multiple explicit sport identities"
         )
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
+    market_content_sha256 = _market_semantic_content_sha256(events)
     upstream_bookmaker_keys = tuple(
         sorted(
             {
@@ -893,7 +920,7 @@ def assemble_historical_corpus(
                 "product_kind": "POINT_IN_TIME_ODDS",
                 "sport": manifest_sport,
                 "source_ids": list(source_ids),
-                "market_sha256": market_sha,
+                "market_content_sha256": market_content_sha256,
                 "market_types": list(market_types),
                 "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
                 "event_count": len(events),
@@ -992,7 +1019,8 @@ def assemble_historical_corpus(
                     "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
                     "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
                     "content_identity": content_identity,
-                    "content_identity_scope": "market_snapshot_only",
+                    "content_identity_scope": "market_snapshot_semantics_excluding_product_ingest_time",
+                    "market_content_sha256": market_content_sha256,
                     "outcome_identity": outcome_identity,
                     "acquisition_identity": acquisition_identity,
                     "governance_identity": governance_identity,

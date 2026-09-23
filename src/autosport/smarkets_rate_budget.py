@@ -294,7 +294,14 @@ class SmarketsAccountRateBudget:
                         if digest != current['observation_sha256']:
                             raise SmarketsRateBudgetError('conflicting rate-budget observations share observed_at')
                         if reservation_id is not None:
-                            self._complete_reservation(connection, reservation_id, digest, reset_text)
+                            self._complete_reservation(
+                                connection,
+                                reservation_id,
+                                digest,
+                                reset_text,
+                                previous_provider_remaining=current['provider_remaining'],
+                                observed_provider_remaining=observation.remaining,
+                            )
                         connection.execute('COMMIT')
                         return
                     if observation.reset_at < current_reset:
@@ -317,7 +324,14 @@ class SmarketsAccountRateBudget:
                 if reset_changed:
                     connection.execute('DELETE FROM smarkets_rate_reservation WHERE account_id = ?', (self._account_id,))
                 if reservation_id is not None and (not reset_changed):
-                    self._complete_reservation(connection, reservation_id, digest, reset_text)
+                    self._complete_reservation(
+                        connection,
+                        reservation_id,
+                        digest,
+                        reset_text,
+                        previous_provider_remaining=current['provider_remaining'],
+                        observed_provider_remaining=observation.remaining,
+                    )
                 block = connection.execute('SELECT observed_at FROM smarkets_rate_block WHERE account_id = ?', (self._account_id,)).fetchone()
                 if block is not None and observation.observed_at > _parse_dt(block['observed_at'], 'block observed_at'):
                     connection.execute('DELETE FROM smarkets_rate_block WHERE account_id = ?', (self._account_id,))
@@ -355,7 +369,16 @@ class SmarketsAccountRateBudget:
         except sqlite3.Error as exc:
             raise SmarketsRateBudgetError('rate-budget failure update failed closed') from exc
 
-    def _complete_reservation(self, connection: sqlite3.Connection, reservation_id: str, observation_sha256: str, reset_text: str) -> None:
+    def _complete_reservation(
+        self,
+        connection: sqlite3.Connection,
+        reservation_id: str,
+        observation_sha256: str,
+        reset_text: str,
+        *,
+        previous_provider_remaining: int,
+        observed_provider_remaining: int,
+    ) -> None:
         row = connection.execute('SELECT * FROM smarkets_rate_reservation WHERE reservation_id = ?', (reservation_id,)).fetchone()
         if row is None or row['account_id'] != self._account_id:
             raise SmarketsRateBudgetError('unknown rate-budget reservation_id')
@@ -369,6 +392,18 @@ class SmarketsAccountRateBudget:
         if row['issued_observation_sha256'] == observation_sha256:
             raise SmarketsRateBudgetError(
                 'reservation completion requires fresh provider observation evidence'
+            )
+        before = _nonnegative_int(
+            previous_provider_remaining,
+            'previous provider remaining',
+        )
+        after = _nonnegative_int(
+            observed_provider_remaining,
+            'observed provider remaining',
+        )
+        if after >= before:
+            raise SmarketsRateBudgetError(
+                'reservation completion requires provider remaining to decrease'
             )
         connection.execute('UPDATE smarkets_rate_reservation SET completed_observation_sha256 = ? WHERE reservation_id = ?', (observation_sha256, reservation_id))
 

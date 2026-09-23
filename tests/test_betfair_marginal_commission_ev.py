@@ -45,6 +45,8 @@ def test_market_netting_sign_flip_matches_reference_oracle():
     assert {row.outcome_id: row.marginal_after_commission_pnl for row in result.outcomes} == {
         "home": Decimal("-76"), "away": Decimal("80")
     }
+    assert result.commission_quantum == Decimal("0.01")
+    assert result.commission_rounding == "ROUND_HALF_UP"
     assert result.decision_authorized is False
 
 
@@ -139,3 +141,87 @@ def test_evidence_identity_and_currency_are_strict():
 def test_oversized_decimal_envelope_fails_before_arithmetic():
     with pytest.raises(BetfairMarginalCommissionEVError, match="bounded Decimal"):
         scenario("only", "1", "1e1001", "0")
+
+
+def test_invalid_utf8_surrogate_text_fails_closed_before_hashing():
+    with pytest.raises(BetfairMarginalCommissionEVError, match="valid UTF-8"):
+        calculate_betfair_marginal_commission_ev(
+            account_id="bad\ud800account",
+            market_id="1.2",
+            currency="GBP",
+            effective_commission_rate=Decimal("0.05"),
+            probability_evidence_sha256=SHA_A,
+            exposure_evidence_sha256=SHA_B,
+            candidate_evidence_sha256=SHA_C,
+            commission_rate_evidence_sha256=SHA_D,
+            outcomes=(scenario("only", "1", "0", "1"),),
+        )
+
+
+def test_provider_commission_charge_rounds_half_up_to_two_decimals():
+    result = calculate((scenario("only", "1", "0.62", "0"),), rate="0.05")
+    row = result.outcomes[0]
+    assert row.base_after_commission_pnl == Decimal("0.59")
+
+    tie = calculate((scenario("only", "1", "0.70", "0"),), rate="0.05")
+    assert tie.outcomes[0].base_after_commission_pnl == Decimal("0.66")
+
+
+def test_unrounded_gross_pnl_is_rejected_as_missing_upstream_settlement_authority():
+    with pytest.raises(BetfairMarginalCommissionEVError, match="settlement rounding"):
+        scenario("only", "1", "0.001", "0")
+    with pytest.raises(BetfairMarginalCommissionEVError, match="settlement rounding"):
+        scenario("only", "1", "0", "-1.005")
+
+
+def test_settlement_rounding_makes_rate_interval_endpoint_shortcut_unsound():
+    outcomes = (scenario("only", "1", "0.05", "0.01"),)
+    low = calculate(outcomes, rate="0")
+    interior = calculate(outcomes, rate="0.084")
+    high = calculate(outcomes, rate="0.10")
+
+    assert low.marginal_after_commission_ev == Decimal("0.01")
+    assert interior.marginal_after_commission_ev == Decimal("0.00")
+    assert high.marginal_after_commission_ev == Decimal("0.01")
+
+
+def test_trailing_zero_minor_unit_encodings_remain_canonical():
+    first = calculate((scenario("only", "1.00", "0.6200", "0.0100"),), rate="0.0500")
+    second = calculate((scenario("only", "1", "0.62", "0.01"),), rate="0.05")
+
+    assert first == second
+    assert first.outcomes[0].base_after_commission_pnl == Decimal("0.59")
+
+
+def test_calculation_identity_binds_evidence_and_market_scope():
+    common = dict(
+        currency="GBP",
+        effective_commission_rate=Decimal("0.05"),
+        probability_evidence_sha256=SHA_A,
+        exposure_evidence_sha256=SHA_B,
+        candidate_evidence_sha256=SHA_C,
+        outcomes=(scenario("only", "1", "1.00", "0.25"),),
+    )
+    first = calculate_betfair_marginal_commission_ev(
+        account_id="account-1",
+        market_id="1.1",
+        commission_rate_evidence_sha256=SHA_D,
+        **common,
+    )
+    changed_evidence = calculate_betfair_marginal_commission_ev(
+        account_id="account-1",
+        market_id="1.1",
+        commission_rate_evidence_sha256="e" * 64,
+        **common,
+    )
+    changed_market = calculate_betfair_marginal_commission_ev(
+        account_id="account-1",
+        market_id="1.2",
+        commission_rate_evidence_sha256=SHA_D,
+        **common,
+    )
+
+    assert first.marginal_after_commission_ev == changed_evidence.marginal_after_commission_ev
+    assert first.marginal_after_commission_ev == changed_market.marginal_after_commission_ev
+    assert first.calculation_sha256 != changed_evidence.calculation_sha256
+    assert first.calculation_sha256 != changed_market.calculation_sha256

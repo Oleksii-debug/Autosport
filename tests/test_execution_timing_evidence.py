@@ -9,6 +9,7 @@ import pytest
 from autosport.execution_timing_evidence import (
     ExecutionTimingEvidenceError,
     LocalMonotonicTimingSession,
+    MonotonicTimingIntervalEvidence,
     MonotonicTimingMarker,
 )
 
@@ -42,10 +43,11 @@ def test_same_session_interval_uses_exact_monotonic_duration() -> None:
 
     assert evidence.duration_ns == 2_500_000
     assert evidence.duration_ms == Decimal("2.5")
-    assert evidence.evidence_class == "LOCAL_TRANSPORT_OBSERVED"
+    assert evidence.timing_class == "LOCAL_MONOTONIC_SAME_SESSION"
     assert len(evidence.evidence_id) == 64
     assert evidence.start_marker_id == start.marker_id
     assert evidence.end_marker_id == end.marker_id
+    assert session.require_issued_interval(evidence) is evidence
 
 
 def test_wall_clock_regression_cannot_create_negative_or_favorable_latency() -> None:
@@ -124,6 +126,35 @@ def test_caller_constructed_marker_is_not_issuance_authority() -> None:
         session.interval(start, end)
 
 
+def test_caller_constructed_interval_is_not_positive_authority() -> None:
+    session = _session(monotonic_ns=_sequence(100, 200))
+    start = session.mark("start")
+    end = session.mark("end")
+    forged = MonotonicTimingIntervalEvidence(
+        clock_domain_id=session.clock_domain_id,
+        session_id=session.session_id,
+        issuer_epoch_id=session.issuer_epoch_id,
+        start_marker_id=start.marker_id,
+        end_marker_id=end.marker_id,
+        start_sequence=start.sequence,
+        end_sequence=end.sequence,
+        duration_ns=1,
+    )
+
+    with pytest.raises(ExecutionTimingEvidenceError, match="not product-issued"):
+        session.require_issued_interval(forged)
+
+
+def test_tampered_issued_interval_cannot_be_re_resolved() -> None:
+    session = _session(monotonic_ns=_sequence(100, 200))
+    start = session.mark("start")
+    end = session.mark("end")
+    issued = session.interval(start, end)
+
+    with pytest.raises(ExecutionTimingEvidenceError, match="not product-issued"):
+        session.require_issued_interval(replace(issued, duration_ns=99))
+
+
 def test_reversed_markers_fail_causal_order() -> None:
     session = _session(monotonic_ns=_sequence(100, 200))
     first = session.mark("first")
@@ -152,6 +183,7 @@ def test_interval_identity_is_deterministic_for_same_issued_markers() -> None:
 
     assert first == second
     assert first.evidence_id == second.evidence_id
+    assert session.require_issued_interval(second) == first
 
 
 def test_bool_is_not_accepted_as_monotonic_integer() -> None:

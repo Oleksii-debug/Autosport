@@ -31,11 +31,11 @@
       <input id="205" type="text" readonly aria-label="Віртуальний банк">
       <p><strong>Робоча область:</strong> <span id="workspace-value">—</span></p>
       <p><strong>Активна економічна область:</strong> <span id="active-workspace-value">—</span></p>
-      <p id="truth-boundary">Реальні грошові ставки вимкнено. Human/NVDA verification ще не підтверджено.</p>
+      <p id="truth-boundary">Реальні грошові ставки вимкнено. Людську перевірку та перевірку NVDA ще не підтверджено.</p>
     </section>
 
     <section id="replay-controls" aria-labelledby="replay-heading">
-      <h2 id="replay-heading">Дані, стратегія та PAPER replay</h2>
+      <h2 id="replay-heading">Дані, стратегія та симуляційний повтор</h2>
 
       <label for="dataset-path">Шлях до папки набору даних</label>
       <input id="dataset-path" type="text" autocomplete="off" aria-describedby="dataset-summary">
@@ -60,21 +60,21 @@
       </select>
 
       <div class="button-row">
-        <button id="102" type="button">Запустити PAPER replay</button>
+        <button id="102" type="button">Запустити симуляційний повтор</button>
         <button id="108" type="button">Відновити робочу область</button>
       </div>
 
-      <label for="evidence-path">Файл експорту evidence поза активною робочою областю</label>
+      <label for="evidence-path">Файл експорту доказів поза активною робочою областю</label>
       <input id="evidence-path" type="text" autocomplete="off">
-      <button id="109" type="button">Експортувати evidence</button>
+      <button id="109" type="button">Експортувати докази</button>
     </section>
 
     <section id="paper-runtime" aria-labelledby="paper-runtime-heading">
-      <h2 id="paper-runtime-heading">Тривала PAPER-робота</h2>
-      <p>Ця оболонка лише керує канонічним Python runtime. Реальні грошові ставки не виконуються.</p>
+      <h2 id="paper-runtime-heading">Тривала симуляційна робота</h2>
+      <p>Ця оболонка лише керує канонічним середовищем виконання застосунку. Реальні грошові ставки не виконуються.</p>
       <div class="button-row">
-        <button id="product-runtime-start" type="button">PAPER: старт</button>
-        <button id="product-runtime-stop" type="button" disabled>PAPER: стоп</button>
+        <button id="product-runtime-start" type="button">Запустити симуляційну роботу</button>
+        <button id="product-runtime-stop" type="button" disabled>Зупинити симуляційну роботу</button>
       </div>
       <label for="product-runtime-status">Стан тривалої PAPER-роботи</label>
       <input id="product-runtime-status" type="text" readonly aria-label="Стан тривалої PAPER-роботи">
@@ -84,7 +84,7 @@
       <h2 id="live-heading">Живі ринкові дані</h2>
       <label for="104">Режим живих даних</label>
       <select id="104" aria-label="Режим живих даних">
-        <option value="public_preview">Публічний preview без ключа</option>
+        <option value="public_preview">Публічний попередній перегляд без ключа</option>
         <option value="api_key">ParlayAPI з ключем середовища</option>
       </select>
       <button id="105" type="button">Оновити поточні котирування</button>
@@ -192,16 +192,16 @@
         </div>
 
         <p id="manual-status" role="status" aria-live="polite">Готово до розрахунку.</p>
-        <label for="334">Результат і evidence ручного розрахунку</label>
+        <label for="334">Результат і докази ручного розрахунку</label>
         <textarea id="334" rows="16" readonly aria-label="Результат і evidence ручного розрахунку"></textarea>
       </div>
     </section>
 
     <section id="help-about" aria-labelledby="help-heading">
       <h2 id="help-heading">Клавіатура і межа доказів</h2>
-      <p>Ctrl+O — шлях набору даних; Ctrl+E — evidence; Ctrl+L — live snapshot. PAPER replay і recovery запускаються через звичайні кнопки Tab + Enter/Space, без перехоплення браузерного Ctrl+R.</p>
-      <p>F2 — навігація екранами; F8 — оцінювання. F6/F7/F9/F10 залишаються браузеру/WebView2 та assistive technology; квитки, live, економічні межі й ручні розрахунки доступні через семантичні controls і навігацію екранами.</p>
-      <p>Machine semantic/UIA checks не є фізичною перевіркою NVDA. NVDA_VERIFIED залишається false до людського тесту exact release artifact.</p>
+      <p>Ctrl+O — шлях набору даних; Ctrl+E — докази; Ctrl+L — поточний знімок. Симуляційний повтор і відновлення запускаються через звичайні кнопки Tab + Enter/Space, без перехоплення браузерного Ctrl+R.</p>
+      <p>F2 — навігація екранами; F8 — оцінювання. F6/F7/F9/F10 залишаються браузеру/WebView2 та допоміжним технологіям; квитки, живі дані, економічні межі й ручні розрахунки доступні через семантичні елементи керування і навігацію екранами.</p>
+      <p>Машинні семантичні перевірки UIA не є фізичною перевіркою NVDA. NVDA_VERIFIED залишається false до людського тесту точного артефакту випуску.</p>
     </section>
   </main>
 

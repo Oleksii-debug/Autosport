@@ -29,6 +29,8 @@ _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
 _LIST_CLEARED_ORDERS = "SportsAPING/v1.0/listClearedOrders"
 _LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
 _EXECUTION_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
+_MAX_PROVIDER_DECIMAL_DIGITS = 512
+_MAX_PROVIDER_DECIMAL_ABS_EXPONENT = 4096
 _READ_METHOD_ENDPOINT = MappingProxyType({
     _GET_ACCOUNT_FUNDS: ACCOUNT_JSON_RPC_ENDPOINT,
     _GET_ACCOUNT_DETAILS: ACCOUNT_JSON_RPC_ENDPOINT,
@@ -1070,6 +1072,15 @@ def _enum_text(value: object, field: str, allowed: set[str]) -> str:
 def _decimal(value: object, field: str) -> Decimal:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise BetfairReadOnlyError(f"{field} must be a finite Decimal")
+    decimal_tuple = value.as_tuple()
+    exponent = decimal_tuple.exponent
+    if (
+        len(decimal_tuple.digits) > _MAX_PROVIDER_DECIMAL_DIGITS
+        or not isinstance(exponent, int)
+        or isinstance(exponent, bool)
+        or abs(exponent) > _MAX_PROVIDER_DECIMAL_ABS_EXPONENT
+    ):
+        raise BetfairReadOnlyError(f"{field} exceeds provider Decimal resource bounds")
     return value
 
 
@@ -1237,6 +1248,10 @@ def _install_execution_readback_authority() -> None:
     sealed_list_cleared = _LIST_CLEARED_ORDERS
     sealed_list_market = _LIST_MARKET_CATALOGUE
     sealed_cleared_statuses = tuple(_EXECUTION_CLEARED_STATUSES)
+    sealed_max_provider_decimal_digits = _MAX_PROVIDER_DECIMAL_DIGITS
+    sealed_max_provider_decimal_abs_exponent = (
+        _MAX_PROVIDER_DECIMAL_ABS_EXPONENT
+    )
 
     def json_executable_graph_matches() -> bool:
         return bool(
@@ -1536,6 +1551,16 @@ def _install_execution_readback_authority() -> None:
             )
         if not result.is_finite():
             raise sealed_error_type(f"{field} must be finite")
+        decimal_tuple = result.as_tuple()
+        exponent = decimal_tuple.exponent
+        if (
+            len(decimal_tuple.digits) > sealed_max_provider_decimal_digits
+            or type(exponent) is not int
+            or abs(exponent) > sealed_max_provider_decimal_abs_exponent
+        ):
+            raise sealed_error_type(
+                f"{field} exceeds provider Decimal resource bounds"
+            )
         if positive and result <= 0:
             raise sealed_error_type(f"{field} must be positive")
         if nonnegative and result < 0:

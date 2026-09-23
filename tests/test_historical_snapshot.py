@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import json
 import tempfile
@@ -11,7 +12,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import autosport.historical_snapshot as historical_snapshot
-from autosport.historical_snapshot import _atomic_write_jsonl, capture_historical_snapshot
+from autosport.historical_snapshot import (
+    _atomic_write_jsonl,
+    assert_historical_snapshot_provider_origin,
+    capture_historical_snapshot,
+    capture_product_owned_historical_snapshot,
+)
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
     ParlayApiTableTennisProvider,
@@ -99,6 +105,104 @@ class HistoricalSnapshotTests(unittest.TestCase):
             sleeper=lambda _: None,
         )
 
+    def test_injected_transport_capture_cannot_issue_provider_origin_authority(self) -> None:
+        transport = _Transport(_payload())
+        provider = self._provider(transport)
+        with tempfile.TemporaryDirectory() as temp:
+            report = capture_historical_snapshot(
+                provider,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=Path(temp) / "market.jsonl",
+                evidence_path=Path(temp) / "evidence.json",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "not issued by canonical product-owned Parlay acquisition",
+        ):
+            assert_historical_snapshot_provider_origin(report)
+
+    def test_product_owned_capture_issues_only_exact_live_origin_witness(self) -> None:
+        payload = _payload()
+        raw = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        class UrlopenResponse:
+            status = 200
+            headers = {"X-API-Version": "test"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return raw
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "autosport.parlayapi_provider.urlopen",
+            return_value=UrlopenResponse(),
+        ):
+            report = capture_product_owned_historical_snapshot(
+                api_key="secret-key-must-not-leak",
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=Path(temp) / "market.jsonl",
+                evidence_path=Path(temp) / "evidence.json",
+            )
+            persisted = json.loads(
+                (Path(temp) / "evidence.json").read_text(encoding="utf-8")
+            )
+
+        assert_historical_snapshot_provider_origin(report)
+        self.assertFalse(
+            persisted["acquisition_provenance"]["provider_origin_authority_persisted"]
+        )
+        self.assertTrue(
+            persisted["acquisition_provenance"][
+                "provider_origin_requires_live_product_capture"
+            ]
+        )
+
+        reconstructed = replace(report)
+        self.assertEqual(reconstructed, report)
+        self.assertIsNot(reconstructed, report)
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "not issued by canonical product-owned Parlay acquisition",
+        ):
+            assert_historical_snapshot_provider_origin(reconstructed)
+
+    def test_product_owned_capture_rejects_provider_dispatch_drift_before_io(self) -> None:
+        calls: list[str] = []
+
+        def forged_request(provider, url):
+            calls.append(url)
+            return HttpJsonResponse(_payload(), 200, {"X-API-Version": "forged"})
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            ParlayApiTableTennisProvider,
+            "_request",
+            forged_request,
+        ):
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "authority changed before acquisition",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=Path(temp) / "market.jsonl",
+                    evidence_path=Path(temp) / "evidence.json",
+                )
+
+        self.assertEqual(calls, [])
+
+
     def test_capture_uses_provider_snapshot_time_when_quote_last_update_is_missing(self) -> None:
         transport = _Transport(_payload())
         provider = self._provider(transport)
@@ -141,6 +245,8 @@ class HistoricalSnapshotTests(unittest.TestCase):
         self.assertEqual(acquisition["http_status"], 200)
         self.assertTrue(acquisition["canonical_response_payload_bound"])
         self.assertFalse(acquisition["raw_response_bytes_bound"])
+        self.assertFalse(acquisition["provider_origin_authority_persisted"])
+        self.assertTrue(acquisition["provider_origin_requires_live_product_capture"])
         self.assertEqual(
             acquisition["response_payload_sha256"],
             evidence["response_sha256"],

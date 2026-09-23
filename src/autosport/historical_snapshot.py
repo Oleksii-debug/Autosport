@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+import weakref
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -123,7 +124,7 @@ def _tracked_response_headers(headers: Mapping[str, str]) -> dict[str, str | Non
     return {name: observed.get(name) for name in _TRACKED_RESPONSE_HEADERS}
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class HistoricalSnapshotCapture:
     requested_at: str
     snapshot_at: str
@@ -263,6 +264,8 @@ def capture_historical_snapshot(
         "response_headers": response_headers,
         "canonical_response_payload_bound": True,
         "raw_response_bytes_bound": False,
+        "provider_origin_authority_persisted": False,
+        "provider_origin_requires_live_product_capture": True,
     }
     acquisition_sha256 = _canonical_sha256(acquisition_provenance)
     market_types = tuple(sorted({event.market_type.value for event in events}))
@@ -343,6 +346,190 @@ def capture_historical_snapshot(
         output_path=str(output),
         evidence_path=str(evidence),
     )
+
+
+def _build_historical_snapshot_provider_origin_authority():
+    """Build one lexical live-only issuer for canonical Parlay historical capture."""
+
+    provider_type = ParlayApiTableTennisProvider
+    canonical_provider_init = provider_type.__init__
+    canonical_provider_request = provider_type._request
+    canonical_event_quotes = provider_type._event_quotes
+    canonical_capture = capture_historical_snapshot
+    canonical_defaults = canonical_provider_init.__kwdefaults__
+    if type(canonical_defaults) is not dict:
+        raise RuntimeError("canonical Parlay provider defaults are unavailable")
+    canonical_transport = canonical_defaults.get("transport")
+    canonical_clock = canonical_defaults.get("clock")
+    canonical_sleeper = canonical_defaults.get("sleeper")
+    if not callable(canonical_transport) or not callable(canonical_clock) or not callable(
+        canonical_sleeper
+    ):
+        raise RuntimeError("canonical Parlay provider runtime defaults are invalid")
+
+    issued: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[object, ...],
+        ],
+    ] = {}
+
+    def capture_fingerprint(capture: HistoricalSnapshotCapture) -> tuple[object, ...]:
+        return (
+            capture.requested_at,
+            capture.snapshot_at,
+            capture.captured_at,
+            capture.previous_snapshot_at,
+            capture.next_snapshot_at,
+            capture.response_sha256,
+            capture.market_sha256,
+            capture.quote_count,
+            capture.snapshot_timestamp_fallback_count,
+            capture.market_types,
+            capture.bookmaker_keys,
+            capture.output_path,
+            capture.evidence_path,
+        )
+
+    def forget_issued(
+        capture_id: int,
+        reference: weakref.ReferenceType,
+    ) -> None:
+        current = issued.get(capture_id)
+        if current is not None and current[0] is reference:
+            issued.pop(capture_id, None)
+
+    def provider_state_is_current(
+        provider: ParlayApiTableTennisProvider,
+        *,
+        regions: tuple[str, ...],
+        markets: tuple[str, ...],
+    ) -> bool:
+        if (
+            type(provider) is not provider_type
+            or provider_type.__init__ is not canonical_provider_init
+            or provider_type._request is not canonical_provider_request
+            or provider_type._event_quotes is not canonical_event_quotes
+            or provider_type.source_id != "parlayapi:table_tennis"
+            or provider_type.sport_key != "table_tennis"
+        ):
+            return False
+        instance_dict = getattr(provider, "__dict__", None)
+        if type(instance_dict) is not dict or any(
+            name in instance_dict
+            for name in (
+                "source_id",
+                "sport_key",
+                "_request",
+                "_event_quotes",
+            )
+        ):
+            return False
+        return (
+            provider.public_preview is False
+            and provider.base_url == "https://parlay-api.com"
+            and provider.transport is canonical_transport
+            and provider.clock is canonical_clock
+            and provider.sleeper is canonical_sleeper
+            and provider.regions == regions
+            and provider.markets == markets
+        )
+
+    def issue_capture(
+        capture: HistoricalSnapshotCapture,
+    ) -> HistoricalSnapshotCapture:
+        capture_id = id(capture)
+        reference = weakref.ref(
+            capture,
+            lambda current, capture_id=capture_id: forget_issued(
+                capture_id,
+                current,
+            ),
+        )
+        issued[capture_id] = (reference, capture_fingerprint(capture))
+        return capture
+
+    def capture_product_owned_historical_snapshot(
+        *,
+        api_key: str,
+        requested_at: str,
+        output_path: str | Path,
+        evidence_path: str | Path | None = None,
+        regions: tuple[str, ...] = ("us",),
+        markets: tuple[str, ...] = ("h2h", "spreads", "totals"),
+    ) -> HistoricalSnapshotCapture:
+        """Acquire through the fixed production Parlay boundary and issue live origin authority."""
+
+        if type(api_key) is not str or not api_key or api_key != api_key.strip():
+            raise ValueError("api_key must be non-empty trimmed text")
+        if any(character.isspace() for character in api_key):
+            raise ValueError("api_key must not contain whitespace")
+        if type(regions) is not tuple or not regions:
+            raise ValueError("regions must be a non-empty tuple")
+        if type(markets) is not tuple or not markets:
+            raise ValueError("markets must be a non-empty tuple")
+        if any(type(value) is not str or not value or value != value.strip() for value in regions):
+            raise ValueError("regions must contain canonical non-empty text")
+        if any(type(value) is not str or not value or value != value.strip() for value in markets):
+            raise ValueError("markets must contain canonical non-empty text")
+
+        provider = provider_type(
+            api_key,
+            public_preview=False,
+            regions=regions,
+            markets=markets,
+            base_url="https://parlay-api.com",
+            transport=canonical_transport,
+            clock=canonical_clock,
+            sleeper=canonical_sleeper,
+        )
+        if not provider_state_is_current(provider, regions=regions, markets=markets):
+            raise ProviderPayloadError(
+                "canonical Parlay historical provider authority changed before acquisition"
+            )
+        capture = canonical_capture(
+            provider,
+            requested_at=requested_at,
+            output_path=output_path,
+            evidence_path=evidence_path,
+        )
+        if not provider_state_is_current(provider, regions=regions, markets=markets):
+            raise ProviderPayloadError(
+                "canonical Parlay historical provider authority changed during acquisition"
+            )
+        return issue_capture(capture)
+
+    def assert_historical_snapshot_provider_origin(
+        capture: HistoricalSnapshotCapture,
+    ) -> None:
+        """Require the exact live object issued by canonical production acquisition."""
+
+        if type(capture) is not HistoricalSnapshotCapture:
+            raise ProviderPayloadError(
+                "historical snapshot provider origin requires exact capture type"
+            )
+        current = issued.get(id(capture))
+        if (
+            current is None
+            or current[0]() is not capture
+            or current[1] != capture_fingerprint(capture)
+        ):
+            raise ProviderPayloadError(
+                "historical snapshot was not issued by canonical product-owned Parlay acquisition"
+            )
+
+    return (
+        capture_product_owned_historical_snapshot,
+        assert_historical_snapshot_provider_origin,
+    )
+
+
+(
+    capture_product_owned_historical_snapshot,
+    assert_historical_snapshot_provider_origin,
+) = _build_historical_snapshot_provider_origin_authority()
+del _build_historical_snapshot_provider_origin_authority
 
 
 def _bind_quote_to_snapshot(
@@ -471,9 +658,10 @@ def main(argv: list[str] | None = None) -> int:
     regions = tuple(value.strip() for value in args.regions.split(",") if value.strip())
     markets = tuple(value.strip() for value in args.markets.split(",") if value.strip())
     try:
-        provider = ParlayApiTableTennisProvider(api_key, regions=regions, markets=markets)
-        report = capture_historical_snapshot(
-            provider,
+        report = capture_product_owned_historical_snapshot(
+            api_key=api_key,
+            regions=regions,
+            markets=markets,
             requested_at=args.at,
             output_path=args.output,
             evidence_path=args.evidence,

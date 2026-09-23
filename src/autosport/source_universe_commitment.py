@@ -17,10 +17,28 @@ _CANONICAL_READ_SEAM_NAMES = frozenset(
         "_cycle_terminal_payload_sha256",
     }
 )
+_CANONICAL_CLASS_READ_SEAMS = {
+    name: getattr(CollectorDeltaStore, name) for name in _CANONICAL_READ_SEAM_NAMES
+}
 
 
 class SourceUniverseCommitmentError(ValueError):
     """Canonical collector evidence cannot support a bounded universe commitment."""
+
+
+def _require_canonical_class_read_seams() -> None:
+    """Reject runtime replacement of canonical class-level durable read authority."""
+
+    rebound = sorted(
+        name
+        for name, expected in _CANONICAL_CLASS_READ_SEAMS.items()
+        if getattr(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise TypeError(
+            "store canonical durable read seam is class-rebound: "
+            + ", ".join(rebound)
+        )
 
 
 def _require_product_expected_store_path(
@@ -146,6 +164,7 @@ def build_source_universe_commitment(
     if type(store) is not CollectorDeltaStore:
         raise TypeError("store must be the exact canonical CollectorDeltaStore")
     _require_product_expected_store_path(store, expected_store_path)
+    _require_canonical_class_read_seams()
     instance_state = vars(store)
     rebound = sorted(
         name for name in _CANONICAL_READ_SEAM_NAMES if name in instance_state
@@ -177,6 +196,7 @@ def build_source_universe_commitment(
             start_cycle_seq=start_cycle_seq,
             end_cycle_seq=end_cycle_seq,
         )
+        _require_canonical_class_read_seams()
     except ValueError as exc:
         raise SourceUniverseCommitmentError(
             "canonical collector store evidence is unavailable"

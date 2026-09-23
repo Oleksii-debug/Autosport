@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 from pathlib import Path
 
@@ -131,3 +132,43 @@ def test_product_runtime_start_cannot_bypass_strategy_workspace_recovery_quarant
     assert result["status"] == "rejected"
     assert worker.start_calls == []
     assert controller.product_worker.busy is False
+
+
+def test_product_runtime_actionability_uses_selected_strategy_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_workspace = tmp_path / "workspace"
+    strategy_workspace = tmp_path / "workspace-research"
+    controller, _worker = _controller(base_workspace)
+    _bind_strategy_workspace(controller, monkeypatch, strategy_workspace)
+
+    assert controller._product_runtime_can_start() is True
+
+    controller._recovery_required_workspaces.add(strategy_workspace)
+
+    assert controller._product_runtime_can_start() is False
+
+
+def test_product_runtime_actionability_fails_closed_for_invalid_strategy_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    controller, _worker = _controller(tmp_path / "workspace")
+
+    def invalid_target() -> Path:
+        raise ValueError("invalid selected strategy configuration")
+
+    monkeypatch.setattr(
+        controller,
+        "_product_runtime_target_workspace",
+        invalid_target,
+    )
+
+    assert controller._product_runtime_can_start() is False
+
+
+def test_product_runtime_state_projects_canonical_start_actionability() -> None:
+    source = inspect.getsource(AutosportWebController.state)
+
+    assert '"can_start": self._product_runtime_can_start()' in source

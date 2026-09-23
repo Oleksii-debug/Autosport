@@ -16,7 +16,7 @@ from .evaluation_universe import (
 from .paper_execution_reality import PaperAttemptOutcome
 
 
-PROTOCOL = "autosport-execution-quality-evidence/v3"
+PROTOCOL = "autosport-execution-quality-evidence/v2"
 DERIVED_DECIMAL_PRECISION = 50
 DERIVED_DECIMAL_ROUNDING = "ROUND_HALF_EVEN"
 DERIVED_DECIMAL_EMIN = -999_999

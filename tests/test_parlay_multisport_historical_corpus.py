@@ -701,6 +701,104 @@ def test_generic_provider_capture_flows_into_governed_second_sport_corpus(tmp_pa
     assert secret not in manifest_text
 
 
+def test_reacquiring_identical_provider_market_content_changes_only_acquisition_axis(
+    tmp_path: Path,
+) -> None:
+    payload = _basketball_historical_payload()
+    first_market = tmp_path / "reacquire-first.jsonl"
+    first_evidence = tmp_path / "reacquire-first.evidence.json"
+    second_market = tmp_path / "reacquire-second.jsonl"
+    second_evidence = tmp_path / "reacquire-second.evidence.json"
+
+    first_provider = ParlayApiSportProvider(
+        "basketball",
+        "test-secret",
+        transport=_HistoricalTransport(payload),
+        clock=lambda: "2026-01-02T00:00:00+00:00",
+        sleeper=lambda _seconds: None,
+    )
+    second_provider = ParlayApiSportProvider(
+        "basketball",
+        "test-secret",
+        transport=_HistoricalTransport(payload),
+        clock=lambda: "2026-01-02T00:01:00+00:00",
+        sleeper=lambda _seconds: None,
+    )
+
+    capture_historical_snapshot(
+        first_provider,
+        requested_at="2026-01-01T10:00:20+00:00",
+        output_path=first_market,
+        evidence_path=first_evidence,
+    )
+    capture_historical_snapshot(
+        second_provider,
+        requested_at="2026-01-01T10:00:20+00:00",
+        output_path=second_market,
+        evidence_path=second_evidence,
+    )
+
+    events = tuple(
+        MarketEvent.from_dict(json.loads(line))
+        for line in first_market.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="reacquire-shared",
+    )
+    results = _write_results(
+        tmp_path,
+        events,
+        suffix="reacquire-shared",
+    )
+
+    assemble_historical_corpus(
+        [(first_market, first_evidence)],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "reacquire-corpus-first",
+        name="reacquired basketball first",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    assemble_historical_corpus(
+        [(second_market, second_evidence)],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "reacquire-corpus-second",
+        name="reacquired basketball second",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+
+    first_manifest = json.loads(
+        (tmp_path / "reacquire-corpus-first" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    second_manifest = json.loads(
+        (tmp_path / "reacquire-corpus-second" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_manifest["market_sha256"] != second_manifest["market_sha256"]
+    assert first["market_content_sha256"] == second["market_content_sha256"]
+    assert first["content_identity"] == second["content_identity"]
+    assert first["outcome_identity"] == second["outcome_identity"]
+    assert first["governance_identity"] == second["governance_identity"]
+    assert first["acquisition_identity"] != second["acquisition_identity"]
+    assert first["qualified_corpus_identity"] != second["qualified_corpus_identity"]
+    assert (
+        first["content_identity_scope"]
+        == "market_snapshot_semantics_excluding_product_ingest_time"
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [

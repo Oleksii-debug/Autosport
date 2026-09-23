@@ -11,6 +11,7 @@ from autosport.nvda_human_acceptance import (
     REQUIRED_JOURNEY_IDS,
 )
 from autosport.nvda_manual_acceptance import (
+    _ManualNvdaWriterLock,
     ManualNvdaAcceptanceLedger,
     ManualNvdaAcceptanceResolution,
     ManualNvdaDecision,
@@ -379,18 +380,31 @@ def test_unknown_protocol_cannot_mint_or_resolve_decision(tmp_path):
         )
 
 
-def test_writer_lock_fails_closed(tmp_path):
+def test_active_writer_lock_fails_closed(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)
-    ledger._lock_path.write_text("occupied", encoding="utf-8")
-    try:
+
+    with _ManualNvdaWriterLock(ledger.path):
         with pytest.raises(
             NvdaManualAcceptanceStateError,
-            match="writer lock exists",
+            match="writer is active",
         ):
             _record(ledger, transcript)
-    finally:
-        ledger._lock_path.unlink()
+
+
+def test_stale_writer_lock_path_does_not_block_restart(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    ledger._lock_path.write_text("stale-after-crash", encoding="utf-8")
+
+    record = _record(ledger, transcript)
+
+    assert record.decision is ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA
+    assert ledger._lock_path.read_text(encoding="utf-8") == "stale-after-crash"
+    restarted = ManualNvdaAcceptanceLedger(ledger.path)
+    resolution = _resolve(restarted, transcript)
+    assert resolution is not None
+    assert resolution.record == record
 
 
 def test_event_tamper_is_detected(tmp_path):

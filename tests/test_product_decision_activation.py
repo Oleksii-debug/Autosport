@@ -38,13 +38,18 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.test_root = Path(self._tmp.name)
         self.workspace = self.test_root / "workspace"
         self.workspace.mkdir()
-        self.authority_root = self.test_root / "machine-authority"
-        self._authority_env = mock.patch.dict(
-            os.environ,
-            {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(self.authority_root)},
+        self.machine_state_base = self.test_root / "machine-state"
+        self.authority_root = (
+            self.machine_state_base
+            / "autosport"
+            / "product-decision-activation-authority-v1"
         )
-        self._authority_env.start()
-        self.addCleanup(self._authority_env.stop)
+        self._machine_state_patch = mock.patch(
+            "autosport.product_decision_activation._product_machine_state_base",
+            return_value=self.machine_state_base,
+        )
+        self._machine_state_patch.start()
+        self.addCleanup(self._machine_state_patch.stop)
         self.registry = ScientificRegistry.initialize_pristine(
             self.workspace / "scientific_registry.json"
         )
@@ -181,6 +186,45 @@ class ProductDecisionActivationTests(unittest.TestCase):
             self._initialize()
 
         self.assertFalse(self.store.path.exists())
+        self.assertEqual(committed.strategy_version_id, self.STRATEGY_ID)
+
+    def test_process_environment_cannot_repoint_activation_authority_root(self) -> None:
+        env_root_a = self.test_root / "operator-root-a"
+        env_root_b = self.test_root / "operator-root-b"
+
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(env_root_a)},
+        ):
+            first_store = ProductDecisionActivationStore(self.workspace)
+            self.store = first_store
+            committed = self._initialize()
+
+        self.assertEqual(first_store._authority.authority_root, self.authority_root)
+        self.assertFalse(env_root_a.exists())
+        first_store.path.unlink()
+
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(env_root_b)},
+        ):
+            reopened = ProductDecisionActivationStore(self.workspace)
+            self.assertEqual(reopened._authority.authority_root, self.authority_root)
+            self.assertNotEqual(reopened._authority.authority_root, env_root_b)
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "anti-rollback authority rejected",
+            ):
+                reopened.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=self.goal,
+                    risk_policy=self.risk,
+                    execution_config=self.execution,
+                )
+
+        self.assertFalse(reopened.path.exists())
+        self.assertFalse(env_root_b.exists())
         self.assertEqual(committed.strategy_version_id, self.STRATEGY_ID)
 
     def test_structurally_valid_rebound_activation_is_rejected(self) -> None:

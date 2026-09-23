@@ -71,8 +71,11 @@ class PEInfo:
 
 
 _IMAGE_FILE_EXECUTABLE_IMAGE = 0x0002
+_IMAGE_FILE_DEPRECATED_OR_RESERVED_MASK = 0x0004 | 0x0008 | 0x0010 | 0x0040 | 0x0080 | 0x8000
+_IMAGE_FILE_32BIT_MACHINE = 0x0100
 _IMAGE_FILE_SYSTEM = 0x1000
 _IMAGE_FILE_DLL = 0x2000
+_DLL_CHARACTERISTICS_RESERVED_MASK = 0x000F
 _PE32_PLUS_MAGIC = 0x020B
 _PE_SIGNATURE = b"PE\0\0"
 _PAGE_SIZE = 4096
@@ -175,6 +178,10 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
         _fail("invalid section count")
     if pointer_to_symbols or number_of_symbols:
         _fail("COFF symbol table must be absent from executable image")
+    if characteristics & _IMAGE_FILE_DEPRECATED_OR_RESERVED_MASK:
+        _fail("COFF Characteristics contains reserved or deprecated flags")
+    if machine == 0x8664 and (characteristics & _IMAGE_FILE_32BIT_MACHINE):
+        _fail("AMD64 image cannot set IMAGE_FILE_32BIT_MACHINE")
     if optional_size < _FIXED_PE32_PLUS_FIELDS:
         _fail("optional header too small for PE32+ fixed fields")
 
@@ -203,6 +210,8 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
         _fail("system image is not an application executable")
     if subsystem not in policy.allowed_subsystems:
         _fail(f"unsupported subsystem: {subsystem}")
+    if dll_characteristics & _DLL_CHARACTERISTICS_RESERVED_MASK:
+        _fail("DllCharacteristics contains reserved bits")
     if win32_version_value != 0:
         _fail("Win32VersionValue must be zero")
     if loader_flags != 0:

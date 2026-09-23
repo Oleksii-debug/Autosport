@@ -56,14 +56,26 @@ def clock_two():
     return datetime(2026, 9, 23, 0, 20, tzinfo=timezone.utc)
 
 
-def soap(method, result_attributes="", inner="", return_status_code="0"):
+def soap(
+    method,
+    result_attributes="",
+    inner="",
+    return_status_code="0",
+    *,
+    include_return_status=True,
+):
+    return_status = (
+        f'<ReturnStatus Code="{return_status_code}" Description="fixture-status" '
+        f'CallId="fixture-call" />'
+        if include_return_status
+        else ""
+    )
     return (
         f'<?xml version="1.0" encoding="utf-8"?>'
         f'<soap:Envelope xmlns:soap="{SOAP}" xmlns="{NS}">'
         f"<soap:Body><{method}Response><{method}Result {result_attributes}>"
-        f'<ReturnStatus Code="{return_status_code}" Description="fixture-status" '
-        f'CallId="fixture-call" />'
-        f"{inner}</{method}Result></{method}Response></soap:Body></soap:Envelope>"
+        f"{return_status}{inner}</{method}Result></{method}Response>"
+        f"</soap:Body></soap:Envelope>"
     ).encode()
 
 
@@ -266,7 +278,7 @@ def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
         )
 
 
-def test_same_query_and_provider_payload_reresolve_same_evidence_id(monkeypatch):
+def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monkeypatch):
     payload = postings_by_id(posting(9001))
     first, _ = economic_client(monkeypatch, payload, clock=clock_one)
     first_value = first.read_account_postings_by_id(9001)
@@ -277,6 +289,29 @@ def test_same_query_and_provider_payload_reresolve_same_evidence_id(monkeypatch)
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.readback_id == second_value.readback_id
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
+
+
+def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    first, _ = economic_client(
+        monkeypatch,
+        payload,
+        credentials=BetdaqCredentials("alice-a", "secret-a", "app-a"),
+    )
+    first_value = first.read_account_postings_by_id(9001)
+
+    second, _ = economic_client(
+        monkeypatch,
+        payload,
+        credentials=BetdaqCredentials("alice-b", "secret-b", "app-b"),
+    )
+    second_value = second.read_account_postings_by_id(9001)
+
+    assert first_value.evidence.account_context_id != second_value.evidence.account_context_id
+    assert first_value.evidence.evidence_id != second_value.evidence.evidence_id
+    assert first_value.readback_id != second_value.readback_id
 
 
 def test_transport_exception_is_sanitized(monkeypatch):
@@ -328,6 +363,43 @@ def test_by_id_response_cannot_mint_window_completeness(monkeypatch):
     with pytest.raises(
         BetdaqEconomicReadbackError,
         match="cannot.*window completeness|unexpectedly tries to mint window completeness",
+    ):
+        client.read_account_postings_by_id(9001)
+
+
+def test_official_generated_response_without_return_status_is_accepted(monkeypatch):
+    payload = soap(
+        "ListAccountPostingsById",
+        (
+            'Currency="EUR" AvailableFunds="100.00" Balance="120.00" '
+            'Credit="0" Exposure="-20.00"'
+        ),
+        f"<Orders>{posting(9001)}</Orders>",
+        include_return_status=False,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    result = client.read_account_postings_by_id(9001)
+
+    assert result.postings[0].transaction_id == "9001"
+    assert result.window_complete is None
+
+
+def test_present_nonzero_return_status_fails_closed(monkeypatch):
+    payload = soap(
+        "ListAccountPostingsById",
+        (
+            'Currency="EUR" AvailableFunds="100.00" Balance="120.00" '
+            'Credit="0" Exposure="-20.00"'
+        ),
+        f"<Orders>{posting(9001)}</Orders>",
+        return_status_code="17",
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
     ):
         client.read_account_postings_by_id(9001)
 

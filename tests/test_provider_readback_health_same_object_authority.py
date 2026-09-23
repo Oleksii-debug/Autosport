@@ -81,6 +81,7 @@ def test_same_object_state_mutation_cannot_promote_public_partial_health() -> No
     )
 
     _assert_not_authoritative(health)
+    assert health.operator_status_uk == "стан даних букмекера невідомий"
 
 
 def test_same_object_identity_mutation_revokes_product_issued_complete_health() -> None:
@@ -109,6 +110,7 @@ def test_same_object_identity_mutation_revokes_product_issued_complete_health() 
 
     assert health.result_id != original_result_id
     _assert_not_authoritative(health)
+    assert health.operator_status_uk == "стан даних букмекера невідомий"
 
 
 def test_same_object_scope_mutation_revokes_complete_health_and_reclassification() -> None:
@@ -138,6 +140,7 @@ def test_same_object_scope_mutation_revokes_complete_health_and_reclassification
     assert scope.evidence_id != original_evidence_id
     _assert_not_authoritative(health)
     assert not health.scope_is_authoritative(BookmakerCapability.OPEN_POSITIONS_READ)
+    assert health.operator_status_uk == "стан даних букмекера невідомий"
 
     reclassified = classify_provider_readback_health(
         required_capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),

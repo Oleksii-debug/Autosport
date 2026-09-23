@@ -1194,8 +1194,11 @@ def _install_execution_readback_authority() -> None:
     sealed_market_event_type = BetfairMarketEventObservation
     sealed_envelope_type = BetfairExecutionReadbackEnvelope
     sealed_decimal_type = Decimal
+    sealed_json_module = json
     sealed_json_loads = json.loads
+    sealed_json_loads_code = getattr(sealed_json_loads, "__code__", None)
     sealed_json_dumps = json.dumps
+    sealed_json_dumps_code = getattr(sealed_json_dumps, "__code__", None)
     sealed_json_decode_error = json.JSONDecodeError
     sealed_sha256 = sha256
     sealed_adapter_id = ADAPTER_ID
@@ -1204,6 +1207,19 @@ def _install_execution_readback_authority() -> None:
     sealed_list_cleared = _LIST_CLEARED_ORDERS
     sealed_list_market = _LIST_MARKET_CATALOGUE
     sealed_cleared_statuses = tuple(_EXECUTION_CLEARED_STATUSES)
+
+    def json_executable_graph_matches() -> bool:
+        return bool(
+            json is sealed_json_module
+            and getattr(sealed_json_module, "loads", None) is sealed_json_loads
+            and getattr(sealed_json_loads, "__code__", None)
+            is sealed_json_loads_code
+            and getattr(sealed_json_module, "dumps", None) is sealed_json_dumps
+            and getattr(sealed_json_dumps, "__code__", None)
+            is sealed_json_dumps_code
+            and getattr(sealed_json_module, "JSONDecodeError", None)
+            is sealed_json_decode_error
+        )
 
     def capture_opener_dispatch() -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
         records: list[tuple[str, object, tuple[object, ...]]] = []
@@ -1346,6 +1362,11 @@ def _install_execution_readback_authority() -> None:
         return True
 
     def trusted_json(payload: bytes) -> object:
+        if not json_executable_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair JSON executable authority changed"
+            )
+
         def reject_duplicate_pairs(
             pairs: list[tuple[str, object]],
         ) -> dict[str, object]:
@@ -1364,7 +1385,7 @@ def _install_execution_readback_authority() -> None:
             )
 
         try:
-            return sealed_json_loads(
+            decoded = sealed_json_loads(
                 payload.decode("utf-8"),
                 parse_float=sealed_decimal_type,
                 object_pairs_hook=reject_duplicate_pairs,
@@ -1376,8 +1397,17 @@ def _install_execution_readback_authority() -> None:
             raise sealed_error_type(
                 "Betfair response is not valid UTF-8 JSON"
             ) from None
+        if not json_executable_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair JSON executable authority changed"
+            )
+        return decoded
 
     def trusted_sha(value: object) -> str:
+        if not json_executable_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair JSON executable authority changed"
+            )
         try:
             payload = sealed_json_dumps(
                 value,
@@ -1390,6 +1420,10 @@ def _install_execution_readback_authority() -> None:
             raise sealed_error_type(
                 "trusted readback evidence is not canonical JSON"
             ) from exc
+        if not json_executable_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair JSON executable authority changed"
+            )
         return sealed_sha256(payload).hexdigest()
 
     def trusted_mapping(value: object, field: str) -> dict[str, object]:
@@ -2155,6 +2189,7 @@ def _install_execution_readback_authority() -> None:
             or getattr(private_opener_type, "open", None) is not private_opener_open
             or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
             or not opener_graph_matches()
+            or not json_executable_graph_matches()
         ):
             return False
         instance_dict = getattr(transport, "__dict__", {})
@@ -2188,6 +2223,7 @@ def _install_execution_readback_authority() -> None:
             or getattr(private_opener_type, "open", None) is not private_opener_open
             or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
             or not opener_graph_matches()
+            or not json_executable_graph_matches()
         ):
             raise sealed_error_type(
                 "canonical Betfair network authority changed"

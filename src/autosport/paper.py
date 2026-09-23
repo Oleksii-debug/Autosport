@@ -524,6 +524,11 @@ class PaperBook:
                 raise ValueError(
                     "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
                 )
+            if exchange_side == "lay":
+                raise ValueError(
+                    "PaperBook LAY materialization is unsupported until canonical "
+                    "side-aware liability and settlement authority is integrated"
+                )
         if leg.market_semantics_id is not None:
             market_semantics_id = cls._require_canonical_text(
                 leg.market_semantics_id,

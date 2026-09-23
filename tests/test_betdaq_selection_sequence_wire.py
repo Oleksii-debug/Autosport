@@ -254,7 +254,7 @@ def test_non_success_return_status_is_typed_before_row_publication() -> None:
 
 
 def test_nonfinite_economics_and_malformed_timestamp_fail_closed() -> None:
-    with pytest.raises(BetdaqSoapProtocolError, match="finite"):
+    with pytest.raises(BetdaqSoapProtocolError, match="XML Schema decimal"):
         parse_list_selections_changed_since_response(
             _changed(_selection().replace('WithdrawalFactor="0.125"', 'WithdrawalFactor="NaN"'))
         )
@@ -301,6 +301,7 @@ def test_soap_fault_is_never_empty_changed_truth() -> None:
     with pytest.raises(BetdaqSoapFaultError):
         parse_list_selections_changed_since_response(fault)
 
+
 def test_unknown_wire_attributes_fail_closed_instead_of_aliasing_modeled_evidence() -> None:
     current_extra = _current().replace(
         'SelectionSequenceNumber="1234"',
@@ -346,6 +347,7 @@ def test_unknown_wire_attributes_fail_closed_instead_of_aliasing_modeled_evidenc
     )
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_list_selections_changed_since_response(return_status_extra)
+
 
 def test_current_sequence_enforces_xsd_long_lexical_and_width() -> None:
     max_long = 2**63 - 1
@@ -401,3 +403,52 @@ def test_changed_selection_accepts_exact_xsd_integer_boundaries() -> None:
     assert item.status_code == 32767
     assert item.reset_count == 32767
 
+
+@pytest.mark.parametrize(
+    "invalid",
+    ("1E+3", "1_000", "1,25", " 1.0", "1.0 "),
+)
+def test_withdrawal_factor_rejects_non_xsd_decimal_lexemes(invalid: str) -> None:
+    row = _selection().replace(
+        'WithdrawalFactor="0.125"',
+        f'WithdrawalFactor="{invalid}"',
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="XML Schema decimal"):
+        parse_list_selections_changed_since_response(_changed(row))
+
+
+def test_settlement_economics_reject_non_xsd_decimal_lexemes() -> None:
+    settlement = """
+      <SettlementInformation
+        SettledTime="2026-09-23T01:12:00+00:00"
+        VoidPercentage="1E+2"
+        LeftSideFactor="1.0"
+        RightSideFactor="0.5"
+        SettlementResultString="Win" />
+    """
+    with pytest.raises(BetdaqSoapProtocolError, match="XML Schema decimal"):
+        parse_list_selections_changed_since_response(
+            _changed(_selection(settlement=settlement))
+        )
+
+
+@pytest.mark.parametrize(
+    ("lexeme", "expected"),
+    (
+        ("0", Decimal("0")),
+        ("+1.25", Decimal("1.25")),
+        (".5", Decimal("0.5")),
+        ("1.", Decimal("1")),
+        ("01.0", Decimal("1.0")),
+    ),
+)
+def test_withdrawal_factor_preserves_legal_xsd_decimal_forms(
+    lexeme: str,
+    expected: Decimal,
+) -> None:
+    row = _selection().replace(
+        'WithdrawalFactor="0.125"',
+        f'WithdrawalFactor="{lexeme}"',
+    )
+    response = parse_list_selections_changed_since_response(_changed(row))
+    assert response.selections[0].withdrawal_factor == expected

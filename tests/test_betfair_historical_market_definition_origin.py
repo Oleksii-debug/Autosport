@@ -57,7 +57,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
 
     def witness(self, raw: bytes) -> HistoricalProviderOriginWitness:
         return HistoricalProviderOriginWitness(
-            session_context_id=_sha("session"),
+            session_context_id="betfair-session-context:" + _sha("session"),
             entitlement_snapshot_sha256=_sha("entitlement"),
             listing_sha256=_sha("listing"),
             download_file_identity_sha256=_sha("download"),
@@ -76,7 +76,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         cutoff: int = 2500,
         market_id: str | None = None,
     ):
-        # #1345 separately tests issuance of the process-local capability.  These
+        # #1345 separately tests issuance of the process-local capability. These
         # composition tests stub only that upstream authority call; raw-file replay,
         # source identity and revision selection remain real #1340 code paths.
         with patch.object(
@@ -104,7 +104,6 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             _line(3000, self.MARKET_ID, future),
         )
         witness = self.witness(raw)
-
         bound = self.bind_with_upstream_authority_stub(witness, raw)
 
         self.assertEqual(bound.provider_pt_ms, 2000)
@@ -113,10 +112,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         self.assertEqual(bound.raw_file_sha256, witness.raw_sha256)
         self.assertEqual(bound.provider_path, witness.provider_path)
         self.assertEqual(bound.download_retrieved_at, witness.retrieved_at)
-        self.assertEqual(
-            bound.provider_origin_witness_sha256,
-            witness.witness_sha256,
-        )
+        self.assertEqual(bound.provider_origin_witness_sha256, witness.witness_sha256)
         with patch.object(
             HistoricalProviderOriginWitness,
             "assert_authoritative",
@@ -138,16 +134,12 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         self.assertFalse(truth["promotion_authority"])
         self.assertFalse(truth["real_money_execution"])
         bound.assert_published_by(2000)
-        with self.assertRaisesRegex(
-            BetfairHistoricalMarketDefinitionOriginError,
-            "published after",
-        ):
+        with self.assertRaisesRegex(BetfairHistoricalMarketDefinitionOriginError, "published after"):
             bound.assert_published_by(1999)
 
     def test_caller_constructed_upstream_witness_cannot_mint_origin(self) -> None:
         raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
         witness = self.witness(raw)
-
         with self.assertRaisesRegex(
             BetfairHistoricalMarketDefinitionOriginError,
             "lacks live canonical provider-origin authority",
@@ -163,8 +155,6 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
     def test_authoritative_witness_cannot_be_reused_for_mutated_bytes(self) -> None:
         raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
         witness = self.witness(raw)
-        mutated = raw + b"tamper"
-
         with patch.object(
             HistoricalProviderOriginWitness,
             "assert_authoritative",
@@ -177,35 +167,32 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             ):
                 bind_betfair_historical_market_definition_origin(
                     witness=witness,
-                    raw_bytes=mutated,
+                    raw_bytes=raw + b"tamper",
                     market_id=self.MARKET_ID,
                     cutoff_pt_ms=1000,
                     package_tier=HistoricalPackageTier.PRO,
                 )
 
-    def test_future_only_revision_is_not_visible_before_provider_cutoff(self) -> None:
-        raw = _raw(_line(3000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
-        witness = self.witness(raw)
+    def test_future_or_unrelated_revision_cannot_satisfy_requested_market(self) -> None:
+        future_raw = _raw(
+            _line(3000, self.MARKET_ID, self.definition(status="OPEN", version=1))
+        )
+        with self.assertRaisesRegex(BetfairHistoricalMarketDefinitionOriginError, "no marketDefinition"):
+            self.bind_with_upstream_authority_stub(
+                self.witness(future_raw), future_raw, cutoff=2999
+            )
 
-        with self.assertRaisesRegex(
-            BetfairHistoricalMarketDefinitionOriginError,
-            "no marketDefinition revision",
-        ):
-            self.bind_with_upstream_authority_stub(witness, raw, cutoff=2999)
+        other_raw = _raw(
+            _line(1000, "1.other", self.definition(status="OPEN", version=1))
+        )
+        with self.assertRaisesRegex(BetfairHistoricalMarketDefinitionOriginError, "no marketDefinition"):
+            self.bind_with_upstream_authority_stub(
+                self.witness(other_raw), other_raw, cutoff=1000
+            )
 
-    def test_unrelated_market_cannot_satisfy_requested_market_identity(self) -> None:
-        raw = _raw(_line(1000, "1.other", self.definition(status="OPEN", version=1)))
-        witness = self.witness(raw)
-
-        with self.assertRaisesRegex(
-            BetfairHistoricalMarketDefinitionOriginError,
-            "no marketDefinition revision",
-        ):
-            self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
-
-    def test_duplicate_market_revision_inside_one_provider_record_fails_closed(self) -> None:
+    def test_ambiguous_or_malformed_market_change_fails_closed(self) -> None:
         definition = self.definition(status="OPEN", version=1)
-        raw = _raw(
+        duplicate = _raw(
             {
                 "op": "mcm",
                 "pt": 1000,
@@ -215,23 +202,22 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
                 ],
             }
         )
-        witness = self.witness(raw)
-
         with self.assertRaisesRegex(
             BetfairHistoricalMarketDefinitionOriginError,
             "duplicate marketDefinition revisions",
         ):
-            self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+            self.bind_with_upstream_authority_stub(
+                self.witness(duplicate), duplicate, cutoff=1000
+            )
 
-    def test_malformed_market_change_container_fails_closed(self) -> None:
-        raw = _raw({"op": "mcm", "pt": 1000, "mc": {"id": self.MARKET_ID}})
-        witness = self.witness(raw)
-
+        malformed = _raw({"op": "mcm", "pt": 1000, "mc": {"id": self.MARKET_ID}})
         with self.assertRaisesRegex(
             BetfairHistoricalMarketDefinitionOriginError,
             "mcm.mc must be an exact JSON array",
         ):
-            self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+            self.bind_with_upstream_authority_stub(
+                self.witness(malformed), malformed, cutoff=1000
+            )
 
     def test_dynamic_provider_origin_truth_revokes_with_upstream_capability(self) -> None:
         raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))

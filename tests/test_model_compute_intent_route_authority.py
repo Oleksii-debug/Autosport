@@ -70,6 +70,7 @@ def _issue(
         data_classification=DataClassification.PUBLIC,
         allow_cloud=False,
         max_cost=max_cost,
+        decision_timeout=timedelta(seconds=5),
         response_ttl_seconds=Decimal("5"),
         baseline_candidate_id="local-deterministic",
     )
@@ -108,7 +109,7 @@ def _workspace():
 
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
     intent = _canonical_intent(suffix="origin")
-    issued_at = _proposal(intent) - timedelta(seconds=2)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -121,7 +122,9 @@ def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
         request = _issue(authority, router, intent)
 
         assert request.created_at == _time_text(issued_at)
-        assert request.decision_deadline == _time_text(_proposal(intent))
+        assert request.decision_deadline == _time_text(
+            issued_at + timedelta(seconds=5)
+        )
         assert request.decision_input_sha256 == intent.intent_sha256
         assert (
             request.decision_evidence_sha256
@@ -138,7 +141,7 @@ def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
             intent=intent,
             router_store=reopened_router,
             request_id=request.request_id,
-            decision_at=_proposal(intent),
+            decision_at=issued_at + timedelta(seconds=3),
         )
 
         assert record.request == request.payload()
@@ -151,7 +154,7 @@ def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
         assert len(record.authority_sha256) == 64
 
 
-def test_public_issuer_has_no_caller_timestamp_or_digest_surface() -> None:
+def test_public_issuer_has_no_caller_absolute_timestamp_or_digest_surface() -> None:
     parameters = set(
         inspect.signature(
             subject.ModelComputeIntentRouteAuthorityStore.issue_request
@@ -171,15 +174,12 @@ def test_public_issuer_has_no_caller_timestamp_or_digest_surface() -> None:
     )
 
 
-def test_issue_after_or_at_proposal_cutoff_fails_before_state_publish(
+def test_future_dated_intent_proposal_fails_before_state_publish(
     monkeypatch,
 ) -> None:
-    intent = _canonical_intent(suffix="late")
-    monkeypatch.setattr(
-        subject,
-        "_authority_now",
-        lambda: _time_text(_proposal(intent)),
-    )
+    intent = _canonical_intent(suffix="future")
+    issued_at = _proposal(intent) - timedelta(seconds=1)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
     with temporary:
@@ -191,7 +191,7 @@ def test_issue_after_or_at_proposal_cutoff_fails_before_state_publish(
 
         with pytest.raises(
             subject.ModelComputeIntentRouteAuthorityError,
-            match="before intent proposal cutoff",
+            match="proposal cannot be in the future",
         ):
             _issue(authority, router, intent)
 
@@ -203,7 +203,7 @@ def test_existing_router_request_cannot_be_backfilled_with_origin_authority(
     monkeypatch,
 ) -> None:
     intent = _canonical_intent(suffix="backfill")
-    issued_at = _proposal(intent) - timedelta(seconds=3)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -212,7 +212,9 @@ def test_existing_router_request_cannot_be_backfilled_with_origin_authority(
         caller_request = ComputeRouteRequest(
             request_id="intent-route-1",
             created_at=_time_text(issued_at),
-            decision_deadline=_time_text(_proposal(intent)),
+            decision_deadline=_time_text(
+                issued_at + timedelta(seconds=5)
+            ),
             required_capability="intent-economics",
             data_classification=DataClassification.PUBLIC,
             allow_cloud=False,
@@ -241,7 +243,7 @@ def test_same_id_retry_is_idempotent_and_cannot_retimestamp(
     monkeypatch,
 ) -> None:
     intent = _canonical_intent(suffix="retry")
-    first_at = _proposal(intent) - timedelta(seconds=4)
+    first_at = _proposal(intent) + timedelta(seconds=1)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(first_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -254,7 +256,7 @@ def test_same_id_retry_is_idempotent_and_cannot_retimestamp(
         first = _issue(authority, router, intent)
         _route(router, first)
 
-        second_at = _proposal(intent) - timedelta(seconds=1)
+        second_at = _proposal(intent) + timedelta(seconds=4)
         monkeypatch.setattr(
             subject,
             "_authority_now",
@@ -274,7 +276,7 @@ def test_same_request_id_cannot_be_rebound_to_another_intent(
     issued_at = min(
         _proposal(first_intent),
         _proposal(other_intent),
-    ) - timedelta(seconds=2)
+    ) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -300,7 +302,7 @@ def test_resolve_rejects_cross_intent_substitution(monkeypatch) -> None:
     issued_at = min(
         _proposal(first_intent),
         _proposal(other_intent),
-    ) - timedelta(seconds=2)
+    ) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -329,7 +331,7 @@ def test_resolve_rejects_same_id_router_request_substitution(
     monkeypatch,
 ) -> None:
     intent = _canonical_intent(suffix="route-substitution")
-    issued_at = _proposal(intent) - timedelta(seconds=3)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -388,7 +390,7 @@ def test_resolve_rejects_same_id_router_request_substitution(
 
 def test_resolve_requires_router_request_to_exist(monkeypatch) -> None:
     intent = _canonical_intent(suffix="missing-router")
-    issued_at = _proposal(intent) - timedelta(seconds=2)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -412,9 +414,9 @@ def test_resolve_requires_router_request_to_exist(monkeypatch) -> None:
             )
 
 
-def test_caller_cannot_move_resolution_cutoff(monkeypatch) -> None:
+def test_resolution_cutoff_cannot_precede_physical_issuance(monkeypatch) -> None:
     intent = _canonical_intent(suffix="cutoff")
-    issued_at = _proposal(intent) - timedelta(seconds=2)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -429,19 +431,27 @@ def test_caller_cannot_move_resolution_cutoff(monkeypatch) -> None:
 
         with pytest.raises(
             subject.ModelComputeIntentRouteAuthorityError,
-            match="decision_at must equal",
+            match="not causally available by cutoff",
         ):
             authority.resolve(
                 intent=intent,
                 router_store=router,
                 request_id=request.request_id,
-                decision_at=_proposal(intent) + timedelta(seconds=1),
+                decision_at=issued_at - timedelta(microseconds=1),
             )
+
+        resolved = authority.resolve(
+            intent=intent,
+            router_store=router,
+            request_id=request.request_id,
+            decision_at=issued_at,
+        )
+        assert resolved.request_id == request.request_id
 
 
 def test_router_instance_get_request_shadow_is_rejected(monkeypatch) -> None:
     intent = _canonical_intent(suffix="shadow")
-    issued_at = _proposal(intent) - timedelta(seconds=2)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -470,7 +480,7 @@ def test_deleted_authority_state_fails_monotonic_rollback_fence(
     monkeypatch,
 ) -> None:
     intent = _canonical_intent(suffix="rollback")
-    issued_at = _proposal(intent) - timedelta(seconds=2)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()
@@ -492,7 +502,7 @@ def test_deleted_authority_state_fails_monotonic_rollback_fence(
 
 def test_tampered_authority_bytes_fail_monotonic_fence(monkeypatch) -> None:
     intent = _canonical_intent(suffix="tamper")
-    issued_at = _proposal(intent) - timedelta(seconds=2)
+    issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
     temporary, workspace, authority_root = _workspace()

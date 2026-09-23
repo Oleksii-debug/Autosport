@@ -140,6 +140,122 @@ def test_ssl_context_factory_swap_cannot_mint_login_origin(monkeypatch, tmp_path
         )
 
 
+def test_endpoint_registry_rebind_cannot_relabel_login_origin(
+    monkeypatch, tmp_path
+):
+    forged = dict(subject._CERT_LOGIN_ENDPOINTS)
+    forged[BetfairLoginJurisdiction.SPAIN] = forged[
+        BetfairLoginJurisdiction.GLOBAL_COM
+    ]
+    monkeypatch.setattr(subject, "_CERT_LOGIN_ENDPOINTS", forged)
+    secrets = BetfairNonInteractiveLoginSecrets(
+        "app",
+        "user",
+        "password",
+        tmp_path / "client.crt",
+        tmp_path / "client.key",
+    )
+
+    with pytest.raises(
+        BetfairSessionOriginError,
+        match="canonical Betfair login authority binding changed",
+    ):
+        login_betfair_noninteractive(
+            secrets,
+            jurisdiction=BetfairLoginJurisdiction.SPAIN,
+        )
+
+
+def test_endpoint_registry_contents_are_immutable():
+    with pytest.raises(TypeError):
+        subject._CERT_LOGIN_ENDPOINTS[  # type: ignore[index]
+            BetfairLoginJurisdiction.SPAIN
+        ] = subject._CERT_LOGIN_ENDPOINTS[
+            BetfairLoginJurisdiction.GLOBAL_COM
+        ]
+
+
+def test_paired_transport_and_public_canonical_reference_rebind_cannot_mint_origin(
+    monkeypatch, tmp_path
+):
+    def forged_post(
+        self,
+        endpoint,
+        *,
+        application_key,
+        username,
+        password,
+        certificate_path,
+        private_key_path,
+        timeout_seconds,
+    ):
+        return b'{"sessionToken":"forged-token","loginStatus":"SUCCESS"}'
+
+    monkeypatch.setattr(
+        subject.UrllibBetfairCertLoginTransport,
+        "post_cert_login",
+        forged_post,
+    )
+    monkeypatch.setattr(subject, "_CANONICAL_TRANSPORT_POST", forged_post)
+    secrets = BetfairNonInteractiveLoginSecrets(
+        "app",
+        "user",
+        "password",
+        tmp_path / "client.crt",
+        tmp_path / "client.key",
+    )
+
+    with pytest.raises(
+        BetfairSessionOriginError,
+        match="canonical Betfair login authority binding changed",
+    ):
+        login_betfair_noninteractive(
+            secrets,
+            jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+        )
+
+
+def test_json_decoder_rebind_cannot_fabricate_successful_login(
+    monkeypatch, tmp_path
+):
+    class ForgedDecoder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def decode(self, payload):
+            return {
+                "sessionToken": "forged-token",
+                "loginStatus": "SUCCESS",
+            }
+
+    monkeypatch.setattr(subject.json, "JSONDecoder", ForgedDecoder)
+    secrets = BetfairNonInteractiveLoginSecrets(
+        "app",
+        "user",
+        "password",
+        tmp_path / "client.crt",
+        tmp_path / "client.key",
+    )
+
+    with pytest.raises(
+        BetfairSessionOriginError,
+        match="canonical Betfair login authority binding changed",
+    ):
+        login_betfair_noninteractive(
+            secrets,
+            jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+        )
+
+
+def test_bound_issuer_has_no_writable_canonical_reference_dependency():
+    assert "_CANONICAL_ACCOUNT_IDENTITY_REQUIRE" not in (
+        bind_betfair_authenticated_jurisdiction.__code__.co_names
+    )
+    assert "require_authoritative_betfair_account_identity" not in (
+        bind_betfair_authenticated_jurisdiction.__code__.co_names
+    )
+
+
 def test_missing_certificate_fails_without_exposing_secrets(tmp_path):
     secrets = BetfairNonInteractiveLoginSecrets(
         "app-secret",

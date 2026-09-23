@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import uuid
 from decimal import (
     Context,
@@ -87,14 +88,27 @@ def _snapshot_publication_lock_path(witness_path: Path) -> Path:
     return witness_path.with_name(witness_path.name + ".writer.lock")
 
 
-def _acquire_snapshot_publication_lock(witness_path: Path) -> int:
-    lock_path = _snapshot_publication_lock_path(witness_path)
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError as exc:
-        raise ValueError("cannot open PaperBook snapshot publication lock") from exc
+_snapshot_publication_process_guard = threading.Lock()
+_snapshot_publication_process_locks: set[str] = set()
 
+
+def _acquire_snapshot_publication_lock(witness_path: Path) -> tuple[int, str]:
+    lock_path = _snapshot_publication_lock_path(witness_path)
+    lock_key = _canonical_path_key(lock_path)
+    with _snapshot_publication_process_guard:
+        if lock_key in _snapshot_publication_process_locks:
+            raise ValueError(
+                "PaperBook snapshot publication lock is held by another writer"
+            )
+        _snapshot_publication_process_locks.add(lock_key)
+
+    fd: int | None = None
     try:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise ValueError("cannot open PaperBook snapshot publication lock") from exc
+
         if os.name == "nt":
             import msvcrt
 
@@ -117,27 +131,35 @@ def _acquire_snapshot_publication_lock(witness_path: Path) -> int:
                 raise ValueError(
                     "PaperBook snapshot publication lock is held by another writer"
                 ) from exc
+        return fd, lock_key
     except BaseException:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        with _snapshot_publication_process_guard:
+            _snapshot_publication_process_locks.discard(lock_key)
         raise
-    return fd
 
 
-def _release_snapshot_publication_lock(fd: int) -> None:
+def _release_snapshot_publication_lock(lock: tuple[int, str]) -> None:
+    fd, lock_key = lock
     try:
-        if os.name == "nt":
-            import msvcrt
+        try:
+            if os.name == "nt":
+                import msvcrt
 
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
 
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError as exc:
-        raise ValueError("cannot release PaperBook snapshot publication lock") from exc
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError as exc:
+            raise ValueError("cannot release PaperBook snapshot publication lock") from exc
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        with _snapshot_publication_process_guard:
+            _snapshot_publication_process_locks.discard(lock_key)
 
 
 def _canonical_path_key(path: Path) -> str:
@@ -589,7 +611,7 @@ class PaperBook:
                     "PaperBook independent snapshot authority root changed after binding"
                 )
             if verify_bound_head:
-                publication_lock_fd = _acquire_snapshot_publication_lock(witness_path)
+                publication_lock = _acquire_snapshot_publication_lock(witness_path)
                 try:
                     _, committed, pending = _read_snapshot_witnesses(
                         snapshot_path,
@@ -617,7 +639,7 @@ class PaperBook:
                             "PaperBook snapshot authority is stale; reload current durable snapshot"
                         )
                 finally:
-                    _release_snapshot_publication_lock(publication_lock_fd)
+                    _release_snapshot_publication_lock(publication_lock)
 
     @property
     def committed_stake(self) -> Decimal:
@@ -921,7 +943,7 @@ class PaperBook:
         snapshot_sha = _snapshot_sha256(snapshot_bytes)
 
         temporary: Path | None = None
-        publication_lock_fd: int | None = None
+        publication_lock: tuple[int, str] | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 "wb",
@@ -938,7 +960,7 @@ class PaperBook:
             # Serialize the full compare -> PREPARE -> replace -> COMMIT protocol.
             # The kernel advisory lock is released automatically on process death,
             # so a later load can still perform the existing crash recovery.
-            publication_lock_fd = _acquire_snapshot_publication_lock(witness_path)
+            publication_lock = _acquire_snapshot_publication_lock(witness_path)
 
             records, committed, pending = _read_snapshot_witnesses(
                 destination,
@@ -1054,8 +1076,8 @@ class PaperBook:
                 new_snapshot_sha256=snapshot_sha,
             )
         finally:
-            if publication_lock_fd is not None:
-                _release_snapshot_publication_lock(publication_lock_fd)
+            if publication_lock is not None:
+                _release_snapshot_publication_lock(publication_lock)
             if temporary is not None:
                 try:
                     temporary.unlink()
@@ -1796,7 +1818,7 @@ class PaperBook:
     def load(cls, path: str | Path) -> "PaperBook":
         source = Path(path)
         witness_path = _snapshot_witness_path(source)
-        publication_lock_fd = _acquire_snapshot_publication_lock(witness_path)
+        publication_lock = _acquire_snapshot_publication_lock(witness_path)
         try:
             payload = source.read_bytes()
             book = cls._decode_snapshot_bytes(payload)
@@ -1834,4 +1856,4 @@ class PaperBook:
             )
             return book
         finally:
-            _release_snapshot_publication_lock(publication_lock_fd)
+            _release_snapshot_publication_lock(publication_lock)

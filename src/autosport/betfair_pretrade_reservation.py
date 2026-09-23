@@ -790,7 +790,6 @@ def _immutable_key(item: BetfairExposureReservation) -> tuple[object, ...]:
         item.action_id,
         item.account_id,
         item.account_context_id,
-        item.account_identity_id,
         item.customer_order_ref,
         item.currency_code,
         item.reserved_amount,

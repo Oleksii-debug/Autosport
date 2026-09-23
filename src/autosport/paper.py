@@ -83,6 +83,63 @@ def _snapshot_witness_path(snapshot_path: Path) -> Path:
     return _authority_root(snapshot_path) / f"{identity}{_PAPER_SNAPSHOT_WITNESS_SUFFIX}"
 
 
+def _snapshot_publication_lock_path(witness_path: Path) -> Path:
+    return witness_path.with_name(witness_path.name + ".writer.lock")
+
+
+def _acquire_snapshot_publication_lock(witness_path: Path) -> int:
+    lock_path = _snapshot_publication_lock_path(witness_path)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        raise ValueError("cannot open PaperBook snapshot publication lock") from exc
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"0")
+                os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise ValueError(
+                    "PaperBook snapshot publication lock is held by another writer"
+                ) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise ValueError(
+                    "PaperBook snapshot publication lock is held by another writer"
+                ) from exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _release_snapshot_publication_lock(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as exc:
+        raise ValueError("cannot release PaperBook snapshot publication lock") from exc
+    finally:
+        os.close(fd)
+
+
 def _canonical_path_key(path: Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(path)))
 
@@ -532,31 +589,35 @@ class PaperBook:
                     "PaperBook independent snapshot authority root changed after binding"
                 )
             if verify_bound_head:
-                _, committed, pending = _read_snapshot_witnesses(
-                    snapshot_path,
-                    witness_path=witness_path,
-                )
-                current_sha = _file_sha256(snapshot_path)
-                expected_generation = int(binding[4])
-                expected_snapshot_sha = str(binding[5])
-                if expected_generation == 0:
-                    if (
+                publication_lock_fd = _acquire_snapshot_publication_lock(witness_path)
+                try:
+                    _, committed, pending = _read_snapshot_witnesses(
+                        snapshot_path,
+                        witness_path=witness_path,
+                    )
+                    current_sha = _file_sha256(snapshot_path)
+                    expected_generation = int(binding[4])
+                    expected_snapshot_sha = str(binding[5])
+                    if expected_generation == 0:
+                        if (
+                            pending is not None
+                            or committed is not None
+                            or current_sha is not None
+                        ):
+                            raise ValueError(
+                                "PaperBook snapshot authority is stale; reload current durable snapshot"
+                            )
+                    elif (
                         pending is not None
-                        or committed is not None
-                        or current_sha is not None
+                        or committed
+                        != (expected_generation, expected_snapshot_sha)
+                        or current_sha != expected_snapshot_sha
                     ):
                         raise ValueError(
                             "PaperBook snapshot authority is stale; reload current durable snapshot"
                         )
-                elif (
-                    pending is not None
-                    or committed
-                    != (expected_generation, expected_snapshot_sha)
-                    or current_sha != expected_snapshot_sha
-                ):
-                    raise ValueError(
-                        "PaperBook snapshot authority is stale; reload current durable snapshot"
-                    )
+                finally:
+                    _release_snapshot_publication_lock(publication_lock_fd)
 
     @property
     def committed_stake(self) -> Decimal:
@@ -860,6 +921,7 @@ class PaperBook:
         snapshot_sha = _snapshot_sha256(snapshot_bytes)
 
         temporary: Path | None = None
+        publication_lock_fd: int | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 "wb",
@@ -872,6 +934,11 @@ class PaperBook:
                 handle.write(snapshot_bytes)
                 handle.flush()
                 os.fsync(handle.fileno())
+
+            # Serialize the full compare -> PREPARE -> replace -> COMMIT protocol.
+            # The kernel advisory lock is released automatically on process death,
+            # so a later load can still perform the existing crash recovery.
+            publication_lock_fd = _acquire_snapshot_publication_lock(witness_path)
 
             records, committed, pending = _read_snapshot_witnesses(
                 destination,
@@ -987,6 +1054,8 @@ class PaperBook:
                 new_snapshot_sha256=snapshot_sha,
             )
         finally:
+            if publication_lock_fd is not None:
+                _release_snapshot_publication_lock(publication_lock_fd)
             if temporary is not None:
                 try:
                     temporary.unlink()
@@ -1726,39 +1795,43 @@ class PaperBook:
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
         source = Path(path)
-        payload = source.read_bytes()
-        book = cls._decode_snapshot_bytes(payload)
         witness_path = _snapshot_witness_path(source)
-        if not (
-            book.tickets
-            or book._snapshot_schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
-        ):
-            # Empty pre-witness legacy snapshots are structural/forensic input only.
-            # Skipping verification must never promote them into economic authority.
-            return book
+        publication_lock_fd = _acquire_snapshot_publication_lock(witness_path)
         try:
-            verified_head = _verify_snapshot_witness(
-                source,
-                payload,
-                witness_path=witness_path,
-            )
-        except ValueError as exc:
-            # Pre-witness legacy schemas remain available for forensic/read-only
-            # inspection, but cannot be promoted to trusted economics by save(),
-            # open_ticket(), or settle(). Current schema-8 snapshots must have
-            # the independent authority because otherwise caller-edited current
-            # bytes could be silently re-baselined.
-            if (
-                book._snapshot_schema_version is None
-                or book._snapshot_schema_version < _PAPER_SNAPSHOT_SCHEMA_VERSION
-            ) and "missing independent durable opening witness" in str(exc):
+            payload = source.read_bytes()
+            book = cls._decode_snapshot_bytes(payload)
+            if not (
+                book.tickets
+                or book._snapshot_schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
+            ):
+                # Empty pre-witness legacy snapshots are structural/forensic input only.
+                # Skipping verification must never promote them into economic authority.
                 return book
-            raise
-        _bind_snapshot_authority(
-            book,
-            source,
-            witness_path,
-            generation=verified_head[0],
-            snapshot_sha256=verified_head[1],
-        )
-        return book
+            try:
+                verified_head = _verify_snapshot_witness(
+                    source,
+                    payload,
+                    witness_path=witness_path,
+                )
+            except ValueError as exc:
+                # Pre-witness legacy schemas remain available for forensic/read-only
+                # inspection, but cannot be promoted to trusted economics by save(),
+                # open_ticket(), or settle(). Current schema-8 snapshots must have
+                # the independent authority because otherwise caller-edited current
+                # bytes could be silently re-baselined.
+                if (
+                    book._snapshot_schema_version is None
+                    or book._snapshot_schema_version < _PAPER_SNAPSHOT_SCHEMA_VERSION
+                ) and "missing independent durable opening witness" in str(exc):
+                    return book
+                raise
+            _bind_snapshot_authority(
+                book,
+                source,
+                witness_path,
+                generation=verified_head[0],
+                snapshot_sha256=verified_head[1],
+            )
+            return book
+        finally:
+            _release_snapshot_publication_lock(publication_lock_fd)

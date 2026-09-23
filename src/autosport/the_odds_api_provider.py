@@ -143,6 +143,22 @@ class TheOddsApiRequestEvidence:
         }
 
 
+    def source_metadata(self) -> dict[str, Any]:
+        """Request/source evidence safe to bind into durable per-quote payload.
+
+        Receipt time, quota counters and the whole-response digest describe this local
+        acquisition, not the provider quote at its source sequence. They remain
+        available on TheOddsApiRequestEvidence and the batch cursor instead of making
+        an unchanged provider quote conflict with itself on the next poll.
+        """
+
+        metadata = self.metadata()
+        metadata.pop("observed_at", None)
+        metadata.pop("response_sha256", None)
+        metadata.pop("quota", None)
+        return metadata
+
+
 @dataclass(frozen=True, slots=True)
 class TheOddsApiHistoricalSnapshot:
     requested_at: str
@@ -473,6 +489,26 @@ def _timestamp(value: object, field: str) -> str:
 
 def _datetime(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _chronological_microseconds(value: str, field: str) -> int:
+    """Map one provider timestamp to exact UTC microseconds for source ordering."""
+
+    try:
+        instant = _datetime(_timestamp(value, field)).astimezone(timezone.utc)
+    except (OverflowError, ValueError) as exc:
+        raise TheOddsApiPayloadError(
+            f"{field} cannot be represented as a UTC source sequence"
+        ) from exc
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = instant - epoch
+    sequence = (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    if sequence < -(1 << 63) or sequence > (1 << 63) - 1:
+        raise TheOddsApiPayloadError(f"{field} source sequence exceeds signed 64-bit range")
+    return sequence
 
 
 def _decimal(
@@ -1248,8 +1284,6 @@ class TheOddsApiProvider:
                         side,
                     )
                     sequence = self._sequence(
-                        exact_identity,
-                        decimal_odds,
                         source_ts,
                         historical_snapshot_at,
                     )
@@ -1272,7 +1306,7 @@ class TheOddsApiProvider:
                         "commence_time": commence_time,
                         "historical_snapshot_at": historical_snapshot_at,
                         "coverage_complete": False,
-                        "request": evidence.metadata(),
+                        "request": evidence.source_metadata(),
                         "terms": {
                             "source_ref": THE_ODDS_API_TERMS_SOURCE_REF,
                             "last_updated": THE_ODDS_API_TERMS_LAST_UPDATED,
@@ -1321,15 +1355,12 @@ class TheOddsApiProvider:
 
     @staticmethod
     def _sequence(
-        identity: tuple[object, ...],
-        decimal_odds: Decimal,
         source_ts: str,
         historical_snapshot_at: str | None,
     ) -> int:
-        digest = _identity_digest(
-            identity,
-            _decimal_text(decimal_odds),
-            source_ts,
-            historical_snapshot_at,
-        )
-        return int(digest[:16], 16) & ((1 << 63) - 1)
+        if historical_snapshot_at is not None:
+            return _chronological_microseconds(
+                historical_snapshot_at,
+                "historical_snapshot_at",
+            )
+        return _chronological_microseconds(source_ts, "market.last_update")

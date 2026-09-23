@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import runpy
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -118,6 +119,16 @@ def _private_authority_opener():
             and hasattr(value, "_open")
             and hasattr(value, "_call_chain")
             and hasattr(value, "handlers")
+        ),
+    )
+
+
+def _trusted_json_parser():
+    return _find_closure_value(
+        BetfairReadOnlyClient._rpc,
+        lambda value: (
+            callable(value)
+            and getattr(value, "__name__", "") == "trusted_json"
         ),
     )
 
@@ -420,3 +431,54 @@ def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
         object.__setattr__(order, "size_matched", original[1])
         object.__setattr__(order, "size_remaining", original[2])
 
+
+
+def test_trusted_json_rejects_in_place_stdlib_loads_code_mutation() -> None:
+    parser = _trusted_json_parser()
+    original_code = json.loads.__code__
+
+    def forged_loads(
+        value,
+        *,
+        cls=None,
+        object_hook=None,
+        parse_float=None,
+        parse_int=None,
+        parse_constant=None,
+        object_pairs_hook=None,
+        **kwargs,
+    ):
+        return {"jsonrpc": "2.0", "result": {"forged": True}, "id": 1}
+
+    json.loads.__code__ = forged_loads.__code__
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair JSON executable authority changed",
+        ):
+            parser(b'{"jsonrpc":"2.0","result":{"real":true},"id":1}')
+    finally:
+        json.loads.__code__ = original_code
+
+
+def test_authoritative_read_rejects_in_place_json_dumps_code_mutation_before_network() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+    original_code = json.dumps.__code__
+
+    def forged_dumps(value, **kwargs):
+        return '{"jsonrpc":"2.0","method":"forged","params":{},"id":1}'
+
+    json.dumps.__code__ = forged_dumps.__code__
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair network authority changed",
+        ):
+            client.read_execution_readback(
+                action_id="action-json-dumps-code-falsifier",
+                market_id="1.234",
+            )
+    finally:
+        json.dumps.__code__ = original_code

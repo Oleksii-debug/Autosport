@@ -149,7 +149,7 @@ def test_emergency_stop_frontend_reuses_shared_ordered_dispatch():
     assert "globalThis.autosportDispatch = dispatch;" in app_script
     assert "const dispatch = globalThis.autosportDispatch;" in script
     assert '"emergency_stop.activate",' in script
-    assert "{ globalAnnouncement: false }" in script
+    assert "{ globalAnnouncement: false, resultFocus: false }" in script
     assert 'getElementById("emergency-stop-action")' in script
     assert 'getElementById("emergency-stop-status")' in script
     assert "globalThis.pywebview.api.dispatch" not in script
@@ -199,10 +199,12 @@ def test_emergency_stop_uses_one_live_region_announcement_authority():
 
     assert "async function dispatch(actionId, payload = {}, options = {})" in app_script
     assert "const useGlobalAnnouncement = options.globalAnnouncement !== false;" in app_script
+    assert "const useResultFocus = options.resultFocus !== false;" in app_script
+    assert "if (useResultFocus) focusResult(result);" in app_script
     assert app_script.count("if (useGlobalAnnouncement) {") == 2
 
     assert '"emergency_stop.activate",' in emergency_script
-    assert "{ globalAnnouncement: false }" in emergency_script
+    assert "{ globalAnnouncement: false, resultFocus: false }" in emergency_script
     assert 'result.status !== "completed"' in emergency_script
     assert "result.message" in emergency_script
     assert 'getElementById("emergency-stop-status")' in emergency_script

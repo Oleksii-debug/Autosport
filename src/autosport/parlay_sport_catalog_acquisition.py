@@ -347,6 +347,21 @@ def _acquire_parlay_sport_catalog_impl(
     clock: Clock,
     product_transport: Transport,
     product_clock: Clock,
+    finite_positive_float=_finite_positive_float,
+    positive_int=_positive_int,
+    prior_validator=_validate_prior_acquisition,
+    raw_response_validator=_validate_raw_response,
+    timestamp_validator=_validate_timestamp,
+    timestamp_parser=_timestamp_instant,
+    header_reader=_single_header,
+    digest_factory=hashlib.sha256,
+    acquisition_id_builder=_acquisition_id,
+    acquisition_type=ParlaySportCatalogAcquisition,
+    evidence_error_type=ParlaySportCatalogEvidenceError,
+    canonical_url: str = CANONICAL_PARLAY_SPORTS_URL,
+    user_agent: str = _USER_AGENT,
+    timeout_limit: float = DEFAULT_TIMEOUT_SECONDS,
+    response_size_limit: int = DEFAULT_MAX_RESPONSE_BYTES,
 ) -> ParlaySportCatalogAcquisition:
     """Acquire exact `/v1/sports` bytes without granting odds/write/product authority.
 
@@ -358,64 +373,70 @@ def _acquire_parlay_sport_catalog_impl(
     product-owned durable acquisition authority rather than a caller-supplied object.
     """
 
-    timeout_seconds = _finite_positive_float(timeout_seconds, field_name="timeout_seconds")
-    max_response_bytes = _positive_int(max_response_bytes, field_name="max_response_bytes")
-    if timeout_seconds > DEFAULT_TIMEOUT_SECONDS:
+    timeout_seconds = finite_positive_float(
+        timeout_seconds,
+        field_name="timeout_seconds",
+    )
+    max_response_bytes = positive_int(
+        max_response_bytes,
+        field_name="max_response_bytes",
+    )
+    if timeout_seconds > timeout_limit:
         raise ValueError(
-            f"timeout_seconds must not exceed product maximum {DEFAULT_TIMEOUT_SECONDS}"
+            f"timeout_seconds must not exceed product maximum {timeout_limit}"
         )
-    if max_response_bytes > DEFAULT_MAX_RESPONSE_BYTES:
+    if max_response_bytes > response_size_limit:
         raise ValueError(
             "max_response_bytes must not exceed product maximum "
-            f"{DEFAULT_MAX_RESPONSE_BYTES}"
+            f"{response_size_limit}"
         )
-    if prior is not None and not isinstance(prior, ParlaySportCatalogAcquisition):
+    if prior is not None and not isinstance(prior, acquisition_type):
         raise TypeError("prior must be a ParlaySportCatalogAcquisition")
 
     headers: dict[str, str] = {
         "Accept": "application/json",
-        "User-Agent": _USER_AGENT,
+        "User-Agent": user_agent,
     }
     conditional_etag: str | None = None
     if prior is not None:
-        conditional_etag = _validate_prior_acquisition(prior)
+        conditional_etag = prior_validator(prior)
         if conditional_etag is not None:
             headers["If-None-Match"] = conditional_etag
 
     using_product_transport = transport is None
     using_product_clock = clock is product_clock
     active_transport = product_transport if transport is None else transport
-    response = _validate_raw_response(
+    response = raw_response_validator(
         active_transport(
-            CANONICAL_PARLAY_SPORTS_URL,
+            canonical_url,
             headers,
             timeout_seconds,
             max_response_bytes,
         ),
         max_response_bytes=max_response_bytes,
     )
-    acquired_at = _validate_timestamp(clock())
-    if prior is not None and _timestamp_instant(acquired_at) < _timestamp_instant(
+    acquired_at = timestamp_validator(clock())
+    if prior is not None and timestamp_parser(acquired_at) < timestamp_parser(
         prior.acquired_at
     ):
-        raise ParlaySportCatalogEvidenceError(
+        raise evidence_error_type(
             "acquired_at cannot precede the exact prior acquisition"
         )
-    etag = _single_header(response.headers, "ETag")
+    etag = header_reader(response.headers, "ETag")
 
     if response.status_code == 304:
         if prior is None or conditional_etag is None:
-            raise ParlaySportCatalogEvidenceError(
+            raise evidence_error_type(
                 "HTTP 304 requires an exact prior acquisition and If-None-Match witness"
             )
         if response.body:
-            raise ParlaySportCatalogEvidenceError("HTTP 304 must not carry a catalog body")
+            raise evidence_error_type("HTTP 304 must not carry a catalog body")
         # A caller-supplied prior object is only structurally self-consistent evidence.
         # Until a product-owned durable authority can re-resolve its exact HTTP-200
         # bytes by identity, a genuine provider 304 must not transfer positive origin
         # authority from that object.
         provider_origin_verified = False
-        acquisition_id = _acquisition_id(
+        acquisition_id = acquisition_id_builder(
             acquired_at=acquired_at,
             status_code=304,
             final_url=response.final_url,
@@ -424,7 +445,7 @@ def _acquire_parlay_sport_catalog_impl(
             prior_acquisition_id=prior.acquisition_id,
             provider_origin_verified=provider_origin_verified,
         )
-        result = ParlaySportCatalogAcquisition(
+        result = acquisition_type(
             acquired_at=acquired_at,
             status_code=304,
             final_url=response.final_url,
@@ -435,9 +456,9 @@ def _acquire_parlay_sport_catalog_impl(
             acquisition_id=acquisition_id,
         )
     else:
-        digest = hashlib.sha256(response.body).hexdigest()
+        digest = digest_factory(response.body).hexdigest()
         provider_origin_verified = using_product_transport and using_product_clock
-        acquisition_id = _acquisition_id(
+        acquisition_id = acquisition_id_builder(
             acquired_at=acquired_at,
             status_code=200,
             final_url=response.final_url,
@@ -446,7 +467,7 @@ def _acquire_parlay_sport_catalog_impl(
             prior_acquisition_id=None,
             provider_origin_verified=provider_origin_verified,
         )
-        result = ParlaySportCatalogAcquisition(
+        result = acquisition_type(
             acquired_at=acquired_at,
             status_code=200,
             final_url=response.final_url,

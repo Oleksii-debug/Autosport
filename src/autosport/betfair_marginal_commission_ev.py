@@ -1,4 +1,4 @@
-"""Exact Betfair market-level marginal ordinary-commission EV projection.
+"""Betfair market-level marginal ordinary-commission EV for exact evidence-bound inputs.
 
 Pure consumer-side mathematics only. This module does not read Betfair, prove
 accepted exposure, issue an effective commission rate, or authorize execution.
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from decimal import Context, Decimal, DecimalException, Inexact, InvalidOperation, Overflow, Underflow, localcontext
+from decimal import Context, Decimal, DecimalException, Inexact, InvalidOperation, Overflow, ROUND_HALF_UP, Underflow, localcontext
 import hashlib
 import json
 import re
@@ -17,6 +17,8 @@ SOURCE_FAMILY = "betfair.marginal-market-commission-ev.v1"
 MAX_OUTCOMES = 512
 MAX_SIGNIFICANT_DIGITS = 80
 MAX_ADJUSTED_EXPONENT = 1000
+COMMISSION_QUANTUM = Decimal("0.01")
+COMMISSION_ROUNDING = "ROUND_HALF_UP"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _CTX = Context(prec=256, Emin=-999999, Emax=999999)
@@ -42,8 +44,16 @@ class BetfairMarketOutcomeEconomicInput:
             raise BetfairMarginalCommissionEVError(
                 "probability must be between 0 and 1 inclusive"
             )
-        _decimal(self.existing_gross_pnl, "existing_gross_pnl")
-        _decimal(self.candidate_gross_pnl, "candidate_gross_pnl")
+        existing = _decimal(self.existing_gross_pnl, "existing_gross_pnl")
+        candidate = _decimal(self.candidate_gross_pnl, "candidate_gross_pnl")
+        if not _is_settlement_minor_unit(existing):
+            raise BetfairMarginalCommissionEVError(
+                "existing_gross_pnl must already reflect Betfair settlement rounding to 2 decimals"
+            )
+        if not _is_settlement_minor_unit(candidate):
+            raise BetfairMarginalCommissionEVError(
+                "candidate_gross_pnl must already reflect Betfair settlement rounding to 2 decimals"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +74,8 @@ class BetfairMarginalCommissionEVProjection:
     market_id: str
     currency: str
     effective_commission_rate: Decimal
+    commission_quantum: Decimal
+    commission_rounding: str
     probability_evidence_sha256: str
     exposure_evidence_sha256: str
     candidate_evidence_sha256: str
@@ -94,9 +106,12 @@ def calculate_betfair_marginal_commission_ev(
     """Return marginal EV after ordinary market-level commission.
 
     The effective rate must already be authoritative for the exact account,
-    market and decision snapshot. This function deliberately does not infer a
-    rate from Market Base Rate, Discount Rate, rewards, jurisdiction or defaults.
-    The SHA-256 fields bind evidence identity but do not validate its provenance.
+    market and decision snapshot. Gross P&L inputs must already incorporate
+    Betfair's settlement rounding for constituent bet winnings/losses; this
+    function then rounds each positive market commission charge to 2 decimals,
+    half-up, before computing the marginal outcome delta. It deliberately does
+    not infer a rate from Market Base Rate, Discount Rate, rewards, jurisdiction
+    or defaults. SHA-256 fields bind evidence identity but do not validate it.
     """
     account = _text(account_id, "account_id")
     market = _text(market_id, "market_id")
@@ -174,6 +189,8 @@ def calculate_betfair_marginal_commission_ev(
         "market_id": market,
         "currency": currency,
         "effective_commission_rate": _decimal_text(rate),
+        "commission_quantum": _decimal_text(COMMISSION_QUANTUM),
+        "commission_rounding": COMMISSION_ROUNDING,
         **evidence,
         "outcomes": [
             {
@@ -196,6 +213,8 @@ def calculate_betfair_marginal_commission_ev(
         market,
         currency,
         rate,
+        COMMISSION_QUANTUM,
+        COMMISSION_ROUNDING,
         evidence["probability_evidence_sha256"],
         evidence["exposure_evidence_sha256"],
         evidence["candidate_evidence_sha256"],
@@ -209,7 +228,29 @@ def calculate_betfair_marginal_commission_ev(
 
 
 def _net(gross_pnl: Decimal, rate: Decimal) -> Decimal:
-    return gross_pnl if gross_pnl <= 0 else gross_pnl - gross_pnl * rate
+    if gross_pnl <= 0:
+        return gross_pnl
+    unrounded_charge = gross_pnl * rate
+    with localcontext(_CTX) as rounding_context:
+        rounding_context.traps[Inexact] = False
+        charge = unrounded_charge.quantize(
+            COMMISSION_QUANTUM,
+            rounding=ROUND_HALF_UP,
+            context=rounding_context,
+        )
+    return gross_pnl - charge
+
+
+def _is_settlement_minor_unit(value: Decimal) -> bool:
+    if value == 0:
+        return True
+    _, digits, exponent = value.as_tuple()
+    trailing_zeroes = 0
+    for digit in reversed(digits):
+        if digit != 0:
+            break
+        trailing_zeroes += 1
+    return exponent + trailing_zeroes >= -2
 
 
 def _decimal(value: object, label: str) -> Decimal:
@@ -227,7 +268,17 @@ def _decimal(value: object, label: str) -> Decimal:
 def _text(value: object, label: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise BetfairMarginalCommissionEVError(f"{label} must be non-empty canonical text")
-    if len(value) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BetfairMarginalCommissionEVError(
+            f"{label} must be valid UTF-8 canonical text"
+        ) from exc
+    if (
+        len(value) > 256
+        or len(encoded) > 1024
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
         raise BetfairMarginalCommissionEVError(f"{label} is not bounded canonical text")
     return value
 

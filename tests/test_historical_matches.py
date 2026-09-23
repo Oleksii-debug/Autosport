@@ -202,6 +202,32 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
                 self.assertFalse(evidence.exists())
         self.assertEqual(transport.urls, [])
 
+    def test_module_sport_global_rebind_cannot_redefine_canonical_scope(self) -> None:
+        transport = _Transport([])
+        with patch.object(
+            historical_matches,
+            "_CANONICAL_HISTORICAL_SPORT_KEY",
+            "football",
+            create=True,
+        ):
+            provider = self._provider(transport)
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "matches.json"
+                report = capture_historical_matches(
+                    provider,
+                    requested_date="2026-09-10",
+                    output_path=output,
+                )
+                capture = json.loads(output.read_text(encoding="utf-8"))
+
+        expected_url = (
+            "https://parlay-api.com/v1/historical/sports/table_tennis/matches"
+            "?date=2026-09-10&pricedOnly=false"
+        )
+        self.assertEqual(transport.urls, [expected_url])
+        self.assertEqual(report.request_url, expected_url)
+        self.assertEqual(capture["sport_key"], "table_tennis")
+
     def test_retry_transport_and_clock_mutation_cannot_mint_positive_trust(self) -> None:
         payload = [{"provider_defined_id": "retry-match"}]
         second_transport = _Transport(payload)

@@ -7,6 +7,8 @@ import pytest
 
 from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
+    _evaluate_betfair_provider_state_semantics,
+    assert_verified_provider_evidence_authoritative,
     verify_betfair_provider_state,
 )
 
@@ -41,3 +43,27 @@ def test_injected_readback_transport_cannot_mint_provider_effect_authority() -> 
             readback=capture,
             expected_provider_order_ref=PROVIDER_REF,
         )
+
+def test_injected_transport_semantic_result_is_not_transferable_provider_authority() -> None:
+    action = _action()
+    profile = _profile()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+
+    evidence = _evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=PROVIDER_REF,
+    )
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="not issued by canonical verifier",
+    ):
+        assert_verified_provider_evidence_authoritative(evidence)
+

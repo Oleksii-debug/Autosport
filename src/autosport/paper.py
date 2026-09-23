@@ -737,7 +737,10 @@ class PaperBook:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            records, committed, pending = _read_snapshot_witnesses(destination, witness_path=witness_path)
+            records, committed, pending = _read_snapshot_witnesses(
+                destination,
+                witness_path=witness_path,
+            )
             current_sha = _file_sha256(destination)
             if was_fresh and (records or current_sha is not None):
                 raise ValueError(
@@ -778,7 +781,10 @@ class PaperBook:
                     raise ValueError(
                         "PaperBook snapshot witness has an unresolved different PREPARE"
                     )
-                records, committed, pending = _read_snapshot_witnesses(destination, witness_path=witness_path)
+                records, committed, pending = _read_snapshot_witnesses(
+                    destination,
+                    witness_path=witness_path,
+                )
                 if pending is not None:
                     raise ValueError(
                         "PaperBook snapshot witness pending state did not close"
@@ -1558,27 +1564,30 @@ class PaperBook:
         payload = source.read_bytes()
         book = cls._decode_snapshot_bytes(payload)
         witness_path = _snapshot_witness_path(source)
-        if (
+        if not (
             book.tickets
             or book._snapshot_schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
         ):
-            try:
-                _verify_snapshot_witness(
-                    source,
-                    payload,
-                    witness_path=witness_path,
-                )
-            except ValueError as exc:
-                # Pre-witness legacy schemas remain available for forensic/read-only
-                # inspection, but cannot be promoted to trusted economics by save(),
-                # open_ticket(), or settle(). Current schema-8 snapshots must have
-                # the independent authority because otherwise caller-edited current
-                # bytes could be silently re-baselined.
-                if (
-                    book._snapshot_schema_version is None
-                    or book._snapshot_schema_version < _PAPER_SNAPSHOT_SCHEMA_VERSION
-                ) and "missing independent durable opening witness" in str(exc):
-                    return book
-                raise
+            # Empty pre-witness legacy snapshots are structural/forensic input only.
+            # Skipping verification must never promote them into economic authority.
+            return book
+        try:
+            _verify_snapshot_witness(
+                source,
+                payload,
+                witness_path=witness_path,
+            )
+        except ValueError as exc:
+            # Pre-witness legacy schemas remain available for forensic/read-only
+            # inspection, but cannot be promoted to trusted economics by save(),
+            # open_ticket(), or settle(). Current schema-8 snapshots must have
+            # the independent authority because otherwise caller-edited current
+            # bytes could be silently re-baselined.
+            if (
+                book._snapshot_schema_version is None
+                or book._snapshot_schema_version < _PAPER_SNAPSHOT_SCHEMA_VERSION
+            ) and "missing independent durable opening witness" in str(exc):
+                return book
+            raise
         _bind_snapshot_authority(book, source, witness_path)
         return book

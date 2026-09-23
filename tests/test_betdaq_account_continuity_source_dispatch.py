@@ -92,3 +92,30 @@ def test_redirected_source_client_cannot_authenticate_b_and_issue_principal_a(
         client.read_account_evidence(
             frozenset({BookmakerCapability.BALANCE_READ})
         )
+
+
+def test_shadowed_source_read_method_cannot_issue_continuity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An instance-level read shadow cannot become the authentication authority."""
+    opener = _QueueUrlopen(_balance_response())
+    monkeypatch.setattr(account_module, "urlopen", opener)
+
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("principal-a", "password-a", "application-a"),
+        clock=_clock,
+    )
+    monkeypatch.setattr(
+        client._source,
+        "read_account_evidence",
+        lambda _requested_capabilities: None,
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="read authority was shadowed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+    assert opener.calls == []

@@ -23,6 +23,8 @@ REWARD_ID = "6" * 64
 FORECAST_EVIDENCE = "7" * 64
 EXECUTION_EVIDENCE = "8" * 64
 RANDOMNESS_EVIDENCE = "9" * 64
+WIN_REWARD_ID = "a" * 64
+LOSS_REWARD_ID = "b" * 64
 
 
 def _finding(
@@ -47,6 +49,7 @@ def _attribution(
     *,
     reward_value: Decimal,
     findings: tuple[AttributionFinding, ...],
+    reward_id: str = REWARD_ID,
     truth: EvidenceTruth = EvidenceTruth.OBSERVED,
     simulation_model_id: str | None = None,
 ) -> OutcomeAttribution:
@@ -56,7 +59,7 @@ def _attribution(
         transition_id=TRANSITION_ID,
         action_id=ACTION_ID,
         outcome_id=OUTCOME_ID,
-        reward_id=REWARD_ID,
+        reward_id=reward_id,
         reward_value=reward_value,
         truth=truth,
         simulation_model_id=simulation_model_id,
@@ -164,9 +167,18 @@ def test_reward_sign_cannot_rewrite_identical_finding_payload():
         ),
     )
 
-    win = _attribution(reward_value=Decimal("1"), findings=findings)
-    loss = _attribution(reward_value=Decimal("-1"), findings=findings)
+    win = _attribution(
+        reward_value=Decimal("1"),
+        reward_id=WIN_REWARD_ID,
+        findings=findings,
+    )
+    loss = _attribution(
+        reward_value=Decimal("-1"),
+        reward_id=LOSS_REWARD_ID,
+        findings=findings,
+    )
 
+    assert win.reward_id != loss.reward_id
     assert win.findings[0].payload() == loss.findings[0].payload()
     assert win.reward_value == -loss.reward_value
 

@@ -91,6 +91,18 @@ def test_nonpositive_or_nonfinite_request_terms_fail_closed(field, value):
         intent(**{field: value})
 
 
+@pytest.mark.parametrize("control", ("\\x00", "\\t", "\\n", "\\r", "\\x1f", "\\x7f"))
+def test_intent_account_context_rejects_ascii_control_characters(control):
+    with pytest.raises(MatchbookOfferEditReconciliationError, match="canonical text"):
+        intent(account_context_id=f"acct{control}alias")
+
+
+@pytest.mark.parametrize("control", ("\\x00", "\\t", "\\n", "\\r", "\\x1f", "\\x7f"))
+def test_readback_account_context_rejects_ascii_control_characters(control):
+    with pytest.raises(MatchbookOfferEditReconciliationError, match="canonical text"):
+        readback(account=f"acct{control}alias")
+
+
 def test_delayed_is_pending_not_applied_and_has_no_authority():
     x = readback()
     assert x.truth is MatchbookOfferEditTruth.PENDING_DELAY_ASSERTION

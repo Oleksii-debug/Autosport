@@ -77,8 +77,12 @@ class PaperValueAgent:
             "agent": cls.name,
             "action": _MATERIAL_ACTION_NAME,
             "quote_key": event.quote_key,
-            "market_semantics_id": event.market_semantics_id,
         }
+        # Preserve the exact pre-market-semantics durable identity for legacy
+        # events. Adding a null field would change the hash and could create a
+        # second material-action lineage after upgrade.
+        if event.market_semantics_id is not None:
+            identity["market_semantics_id"] = event.market_semantics_id
         canonical = json.dumps(
             identity,
             ensure_ascii=False,

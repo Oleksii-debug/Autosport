@@ -5,7 +5,9 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
+from types import MappingProxyType
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,34 @@ from autosport.performance_qualification import (
 )
 
 SOURCE_SHA = "a" * 40
+
+
+class _FlipOnIterationReport(Mapping[str, object]):
+    """Show one state to keyed reads and another when materialized."""
+
+    def __init__(
+        self,
+        validation_view: dict[str, object],
+        materialized_view: dict[str, object],
+    ) -> None:
+        self._validation_view = validation_view
+        self._materialized_view = materialized_view
+        self._materializing = False
+
+    def __getitem__(self, key: str) -> object:
+        source = (
+            self._materialized_view
+            if self._materializing
+            else self._validation_view
+        )
+        return source[key]
+
+    def __iter__(self) -> Iterator[str]:
+        self._materializing = True
+        return iter(self._materialized_view)
+
+    def __len__(self) -> int:
+        return len(self._materialized_view)
 
 
 def _canonical_digest(value: object) -> str:
@@ -135,6 +165,39 @@ def test_exact_boundaries_pass_and_identity_is_deterministic() -> None:
     assert first.qualification_id == second.qualification_id
     assert first.target_machine_acceptance is False
     assert len(first.checks) == 6
+
+
+def test_stateful_mapping_cannot_change_between_validation_and_report_hash() -> None:
+    validation_view = _report()
+    materialized_view = _report()
+    materialized_view["status"] = "FAIL"
+    materialized_view["failures"] = ["changed after keyed validation"]
+    materialized_view["accepted_events_per_second"] = 1.0
+    report = _FlipOnIterationReport(validation_view, materialized_view)
+
+    with pytest.raises(
+        PerformanceQualificationError,
+        match="correctness status must be PASS",
+    ):
+        qualify_endurance_report(
+            report,
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="machine",
+        )
+
+
+def test_read_only_mapping_input_remains_supported() -> None:
+    report = MappingProxyType(_report())
+
+    result = qualify_endurance_report(
+        report,
+        _budget(),
+        source_sha=SOURCE_SHA,
+        machine_profile="machine",
+    )
+
+    assert result.status == "PASS"
 
 
 def test_correctness_failure_cannot_become_performance_pass() -> None:

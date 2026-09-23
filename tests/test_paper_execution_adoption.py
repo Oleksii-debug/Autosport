@@ -168,6 +168,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ticket = next(iter(book.tickets.values()))
             self.assertEqual(str(ticket.stake), "10.00")
             self.assertEqual(str(ticket.legs[0].locked_odds), "2.25")
+            self.assertEqual(ticket.legs[0].exchange_side, "back")
             self.assertIsNone(ticket.legs[0].market_semantics_id)
             self.assertEqual(ticket.placed_at, STARTED_AT)
             self.assertEqual(book.balance, __import__("decimal").Decimal("90.00"))
@@ -202,10 +203,12 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
 
             self.assertEqual(len(result.ticket_ids), 1)
             ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "back")
             self.assertEqual(ticket.legs[0].market_semantics_id, semantics)
 
             reloaded = PaperBook.load(Path(tmp) / "paper-book.json")
             reloaded_ticket = next(iter(reloaded.tickets.values()))
+            self.assertEqual(reloaded_ticket.legs[0].exchange_side, "back")
             self.assertEqual(
                 reloaded_ticket.legs[0].market_semantics_id,
                 semantics,

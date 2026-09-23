@@ -13,6 +13,89 @@ def _command(request_id: str) -> dict[str, object]:
     }
 
 
+def test_webview_emergency_stop_missing_state_projects_fail_closed_without_mutation(
+    tmp_path,
+):
+    path = execution_stop_path(tmp_path)
+    controller = EmergencyStopWebController(tmp_path)
+
+    state = controller.state()["emergency_stop"]
+
+    assert state["available"] is True
+    assert state["execution_blocked"] is True
+    assert state["mode"] is None
+    assert state["revision"] is None
+    assert state["integrity_confirmed"] is False
+    assert state["initialized"] is False
+    assert "ще не ініціалізовано" in state["status"]
+    assert not path.exists()
+    assert not path.with_name(path.name + ".anchor.json").exists()
+
+
+def test_webview_emergency_stop_reopen_projects_durable_stopped_revision(tmp_path):
+    authority = ExecutionStopAuthority(execution_stop_path(tmp_path))
+    stopped = authority.initialize_stopped(operator_id="test", reason="restart-safe")
+
+    first = EmergencyStopWebController(tmp_path).state()["emergency_stop"]
+    reopened = EmergencyStopWebController(tmp_path).state()["emergency_stop"]
+
+    for state in (first, reopened):
+        assert state["available"] is True
+        assert state["execution_blocked"] is True
+        assert state["mode"] == ExecutionAuthorityMode.STOPPED.value
+        assert state["revision"] == stopped.revision
+        assert state["integrity_confirmed"] is True
+        assert state["initialized"] is True
+        assert "Аварійний STOP активний" in state["status"]
+        assert f"ревізії {stopped.revision}" in state["status"]
+
+
+def test_webview_emergency_stop_state_refreshes_external_armed_transition(tmp_path):
+    authority = ExecutionStopAuthority(execution_stop_path(tmp_path))
+    stopped = authority.initialize_stopped(operator_id="test", reason="initial-safe")
+    controller = EmergencyStopWebController(tmp_path)
+
+    before = controller.state()["emergency_stop"]
+    armed = authority.arm(
+        operator_id="test",
+        reason="explicit-test-arm",
+        confirmation_id="state-refresh-confirmation",
+        expected_revision=stopped.revision,
+    )
+    after = controller.state()["emergency_stop"]
+
+    assert before["mode"] == ExecutionAuthorityMode.STOPPED.value
+    assert before["execution_blocked"] is True
+    assert after["mode"] == ExecutionAuthorityMode.ARMED.value
+    assert after["revision"] == armed.revision
+    assert after["execution_blocked"] is False
+    assert after["integrity_confirmed"] is True
+    assert "допуск виконання дозволено" in after["status"]
+    assert "Кнопка аварійного STOP доступна" in after["status"]
+
+
+def test_webview_emergency_stop_corrupt_state_projection_is_fail_closed_and_read_only(
+    tmp_path,
+):
+    path = execution_stop_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    corrupt = b'{"partial":true}\n'
+    path.write_bytes(corrupt)
+    controller = EmergencyStopWebController(tmp_path)
+
+    state = controller.state()["emergency_stop"]
+
+    assert state["available"] is True
+    assert state["execution_blocked"] is True
+    assert state["mode"] is None
+    assert state["revision"] is None
+    assert state["integrity_confirmed"] is False
+    assert state["initialized"] is True
+    assert "не підтверджено" in state["status"]
+    assert path.read_bytes() == corrupt
+    assert not path.with_name(path.name + ".anchor.json").exists()
+
+
 def test_webview_emergency_stop_initializes_missing_authority_stopped(tmp_path):
     controller = EmergencyStopWebController(tmp_path)
 
@@ -22,7 +105,13 @@ def test_webview_emergency_stop_initializes_missing_authority_stopped(tmp_path):
     state = ExecutionStopAuthority(execution_stop_path(tmp_path)).current()
     assert state.mode is ExecutionAuthorityMode.STOPPED
     assert state.revision == 1
-    assert "не є доказом зупинки вже запущеного" in result["message"]
+    assert "не доводить завершення вже запущеного" in result["message"]
+
+    projected = controller.state()["emergency_stop"]
+    assert projected["mode"] == ExecutionAuthorityMode.STOPPED.value
+    assert projected["revision"] == 1
+    assert projected["execution_blocked"] is True
+    assert projected["integrity_confirmed"] is True
 
 
 def test_webview_emergency_stop_transitions_armed_authority_and_is_request_idempotent(

@@ -228,6 +228,60 @@ def test_mid_acquisition_credential_rotation_still_fails_closed(monkeypatch):
         )
 
 
+def test_external_credentials_aba_mutation_cannot_mix_secure_requests(
+    monkeypatch,
+):
+    credentials = BetdaqCredentials("alice", "password-a", "app-a")
+
+    class AbaUrlopen(QueueUrlopen):
+        def __call__(self, request, *, timeout):
+            response = super().__call__(request, timeout=timeout)
+            if len(self.calls) == 1:
+                object.__setattr__(credentials, "username", "mallory")
+                object.__setattr__(credentials, "password", "password-b")
+                object.__setattr__(credentials, "application_identifier", "app-b")
+            elif len(self.calls) == 2:
+                object.__setattr__(credentials, "username", "alice")
+                object.__setattr__(credentials, "password", "password-a")
+                object.__setattr__(credentials, "application_identifier", "app-a")
+            return response
+
+    opener = AbaUrlopen(
+        balance(),
+        soap(
+            "ListBootstrapOrders",
+            'MaximumSequenceNumber="-1"',
+            "<Orders />",
+        ),
+        soap("ListOrdersChangedSince", inner="<Orders />"),
+    )
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(credentials, clock=at(0, 1))
+
+    evidence = client.read_account_evidence(
+        frozenset(
+            {
+                BookmakerCapability.BALANCE_READ,
+                BookmakerCapability.OPEN_POSITIONS_READ,
+            }
+        )
+    )
+
+    assert credentials == BetdaqCredentials("alice", "password-a", "app-a")
+    assert len(opener.calls) == 3
+    for request, _timeout in opener.calls:
+        body = request.data
+        assert b'username="alice"' in body
+        assert b'password="password-a"' in body
+        assert b'applicationIdentifier="app-a"' in body
+        assert b"mallory" not in body
+        assert b"password-b" not in body
+        assert b"app-b" not in body
+    assert evidence.snapshot.profile.account_id.startswith(
+        "betdaq-authenticated-principal:"
+    )
+
+
 def test_continuous_identity_composes_with_reconciliation_across_new_clients(
     monkeypatch,
     tmp_path,

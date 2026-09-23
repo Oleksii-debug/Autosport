@@ -1232,6 +1232,59 @@ def _install_execution_readback_authority() -> None:
     if private_opener_dispatch is None:
         raise RuntimeError("canonical Betfair private opener graph is invalid")
 
+    def capture_opener_handler_methods() -> tuple[
+        tuple[object, str, object, object], ...
+    ] | None:
+        methods: list[tuple[object, str, object, object]] = []
+        seen: set[tuple[int, str]] = set()
+        for map_name, key, handlers in private_opener_dispatch:
+            if map_name == "handle_open":
+                primary_name = f"{key}_open"
+            elif map_name == "process_request":
+                primary_name = f"{key}_request"
+            elif map_name == "process_response":
+                primary_name = f"{key}_response"
+            elif map_name.startswith("handle_error:"):
+                protocol = map_name.split(":", 1)[1]
+                primary_name = f"{protocol}_error_{key}"
+            else:
+                return None
+            for handler in handlers:
+                for method_name in (
+                    primary_name,
+                    "do_open",
+                    "do_request_",
+                    "redirect_request",
+                ):
+                    identity = (id(handler), method_name)
+                    if identity in seen or not hasattr(handler, method_name):
+                        continue
+                    seen.add(identity)
+                    instance_state = getattr(handler, "__dict__", None)
+                    if (
+                        type(instance_state) is dict
+                        and method_name in instance_state
+                    ):
+                        method = instance_state[method_name]
+                    else:
+                        method = getattr(type(handler), method_name, None)
+                    if method is None:
+                        return None
+                    methods.append(
+                        (
+                            handler,
+                            method_name,
+                            method,
+                            getattr(method, "__code__", None),
+                        )
+                    )
+        methods.sort(key=lambda item: (type(item[0]).__name__, item[1], id(item[0])))
+        return tuple(methods)
+
+    private_opener_handler_methods = capture_opener_handler_methods()
+    if private_opener_handler_methods is None:
+        raise RuntimeError("canonical Betfair private opener handlers are invalid")
+
     def opener_graph_matches() -> bool:
         if (
             type(private_opener) is not private_opener_type
@@ -1270,6 +1323,21 @@ def _install_execution_readback_authority() -> None:
             if len(current[2]) != len(expected[2]) or any(
                 current_handler is not expected_handler
                 for current_handler, expected_handler in zip(current[2], expected[2])
+            ):
+                return False
+        for handler, method_name, expected_method, expected_code in (
+            private_opener_handler_methods
+        ):
+            instance_state = getattr(handler, "__dict__", None)
+            if type(instance_state) is not dict:
+                return False
+            if method_name in instance_state:
+                current_method = instance_state[method_name]
+            else:
+                current_method = getattr(type(handler), method_name, None)
+            if (
+                current_method is not expected_method
+                or getattr(current_method, "__code__", None) is not expected_code
             ):
                 return False
         return True

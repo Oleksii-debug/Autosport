@@ -45,6 +45,29 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
             temporary_path.unlink()
 
 
+def _path_identity(path: Path) -> str:
+    try:
+        return os.path.normcase(str(path.resolve(strict=False)))
+    except OSError as exc:
+        raise PerformanceQualificationError(
+            f"cannot resolve qualification path {path}: {exc}"
+        ) from exc
+
+
+def _prepare_output(path: Path, *, inputs: tuple[Path, ...]) -> None:
+    output_identity = _path_identity(path)
+    if any(output_identity == _path_identity(input_path) for input_path in inputs):
+        raise PerformanceQualificationError(
+            "qualification output must not overwrite report or budget input"
+        )
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise PerformanceQualificationError(
+            f"cannot invalidate stale qualification output: {exc}"
+        ) from exc
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Qualify one Autosport endurance report against an explicit machine-bound budget."
@@ -65,6 +88,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        _prepare_output(args.output, inputs=(args.report, args.budget))
         report = _read_json_object(args.report, "endurance report")
         budget = PerformanceBudget.from_dict(_read_json_object(args.budget, "performance budget"))
         qualification = qualify_endurance_report(

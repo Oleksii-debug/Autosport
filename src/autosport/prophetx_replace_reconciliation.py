@@ -50,6 +50,11 @@ class ReplaceOutcome(str, Enum):
     REJECTED = "REJECTED"
 
 
+class ReplaceRejectResponseTo(str, Enum):
+    CANCEL = "1"
+    REPLACE = "2"
+
+
 def _text(v: object, name: str) -> str:
     if not isinstance(v, str) or not v or v != v.strip():
         raise ProphetXReplaceError(f"{name} must be non-empty trimmed text")
@@ -404,6 +409,7 @@ class ReplaceReject:
     replace_cl_ord_id: str
     orig_cl_ord_id: str
     reason: str
+    response_to: ReplaceRejectResponseTo
     order_status: OrderStatus
     transact_time: str
     fix_session_id: str
@@ -422,6 +428,8 @@ class ReplaceReject:
             "fix_session_id",
         ):
             _text(getattr(self, n), n)
+        if not isinstance(self.response_to, ReplaceRejectResponseTo):
+            raise ProphetXReplaceError("invalid CxlRejResponseTo")
         if not isinstance(self.order_status, OrderStatus):
             raise ProphetXReplaceError("invalid order_status")
         _time(self.transact_time, "transact_time")
@@ -442,6 +450,7 @@ class ReplaceReject:
             "replace_cl_ord_id": self.replace_cl_ord_id,
             "orig_cl_ord_id": self.orig_cl_ord_id,
             "reason": self.reason,
+            "response_to": self.response_to.value,
             "order_status": self.order_status.value,
             "transact_time": self.transact_time,
             "fix_session_id": self.fix_session_id,
@@ -687,6 +696,10 @@ def reconcile(
             active_price = request.new_price
             ro = request.new_quantity
         else:
+            if item.response_to is not ReplaceRejectResponseTo.REPLACE:
+                raise ProphetXReplaceConflict(
+                    "OrderCancelReject CxlRejResponseTo does not identify replace"
+                )
             if (
                 item.replace_cl_ord_id != request.replace_cl_ord_id
                 or item.orig_cl_ord_id != request.original_cl_ord_id

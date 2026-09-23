@@ -37,6 +37,28 @@ def _append(store: DeploymentRuntimeAuthorityStore):
     )
 
 
+def test_hard_link_created_after_store_open_fails_closed_on_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime-authority.json"
+    alias = tmp_path / "runtime-authority-late-hardlink-read.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(path)
+
+    try:
+        os.link(path, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable in this environment: {exc}")
+
+    assert path.stat().st_nlink == 2
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="hard-linked",
+    ):
+        store.records()
+
+    assert os.path.samefile(path, alias)
+
+
 def test_hard_link_created_after_store_open_fails_closed_before_append(
     tmp_path: Path,
 ) -> None:

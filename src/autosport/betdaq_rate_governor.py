@@ -20,6 +20,7 @@ from enum import StrEnum
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import threading
 from typing import Final
@@ -1141,6 +1142,12 @@ def _workspace(path: str | Path) -> Path:
         ) from exc
 
 
+def _workspace_registry_key(path: Path) -> str:
+    """Canonical process-registry identity for one resolved workspace."""
+
+    return os.path.normcase(str(path))
+
+
 def resolve_betdaq_rate_governor(
     workspace: str | Path,
     policy: BetdaqRatePolicy,
@@ -1170,7 +1177,7 @@ def resolve_betdaq_rate_governor(
         if authority_root is None
         else _workspace(authority_root)
     )
-    workspace_key = str(root)
+    workspace_key = _workspace_registry_key(root)
     fingerprint = policy.fingerprint()
 
     with _REGISTRY_LOCK:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -500,6 +500,83 @@ def test_active_old_authenticated_context_blocks_new_context(
             funds_precheck=_precheck(second_client, second),
             execution_ledger=ledger,
         )
+
+
+
+def test_lay_liability_is_independent_of_ambient_decimal_precision() -> None:
+    action = _action(
+        "lay-precision",
+        side="LAY",
+        odds="123.456",
+        stake="78.901",
+    )
+    with localcontext() as context:
+        context.prec = 2
+        assert worst_case_incremental_exposure(action) == Decimal("9661.900856")
+
+
+def test_later_advanced_unreserved_attempt_blocks_earlier_new_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    first = _action("a1", stake="25")
+    second = _action("a2", stake="25")
+    ledger = _ledger(tmp_path, first, second)
+    ledger.mark_submitted("try-2", submitted_at=SUBMITTED)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        _store(tmp_path).reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=_precheck(client, first),
+            execution_ledger=ledger,
+        )
+
+
+def test_sync_can_skip_intermediate_unknown_observation_when_ledger_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    submitted = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert submitted.ledger_state is AttemptState.SUBMITTED
+
+    ledger.mark_unknown("try-1", reason="timeout", observed_at=UNKNOWN)
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="try-1",
+            evidence_id="provider-absence",
+            observed_at=RECONCILED,
+            external_effect_found=False,
+            source="provider-readback",
+        )
+    )
+    released = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert released.status is ReservationStatus.RELEASED
+    assert store.active_reserved_amount() == Decimal("0")
 
 
 def test_copied_funds_precheck_cannot_mint_reservation(

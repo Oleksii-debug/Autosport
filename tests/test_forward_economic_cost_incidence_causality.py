@@ -193,7 +193,7 @@ def _accumulator() -> ForwardEconomicEvidenceAccumulator:
         champion_id="champion",
         universe_id="universe",
         universe_sha256="1" * 64,
-        authority_binding_sha256="2" * 64,
+        authority_binding_sha256=RESOLVER_AUTHORITY_SHA,
         alpha_registry=alpha,
         minimum_events=1,
         risk_unit_currency=Decimal("10"),

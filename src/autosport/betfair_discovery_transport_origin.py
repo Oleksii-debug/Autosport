@@ -5,12 +5,12 @@ request/response bytes are useful acquisition evidence, but caller-supplied
 bytes are not proof that Autosport obtained them through an authenticated
 Betfair transport.  This module keeps those two facts separate.
 
-A positive transport-origin assessment requires one product-issued receipt for
-every exchange in the acquisition.  Receipt construction is capability-gated;
-there is deliberately no public receipt issuer in this transport-free lineage.
-A future authenticated Betfair transport may compose with this seam and issue
-receipts at the I/O boundary.  Until then, imported/replayed evidence remains
-useful but cannot mint authenticated-provider-origin authority.
+A positive transport-origin assessment requires a product-owned issuance
+boundary at the authenticated I/O layer.  This transport-free lineage has no
+such issuer.  Module-private Python objects are deliberately not treated as a
+security or authority boundary: an ordinary caller can introspect/import them.
+Until a canonical authenticated transport composes with this seam, even an
+otherwise exact structural receipt candidate remains non-authoritative.
 """
 from __future__ import annotations
 
@@ -29,7 +29,12 @@ _TRANSPORT_RECEIPT_ISSUER_TOKEN = object()
 
 @dataclass(frozen=True, slots=True)
 class BetfairDiscoveryTransportOriginReceipt:
-    """Capability-gated receipt for one exact authenticated transport exchange."""
+    """Structural receipt candidate for one exact transport exchange.
+
+    The constructor token is only an internal shape guard.  It is not a
+    product-owned trust root and therefore cannot by itself grant authenticated
+    transport-origin authority.
+    """
 
     transport_authority_ref: str
     method: str
@@ -161,9 +166,15 @@ def assess_betfair_discovery_transport_origin(
             fingerprints,
         )
 
+    # A module-private Python token is introspectable/importable by ordinary
+    # in-process callers and therefore cannot be the trust root for provider
+    # origin.  The current #1137 lineage is transport-free, so exact candidate
+    # receipts prove structural co-binding only.  A future canonical
+    # authenticated transport must add a product-owned issuance/composition
+    # boundary before this authority can become true.
     return BetfairDiscoveryTransportOriginAssessment(
-        True,
-        "BOUND_TO_AUTHENTICATED_TRANSPORT_RECEIPTS",
+        False,
+        "NO_PRODUCT_OWNED_TRANSPORT_RECEIPT_ISSUER",
         len(exchanges),
         bound,
         fingerprints,

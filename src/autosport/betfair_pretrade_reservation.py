@@ -7,7 +7,9 @@ write to Betfair.
 Before a provider mutation, one exact execution attempt must atomically reserve
 its full worst-case incremental exposure. SUBMITTED, UNKNOWN, ACCEPTED and
 PARTIAL attempts remain fully reserved. Capital is released here only when the
-execution ledger proves REJECTED or RECONCILED_NOT_FOUND. A provider funds
+execution ledger proves RECONCILED_NOT_FOUND. A generic ledger REJECTED state
+is intentionally not sufficient because the ledger can record rejection
+without independently proving provider-origin zero-effect authority. A provider funds
 snapshot therefore cannot be double-spent by concurrent Autosport workers.
 """
 from __future__ import annotations
@@ -48,9 +50,7 @@ _ACTIVE_STATES = frozenset(
         AttemptState.PARTIAL,
     }
 )
-_RELEASE_STATES = frozenset(
-    {AttemptState.REJECTED, AttemptState.RECONCILED_NOT_FOUND}
-)
+_RELEASE_STATES = frozenset({AttemptState.RECONCILED_NOT_FOUND})
 _RESERVATION_FIELDS = frozenset(
     {
         "schema_version",

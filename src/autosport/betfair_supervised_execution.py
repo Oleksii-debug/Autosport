@@ -33,6 +33,10 @@ from .bookmaker_capability import (
 from .economic_goal import AutomationLevel, EconomicGoalContractError
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
+from .execution_stop_authority import (
+    ExecutionStopAuthority,
+    ExecutionStopAuthorityError,
+)
 from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
@@ -50,6 +54,7 @@ from .supervised_execution import (
 PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
+EXECUTION_STOP_JOURNAL_FILENAME = "execution-stop.jsonl"
 
 # Terminal provider-effect authority must not depend on caller-rebindable method
 # dispatch.  These product-owned implementations are captured once and are used
@@ -1094,26 +1099,35 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        stop_authority = ExecutionStopAuthority(
+            Path(execution_workspace) / EXECUTION_STOP_JOURNAL_FILENAME
+        )
         try:
-            if _transport_post is None:
-                payload = self._transport.post(
-                    BETTING_JSON_RPC_ENDPOINT,
-                    headers=headers,
-                    body=body,
-                    timeout_seconds=self._timeout_seconds,
-                )
-            else:
-                payload = _transport_post(
-                    self._transport,
-                    BETTING_JSON_RPC_ENDPOINT,
-                    headers=headers,
-                    body=body,
-                    timeout_seconds=self._timeout_seconds,
-                )
-        except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
-            raise BetfairPlaceOrdersAmbiguous(
-                "placeOrders transport outcome is ambiguous; "
-                "authoritative readback required"
+            with stop_authority.admission_lease():
+                try:
+                    if _transport_post is None:
+                        payload = self._transport.post(
+                            BETTING_JSON_RPC_ENDPOINT,
+                            headers=headers,
+                            body=body,
+                            timeout_seconds=self._timeout_seconds,
+                        )
+                    else:
+                        payload = _transport_post(
+                            self._transport,
+                            BETTING_JSON_RPC_ENDPOINT,
+                            headers=headers,
+                            body=body,
+                            timeout_seconds=self._timeout_seconds,
+                        )
+                except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
+                    raise BetfairPlaceOrdersAmbiguous(
+                        "placeOrders transport outcome is ambiguous; "
+                        "authoritative readback required"
+                    ) from exc
+        except ExecutionStopAuthorityError as exc:
+            raise BetfairSupervisedExecutionError(
+                "execution STOP authority denied provider write"
             ) from exc
         if not isinstance(payload, bytes):
             raise BetfairPlaceOrdersAmbiguous(

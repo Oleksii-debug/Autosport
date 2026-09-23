@@ -371,8 +371,8 @@
     refreshInFlight = (async () => {
       do {
         refreshPending = false;
+        const requestEpoch = stateProjectionEpoch;
         try {
-          const requestEpoch = stateProjectionEpoch;
           const state = await apiState();
           if (requestEpoch === stateProjectionEpoch) {
             renderState(state);
@@ -382,7 +382,13 @@
             refreshPending = true;
           }
         } catch (_error) {
-          announce("Не вдалося оновити стан застосунку.", true);
+          if (requestEpoch === stateProjectionEpoch) {
+            announce("Не вдалося оновити стан застосунку.", true);
+          } else {
+            // A failure from a causally stale poll is stale presentation too.
+            // Do not overwrite a newer action result with an obsolete error.
+            refreshPending = true;
+          }
         }
       } while (refreshPending);
     })();

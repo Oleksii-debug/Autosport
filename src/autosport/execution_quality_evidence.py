@@ -497,6 +497,10 @@ def project_paper_execution_quality(
             raise EvaluationUniverseIntegrityError(
                 "PAPER outcome lies outside execution-model eligible denominator"
             )
+        if row.row_id not in attempted_rows:
+            raise EvaluationUniverseIntegrityError(
+                "PAPER outcome lacks a durable ATTEMPTED predecessor"
+            )
         samples.append(_sample_for_event(ledger, row, event))
         seen_outcomes.add(event.row_id)
 

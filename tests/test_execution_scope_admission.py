@@ -199,7 +199,8 @@ def test_favorable_current_evidence_still_cannot_mint_write_admission() -> None:
     assert assessment.provider_action_documented is True
     assert assessment.governance_automation_permitted is True
     assert assessment.integration_channel_bound is True
-    assert assessment.supervised_action_binding_structurally_valid is True\n    assert assessment.product_supervised_action_issued is False
+    assert assessment.supervised_action_binding_structurally_valid is True
+    assert assessment.product_supervised_action_issued is False
 
     assert assessment.provider_write_entitlement_proven is False
     assert assessment.authenticated_context_proven is False
@@ -357,7 +358,8 @@ def test_assessment_cannot_be_replaced_into_positive_execution_admission() -> No
         supervised_action_binding_structurally_valid=True,
     )
 
-    assert replaced.product_supervised_action_issued is False\n    assert replaced.provider_write_entitlement_proven is False
+    assert replaced.product_supervised_action_issued is False
+    assert replaced.provider_write_entitlement_proven is False
     assert replaced.execution_admitted is False
     assert replaced.assessment_sha256 == assessment.assessment_sha256
 

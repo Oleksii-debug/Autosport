@@ -856,6 +856,15 @@ def _publish_bound_windows_file_once(
         wintypes.ULONG,
     )
     nt_create_file.restype = wintypes.LONG
+    nt_set_information_file = ntdll.NtSetInformationFile
+    nt_set_information_file.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    )
+    nt_set_information_file.restype = wintypes.LONG
     rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
     rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
     rtl_status_to_dos_error.restype = wintypes.ULONG
@@ -1197,7 +1206,6 @@ class CampaignPrecommitManifest:
                 "precommit manifest digest mismatch"
             )
         return manifest
-
 
 def load_campaign_precommit_manifest(
     path: str | os.PathLike[str],
@@ -1597,7 +1605,6 @@ def resolve_campaign_precommit_publication_witness(
     authority_root: str | os.PathLike[str] | None = None,
 ) -> CampaignPrecommitPublicationWitness:
     """Resolve exact manifest + committed monotonic witness without issuing authority."""
-
     absolute_workspace, target, relative = _publication_target_context(
         path,
         workspace=workspace,

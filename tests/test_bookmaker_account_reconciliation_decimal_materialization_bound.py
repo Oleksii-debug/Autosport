@@ -241,6 +241,37 @@ def test_authority_binding_field_drift_is_rejected_before_publication(tmp_path) 
     assert not path.exists()
 
 
+def test_authority_guard_instance_shadow_cannot_redirect_requested_root(
+    tmp_path,
+) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority-a",
+    )
+    replacement = MonotonicWorkspaceAuthority(
+        workspace=store._workspace,
+        domain="provider.account-snapshot-reconciliation-v1",
+        key=f"account-reconciliation:{path.name}",
+        authority_root=tmp_path / "authority-b",
+    )
+
+    # Reproduce the exact post-construction bypass: both the mutable authority
+    # field and the instance-visible validator point at root B. Internal durable
+    # paths must use the validator captured when the canonical class was defined,
+    # so the closure-owned root-A issuance remains authoritative.
+    store._authority = replacement
+    store._require_canonical_authority = lambda: replacement
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority identity or binding changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert not path.exists()
+
+
 
 
 def test_caller_mutable_baseline_fields_cannot_authorize_alternate_root(

@@ -18,7 +18,7 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 
 BETDAQ_GET_PRICES_ENDPOINT = "https://api.betdaq.com/v2.0/ReadOnlyService.asmx"
 BETDAQ_GET_PRICES_SOAP_ACTION = "http://www.GlobalBettingExchange.com/ExternalAPI/GetPrices"
-BETDAQ_GET_PRICES_MAX_MARKETS = 50
+BETDAQ_GET_PRICES_MAX_MARKETS = 500
 _MAX_FIXED_DECIMAL_CHARS = 512
 
 
@@ -85,7 +85,10 @@ class BetdaqGetPricesRequest:
             or any(type(value) is not int or value < 0 for value in self.market_ids)
             or len(set(self.market_ids)) != len(self.market_ids)
         ):
-            raise ValueError("market_ids must be 1..50 unique non-negative integers")
+            raise ValueError(
+                f"market_ids must be 1..{BETDAQ_GET_PRICES_MAX_MARKETS} "
+                "unique non-negative integers"
+            )
         if (
             not isinstance(self.threshold_amount, Decimal)
             or not self.threshold_amount.is_finite()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import tempfile
 from dataclasses import replace
@@ -92,12 +93,14 @@ def _fixed_supervised_clock(monkeypatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _canonical_write_network_seam(monkeypatch):
+    """Intercept below Autosport's provider-origin authority for deterministic tests."""
+
     global _ACTIVE_WRITE_TRANSPORT
     _ACTIVE_WRITE_TRANSPORT = None
     monkeypatch.setattr(
-        betfair_account_readonly,
-        "urlopen",
-        _test_urlopen,
+        http.client,
+        "HTTPSConnection",
+        _TestHTTPSConnection,
     )
     yield
     _ACTIVE_WRITE_TRANSPORT = None
@@ -292,6 +295,11 @@ class _Transport:
 class _UrlopenResponse:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+        self.code = 200
+        self.status = 200
+        self.reason = "OK"
+        self.msg = "OK"
+        self.headers: dict[str, str] = {}
 
     def __enter__(self):
         return self
@@ -302,17 +310,73 @@ class _UrlopenResponse:
     def read(self, max_bytes: int) -> bytes:
         return self._payload[:max_bytes]
 
+    def close(self) -> None:
+        return None
 
-def _test_urlopen(request, timeout):
-    if _ACTIVE_WRITE_TRANSPORT is None:
-        raise AssertionError("canonical Betfair network seam has no test responder")
-    payload = _ACTIVE_WRITE_TRANSPORT.post(
-        request.full_url,
-        headers=dict(request.header_items()),
-        body=request.data or b"",
-        timeout_seconds=timeout,
-    )
-    return _UrlopenResponse(payload)
+    def info(self) -> dict[str, str]:
+        return self.headers
+
+    def getcode(self) -> int:
+        return self.code
+
+
+_REAL_HTTPS_CONNECTION = http.client.HTTPSConnection
+
+
+class _TestHTTPSConnection:
+    """Network-free stdlib boundary used only by this test module."""
+
+    _http_vsn = _REAL_HTTPS_CONNECTION._http_vsn
+    _http_vsn_str = _REAL_HTTPS_CONNECTION._http_vsn_str
+
+    def __init__(self, host: str, timeout=None, **kwargs) -> None:
+        self.host = host
+        self.timeout = timeout
+        self.sock = None
+        self._tunnel_host: str | None = None
+        self._request_target = ""
+        self._request_body = b""
+        self._request_headers: dict[str, str] = {}
+
+    def set_debuglevel(self, level: int) -> None:
+        return None
+
+    def set_tunnel(self, host: str, port=None, headers=None) -> None:
+        self._tunnel_host = host
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        body=None,
+        headers=None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        self._request_target = url
+        self._request_body = body or b""
+        self._request_headers = dict(headers or {})
+
+    def getresponse(self) -> _UrlopenResponse:
+        if _ACTIVE_WRITE_TRANSPORT is None:
+            raise AssertionError(
+                "canonical Betfair network seam has no test responder"
+            )
+        if self._request_target.startswith(("http://", "https://")):
+            full_url = self._request_target
+        else:
+            host = self._tunnel_host or self.host
+            full_url = f"https://{host}{self._request_target}"
+        payload = _ACTIVE_WRITE_TRANSPORT.post(
+            full_url,
+            headers=self._request_headers,
+            body=self._request_body,
+            timeout_seconds=self.timeout,
+        )
+        return _UrlopenResponse(payload)
+
+    def close(self) -> None:
+        return None
 
 
 class _TimeoutTransport(_Transport):

@@ -188,6 +188,14 @@ class ProphetXTransactionPage:
     source_payload_sha256: str
 
 
+_PROVIDER_TRANSPORTS: WeakKeyDictionary[object, UrllibProphetXTransactionsTransport] = (
+    WeakKeyDictionary()
+)
+_ISSUED_PAGES: WeakKeyDictionary[
+    ProphetXTransactionPage, tuple[object, str]
+] = WeakKeyDictionary()
+
+
 class ProphetXTransactionsClient:
     """Bounded acquisition with process-local proof of exact canonical provider origin."""
 
@@ -208,13 +216,12 @@ class ProphetXTransactionsClient:
         if transport is None:
             canonical = UrllibProphetXTransactionsTransport()
             self._transport: ProphetXTransactionsTransport = canonical
-            self._canonical: UrllibProphetXTransactionsTransport | None = canonical
+            if type(self) is ProphetXTransactionsClient:
+                _PROVIDER_TRANSPORTS[self] = canonical
         else:
             self._transport = transport
-            self._canonical = None
         self._timeout = float(timeout_seconds)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._issued: WeakKeyDictionary[ProphetXTransactionPage, str] = WeakKeyDictionary()
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(adapter_id={ADAPTER_ID!r}, environment='sandbox')"
@@ -243,8 +250,14 @@ class ProphetXTransactionsClient:
         page = ProphetXTransactionPage(
             query, transactions, cursor, observed_at, sha256(response.body).hexdigest()
         )
-        if self._canonical is not None and self._transport is self._canonical:
-            self._issued[page] = _fingerprint(page)
+        canonical = _PROVIDER_TRANSPORTS.get(self)
+        if (
+            type(self) is ProphetXTransactionsClient
+            and canonical is not None
+            and type(canonical) is UrllibProphetXTransactionsTransport
+            and self._transport is canonical
+        ):
+            _ISSUED_PAGES[page] = (self, _fingerprint(page))
         return page
 
     def read_all(
@@ -269,17 +282,8 @@ class ProphetXTransactionsClient:
         raise ProphetXReadOnlyError("ProphetX pagination exceeded configured page bound")
 
     def provider_origin_proven(self, page: ProphetXTransactionPage) -> bool:
-        if (
-            not isinstance(page, ProphetXTransactionPage)
-            or self._canonical is None
-            or type(self._canonical) is not UrllibProphetXTransactionsTransport
-            or self._transport is not self._canonical
-        ):
-            return False
-        try:
-            return self._issued.get(page) == _fingerprint(page)
-        except (ProphetXReadOnlyError, TypeError, ValueError):
-            return False
+        """Compatibility convenience; authority lives in the exact module verifier."""
+        return prophetx_transaction_provider_origin_proven(self, page)
 
     @staticmethod
     def _validate_response(response: ProphetXHttpResponse, url: str) -> None:
@@ -333,6 +337,31 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
         description=_provider_text(row.get("description"), "description"),
         created_at=created_at,
     )
+
+
+def prophetx_transaction_provider_origin_proven(
+    client: object, page: object
+) -> bool:
+    """Verify exact process-local provider origin without caller-owned authority state."""
+    if (
+        type(client) is not ProphetXTransactionsClient
+        or type(page) is not ProphetXTransactionPage
+    ):
+        return False
+    canonical = _PROVIDER_TRANSPORTS.get(client)
+    if (
+        canonical is None
+        or type(canonical) is not UrllibProphetXTransactionsTransport
+        or client._transport is not canonical
+    ):
+        return False
+    issued = _ISSUED_PAGES.get(page)
+    if issued is None or issued[0] is not client:
+        return False
+    try:
+        return issued[1] == _fingerprint(page)
+    except (ProphetXReadOnlyError, TypeError, ValueError, UnicodeEncodeError):
+        return False
 
 
 def _fingerprint(page: ProphetXTransactionPage) -> str:

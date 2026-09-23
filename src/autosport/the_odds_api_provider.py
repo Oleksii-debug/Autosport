@@ -682,9 +682,9 @@ class TheOddsApiProvider:
             raise TheOddsApiPayloadError(
                 "previous_timestamp must precede historical snapshot timestamp"
             )
-        if next_at is not None and _datetime(next_at) <= _datetime(snapshot_at):
+        if next_at is not None and _datetime(next_at) <= _datetime(requested_at):
             raise TheOddsApiPayloadError(
-                "next_timestamp must follow historical snapshot timestamp"
+                "next_timestamp must be later than requested_at for closest snapshot evidence"
             )
 
         events = payload.get("data")

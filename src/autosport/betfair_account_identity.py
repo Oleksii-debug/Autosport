@@ -3,8 +3,14 @@
 The ordinary Betfair Accounts API does not expose a stable customer/account identifier
 through ``getAccountDetails``.  This module therefore proves only the narrower fact
 Autosport can actually establish for the personal-developer path: one account-details
-observation came from one exact canonical authenticated client/session context in this
-process.
+observation is bound to one exact canonical authenticated client/session context in
+this process.
+
+That process-local authority deliberately stops above remote transport origin.  The
+same Python process can substitute I/O below the canonical HTTP/opener stack, so K07
+must not be consumed as proof that account-details bytes causally came from remote
+Betfair.  Remote-provider origin and provider account-details origin remain explicitly
+unproven here and require a separate operational/acquisition authority.
 
 The public identity intentionally does not contain application keys, session tokens,
 credential hashes, configured account labels, or a claim of cross-session account
@@ -83,6 +89,16 @@ class BetfairAuthenticatedAccountIdentity:
         _canonical_timestamp(self.observed_at)
 
     @property
+    def remote_provider_origin_proven(self) -> bool:
+        """K07 alone does not prove below-process remote Betfair transport origin."""
+        return False
+
+    @property
+    def provider_account_details_origin_proven(self) -> bool:
+        """Account-details bytes are not independently attested as remote-provider bytes."""
+        return False
+
+    @property
     def stable_account_identity_proven(self) -> bool:
         return False
 
@@ -106,6 +122,8 @@ class BetfairAuthenticatedAccountIdentity:
             "currency_code": self.currency_code,
             "account_details_sha256": self.account_details_sha256,
             "observed_at": self.observed_at,
+            "remote_provider_origin_proven": False,
+            "provider_account_details_origin_proven": False,
             "stable_account_identity_proven": False,
         }
         return sha256(_canonical_json(payload)).hexdigest()
@@ -317,6 +335,8 @@ def _make_account_identity_authority():
             "currency_code": value.currency_code,
             "account_details_sha256": value.account_details_sha256,
             "observed_at": value.observed_at,
+            "remote_provider_origin_proven": False,
+            "provider_account_details_origin_proven": False,
             "stable_account_identity_proven": False,
         }
         try:
@@ -777,6 +797,7 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
+        """Verify current process-local K07 session-context issuance only."""
         if type(value) is not identity_type or not identity_class_is_current():
             return False
         with lock:
@@ -812,6 +833,7 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> BetfairAuthenticatedAccountIdentity:
+        """Require current K07 context authority, never remote-provider origin proof."""
         if not is_authoritative(value, client=client):
             raise identity_error_type(
                 "Betfair account identity lacks current authenticated-context authority"

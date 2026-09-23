@@ -28,6 +28,7 @@ def test_exact_money_resource_guard_preserves_small_loss_after_huge_gain() -> No
 
     assert result == expected
 
+
 @pytest.mark.parametrize("zero", ("0E-1000000", "-0E-1000000", "0E+1000000"))
 def test_exact_money_zero_scale_does_not_create_artificial_exponent_gap(
     zero: str,

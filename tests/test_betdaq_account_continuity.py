@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import autosport.betdaq_account_continuity as continuity_module
 import autosport.betdaq_account_readonly as betdaq_account_module
 from autosport.betdaq_account_continuity import (
     BetdaqAccountContinuityClient,
@@ -428,5 +429,90 @@ def test_dataclass_replace_cannot_copy_product_issuance_authority(
         match="product-issued BETDAQ continuity evidence",
     ):
         append_to_reconciliation(store, copied)
+
+    assert store.latest_snapshot() is None
+
+
+def test_reconciliation_store_subclass_cannot_bypass_canonical_durability(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+
+    class RedirectingStore(BookmakerAccountReconciliationStore):
+        def latest_snapshot(self):
+            raise AssertionError("virtual latest_snapshot must not be trusted")
+
+        def append_snapshot(self, _snapshot):
+            return True
+
+    store = RedirectingStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="not the canonical durable #790 store",
+    ):
+        append_to_reconciliation(store, current)
+
+
+def test_reconciliation_store_instance_method_shadow_cannot_report_success(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+    monkeypatch.setattr(store, "append_snapshot", lambda _snapshot: True)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation store dispatch was shadowed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert store.latest_snapshot() is None
+
+
+def test_rebound_reconciliation_store_class_cannot_replace_790_authority(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+
+    class RedirectingStore:
+        pass
+
+    monkeypatch.setattr(
+        continuity_module,
+        "BookmakerAccountReconciliationStore",
+        RedirectingStore,
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation store class was replaced",
+    ):
+        append_to_reconciliation(store, current)
 
     assert store.latest_snapshot() is None

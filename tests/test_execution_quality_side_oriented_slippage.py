@@ -27,7 +27,7 @@ def test_adverse_slippage_is_positive_for_bad_back_and_bad_lay_prices() -> None:
 
     assert lay_delta == Decimal("0.1")
     assert lay_spread == Decimal("500.00")
-    assert lay_adverse == Decimal("500.00")
+    assert lay_adverse == Decimal("1000.00")
     assert lay_movement is PriceMovement.HIGHER_ODDS
 
 
@@ -46,7 +46,25 @@ def test_favorable_prices_are_negative_for_both_sides() -> None:
     assert back_spread == Decimal("500.00")
     assert back_adverse == Decimal("-500.00")
     assert lay_spread == Decimal("-500.00")
-    assert lay_adverse == Decimal("-500.00")
+    assert lay_adverse == Decimal("-1000.00")
+
+
+def test_near_even_lay_slippage_tracks_liability_not_raw_odds_ratio() -> None:
+    _delta, raw_spread, adverse, movement = _price_metrics(
+        Decimal("1.01"),
+        Decimal("1.02"),
+        side="LAY",
+    )
+
+    assert raw_spread is not None
+    assert raw_spread < Decimal("100")
+    assert adverse == Decimal("10000")
+    assert movement is PriceMovement.HIGHER_ODDS
+
+
+def test_lay_odds_without_positive_liability_basis_fail_closed() -> None:
+    with pytest.raises(EvaluationUniverseIntegrityError, match="greater than one"):
+        _price_metrics(Decimal("1"), Decimal("1.01"), side="LAY")
 
 
 def test_unknown_side_fails_closed_when_price_economics_are_observed() -> None:

@@ -74,6 +74,34 @@ _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT_CODE = (
     BookmakerAccountReconciliationStore.append_snapshot.__code__
 )
 
+# The two public entrypoints above dynamically dispatch into private #790 helpers.
+# Freeze the complete helper surface reachable from latest_snapshot()/append_snapshot()
+# so a class-level rebinding cannot preserve the top-level function identities while
+# silently replacing durability, recovery, or reconciliation semantics underneath.
+_CANONICAL_RECONCILIATION_HELPER_NAMES = (
+    "_load_history",
+    "_recover_authority",
+    "_require_same_account",
+    "_require_nested_evidence_after",
+    "_reconcile",
+    "_write_history",
+    "_encode_history",
+    "_next_authority_tx_id",
+    "_publish_history_bytes",
+)
+_CANONICAL_RECONCILIATION_HELPER_DESCRIPTORS = {
+    name: vars(BookmakerAccountReconciliationStore)[name]
+    for name in _CANONICAL_RECONCILIATION_HELPER_NAMES
+}
+_CANONICAL_RECONCILIATION_HELPER_CODES = {
+    name: getattr(
+        getattr(descriptor, "__func__", descriptor),
+        "__code__",
+        None,
+    )
+    for name, descriptor in _CANONICAL_RECONCILIATION_HELPER_DESCRIPTORS.items()
+}
+
 
 class BetdaqAccountContinuityError(RuntimeError):
     """Base error for BETDAQ authenticated-principal continuity composition."""
@@ -268,6 +296,26 @@ def _require_canonical_reconciliation_store(store: object) -> None:
         raise BetdaqAccountContinuityError(
             "canonical BETDAQ reconciliation store implementation changed"
         )
+    for helper_name in _CANONICAL_RECONCILIATION_HELPER_NAMES:
+        current_descriptor = vars(_CANONICAL_RECONCILIATION_STORE_CLASS).get(
+            helper_name
+        )
+        expected_descriptor = _CANONICAL_RECONCILIATION_HELPER_DESCRIPTORS[
+            helper_name
+        ]
+        current_callable = getattr(
+            current_descriptor,
+            "__func__",
+            current_descriptor,
+        )
+        if (
+            current_descriptor is not expected_descriptor
+            or getattr(current_callable, "__code__", None)
+            is not _CANONICAL_RECONCILIATION_HELPER_CODES[helper_name]
+        ):
+            raise BetdaqAccountContinuityError(
+                "canonical BETDAQ reconciliation store helper dispatch changed"
+            )
     if type(store) is not _CANONICAL_RECONCILIATION_STORE_CLASS:
         raise BetdaqAccountContinuityError(
             "reconciliation target is not the canonical durable #790 store"
@@ -388,8 +436,12 @@ def append_to_reconciliation(
             "reconciliation requires product-issued BETDAQ continuity evidence"
         )
     latest = _CANONICAL_RECONCILIATION_LATEST_SNAPSHOT(store)
+    _require_canonical_reconciliation_store(store)
     require_reconciliation_history_compatible(latest, evidence)
-    return _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT(store, evidence.snapshot)
+    _require_canonical_reconciliation_store(store)
+    appended = _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT(store, evidence.snapshot)
+    _require_canonical_reconciliation_store(store)
+    return appended
 
 
 def require_reconciliation_history_compatible(

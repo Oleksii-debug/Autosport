@@ -365,3 +365,62 @@ def test_fixed_point_materialization_boundary_is_deterministic() -> None:
         match="canonical Decimal text exceeds bounded length",
     ):
         snapshot_to_canonical_dict(_snapshot(Decimal("1E+4096")))
+
+
+def test_product_default_authority_root_ignores_environment_override(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    baseline = reconciliation_module._product_account_reconciliation_authority_root()
+
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(tmp_path / "caller-selected-root"),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "caller-local-app-data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "caller-xdg-state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home"))
+
+    assert reconciliation_module._product_account_reconciliation_authority_root() == baseline
+
+
+def test_default_authority_root_switch_cannot_pristine_rebootstrap_after_restart(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    product_root = tmp_path / "product-owned-authority"
+    caller_root_a = tmp_path / "caller-root-a"
+    caller_root_b = tmp_path / "caller-root-b"
+
+    # Keep the test isolated from the real OS state directory while exercising
+    # the production default-root branch (authority_root=None).
+    monkeypatch.setattr(
+        reconciliation_module,
+        "_product_account_reconciliation_authority_root",
+        lambda: product_root,
+    )
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(caller_root_a))
+
+    first = BookmakerAccountReconciliationStore(path)
+    assert first.append_snapshot(_snapshot(Decimal("1")))
+    assert first._authority.authority_root == product_root
+    path.unlink()
+
+    # Simulate a new process selecting a different caller/process override.
+    # The supported default path must still re-open the same product-owned root,
+    # where the committed high-water mark detects the deleted local state.
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(caller_root_b))
+    restarted = BookmakerAccountReconciliationStore(path)
+    assert restarted._authority.authority_root == product_root
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="failed independent monotonic authority validation",
+    ):
+        restarted.latest_snapshot()
+
+    assert not path.exists()
+    assert not caller_root_a.exists()
+    assert not caller_root_b.exists()
+

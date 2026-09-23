@@ -64,6 +64,7 @@ def test_familywise_alpha_normal_exact_values_remain_supported() -> None:
     assert registry.allocation_for("a") == Decimal("0.35")
     assert registry.allocation_for("b") == Decimal("0.35")
 
+
 def test_familywise_total_alpha_extreme_scale_fails_before_fraction_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -33,7 +34,10 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self._tmp.name)
+        self.test_root = Path(self._tmp.name)
+        self.workspace = self.test_root / "workspace"
+        self.workspace.mkdir()
+        self.authority_root = self.test_root / "machine-authority"
         self.registry = ScientificRegistry.initialize_pristine(
             self.workspace / "scientific_registry.json"
         )
@@ -64,7 +68,10 @@ class ProductDecisionActivationTests(unittest.TestCase):
         )
         self._write_composition(source_id="provider-a", bankroll="1000")
         self._write_risk(self.risk, self.goal)
-        self.store = ProductDecisionActivationStore(self.workspace)
+        self.store = ProductDecisionActivationStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -158,6 +165,75 @@ class ProductDecisionActivationTests(unittest.TestCase):
             first.intent_producer_id,
             BuiltInIntentProducer.REGISTERED_STRATEGY.value,
         )
+
+    def test_committed_activation_deletion_cannot_reinitialize(self) -> None:
+        committed = self._initialize()
+        self.store.path.unlink()
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "anti-rollback authority rejected",
+        ):
+            self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(committed.strategy_version_id, self.STRATEGY_ID)
+
+    def test_structurally_valid_rebound_activation_is_rejected(self) -> None:
+        self._initialize()
+        root = json.loads(self.store.path.read_text(encoding="utf-8"))
+        root["binding"]["product_source_id"] = "provider-b"
+        encoded = json.dumps(
+            root["binding"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        root["binding_sha256"] = hashlib.sha256(encoded).hexdigest()
+        self._write_json(self.store.path, root)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "anti-rollback authority rejected",
+        ):
+            self.store.load()
+
+    def test_prepare_without_publish_recovers_then_creates_once(self) -> None:
+        with mock.patch(
+            "autosport.product_decision_activation.atomic_write_json",
+            side_effect=RuntimeError("synthetic pre-publish crash"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pre-publish"):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        recovered = self._initialize()
+        self.assertEqual(recovered.strategy_version_id, self.STRATEGY_ID)
+        self.assertEqual(self.store.load(), recovered)
+
+    def test_publish_without_commit_recovers_exact_prepared_activation(self) -> None:
+        with mock.patch.object(
+            self.store._authority,
+            "commit",
+            side_effect=RuntimeError("synthetic post-publish crash"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "post-publish"):
+                self._initialize()
+
+        self.assertTrue(self.store.path.exists())
+        reopened = ProductDecisionActivationStore(
+            self.workspace,
+            authority_root=self.authority_root,
+        )
+        recovered = reopened.initialize_owner(
+            scientific_registry=self.registry,
+            strategy_version_id=self.STRATEGY_ID,
+            economic_goal=self.goal,
+            risk_policy=self.risk,
+            execution_config=self.execution,
+        )
+        self.assertEqual(reopened.load(), recovered)
 
     def test_registry_append_after_strategy_keeps_frozen_prefix_valid(self) -> None:
         frozen = self._initialize()

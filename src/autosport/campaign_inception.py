@@ -312,7 +312,7 @@ def begin_campaign_inception(*, workspace: str | Path, binding: CampaignAuthorit
     if not workspace_path.is_absolute():
         raise CampaignInceptionIntegrityError('workspace must be an absolute path')
     path = _state_path(workspace_path, binding.campaign_id)
-    with WorkspaceEconomicLock(workspace_path):
+    with WorkspaceEconomicLock(path.parent):
         payload, observed_sha256 = _read_validated_state(path, binding)
         authority = _authority(workspace=workspace_path, campaign_id=binding.campaign_id, authority_root=authority_root)
         if payload is not None:
@@ -351,7 +351,7 @@ def finalize_campaign_inception(*, workspace: str | Path, binding: CampaignAutho
     if set(source_authorities) != set(binding.required_source_identities):
         raise CampaignInceptionConflictError('source authorities must exactly cover the frozen source set')
     path = _state_path(workspace_path, binding.campaign_id)
-    with WorkspaceEconomicLock(workspace_path):
+    with WorkspaceEconomicLock(path.parent):
         payload, observed_sha256 = _read_validated_state(path, binding)
         if payload is None:
             raise CampaignInceptionConflictError('campaign inception anchor is not durable')

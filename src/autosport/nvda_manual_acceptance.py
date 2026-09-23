@@ -25,6 +25,11 @@ from .nvda_human_acceptance import (
     validate_human_nvda_acceptance_transcript,
     verify_human_nvda_acceptance_structural_result,
 )
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 SCHEMA_VERSION = 1
@@ -547,6 +552,15 @@ def verify_manual_nvda_acceptance_resolution(
     return resolution
 
 
+class _ManualNvdaWriterLock(WorkspaceEconomicLock):
+    """Crash-releasing writer fence for one manual-NVDA ledger pathname."""
+
+    def __init__(self, ledger_path: str | Path) -> None:
+        path = Path(ledger_path)
+        super().__init__(path.parent)
+        self.path = path.with_name(path.name + ".writer.lock")
+
+
 class ManualNvdaAcceptanceLedger:
     """Append-only exact-candidate manual review ledger."""
 
@@ -705,61 +719,58 @@ class ManualNvdaAcceptanceLedger:
             protocol_version=protocol_version,
         )
 
+        writer_lock = _ManualNvdaWriterLock(self.path)
         try:
-            fd = os.open(
-                self._lock_path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-        except FileExistsError as exc:
+            with writer_lock:
+                records = self.events()
+                for record in records:
+                    if record.decision_id == payload["decision_id"]:
+                        return record
+                if records and payload["reviewed_at"] <= records[-1].reviewed_at:
+                    raise NvdaManualAcceptanceStateError(
+                        "new manual NVDA decision must have a later reviewed_at"
+                    )
+
+                previous_sha = None if not records else records[-1].event_sha256
+                sequence = len(records)
+                body = {
+                    "schema_version": SCHEMA_VERSION,
+                    "event_type": EVENT_TYPE,
+                    "sequence": sequence,
+                    "previous_sha256": previous_sha,
+                    "payload": payload,
+                }
+                event = {**body, "event_sha256": _digest(body)}
+                encoded = _canonical(event) + "\n"
+
+                try:
+                    with self.path.open(
+                        "a",
+                        encoding="utf-8",
+                        newline="\n",
+                    ) as handle:
+                        handle.write(encoded)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    self._sync_parent_directory()
+                    self._write_anchor(
+                        event_count=sequence + 1,
+                        root=event["event_sha256"],
+                    )
+                except OSError as exc:
+                    raise NvdaManualAcceptanceIntegrityError(
+                        "manual NVDA ledger durability barrier failed"
+                    ) from exc
+
+                return _record_from_event(event)
+        except WorkspaceEconomicLockBusyError as exc:
             raise NvdaManualAcceptanceStateError(
-                "manual NVDA ledger writer lock exists"
+                "manual NVDA ledger writer is active"
             ) from exc
-
-        try:
-            records = self.events()
-            for record in records:
-                if record.decision_id == payload["decision_id"]:
-                    return record
-            if records and payload["reviewed_at"] <= records[-1].reviewed_at:
-                raise NvdaManualAcceptanceStateError(
-                    "new manual NVDA decision must have a later reviewed_at"
-                )
-
-            previous_sha = None if not records else records[-1].event_sha256
-            sequence = len(records)
-            body = {
-                "schema_version": SCHEMA_VERSION,
-                "event_type": EVENT_TYPE,
-                "sequence": sequence,
-                "previous_sha256": previous_sha,
-                "payload": payload,
-            }
-            event = {**body, "event_sha256": _digest(body)}
-            encoded = _canonical(event) + "\n"
-
-            try:
-                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                    handle.write(encoded)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                self._sync_parent_directory()
-                self._write_anchor(
-                    event_count=sequence + 1,
-                    root=event["event_sha256"],
-                )
-            except OSError as exc:
-                raise NvdaManualAcceptanceIntegrityError(
-                    "manual NVDA ledger durability barrier failed"
-                ) from exc
-
-            return _record_from_event(event)
-        finally:
-            os.close(fd)
-            try:
-                self._lock_path.unlink()
-            except FileNotFoundError:
-                pass
+        except WorkspaceEconomicLockError as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger writer authority is invalid"
+            ) from exc
 
     def resolve_current(
         self,

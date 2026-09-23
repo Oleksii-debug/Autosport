@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -348,5 +349,30 @@ def test_caller_reconstructed_continuity_object_cannot_authorize_reconciliation(
         match="product-issued BETDAQ continuity evidence",
     ):
         append_to_reconciliation(store, forged)
+
+    assert store.latest_snapshot() is None
+
+
+def test_dataclass_replace_cannot_copy_product_issuance_authority(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    copied = replace(current)
+    assert copied._issuer_token is None
+
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="product-issued BETDAQ continuity evidence",
+    ):
+        append_to_reconciliation(store, copied)
 
     assert store.latest_snapshot() is None

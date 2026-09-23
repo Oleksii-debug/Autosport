@@ -18,6 +18,7 @@ import json
 from secrets import token_bytes
 import ssl
 from threading import RLock
+from types import MappingProxyType
 from typing import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
@@ -36,13 +37,15 @@ KEEPALIVE_SCHEMA = "autosport.betfair_session_keepalive_observation"
 KEEPALIVE_SCHEMA_VERSION = 1
 _MAX_RESPONSE_BYTES = 64 * 1024
 
-_KEEPALIVE_ENDPOINTS: Mapping[BetfairLoginJurisdiction, str] = {
-    BetfairLoginJurisdiction.GLOBAL_COM: "https://identitysso.betfair.com/api/keepAlive",
-    BetfairLoginJurisdiction.AUSTRALIA_NEW_ZEALAND: "https://identitysso.betfair.com.au/api/keepAlive",
-    BetfairLoginJurisdiction.ITALY: "https://identitysso.betfair.it/api/keepAlive",
-    BetfairLoginJurisdiction.SPAIN: "https://identitysso.betfair.es/api/keepAlive",
-    BetfairLoginJurisdiction.ROMANIA: "https://identitysso.betfair.ro/api/keepAlive",
-}
+_KEEPALIVE_ENDPOINTS: Mapping[BetfairLoginJurisdiction, str] = MappingProxyType(
+    {
+        BetfairLoginJurisdiction.GLOBAL_COM: "https://identitysso.betfair.com/api/keepAlive",
+        BetfairLoginJurisdiction.AUSTRALIA_NEW_ZEALAND: "https://identitysso.betfair.com.au/api/keepAlive",
+        BetfairLoginJurisdiction.ITALY: "https://identitysso.betfair.it/api/keepAlive",
+        BetfairLoginJurisdiction.SPAIN: "https://identitysso.betfair.es/api/keepAlive",
+        BetfairLoginJurisdiction.ROMANIA: "https://identitysso.betfair.ro/api/keepAlive",
+    }
+)
 _KEEPALIVE_KEYS = frozenset({"token", "product", "status", "error"})
 _KEEPALIVE_ERRORS = frozenset(
     {"INPUT_VALIDATION_ERROR", "INTERNAL_ERROR", "NO_SESSION"}
@@ -372,12 +375,75 @@ def _build_keepalive_authority_runtime():
     lock = RLock()
     issued: dict[int, _IssuedKeepAliveRecord] = {}
     hmac_key = token_bytes(32)
+
+    # Pin every primitive used to mint or verify authority.  Public parsing helpers
+    # remain useful for diagnostics/tests but are deliberately outside the trust root.
+    client_type = BetfairReadOnlyClient
+    credentials_type = BetfairSessionCredentials
+    jurisdiction_type = BetfairAuthenticatedJurisdiction
+    login_jurisdiction_type = BetfairLoginJurisdiction
+    observation_type = BetfairSessionKeepAliveObservation
+    transport_type = UrllibBetfairKeepAliveTransport
+    error_type = BetfairSessionKeepAliveError
+    jurisdiction_require = require_authoritative_betfair_authenticated_jurisdiction
+    endpoint_table = _KEEPALIVE_ENDPOINTS
+    canonical_transport_post = transport_type.post_keep_alive
+    canonical_observation_init = observation_type.__init__
+    canonical_observation_post_init = observation_type.__post_init__
+    canonical_build_opener = build_opener
+    canonical_https_handler = HTTPSHandler
+    canonical_redirect_handler = HTTPRedirectHandler
+    canonical_ssl_context_factory = ssl.create_default_context
+    canonical_request = Request
+    json_loads = json.loads
+    sha256_fn = sha256
+    hmac_digest = hmac.digest
+    hmac_compare_digest = hmac.compare_digest
     datetime_type = datetime
     utc = timezone.utc
+    max_response_bytes = _MAX_RESPONSE_BYTES
+    exact_keys = _KEEPALIVE_KEYS
+
+    def implementation_is_current() -> bool:
+        return (
+            BetfairReadOnlyClient is client_type
+            and BetfairSessionCredentials is credentials_type
+            and BetfairAuthenticatedJurisdiction is jurisdiction_type
+            and BetfairLoginJurisdiction is login_jurisdiction_type
+            and BetfairSessionKeepAliveObservation is observation_type
+            and UrllibBetfairKeepAliveTransport is transport_type
+            and require_authoritative_betfair_authenticated_jurisdiction
+            is jurisdiction_require
+            and observation_type.__init__ is canonical_observation_init
+            and observation_type.__post_init__ is canonical_observation_post_init
+        )
+
+    def canonical_network_transport(transport: object) -> bool:
+        if type(transport) is not transport_type:
+            return False
+        if type(transport).post_keep_alive is not canonical_transport_post:
+            return False
+        if build_opener is not canonical_build_opener:
+            return False
+        if HTTPSHandler is not canonical_https_handler:
+            return False
+        if HTTPRedirectHandler is not canonical_redirect_handler:
+            return False
+        if ssl.create_default_context is not canonical_ssl_context_factory:
+            return False
+        if Request is not canonical_request:
+            return False
+        state = getattr(transport, "__dict__", None)
+        return (
+            type(state) is dict
+            and set(state) == {"_max_response_bytes"}
+            and type(state["_max_response_bytes"]) is int
+            and 1024 <= state["_max_response_bytes"] <= max_response_bytes
+        )
 
     def credential_binding(credentials: BetfairSessionCredentials) -> bytes:
-        if type(credentials) is not BetfairSessionCredentials:
-            raise BetfairSessionKeepAliveError(
+        if type(credentials) is not credentials_type:
+            raise error_type(
                 "credential binding requires canonical BetfairSessionCredentials"
             )
         try:
@@ -387,10 +453,116 @@ def _build_keepalive_authority_runtime():
                 + credentials.session_token.encode("utf-8")
             )
         except (AttributeError, UnicodeEncodeError) as exc:
-            raise BetfairSessionKeepAliveError(
-                "Betfair credentials are malformed"
+            raise error_type("Betfair credentials are malformed") from exc
+        return hmac_digest(hmac_key, material, "sha256")
+
+    def endpoint_for(jurisdiction: BetfairLoginJurisdiction) -> str:
+        if type(jurisdiction) is not login_jurisdiction_type:
+            raise error_type(
+                "jurisdiction must be exact BetfairLoginJurisdiction"
+            )
+        try:
+            return endpoint_table[jurisdiction]
+        except KeyError as exc:
+            raise error_type(
+                "keepAlive jurisdiction has no explicit endpoint contract"
             ) from exc
-        return hmac.digest(hmac_key, material, "sha256")
+
+    def parse_success_payload(
+        payload: bytes,
+        *,
+        credentials: BetfairSessionCredentials,
+    ) -> str:
+        if type(payload) is not bytes or not payload:
+            raise error_type("keepAlive response must be non-empty bytes")
+        if len(payload) > max_response_bytes:
+            raise error_type("keepAlive response exceeds safe limit")
+        try:
+            raw = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise error_type("keepAlive response is not UTF-8 JSON") from exc
+
+        def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in items:
+                if key in result:
+                    raise error_type(
+                        f"duplicate keepAlive-response JSON key: {key}"
+                    )
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise error_type(
+                f"non-standard keepAlive-response JSON constant: {value}"
+            )
+
+        try:
+            document = json_loads(
+                raw,
+                object_pairs_hook=pairs,
+                parse_constant=reject_constant,
+            )
+        except json.JSONDecodeError as exc:
+            raise error_type("keepAlive response is not valid JSON") from exc
+        if type(document) is not dict or frozenset(document) != exact_keys:
+            raise error_type(
+                "keepAlive response schema does not match provider contract"
+            )
+        token = document["token"]
+        product = document["product"]
+        status = document["status"]
+        error = document["error"]
+        if (
+            type(token) is not str
+            or type(product) is not str
+            or type(status) is not str
+            or type(error) is not str
+        ):
+            raise error_type(
+                "keepAlive response fields must be exact text values"
+            )
+        if status != "SUCCESS":
+            # NO_SESSION and every other provider failure are terminal for this
+            # observation attempt; no stale positive object is issued.
+            raise error_type(
+                "Betfair keepAlive was not successful"
+            )
+        if error != "":
+            raise error_type(
+                "successful keepAlive response must have empty error"
+            )
+        if not hmac_compare_digest(token, credentials.session_token):
+            raise error_type(
+                "keepAlive response token does not match current session"
+            )
+        if not hmac_compare_digest(product, credentials.application_key):
+            raise error_type(
+                "keepAlive response product does not match current application"
+            )
+        return sha256_fn(payload).hexdigest()
+
+    def observation_fingerprint(
+        value: BetfairSessionKeepAliveObservation,
+    ) -> str:
+        if type(value) is not observation_type:
+            raise error_type("keepAlive observation type changed")
+        observed = value.observed_at
+        if (
+            type(observed) is not datetime_type
+            or observed.tzinfo is None
+            or observed.utcoffset() is None
+        ):
+            raise error_type("keepAlive observed_at is not timezone-aware")
+        material = (
+            value.venue_id,
+            value.session_context_id,
+            value.jurisdiction.value,
+            value.endpoint,
+            observed.astimezone(utc).isoformat(),
+            value.response_sha256,
+        )
+        return sha256_fn(repr(material).encode("utf-8")).hexdigest()
 
     def remember(
         value: BetfairSessionKeepAliveObservation,
@@ -413,7 +585,7 @@ def _build_keepalive_authority_runtime():
                 value_ref=ref(value, discard),
                 jurisdiction_ref=ref(jurisdiction),
                 client_ref=ref(client),
-                observation_id=value.observation_id,
+                observation_id=observation_fingerprint(value),
                 credential_binding=credential_binding(credentials),
             )
 
@@ -423,43 +595,33 @@ def _build_keepalive_authority_runtime():
         client: BetfairReadOnlyClient,
         timeout_seconds: float = 10.0,
     ) -> BetfairSessionKeepAliveObservation:
-        if (
-            BetfairReadOnlyClient is not _CANONICAL_CLIENT_TYPE
-            or BetfairSessionCredentials is not _CANONICAL_CREDENTIALS_TYPE
-            or BetfairAuthenticatedJurisdiction is not _CANONICAL_JURISDICTION_TYPE
-            or require_authoritative_betfair_authenticated_jurisdiction
-            is not _CANONICAL_JURISDICTION_REQUIRE
-        ):
-            raise BetfairSessionKeepAliveError(
+        if not implementation_is_current():
+            raise error_type(
                 "canonical authenticated-session authority binding changed"
             )
-        if type(client) is not BetfairReadOnlyClient:
-            raise BetfairSessionKeepAliveError(
-                "client must be exact BetfairReadOnlyClient"
-            )
-        if type(jurisdiction) is not BetfairAuthenticatedJurisdiction:
-            raise BetfairSessionKeepAliveError(
+        if type(client) is not client_type:
+            raise error_type("client must be exact BetfairReadOnlyClient")
+        if type(jurisdiction) is not jurisdiction_type:
+            raise error_type(
                 "jurisdiction must be exact BetfairAuthenticatedJurisdiction"
             )
         try:
-            require_authoritative_betfair_authenticated_jurisdiction(
-                jurisdiction, client=client
-            )
+            jurisdiction_require(jurisdiction, client=client)
         except Exception as exc:
-            raise BetfairSessionKeepAliveError(
+            raise error_type(
                 "keepAlive requires current authenticated jurisdiction authority"
             ) from exc
 
         credentials = getattr(client, "_credentials", None)
-        if type(credentials) is not BetfairSessionCredentials:
-            raise BetfairSessionKeepAliveError(
+        if type(credentials) is not credentials_type:
+            raise error_type(
                 "authenticated client credentials are not canonical"
             )
         _positive_timeout(timeout_seconds)
-        endpoint = keepalive_endpoint(jurisdiction.jurisdiction)
-        transport = UrllibBetfairKeepAliveTransport()
-        if not _canonical_network_transport(transport):
-            raise BetfairSessionKeepAliveError(
+        endpoint = endpoint_for(jurisdiction.jurisdiction)
+        transport = transport_type()
+        if not canonical_network_transport(transport):
+            raise error_type(
                 "canonical Betfair keepAlive transport origin is unavailable"
             )
 
@@ -470,31 +632,47 @@ def _build_keepalive_authority_runtime():
             timeout_seconds=timeout_seconds,
         )
 
-        if not _canonical_network_transport(transport):
-            raise BetfairSessionKeepAliveError(
+        if not canonical_network_transport(transport):
+            raise error_type(
                 "canonical Betfair keepAlive transport changed during request"
             )
         try:
-            require_authoritative_betfair_authenticated_jurisdiction(
-                jurisdiction, client=client
-            )
+            jurisdiction_require(jurisdiction, client=client)
         except Exception as exc:
-            raise BetfairSessionKeepAliveError(
+            raise error_type(
                 "authenticated session changed during keepAlive"
             ) from exc
-        response = validate_keepalive_success_response(
-            parse_keepalive_response(payload),
+        # Recompute credential binding after I/O before trusting the response so
+        # in-place credential rotation during the request cannot mint liveness.
+        before_issue_binding = credential_binding(credentials)
+        response_sha256 = parse_success_payload(
+            payload,
             credentials=credentials,
         )
+        if not hmac_compare_digest(
+            before_issue_binding,
+            credential_binding(credentials),
+        ):
+            raise error_type(
+                "authenticated credentials changed during keepAlive"
+            )
 
-        value = BetfairSessionKeepAliveObservation(
+        value = observation_type(
             venue_id=VENUE_ID,
             session_context_id=jurisdiction.session_context_id,
             jurisdiction=jurisdiction.jurisdiction,
             endpoint=endpoint,
             observed_at=datetime_type.now(utc),
-            response_sha256=response.response_sha256,
+            response_sha256=response_sha256,
         )
+        if (
+            value.endpoint != endpoint
+            or value.session_context_id != jurisdiction.session_context_id
+            or value.jurisdiction is not jurisdiction.jurisdiction
+        ):
+            raise error_type(
+                "keepAlive observation construction was altered"
+            )
         remember(value, jurisdiction, client, credentials)
         return value
 
@@ -503,21 +681,11 @@ def _build_keepalive_authority_runtime():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
-        if type(value) is not BetfairSessionKeepAliveObservation:
-            return False
-        if (
-            BetfairReadOnlyClient is not _CANONICAL_CLIENT_TYPE
-            or BetfairSessionCredentials is not _CANONICAL_CREDENTIALS_TYPE
-            or BetfairAuthenticatedJurisdiction is not _CANONICAL_JURISDICTION_TYPE
-            or require_authoritative_betfair_authenticated_jurisdiction
-            is not _CANONICAL_JURISDICTION_REQUIRE
-        ):
+        if type(value) is not observation_type or not implementation_is_current():
             return False
         with lock:
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
-                return False
-            if not hmac.compare_digest(record.observation_id, value.observation_id):
                 return False
             jurisdiction = record.jurisdiction_ref()
             issued_client = record.client_ref()
@@ -526,25 +694,30 @@ def _build_keepalive_authority_runtime():
             if client is not None and issued_client is not client:
                 return False
             credentials = getattr(issued_client, "_credentials", None)
-            if type(credentials) is not BetfairSessionCredentials:
+            if type(credentials) is not credentials_type:
                 return False
             try:
-                if not hmac.compare_digest(
+                if not hmac_compare_digest(
+                    record.observation_id,
+                    observation_fingerprint(value),
+                ):
+                    return False
+                if not hmac_compare_digest(
                     record.credential_binding,
                     credential_binding(credentials),
                 ):
                     return False
-                require_authoritative_betfair_authenticated_jurisdiction(
-                    jurisdiction, client=issued_client
+                jurisdiction_require(jurisdiction, client=issued_client)
+                return (
+                    value.venue_id == VENUE_ID
+                    and value.session_context_id
+                    == jurisdiction.session_context_id
+                    and value.jurisdiction is jurisdiction.jurisdiction
+                    and value.endpoint
+                    == endpoint_for(jurisdiction.jurisdiction)
                 )
             except Exception:
                 return False
-            return (
-                value.venue_id == VENUE_ID
-                and value.session_context_id == jurisdiction.session_context_id
-                and value.jurisdiction is jurisdiction.jurisdiction
-                and value.endpoint == keepalive_endpoint(jurisdiction.jurisdiction)
-            )
 
     def require(
         value: object,
@@ -552,10 +725,10 @@ def _build_keepalive_authority_runtime():
         client: BetfairReadOnlyClient | None = None,
     ) -> BetfairSessionKeepAliveObservation:
         if not is_authoritative(value, client=client):
-            raise BetfairSessionKeepAliveError(
+            raise error_type(
                 "keepAlive observation lacks current session authority"
             )
-        assert type(value) is BetfairSessionKeepAliveObservation
+        assert type(value) is observation_type
         return value
 
     return keep_alive, is_authoritative, require

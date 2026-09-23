@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -33,20 +34,62 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
 
 def _probe_workspace_writable(workspace: Path) -> None:
-    """Fail before GUI construction when durable workspace storage is not writable."""
+    """Fail before GUI construction when canonical durable publication is unavailable."""
 
     import tempfile
 
+    from autosport.integrity import durable_path_lock
+
+    payload = b"autosport workspace atomic publish probe\n"
+    source: Path | None = None
+    destination: Path | None = None
+    lock_path: Path | None = None
+
     workspace.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=workspace,
-        prefix=".autosport-write-probe-",
-        suffix=".tmp",
-        delete=True,
-    ) as probe:
-        probe.write(b"autosport workspace write probe\n")
-        probe.flush()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-source-",
+            suffix=".tmp",
+            delete=False,
+        ) as probe:
+            source = Path(probe.name)
+            probe.write(payload)
+            probe.flush()
+            os.fsync(probe.fileno())
+
+        # Replace an already-existing disposable sibling while holding the same
+        # per-destination durable path fence used by canonical durable writers.
+        # The probe lock is unique and disposable; canonical state lock files
+        # remain persistent by design and are never removed here.
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-destination-",
+            suffix=".tmp",
+            delete=False,
+        ) as published_probe:
+            destination = Path(published_probe.name)
+        lock_path = destination.with_name(f".{destination.name}.lock")
+
+        with durable_path_lock(destination):
+            os.replace(source, destination)
+            source = None
+
+        if destination.read_bytes() != payload:
+            raise OSError("workspace atomic replace did not publish expected probe bytes")
+    finally:
+        # durable_path_lock intentionally persists sidecars for canonical state,
+        # but this preflight target is uniquely disposable. Clean every probe
+        # artifact only after lock release, including acquisition-failure cases.
+        for candidate in (source, destination, lock_path):
+            if candidate is None:
+                continue
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:

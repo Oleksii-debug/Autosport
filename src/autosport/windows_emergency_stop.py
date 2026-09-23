@@ -88,8 +88,9 @@ class WindowsEmergencyStopBridge:
             revision=state.revision,
             command_id=state.command_id,
             message_uk=(
-                f"Аварійний STOP {status_uk}; підтверджено durable revision "
-                f"{state.revision}. Це не є доказом зупинки вже запущеного worker/feed."
+                f"Аварійний STOP {status_uk}; підтверджено стійкий запис ревізії "
+                f"{state.revision}. Це не доводить завершення вже запущеного "
+                "процесу або потоку даних."
             ),
             message_en=(
                 f"Emergency STOP {status_en}; durable revision {state.revision} "

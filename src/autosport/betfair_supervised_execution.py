@@ -101,6 +101,160 @@ _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE = (
 )
 
 
+def _capture_private_opener_dispatch(
+    opener: object,
+) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
+    """Freeze the application-owned urllib dispatch graph by object identity."""
+
+    records: list[tuple[str, object, tuple[object, ...]]] = []
+    for map_name in ("handle_open", "process_request", "process_response"):
+        mapping = getattr(opener, map_name, None)
+        if type(mapping) is not dict:
+            return None
+        for key, handlers in mapping.items():
+            if type(key) not in (str, int) or type(handlers) is not list:
+                return None
+            records.append((map_name, key, tuple(handlers)))
+
+    error_mapping = getattr(opener, "handle_error", None)
+    if type(error_mapping) is not dict:
+        return None
+    for protocol, by_code in error_mapping.items():
+        if type(protocol) not in (str, int) or type(by_code) is not dict:
+            return None
+        for code, handlers in by_code.items():
+            if type(code) not in (str, int) or type(handlers) is not list:
+                return None
+            records.append(
+                (f"handle_error:{protocol}", code, tuple(handlers))
+            )
+
+    records.sort(
+        key=lambda item: (item[0], type(item[1]).__name__, str(item[1]))
+    )
+    return tuple(records)
+
+
+def _capture_private_opener_method_dispatch(
+    dispatch: tuple[tuple[str, object, tuple[object, ...]], ...],
+) -> tuple[tuple[object, str, object, object | None], ...]:
+    """Capture handler methods reached by the frozen open/request/response maps."""
+
+    records: list[tuple[object, str, object, object | None]] = []
+    seen: set[tuple[int, str]] = set()
+    suffixes = {
+        "handle_open": "_open",
+        "process_request": "_request",
+        "process_response": "_response",
+    }
+    for map_name, key, handlers in dispatch:
+        suffix = suffixes.get(map_name)
+        if suffix is None or type(key) is not str:
+            continue
+        method_name = f"{key}{suffix}"
+        for handler in handlers:
+            candidate_names = [method_name]
+            if suffix == "_open" and hasattr(type(handler), "do_open"):
+                candidate_names.append("do_open")
+            for candidate_name in candidate_names:
+                identity = (id(handler), candidate_name)
+                if identity in seen:
+                    continue
+                method = getattr(type(handler), candidate_name, None)
+                if method is None:
+                    continue
+                seen.add(identity)
+                records.append(
+                    (
+                        handler,
+                        candidate_name,
+                        method,
+                        getattr(method, "__code__", None),
+                    )
+                )
+    return tuple(records)
+
+
+def _private_opener_graph_matches(
+    opener: object,
+    expected_handlers: tuple[object, ...],
+    expected_dispatch: tuple[tuple[str, object, tuple[object, ...]], ...],
+    expected_methods: tuple[tuple[object, str, object, object | None], ...],
+) -> bool:
+    """Verify the exact product-created urllib handler graph without equality hooks."""
+
+    handlers = getattr(opener, "handlers", None)
+    if type(handlers) is not list or len(handlers) != len(expected_handlers):
+        return False
+    if any(
+        current is not expected
+        for current, expected in zip(handlers, expected_handlers)
+    ):
+        return False
+
+    current_records: list[tuple[str, object, tuple[object, ...]]] = []
+    for map_name in ("handle_open", "process_request", "process_response"):
+        mapping = getattr(opener, map_name, None)
+        if type(mapping) is not dict:
+            return False
+        for key, mapped_handlers in mapping.items():
+            if type(key) not in (str, int) or type(mapped_handlers) is not list:
+                return False
+            current_records.append((map_name, key, tuple(mapped_handlers)))
+
+    error_mapping = getattr(opener, "handle_error", None)
+    if type(error_mapping) is not dict:
+        return False
+    for protocol, by_code in error_mapping.items():
+        if type(protocol) not in (str, int) or type(by_code) is not dict:
+            return False
+        for code, mapped_handlers in by_code.items():
+            if type(code) not in (str, int) or type(mapped_handlers) is not list:
+                return False
+            current_records.append(
+                (f"handle_error:{protocol}", code, tuple(mapped_handlers))
+            )
+
+    current_records.sort(
+        key=lambda item: (item[0], type(item[1]).__name__, str(item[1]))
+    )
+    current_dispatch = tuple(current_records)
+    if len(current_dispatch) != len(expected_dispatch):
+        return False
+    for current, expected in zip(current_dispatch, expected_dispatch):
+        if current[0] != expected[0] or current[1] != expected[1]:
+            return False
+        if len(current[2]) != len(expected[2]):
+            return False
+        if any(
+            current_handler is not expected_handler
+            for current_handler, expected_handler in zip(
+                current[2], expected[2]
+            )
+        ):
+            return False
+
+    for handler, method_name, expected_method, expected_code in expected_methods:
+        handler_dict = getattr(handler, "__dict__", None)
+        if type(handler_dict) is not dict or method_name in handler_dict:
+            return False
+        current_method = getattr(type(handler), method_name, None)
+        if current_method is not expected_method:
+            return False
+        if (
+            expected_code is not None
+            and getattr(expected_method, "__code__", None) is not expected_code
+        ):
+            return False
+    return True
+
+
+_CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES = _private_opener_graph_matches
+_CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES_CODE = (
+    _CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES.__code__
+)
+
+
 def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
     """Build a private urllib opener that ambient process state cannot replace."""
 
@@ -116,6 +270,15 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
         _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
     )
     request_type = _CANONICAL_URLLIB_BETFAIR_REQUEST
+    private_opener_handlers = tuple(private_opener.handlers)
+    private_opener_dispatch = _capture_private_opener_dispatch(private_opener)
+    if private_opener_dispatch is None:
+        raise RuntimeError("canonical Betfair private opener graph is invalid")
+    private_opener_methods = _capture_private_opener_method_dispatch(
+        private_opener_dispatch
+    )
+    opener_graph_matches = _CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES
+    opener_graph_matches_code = _CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES_CODE
 
     def product_owned_provider_http_post(
         transport: UrllibBetfairHttpTransport,
@@ -140,6 +303,14 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
             is not opener_call_chain_code
             or "_open" in private_dispatch
             or "_call_chain" in private_dispatch
+            or getattr(opener_graph_matches, "__code__", None)
+            is not opener_graph_matches_code
+            or not opener_graph_matches(
+                private_opener,
+                private_opener_handlers,
+                private_opener_dispatch,
+                private_opener_methods,
+            )
         ):
             raise BetfairReadOnlyError(
                 "Betfair private opener dispatch authority changed"
@@ -168,6 +339,14 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
             is not opener_call_chain_code
             or "_open" in private_dispatch
             or "_call_chain" in private_dispatch
+            or getattr(opener_graph_matches, "__code__", None)
+            is not opener_graph_matches_code
+            or not opener_graph_matches(
+                private_opener,
+                private_opener_handlers,
+                private_opener_dispatch,
+                private_opener_methods,
+            )
         ):
             raise BetfairReadOnlyError(
                 "Betfair private opener dispatch authority changed"
@@ -194,6 +373,31 @@ _CANONICAL_PROVIDER_HTTP_POST_CLOSURE = tuple(
 _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER = (
     _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
         _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener_handlers")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener_dispatch")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener_methods")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("opener_graph_matches")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("opener_graph_matches_code")
     ]
 )
 
@@ -1403,6 +1607,48 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
                 _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
             ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_handlers"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_dispatch"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_methods"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches_code"
+                )
+            ]
+            or getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            or not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS,
+            )
             or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
             or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
             is not _CANONICAL_PROVIDER_HTTP_POST_CODE
@@ -1605,6 +1851,48 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
                 _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
             ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_handlers"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_dispatch"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_methods"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches_code"
+                )
+            ]
+            or getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            or not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS,
+            )
             or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
             or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
             is not _CANONICAL_PROVIDER_HTTP_POST_CODE

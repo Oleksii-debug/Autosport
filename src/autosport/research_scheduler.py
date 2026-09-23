@@ -41,8 +41,33 @@ SCHEMA = "autosport.research_scheduler"
 SCHEMA_VERSION = 3
 _HEX = frozenset("0123456789abcdef")
 _COLD_HISTORY_SCHEMA = "autosport.research_scheduler.cold_history"
-_COLD_HISTORY_SCHEMA_VERSION = 1
+_COLD_HISTORY_SCHEMA_VERSION = 2
 _COLD_HISTORY_ZERO_SHA256 = "0" * 64
+_COLD_HISTORY_DELETE_TRIGGER_NAME = "cold_history_reject_delete"
+_COLD_HISTORY_UPDATE_TRIGGER_NAME = "cold_history_reject_update"
+_COLD_HISTORY_INSERT_TRIGGER_NAME = "cold_history_require_contiguous_insert"
+_COLD_HISTORY_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER cold_history_reject_delete
+BEFORE DELETE ON cold_history
+BEGIN
+    SELECT RAISE(ABORT, 'cold history is append-only');
+END
+""".strip()
+_COLD_HISTORY_UPDATE_TRIGGER_SQL = """
+CREATE TRIGGER cold_history_reject_update
+BEFORE UPDATE ON cold_history
+BEGIN
+    SELECT RAISE(ABORT, 'cold history is append-only');
+END
+""".strip()
+_COLD_HISTORY_INSERT_TRIGGER_SQL = """
+CREATE TRIGGER cold_history_require_contiguous_insert
+BEFORE INSERT ON cold_history
+WHEN NEW.sequence != COALESCE((SELECT MAX(sequence) + 1 FROM cold_history), 1)
+BEGIN
+    SELECT RAISE(ABORT, 'cold history sequence must append contiguously');
+END
+""".strip()
 _COLD_HISTORY_FIELDS = frozenset(
     {"cold_history_count", "cold_history_tail_sha256"}
 )
@@ -574,6 +599,34 @@ class ResearchScheduler:
         }:
             raise ResearchSchedulerError("cold history metadata mismatch")
 
+        expected_triggers = {
+            _COLD_HISTORY_DELETE_TRIGGER_NAME: (
+                "cold_history",
+                " ".join(_COLD_HISTORY_DELETE_TRIGGER_SQL.split()),
+            ),
+            _COLD_HISTORY_UPDATE_TRIGGER_NAME: (
+                "cold_history",
+                " ".join(_COLD_HISTORY_UPDATE_TRIGGER_SQL.split()),
+            ),
+            _COLD_HISTORY_INSERT_TRIGGER_NAME: (
+                "cold_history",
+                " ".join(_COLD_HISTORY_INSERT_TRIGGER_SQL.split()),
+            ),
+        }
+        triggers = {
+            name: (table_name, " ".join((sql or "").split()))
+            for name, table_name, sql in connection.execute(
+                """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'trigger' AND tbl_name = 'cold_history'
+                ORDER BY name
+                """
+            ).fetchall()
+        }
+        if triggers != expected_triggers:
+            raise ResearchSchedulerError("cold history append-only trigger schema mismatch")
+
     def _open_cold_history(
         self,
         *,
@@ -583,14 +636,28 @@ class ResearchScheduler:
         if not path.exists() and not create:
             return None
         path.parent.mkdir(parents=True, exist_ok=True)
+        new_database = not path.exists()
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(path, timeout=30.0)
             connection.execute("PRAGMA synchronous = FULL")
-            if create:
+            if create and new_database:
+                existing_object = connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type IN ('table', 'trigger', 'index', 'view')
+                      AND name NOT LIKE 'sqlite_%'
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if existing_object is not None:
+                    raise ResearchSchedulerError(
+                        "new cold history database was not pristine"
+                    )
                 connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS cold_history_meta (
+                    CREATE TABLE cold_history_meta (
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     )
@@ -598,7 +665,7 @@ class ResearchScheduler:
                 )
                 connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS cold_history (
+                    CREATE TABLE cold_history (
                         sequence INTEGER PRIMARY KEY,
                         record_kind TEXT NOT NULL,
                         record_id TEXT NOT NULL,
@@ -609,24 +676,16 @@ class ResearchScheduler:
                     )
                     """
                 )
-                expected_meta = {
-                    "schema": _COLD_HISTORY_SCHEMA,
-                    "schema_version": str(_COLD_HISTORY_SCHEMA_VERSION),
-                }
-                for key, value in expected_meta.items():
-                    prior = connection.execute(
-                        "SELECT value FROM cold_history_meta WHERE key = ?",
-                        (key,),
-                    ).fetchone()
-                    if prior is None:
-                        connection.execute(
-                            "INSERT INTO cold_history_meta(key, value) VALUES (?, ?)",
-                            (key, value),
-                        )
-                    elif prior[0] != value:
-                        raise ResearchSchedulerError(
-                            "cold history metadata conflicts with scheduler schema"
-                        )
+                connection.execute(_COLD_HISTORY_DELETE_TRIGGER_SQL)
+                connection.execute(_COLD_HISTORY_UPDATE_TRIGGER_SQL)
+                connection.execute(_COLD_HISTORY_INSERT_TRIGGER_SQL)
+                connection.executemany(
+                    "INSERT INTO cold_history_meta(key, value) VALUES (?, ?)",
+                    (
+                        ("schema", _COLD_HISTORY_SCHEMA),
+                        ("schema_version", str(_COLD_HISTORY_SCHEMA_VERSION)),
+                    ),
+                )
                 connection.commit()
             self._validate_cold_history_schema(connection)
             return connection
@@ -811,22 +870,16 @@ class ResearchScheduler:
                 return
             raise ResearchSchedulerError("cold history database is missing")
         try:
-            extent = connection.execute(
-                "SELECT COUNT(*), MIN(sequence), MAX(sequence) FROM cold_history"
-            ).fetchone()
-            if extent is None:
-                raise ResearchSchedulerError("cold history extent is unavailable")
-            actual_count, minimum, maximum = extent
+            maximum = connection.execute(
+                "SELECT MAX(sequence) FROM cold_history"
+            ).fetchone()[0]
             if count == 0:
-                if actual_count != 0 or minimum is not None or maximum is not None:
+                if maximum is not None:
                     raise ResearchSchedulerError(
                         "cold history exists beyond empty state anchor"
                     )
                 return
-            # sequence is an INTEGER PRIMARY KEY, so count=N with min=1/max=N
-            # proves the anchored prefix has no interior gaps without scanning
-            # lifetime history on each hot scheduler operation.
-            if actual_count != count or minimum != 1 or maximum != count:
+            if maximum != count:
                 raise ResearchSchedulerError(
                     "cold history cardinality mismatches state anchor"
                 )

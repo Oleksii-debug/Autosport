@@ -19,6 +19,7 @@ from autosport.incident_risk_register import (
     RiskEvidenceState,
     RiskSeverity,
     RiskStatus,
+    derive_occurrence_entry_id,
 )
 from autosport.scientific_registry import (
     DatasetSnapshot,
@@ -251,7 +252,7 @@ def test_detected_drift_projects_verified_open_model_risk(tmp_path):
     assert entry.updated_at == entry.opened_at
     assert len(entry.occurrence_evidence_refs) == 1
     assert entry.occurrence_evidence_refs == entry.evidence_refs
-    assert "automatic" in entry.summary
+    assert "автоматичним" in entry.summary
     validate_canonical_drift_model_risk(
         monitor,
         entry=entry,
@@ -400,20 +401,26 @@ def test_caller_minted_drift_evidence_reference_fails_closed(tmp_path):
     )
     assert entry is not None
     fake_ref = "drift-finding-evidence:" + "0" * 64 + ":" + "1" * 64
+    fake_entry_id = derive_occurrence_entry_id(
+        kind=RegisterEntryKind.MODEL_RISK,
+        affected_components=entry.affected_components,
+        occurrence_evidence_refs=(fake_ref,),
+        model_version_ids=entry.model_version_ids,
+    )
     spoof = replace(
         entry,
+        entry_id=fake_entry_id,
         occurrence_evidence_refs=(fake_ref,),
         evidence_refs=(fake_ref,),
-        entry_id=entry.entry_id,
     )
 
-    # The generic IncidentRiskEntry constructor itself must reject the stale
-    # caller-provided entry_id before the product validator can trust it.
-    with pytest.raises(ValueError, match="product-derived occurrence identity"):
-        replace(
-            entry,
-            occurrence_evidence_refs=(fake_ref,),
-            evidence_refs=(fake_ref,),
+    # Generic schema/identity checks alone accept a self-consistent caller-minted
+    # reference. The product evidence adapter must independently re-resolve it.
+    with pytest.raises(DriftIncidentProjectionError, match="re-resolution failed"):
+        validate_canonical_drift_model_risk(
+            monitor,
+            entry=spoof,
+            as_of=EVALUATED_AT,
         )
 
 

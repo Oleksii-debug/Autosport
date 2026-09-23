@@ -31,7 +31,6 @@ ACTIVATION_SCHEMA_VERSION: Final = 1
 DECISION_CYCLE_CONTRACT: Final = "autosport.product-paper-decision-cycle.v1"
 PAPER_EXECUTION_MODE: Final = "PAPER"
 _ACTIVATION_AUTHORITY_DOMAIN: Final = "autosport.product-decision-activation.v1"
-_ACTIVATION_FILE_NAME: Final = "product_decision_activation.json"
 _PRODUCT_AUTHORITY_ROOT_NAME: Final = "product-decision-activation-authority-v1"
 
 # Freeze the exact product-import-time fingerprint authority. Exact instance type alone
@@ -936,20 +935,20 @@ class ProductDecisionActivationBinding:
 class ProductDecisionActivationStore:
     """Creation-only supported-START binding; it grants no execution authority."""
 
-    FILE_NAME: Final = _ACTIVATION_FILE_NAME
+    FILE_NAME: Final = "product_decision_activation.json"
 
     def __init__(self, workspace: str | Path) -> None:
-        if type(self).FILE_NAME != _ACTIVATION_FILE_NAME:
+        if type(self).FILE_NAME != "product_decision_activation.json":
             raise ProductDecisionActivationError(
                 "canonical product decision activation store namespace changed"
             )
         self.workspace = Path(workspace).absolute().resolve(strict=False)
-        self.path = self.workspace / _ACTIVATION_FILE_NAME
+        self.path = self.workspace / "product_decision_activation.json"
         try:
             self._authority = MonotonicWorkspaceAuthority(
                 workspace=self.workspace,
                 domain=_ACTIVATION_AUTHORITY_DOMAIN,
-                key=_ACTIVATION_FILE_NAME,
+                key="product_decision_activation.json",
                 authority_root=_product_activation_authority_root(),
             )
         except MonotonicWorkspaceAuthorityError as exc:
@@ -1260,7 +1259,7 @@ class ProductDecisionActivationStore:
             semantic_binding = _digest(
                 {
                     "kind": "PRODUCT_DECISION_ACTIVATION_CREATE",
-                    "activation_filename": _ACTIVATION_FILE_NAME,
+                    "activation_filename": "product_decision_activation.json",
                     "binding_sha256": expected.binding_sha256,
                     "intended_state_sha256": intended,
                 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,7 +29,25 @@ class PaperPreActionWitnessCorruptionTests(unittest.TestCase):
     def test_duplicate_json_key_pre_action_witness_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "live_decision_pre_action_book.json"
-            path.write_text('{"matches":0,"matches":1}', encoding="utf-8")
+            expected = PaperBook("100.00")
+            expected.save(path)
+            canonical = path.read_text(encoding="utf-8")
+            canonical_payload = json.loads(canonical)
+            stripped = canonical.lstrip()
+            self.assertTrue(stripped.startswith("{"))
+
+            duplicate = (
+                '{"schema_version":'
+                + json.dumps(canonical_payload["schema_version"])
+                + ","
+                + stripped[1:]
+            )
+            # Under an ordinary permissive JSON parser, the duplicate same-value
+            # key collapses to the exact valid PaperBook payload.  Therefore the
+            # failure below specifically exercises PaperBook's duplicate-key
+            # rejection rather than a later schema/content validation failure.
+            self.assertEqual(json.loads(duplicate), canonical_payload)
+            path.write_text(duplicate, encoding="utf-8")
 
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,

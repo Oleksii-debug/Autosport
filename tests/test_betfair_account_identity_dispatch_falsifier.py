@@ -273,16 +273,42 @@ def test_stdlib_https_class_dispatch_rebinding_revokes_k07_origin(
         resolve_betfair_authenticated_account_identity(client)
 
 
-def test_opener_open_rebinding_revokes_k07_origin(
+@pytest.mark.parametrize(
+    "attribute",
+    ["open", "_open", "_call_chain", "error"],
+)
+def test_private_opener_internal_dispatch_shadow_revokes_k07_origin(
+    attribute: str,
+) -> None:
+    client = _client()
+    opener = client._transport._opener
+    setattr(
+        opener,
+        attribute,
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("forged opener instance dispatch must never be accepted")
+        ),
+    )
+
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(client)
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["open", "_open", "_call_chain", "error"],
+)
+def test_opener_class_dispatch_rebinding_revokes_k07_origin(
     monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
 ) -> None:
     client = _client()
     opener_type = type(client._transport._opener)
     monkeypatch.setattr(
         opener_type,
-        "open",
+        attribute,
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("forged opener dispatch must never be called")
+            AssertionError("forged opener class dispatch must never be accepted")
         ),
     )
 

@@ -61,6 +61,7 @@ _REQUIRED_CONTROLS = {
     "product-runtime-start": "button",
     "product-runtime-stop": "button",
     "product-runtime-status": "input",
+    "emergency-stop-action": "button",
 }
 _READONLY_CONTROLS = {"202", "205", "302", "306", "334", "product-runtime-status"}
 _LIST_CONTROLS = {"203", "204", "304", "307"}
@@ -191,6 +192,30 @@ def inspect_semantic_shell() -> dict[str, Any]:
         ):
             failures.append(
                 "live-status must remain a non-announcing polled readback"
+            )
+
+    emergency_stop = parser.elements.get("emergency-stop-action")
+    if emergency_stop is not None:
+        _, emergency_attrs = emergency_stop
+        described_by = set((emergency_attrs.get("aria-describedby") or "").split())
+        required_description = {"emergency-stop-boundary", "emergency-stop-status"}
+        if not required_description.issubset(described_by):
+            failures.append(
+                "emergency STOP must describe both durable safety boundary and current status"
+            )
+
+    emergency_status = parser.elements.get("emergency-stop-status")
+    if emergency_status is None:
+        failures.append("emergency STOP assertive status region is missing")
+    else:
+        _, emergency_status_attrs = emergency_status
+        if (
+            emergency_status_attrs.get("role") != "status"
+            or emergency_status_attrs.get("aria-live") != "assertive"
+            or emergency_status_attrs.get("aria-atomic") != "true"
+        ):
+            failures.append(
+                "emergency STOP status must remain role=status, assertive, and atomic"
             )
 
     for automation_id, expected_tag in _REQUIRED_CONTROLS.items():

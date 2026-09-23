@@ -305,7 +305,7 @@ def _require_bound_profile(
 _REQUIRED_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 
 
-def verify_betfair_provider_state(
+def _evaluate_betfair_provider_state_semantics(
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
     *,
@@ -313,7 +313,12 @@ def verify_betfair_provider_state(
     readback: BetfairExecutionReadbackEnvelope,
     expected_provider_order_ref: str | None = None,
 ) -> VerifiedProviderState:
-    """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
+    """Evaluate exact Betfair DTO semantics without granting provider authority.
+
+    This core exists for deterministic parser/semantic tests. Its return value is
+    deliberately outside the verified-provider issuance registry and therefore
+    cannot release UNKNOWN execution state or become transferable provider truth.
+    """
 
     if type(action) is not ExecutionAction:
         raise ProviderEvidenceError("action must be exact canonical ExecutionAction")
@@ -321,12 +326,6 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider evidence requires exact canonical action-scoped readback envelope"
         )
-    try:
-        readback.assert_authoritative()
-    except BetfairReadOnlyError as exc:
-        raise ProviderEvidenceError(
-            "provider evidence requires authoritative canonical readback capture"
-        ) from exc
     if (
         readback.venue_id != action.bookmaker_id
         or readback.account_id != action.account_id
@@ -548,6 +547,10 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider matched price is worse than submitted Betfair BACK limit"
         )
+    if action.side == "LAY" and accepted_odds > action.requested_odds:
+        raise ProviderEvidenceError(
+            "provider matched price is worse than submitted Betfair LAY limit"
+        )
     if accepted_stake > action.requested_stake:
         raise ProviderEvidenceError("provider matched stake exceeds requested stake")
     status = (
@@ -602,6 +605,35 @@ def verify_betfair_provider_state(
         accepted_stake,
         evidence_id,
         readback.provider_order_ref,
+    )
+
+
+def verify_betfair_provider_state(
+    action: ExecutionAction,
+    profile: BookmakerCapabilityProfile,
+    *,
+    expected_profile_sha256: str,
+    readback: BetfairExecutionReadbackEnvelope,
+    expected_provider_order_ref: str | None = None,
+) -> VerifiedProviderState:
+    """Issue provider truth only from a production-authoritative Betfair capture."""
+
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
+        raise ProviderEvidenceError(
+            "provider evidence requires exact canonical action-scoped readback envelope"
+        )
+    try:
+        readback.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise ProviderEvidenceError(
+            "provider evidence requires authoritative canonical readback capture"
+        ) from exc
+    return _evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=expected_profile_sha256,
+        readback=readback,
+        expected_provider_order_ref=expected_provider_order_ref,
     )
 
 

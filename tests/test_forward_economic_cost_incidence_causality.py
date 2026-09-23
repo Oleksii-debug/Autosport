@@ -269,3 +269,29 @@ def test_shared_cost_allocation_identity_is_committed_into_step_and_evidence_has
         == "9" * 64
     )
     assert summary_a.evidence_sha256 != summary_b.evidence_sha256
+
+
+
+def test_preexisting_shared_cost_evidence_may_already_be_known_before_decision() -> None:
+    outcome = _cost_only_outcome(
+        incurred_at=T0 - timedelta(hours=3),
+        available_at=T0 - timedelta(hours=2),
+        causality=EconomicCostCausality.PREEXISTING_SHARED,
+        cost_class_id="provider.subscription.daily",
+        allocation_authority_sha256=ALLOCATION_AUTHORITY_SHA,
+    )
+
+    assert outcome.economic_cost_incurred_at == T0 - timedelta(hours=3)
+    assert outcome.economic_cost_available_at == T0 - timedelta(hours=2)
+    assert outcome.economic_cost_available_at >= outcome.economic_cost_incurred_at
+
+
+def test_decision_caused_cost_evidence_cannot_precede_decision() -> None:
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="economic cost cannot become available before the committed decision",
+    ):
+        _cost_only_outcome(
+            incurred_at=T0,
+            available_at=T0 - timedelta(microseconds=1),
+        )

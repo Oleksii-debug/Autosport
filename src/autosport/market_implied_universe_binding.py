@@ -1,10 +1,11 @@
 """Product-owned composition gate for market-implied baseline evidence.
 
-The lower-level market-implied module proves a causal market probability vector and
-binds caller-visible cohort labels to a frozen external-validity protocol.  This
-module closes the remaining identity seam by resolving the complete evaluation
-membership from the canonical durable ``EvaluationUniverseStore`` and binding each
-label to the exact frozen row it names.
+The lower-level market-implied module derives a causal market probability vector but
+explicitly does not prove provider origin for the typed outcome roster on current main.
+This module closes the separate cohort-identity seam by resolving the complete
+evaluation membership from the canonical durable ``EvaluationUniverseStore`` and
+binding each caller label to the exact frozen row it names.  Row authority must not be
+mistaken for outcome-roster provenance.
 
 No scoring, promotion, provider write, execution, or real-money authority is added.
 """
@@ -25,7 +26,6 @@ from .evaluation_universe import (
 )
 from .external_validity_baseline import BaselineDefinition, FrozenBaselineProtocol
 from .market_implied_baseline import (
-    MarketImpliedBaselineCohortEvidence,
     MarketImpliedBaselineEvidence,
     bind_market_implied_baseline_cohort,
 )
@@ -180,6 +180,8 @@ class MarketImpliedUniverseCohortEvidence:
                 "canonical_evaluation_universe_bound": True,
                 "complete_universe_membership_required": True,
                 "zero_or_missing_membership_fails_closed": True,
+                "outcome_roster_origin_verified": False,
+                "scientific_completeness_proven": False,
                 "source_stream_continuity_proven": False,
                 "metric_computed": False,
                 "execution_authority": False,
@@ -278,7 +280,8 @@ def bind_market_implied_baseline_to_evaluation_universe(
     The store is loaded through its monotonic/intake verification boundary.  The
     external-validity cohort must equal the complete frozen universe row-key set;
     rows without a causally decided candidate fail closed rather than disappearing
-    from the denominator.
+    from the denominator.  This operation intentionally does not strengthen the
+    lower-level outcome-roster origin truth.
     """
 
     if type(evaluation_store) is not EvaluationUniverseStore:

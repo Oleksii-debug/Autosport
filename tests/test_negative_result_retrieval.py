@@ -406,3 +406,128 @@ def test_postmortem_must_causally_follow_referenced_experiment(tmp_path):
             as_of=T3,
         )
 
+
+def _append_negative_result_chronology_fixture(
+    registry,
+    *,
+    prefix,
+    question_at,
+    hypothesis_at,
+    protocol_at,
+    experiment_created_at,
+    experiment_completed_at,
+    notes,
+):
+    question = ResearchQuestion(
+        f"{prefix}-question",
+        f"{prefix} frozen question",
+        SHA_A,
+        question_at,
+    )
+    hypothesis = Hypothesis(
+        f"{prefix}-hypothesis",
+        question.question_id,
+        f"{prefix} candidate improves the primary metric.",
+        "primary > champion",
+        "primary <= champion",
+        "roi",
+        ("drawdown",),
+        hypothesis_at,
+    )
+    binding = ScientificProtocolBinding(
+        research_protocol_id=f"{prefix}-protocol",
+        research_question_id=question.question_id,
+        research_question_sha256=_payload_sha(question),
+        hypothesis_id=hypothesis.hypothesis_id,
+        hypothesis_sha256=_payload_sha(hypothesis),
+        inclusion_criteria="frozen",
+        exclusion_criteria="invalid provenance",
+        lawful_source_requirements="lawful fixture",
+        causal_cutoff=question_at,
+        evaluation_design="walk-forward holdout",
+        feature_set_version="v1",
+        uncertainty_method="bootstrap intervals",
+        multiple_comparison_control="single frozen primary metric",
+        robustness_checks=("time split",),
+        random_seed_policy="fixed",
+        stopping_rule="one final evaluation",
+        promotion_rule=_frozen_promotion_rule_text(),
+        expected_artifacts=("evaluation bundle",),
+        code_config_sha256=SHA_B,
+        frozen_at_utc=protocol_at,
+    )
+    protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, protocol_at)
+    experiment = ExperimentRecord(
+        f"{prefix}-experiment",
+        protocol.record_id,
+        f"{prefix}-dataset",
+        f"{prefix}-features",
+        f"{prefix}-strategy",
+        f"{prefix}-evaluation",
+        19,
+        SHA_B,
+        ResearchOutcome.NULL,
+        experiment_created_at,
+        completed_at=experiment_completed_at,
+        notes=notes,
+    )
+
+    for record in (question, hypothesis, protocol, experiment):
+        registry.append(record)
+    return experiment
+
+
+def test_declared_lineage_rejects_protocol_available_after_experiment_start(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    experiment = _append_negative_result_chronology_fixture(
+        registry,
+        prefix="posthoc",
+        question_at="2026-01-01T08:00:00+00:00",
+        hypothesis_at="2026-01-01T09:00:00+00:00",
+        protocol_at="2026-01-01T12:00:00+00:00",
+        experiment_created_at="2026-01-01T10:00:00+00:00",
+        experiment_completed_at="2026-01-01T11:00:00+00:00",
+        notes="chronology inversion marker",
+    )
+
+    assert registry.causal_precedes(
+        "ResearchProtocol",
+        "posthoc-protocol",
+        "Experiment",
+        experiment.experiment_id,
+    )
+
+    with pytest.raises(RuntimeError, match="availability chronology"):
+        search_negative_results(
+            registry,
+            "chronology inversion marker",
+            as_of="2026-01-01T13:00:00+00:00",
+        )
+
+
+def test_declared_lineage_chronology_compares_timezone_offsets_by_utc_instant(
+    tmp_path,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    experiment = _append_negative_result_chronology_fixture(
+        registry,
+        prefix="offset",
+        question_at="2026-01-01T08:00:00+02:00",
+        hypothesis_at="2026-01-01T06:30:00+00:00",
+        protocol_at="2026-01-01T08:00:00+01:00",
+        experiment_created_at="2026-01-01T07:30:00+00:00",
+        experiment_completed_at="2026-01-01T08:00:00+00:00",
+        notes="offset chronology marker",
+    )
+
+    hits = search_negative_results(
+        registry,
+        "offset chronology marker",
+        as_of="2026-01-01T09:00:00+00:00",
+    )
+
+    assert [hit.experiment_id for hit in hits] == [experiment.experiment_id]

@@ -140,6 +140,113 @@ def _snapshot(
     )
 
 
+def _versioned_profile(
+    profile_version: int,
+    *,
+    observed_at: str = _T1,
+    source_ref: str = "capability-probe",
+    source_payload_sha256: str = _HASH,
+) -> BookmakerCapabilityProfile:
+    return BookmakerCapabilityProfile(
+        venue_id="book-a",
+        account_id="acct-a",
+        adapter_id="adapter-a",
+        adapter_version="1",
+        profile_version=profile_version,
+        facts=(),
+        observed_at=observed_at,
+        source_ref=source_ref,
+        source_payload_sha256=source_payload_sha256,
+    )
+
+
+def test_later_snapshot_rejects_capability_profile_version_rollback(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    profile_v2 = _versioned_profile(2)
+    first = BookmakerAccountSnapshot(
+        profile=profile_v2,
+        observed_capabilities=frozenset(),
+        observed_at=_T2,
+    )
+    assert store.append_snapshot(first) is True
+
+    rollback = BookmakerAccountSnapshot(
+        profile=_versioned_profile(1),
+        observed_capabilities=frozenset(),
+        observed_at=_T3,
+    )
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="profile_version cannot regress",
+    ):
+        store.append_snapshot(rollback)
+
+    assert store.history() == (first,)
+    state = store.latest_state()
+    assert state is not None
+    assert state.profile_id == profile_v2.profile_id
+
+
+def test_later_snapshot_rejects_conflicting_content_for_same_profile_version(
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    profile_v2 = _versioned_profile(2)
+    first = BookmakerAccountSnapshot(
+        profile=profile_v2,
+        observed_capabilities=frozenset(),
+        observed_at=_T2,
+    )
+    assert store.append_snapshot(first) is True
+
+    conflicting_profile_v2 = _versioned_profile(
+        2,
+        observed_at=_T2,
+        source_ref="capability-probe-refresh",
+        source_payload_sha256="b" * 64,
+    )
+    conflict = BookmakerAccountSnapshot(
+        profile=conflicting_profile_v2,
+        observed_capabilities=frozenset(),
+        observed_at=_T3,
+    )
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="profile_version was reused with conflicting content",
+    ):
+        store.append_snapshot(conflict)
+
+    assert store.history() == (first,)
+    state = store.latest_state()
+    assert state is not None
+    assert state.profile_id == profile_v2.profile_id
+
+
+def test_later_snapshot_allows_exact_capability_profile_replay(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    profile_v2 = _versioned_profile(2)
+    first = BookmakerAccountSnapshot(
+        profile=profile_v2,
+        observed_capabilities=frozenset(),
+        observed_at=_T2,
+    )
+    second = BookmakerAccountSnapshot(
+        profile=profile_v2,
+        observed_capabilities=frozenset(),
+        observed_at=_T3,
+    )
+
+    assert store.append_snapshot(first) is True
+    assert store.append_snapshot(second) is True
+    assert store.history() == (first, second)
+    state = store.latest_state()
+    assert state is not None
+    assert state.profile_id == profile_v2.profile_id
+
+
 def test_restart_preserves_open_then_incomplete_read_becomes_unknown(tmp_path) -> None:
     path = tmp_path / "account.json"
     first = _snapshot(

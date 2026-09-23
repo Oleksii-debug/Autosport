@@ -182,7 +182,7 @@ def test_valid_first_page_then_timeout_is_partial_not_complete() -> None:
 
     assert [row.bet_id for row in result.items] == ["bet-1"]
     assert result.witness.completeness is BetfairObservationCompleteness.PARTIAL
-    assert result.witness.failure_code == "acquisition_interrupted"
+    assert result.witness.failure_code == "partial_provider_transient"
     assert result.witness.rows_observed == 1
     assert len(result.witness.pages) == 1
     assert result.witness.pages[0][2] is True
@@ -501,4 +501,3 @@ def test_multi_page_cleared_orders_end_is_not_atomic_snapshot_completeness() -> 
     assert result.witness.authoritative is False
     with pytest.raises(BetfairReadOnlyError, match="not complete"):
         result.assert_complete()
-

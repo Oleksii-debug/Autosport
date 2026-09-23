@@ -21,6 +21,11 @@
     if (node.hidden !== hidden) node.hidden = hidden;
   }
 
+  function setValueUnlessFocused(node, value) {
+    const text = String(value ?? "");
+    if (document.activeElement !== node && node.value !== text) node.value = text;
+  }
+
   function requestId() {
     if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
       return globalThis.crypto.randomUUID();
@@ -179,10 +184,10 @@
     const strategy = byId(106);
     const previousStrategy = strategy.value;
     setSelectOptions(strategy, state.strategy_choices || []);
-    strategy.value = state.strategy_id || previousStrategy;
+    setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
 
-    byId(103).value = String(state.replay_speed);
-    byId(104).value = state.live_mode;
+    setValueUnlessFocused(byId(103), String(state.replay_speed));
+    setValueUnlessFocused(byId(104), state.live_mode);
     setTextIfChanged(byId("live-status"), state.live_status || "");
     renderList(byId(203), state.live_quotes);
     renderSingleColumnTable(byId("tickets-table-body"), state.tickets);
@@ -192,7 +197,7 @@
     const nav = byId(301);
     const priorNav = nav.value;
     setSelectOptions(nav, state.surfaces || [], "key", "title");
-    nav.value = state.surface_key || priorNav;
+    setValueUnlessFocused(nav, state.surface_key || priorNav);
     byId(302).value = state.surface_state || "";
     renderList(byId(304), state.surface_details);
 

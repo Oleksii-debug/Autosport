@@ -1553,13 +1553,21 @@ def _install_execution_readback_authority() -> None:
             raise sealed_error_type(
                 "EXECUTION_COMPLETE current order must have zero size_remaining"
             )
-        if (
-            requested_size is not None
-            and size_matched + size_remaining > requested_size
-        ):
-            raise sealed_error_type(
-                "size_matched plus size_remaining cannot exceed requested_size"
+        if requested_size is not None:
+            requested_num, requested_den = requested_size.as_integer_ratio()
+            matched_num, matched_den = size_matched.as_integer_ratio()
+            remaining_num, remaining_den = size_remaining.as_integer_ratio()
+            accounted_num = (
+                matched_num * remaining_den
+                + remaining_num * matched_den
             )
+            if (
+                accounted_num * requested_den
+                > requested_num * matched_den * remaining_den
+            ):
+                raise sealed_error_type(
+                    "size_matched plus size_remaining cannot exceed requested_size"
+                )
         return (
             trusted_provider_text(raw, "betId", "bet_id"),
             trusted_provider_text(raw, "marketId", "market_id"),

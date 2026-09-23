@@ -157,6 +157,110 @@ _WORKSPACE_BINDING_READ_PATH_CODE = (
     WorkspaceIdentityBinding._read_path_binding_id.__code__
 )
 
+# The canonical binding methods above are not self-contained: their code resolves
+# parser/hash/path helpers and schema constants from monotonic_workspace_binding
+# module globals. Freeze that transitive read/verification graph too, otherwise a
+# caller can leave every top-level method object/code unchanged while redirecting
+# the durable evidence those methods accept.
+_WORKSPACE_BINDING_GLOBALS = _WORKSPACE_BINDING_RESOLVE.__globals__
+_WORKSPACE_BINDING_CANONICAL_INSTANCE_ID = _WORKSPACE_BINDING_GLOBALS.get(
+    "_canonical_instance_id"
+)
+_WORKSPACE_BINDING_CANONICAL_INSTANCE_ID_CODE = getattr(
+    _WORKSPACE_BINDING_CANONICAL_INSTANCE_ID,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_WORKSPACE_LOCATOR = _WORKSPACE_BINDING_GLOBALS.get(
+    "_workspace_locator"
+)
+_WORKSPACE_BINDING_WORKSPACE_LOCATOR_CODE = getattr(
+    _WORKSPACE_BINDING_WORKSPACE_LOCATOR,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_READ_STRICT_OBJECT = _WORKSPACE_BINDING_GLOBALS.get(
+    "_read_strict_object"
+)
+_WORKSPACE_BINDING_READ_STRICT_OBJECT_CODE = getattr(
+    _WORKSPACE_BINDING_READ_STRICT_OBJECT,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_VERIFY_HASH = _WORKSPACE_BINDING_GLOBALS.get(
+    "_verify_binding_hash"
+)
+_WORKSPACE_BINDING_VERIFY_HASH_CODE = getattr(
+    _WORKSPACE_BINDING_VERIFY_HASH,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_PAYLOAD_HASH = _WORKSPACE_BINDING_GLOBALS.get("_payload_hash")
+_WORKSPACE_BINDING_PAYLOAD_HASH_CODE = getattr(
+    _WORKSPACE_BINDING_PAYLOAD_HASH,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_CANONICAL_BYTES = _WORKSPACE_BINDING_GLOBALS.get(
+    "_canonical_bytes"
+)
+_WORKSPACE_BINDING_CANONICAL_BYTES_CODE = getattr(
+    _WORKSPACE_BINDING_CANONICAL_BYTES,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_HASHLIB = _WORKSPACE_BINDING_GLOBALS.get("hashlib")
+_WORKSPACE_BINDING_HASHLIB_SHA256 = getattr(
+    _WORKSPACE_BINDING_HASHLIB,
+    "sha256",
+    None,
+)
+_WORKSPACE_BINDING_UUID = _WORKSPACE_BINDING_GLOBALS.get("uuid")
+_WORKSPACE_BINDING_UUID4 = getattr(_WORKSPACE_BINDING_UUID, "uuid4", None)
+_WORKSPACE_BINDING_OS = _WORKSPACE_BINDING_GLOBALS.get("os")
+_WORKSPACE_BINDING_OS_PATH = getattr(_WORKSPACE_BINDING_OS, "path", None)
+_WORKSPACE_BINDING_OS_NORMCASE = getattr(
+    _WORKSPACE_BINDING_OS_PATH,
+    "normcase",
+    None,
+)
+_WORKSPACE_BINDING_OS_NORMPATH = getattr(
+    _WORKSPACE_BINDING_OS_PATH,
+    "normpath",
+    None,
+)
+_WORKSPACE_BINDING_STAT = _WORKSPACE_BINDING_GLOBALS.get("stat")
+_WORKSPACE_BINDING_STAT_ISREG = getattr(_WORKSPACE_BINDING_STAT, "S_ISREG", None)
+_WORKSPACE_BINDING_JSON = _WORKSPACE_BINDING_GLOBALS.get("json")
+_WORKSPACE_BINDING_JSON_DUMPS = getattr(_WORKSPACE_BINDING_JSON, "dumps", None)
+_WORKSPACE_BINDING_STRICT_JSON_LOADS = _WORKSPACE_BINDING_GLOBALS.get(
+    "strict_json_loads"
+)
+_WORKSPACE_BINDING_STRICT_JSON_LOADS_CODE = getattr(
+    _WORKSPACE_BINDING_STRICT_JSON_LOADS,
+    "__code__",
+    None,
+)
+_WORKSPACE_BINDING_MARKER_KEYS = _WORKSPACE_BINDING_GLOBALS.get(
+    "_WORKSPACE_MARKER_KEYS"
+)
+_WORKSPACE_BINDING_PATH_KEYS = _WORKSPACE_BINDING_GLOBALS.get("_PATH_BINDING_KEYS")
+_WORKSPACE_BINDING_WORKSPACE_SCHEMA = _WORKSPACE_BINDING_GLOBALS.get(
+    "WORKSPACE_BINDING_SCHEMA"
+)
+_WORKSPACE_BINDING_PATH_SCHEMA = _WORKSPACE_BINDING_GLOBALS.get(
+    "PATH_BINDING_SCHEMA"
+)
+_WORKSPACE_BINDING_SCHEMA_VERSION = _WORKSPACE_BINDING_GLOBALS.get(
+    "BINDING_SCHEMA_VERSION"
+)
+_WORKSPACE_BINDING_AUTHORITY_ID = _WORKSPACE_BINDING_GLOBALS.get(
+    "BINDING_AUTHORITY_ID"
+)
+_WORKSPACE_BINDING_SHA256_LENGTH = _WORKSPACE_BINDING_GLOBALS.get(
+    "_SHA256_LENGTH"
+)
+
 
 def _require_workspace_binding_dispatch_authority() -> None:
     if (
@@ -180,6 +284,81 @@ def _require_workspace_binding_dispatch_authority() -> None:
     if WorkspaceIdentityBinding is not _WORKSPACE_BINDING_TYPE:
         raise ProductPolicyEvaluationIssuanceError(
             "product workspace identity binding authority was rebound"
+        )
+    if (
+        _WORKSPACE_BINDING_RESOLVE.__globals__ is not _WORKSPACE_BINDING_GLOBALS
+        or _WORKSPACE_BINDING_VALIDATE.__globals__ is not _WORKSPACE_BINDING_GLOBALS
+        or _WORKSPACE_BINDING_READ_MARKER.__globals__ is not _WORKSPACE_BINDING_GLOBALS
+        or _WORKSPACE_BINDING_READ_PATH.__globals__ is not _WORKSPACE_BINDING_GLOBALS
+        or _WORKSPACE_BINDING_GLOBALS.get("_canonical_instance_id")
+        is not _WORKSPACE_BINDING_CANONICAL_INSTANCE_ID
+        or getattr(
+            _WORKSPACE_BINDING_CANONICAL_INSTANCE_ID,
+            "__code__",
+            None,
+        )
+        is not _WORKSPACE_BINDING_CANONICAL_INSTANCE_ID_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("_workspace_locator")
+        is not _WORKSPACE_BINDING_WORKSPACE_LOCATOR
+        or getattr(_WORKSPACE_BINDING_WORKSPACE_LOCATOR, "__code__", None)
+        is not _WORKSPACE_BINDING_WORKSPACE_LOCATOR_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("_read_strict_object")
+        is not _WORKSPACE_BINDING_READ_STRICT_OBJECT
+        or getattr(_WORKSPACE_BINDING_READ_STRICT_OBJECT, "__code__", None)
+        is not _WORKSPACE_BINDING_READ_STRICT_OBJECT_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("_verify_binding_hash")
+        is not _WORKSPACE_BINDING_VERIFY_HASH
+        or getattr(_WORKSPACE_BINDING_VERIFY_HASH, "__code__", None)
+        is not _WORKSPACE_BINDING_VERIFY_HASH_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("_payload_hash")
+        is not _WORKSPACE_BINDING_PAYLOAD_HASH
+        or getattr(_WORKSPACE_BINDING_PAYLOAD_HASH, "__code__", None)
+        is not _WORKSPACE_BINDING_PAYLOAD_HASH_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("_canonical_bytes")
+        is not _WORKSPACE_BINDING_CANONICAL_BYTES
+        or getattr(_WORKSPACE_BINDING_CANONICAL_BYTES, "__code__", None)
+        is not _WORKSPACE_BINDING_CANONICAL_BYTES_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("hashlib")
+        is not _WORKSPACE_BINDING_HASHLIB
+        or getattr(_WORKSPACE_BINDING_HASHLIB, "sha256", None)
+        is not _WORKSPACE_BINDING_HASHLIB_SHA256
+        or _WORKSPACE_BINDING_GLOBALS.get("uuid") is not _WORKSPACE_BINDING_UUID
+        or getattr(_WORKSPACE_BINDING_UUID, "uuid4", None)
+        is not _WORKSPACE_BINDING_UUID4
+        or _WORKSPACE_BINDING_GLOBALS.get("os") is not _WORKSPACE_BINDING_OS
+        or getattr(_WORKSPACE_BINDING_OS, "path", None)
+        is not _WORKSPACE_BINDING_OS_PATH
+        or getattr(_WORKSPACE_BINDING_OS_PATH, "normcase", None)
+        is not _WORKSPACE_BINDING_OS_NORMCASE
+        or getattr(_WORKSPACE_BINDING_OS_PATH, "normpath", None)
+        is not _WORKSPACE_BINDING_OS_NORMPATH
+        or _WORKSPACE_BINDING_GLOBALS.get("stat") is not _WORKSPACE_BINDING_STAT
+        or getattr(_WORKSPACE_BINDING_STAT, "S_ISREG", None)
+        is not _WORKSPACE_BINDING_STAT_ISREG
+        or _WORKSPACE_BINDING_GLOBALS.get("json") is not _WORKSPACE_BINDING_JSON
+        or getattr(_WORKSPACE_BINDING_JSON, "dumps", None)
+        is not _WORKSPACE_BINDING_JSON_DUMPS
+        or _WORKSPACE_BINDING_GLOBALS.get("strict_json_loads")
+        is not _WORKSPACE_BINDING_STRICT_JSON_LOADS
+        or getattr(_WORKSPACE_BINDING_STRICT_JSON_LOADS, "__code__", None)
+        is not _WORKSPACE_BINDING_STRICT_JSON_LOADS_CODE
+        or _WORKSPACE_BINDING_GLOBALS.get("_WORKSPACE_MARKER_KEYS")
+        is not _WORKSPACE_BINDING_MARKER_KEYS
+        or _WORKSPACE_BINDING_GLOBALS.get("_PATH_BINDING_KEYS")
+        is not _WORKSPACE_BINDING_PATH_KEYS
+        or _WORKSPACE_BINDING_GLOBALS.get("WORKSPACE_BINDING_SCHEMA")
+        != _WORKSPACE_BINDING_WORKSPACE_SCHEMA
+        or _WORKSPACE_BINDING_GLOBALS.get("PATH_BINDING_SCHEMA")
+        != _WORKSPACE_BINDING_PATH_SCHEMA
+        or _WORKSPACE_BINDING_GLOBALS.get("BINDING_SCHEMA_VERSION")
+        != _WORKSPACE_BINDING_SCHEMA_VERSION
+        or _WORKSPACE_BINDING_GLOBALS.get("BINDING_AUTHORITY_ID")
+        != _WORKSPACE_BINDING_AUTHORITY_ID
+        or _WORKSPACE_BINDING_GLOBALS.get("_SHA256_LENGTH")
+        != _WORKSPACE_BINDING_SHA256_LENGTH
+    ):
+        raise ProductPolicyEvaluationIssuanceError(
+            "product workspace identity binding transitive authority was rebound"
         )
     bound_resolve = getattr(_WORKSPACE_BINDING_TYPE, "resolve", None)
     if (

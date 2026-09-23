@@ -91,7 +91,7 @@ class MatchbookPriceLevel:
 @dataclass(frozen=True,slots=True)
 class MatchbookMarketSnapshot:
     request:MatchbookMarketReadRequest; market_state:MatchbookMarketState
-    observed_at:str; raw_response_sha256:str; levels:tuple[MatchbookPriceLevel,...]
+    observed_at:str; evaluated_at:str; raw_response_sha256:str; levels:tuple[MatchbookPriceLevel,...]
     snapshot_sha256:str; freshness_seconds:Decimal
     provider_origin_verified=False; normalized_payload_bound_to_raw_response=False
     execution_authorized=False; write_authorized=False
@@ -129,8 +129,8 @@ def build_matchbook_market_snapshot(req,*,market_state,observed_at,evaluated_at,
     if type(raw_response) is not bytes or not raw_response or len(raw_response)>16*1024*1024: raise MatchbookMarketReadError("invalid raw response")
     levels=normalize_matchbook_price_levels(req,price_rows); raw=hashlib.sha256(raw_response).hexdigest()
     truth=[False,False,False,False,False,False]
-    digest=_hash({"v":1,"request":req.semantic_sha256,"state":market_state.value,"observed_at":_utctext(seen),"raw":raw,"levels":[x.payload() for x in levels],"truth":truth})
-    return MatchbookMarketSnapshot(req,market_state,_utctext(seen),raw,levels,digest,age)
+    digest=_hash({"v":1,"request":req.semantic_sha256,"state":market_state.value,"observed_at":_utctext(seen),"evaluated_at":_utctext(now),"raw":raw,"levels":[x.payload() for x in levels],"truth":truth})
+    return MatchbookMarketSnapshot(req,market_state,_utctext(seen),_utctext(now),raw,levels,digest,age)
 
 def require_direct_liquidity_comparability(a,b):
     if type(a) is not MatchbookMarketSnapshot or type(b) is not MatchbookMarketSnapshot: raise MatchbookMarketReadError("invalid snapshots")
@@ -139,6 +139,11 @@ def require_direct_liquidity_comparability(a,b):
 @dataclass(frozen=True,slots=True)
 class MatchbookPollCursor:
     universe_sha256:str; next_index:int; window_started_at:str; used_in_window:int
+    def __post_init__(self):
+        if type(self.universe_sha256) is not str or len(self.universe_sha256)!=64 or any(c not in "0123456789abcdef" for c in self.universe_sha256): raise MatchbookMarketReadError("invalid cursor universe")
+        if type(self.next_index) is not int or isinstance(self.next_index,bool) or self.next_index<0: raise MatchbookMarketReadError("invalid cursor index")
+        object.__setattr__(self,"window_started_at",_utctext(_utc(self.window_started_at,"window_started_at")))
+        if type(self.used_in_window) is not int or isinstance(self.used_in_window,bool) or not 0<=self.used_in_window<=EVENT_RPM: raise MatchbookMarketReadError("invalid cursor budget")
 @dataclass(frozen=True,slots=True)
 class MatchbookPollPlan:
     request_sha256s:tuple[str,...]; next_cursor:MatchbookPollCursor

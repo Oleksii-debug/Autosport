@@ -10,6 +10,7 @@
   let pollHandle = null;
   let ownerDefaultsApplied = false;
   let ownerReviewFresh = false;
+  let ownerReviewEpoch = 0;
   let refreshInFlight = null;
   let refreshPending = false;
 
@@ -86,6 +87,7 @@
   }
 
   function invalidateOwnerReview() {
+    ownerReviewEpoch += 1;
     ownerReviewFresh = false;
     byId("owner-confirm-checkbox").checked = false;
     syncOwnerConfirmationAvailability(
@@ -93,12 +95,14 @@
     );
   }
 
-  function markOwnerReviewFresh() {
+  function markOwnerReviewFresh(epoch) {
+    if (epoch !== ownerReviewEpoch) return false;
     ownerReviewFresh = true;
     byId("owner-confirm-checkbox").checked = false;
     syncOwnerConfirmationAvailability(
       Boolean(latestState && latestState.owner && latestState.owner.can_initialize),
     );
+    return true;
   }
 
   function requestId() {
@@ -415,12 +419,13 @@
   byId(327).addEventListener("change", invalidateOwnerReview);
   byId(328).addEventListener("click", async () => {
     invalidateOwnerReview();
+    const reviewEpoch = ownerReviewEpoch;
     const result = await dispatch("owner.preview", {
       values: ownerValues(),
       emergency_stop: byId(327).checked,
     });
     if (result && result.status === "completed") {
-      markOwnerReviewFresh();
+      markOwnerReviewFresh(reviewEpoch);
     }
   });
   byId("owner-confirm").addEventListener("click", async () => {

@@ -55,6 +55,24 @@ _CANONICAL_ACCOUNT_READ_EVIDENCE_CODE = (
     BetdaqAccountReadOnlyClient.read_account_evidence.__code__
 )
 
+# #790 is the sole durable reconciliation authority. Freeze the exact class and
+# method dispatch consumed by this composition just as the authenticated #1610
+# source dispatch is frozen above; accepting a subclass/instance shadow here would
+# let caller code report reconciliation success without executing #790 durability.
+_CANONICAL_RECONCILIATION_STORE_CLASS = BookmakerAccountReconciliationStore
+_CANONICAL_RECONCILIATION_LATEST_SNAPSHOT = (
+    BookmakerAccountReconciliationStore.latest_snapshot
+)
+_CANONICAL_RECONCILIATION_LATEST_SNAPSHOT_CODE = (
+    BookmakerAccountReconciliationStore.latest_snapshot.__code__
+)
+_CANONICAL_RECONCILIATION_APPEND_SNAPSHOT = (
+    BookmakerAccountReconciliationStore.append_snapshot
+)
+_CANONICAL_RECONCILIATION_APPEND_SNAPSHOT_CODE = (
+    BookmakerAccountReconciliationStore.append_snapshot.__code__
+)
+
 
 class BetdaqAccountContinuityError(RuntimeError):
     """Base error for BETDAQ authenticated-principal continuity composition."""
@@ -218,6 +236,56 @@ def _require_canonical_source_instance(source: object) -> None:
         )
 
 
+def _require_canonical_reconciliation_store(store: object) -> None:
+    """Require the exact #790 durable store and unshadowed method dispatch."""
+
+    if (
+        BookmakerAccountReconciliationStore
+        is not _CANONICAL_RECONCILIATION_STORE_CLASS
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ reconciliation store class was replaced"
+        )
+    if (
+        _CANONICAL_RECONCILIATION_STORE_CLASS.latest_snapshot
+        is not _CANONICAL_RECONCILIATION_LATEST_SNAPSHOT
+        or getattr(
+            _CANONICAL_RECONCILIATION_STORE_CLASS.latest_snapshot,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_RECONCILIATION_LATEST_SNAPSHOT_CODE
+        or _CANONICAL_RECONCILIATION_STORE_CLASS.append_snapshot
+        is not _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT
+        or getattr(
+            _CANONICAL_RECONCILIATION_STORE_CLASS.append_snapshot,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT_CODE
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ reconciliation store implementation changed"
+        )
+    if type(store) is not _CANONICAL_RECONCILIATION_STORE_CLASS:
+        raise BetdaqAccountContinuityError(
+            "reconciliation target is not the canonical durable #790 store"
+        )
+    bound_latest = getattr(store, "latest_snapshot", None)
+    bound_append = getattr(store, "append_snapshot", None)
+    if (
+        getattr(bound_latest, "__self__", None) is not store
+        or getattr(bound_latest, "__func__", None)
+        is not _CANONICAL_RECONCILIATION_LATEST_SNAPSHOT
+        or getattr(bound_append, "__self__", None) is not store
+        or getattr(bound_append, "__func__", None)
+        is not _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ reconciliation store dispatch was shadowed"
+        )
+
+
 class BetdaqAccountContinuityClient:
     """Canonical BETDAQ account acquisition with post-auth principal projection.
 
@@ -313,15 +381,14 @@ def append_to_reconciliation(
     evidence: BetdaqContinuousAccountEvidence,
 ) -> bool:
     """Canonical #1733 -> #790 composition; account-id text alone is insufficient."""
-    if not isinstance(store, BookmakerAccountReconciliationStore):
-        raise TypeError("store must be BookmakerAccountReconciliationStore")
+    _require_canonical_reconciliation_store(store)
     if not _is_product_issued_continuity_evidence(evidence):
         raise BetdaqAccountContinuityError(
             "reconciliation requires product-issued BETDAQ continuity evidence"
         )
-    latest = store.latest_snapshot()
+    latest = _CANONICAL_RECONCILIATION_LATEST_SNAPSHOT(store)
     require_reconciliation_history_compatible(latest, evidence)
-    return store.append_snapshot(evidence.snapshot)
+    return _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT(store, evidence.snapshot)
 
 
 def require_reconciliation_history_compatible(

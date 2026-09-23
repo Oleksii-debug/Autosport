@@ -37,11 +37,19 @@ _SUPPORTED = {
     StrategyClass.DUTCHING: EvaluationContractFamily.DUTCHING_EXECUTION,
     StrategyClass.HEDGE_REBALANCE: EvaluationContractFamily.HEDGE_PORTFOLIO_RISK,
 }
-_UNRESOLVED = {\n    FunnelStage.ATTEMPTED,\n    FunnelStage.UNKNOWN,\n    FunnelStage.PENDING,\n    FunnelStage.MISSING,\n}
-_PAPER = {
-    FunnelStage.ACCEPTED, FunnelStage.PARTIAL, FunnelStage.REJECTED,
-    FunnelStage.UNKNOWN, FunnelStage.RECONCILED, FunnelStage.SETTLED,
-    FunnelStage.VOID, FunnelStage.PENDING, FunnelStage.MISSING,
+_UNRESOLVED = {
+    FunnelStage.ATTEMPTED,
+    FunnelStage.UNKNOWN,
+    FunnelStage.PENDING,
+    FunnelStage.MISSING,
+}
+_PAPER_OUTCOME_STAGES = {
+    FunnelStage.ACCEPTED,
+    FunnelStage.PARTIAL,
+    FunnelStage.REJECTED,
+    FunnelStage.RECONCILED,
+    FunnelStage.SETTLED,
+    FunnelStage.VOID,
 }
 
 
@@ -184,8 +192,17 @@ def evaluate_strategy_external_validity(
         if any(stage in _UNRESOLVED for stage in stages):
             gaps.add("material_funnel_state_unresolved")
             grade = StrategyEvidenceGrade.INSUFFICIENT
-        elif grade is not StrategyEvidenceGrade.INSUFFICIENT and any(stage in _PAPER for stage in stages):
-            grade = StrategyEvidenceGrade.PAPER_MODEL
+        elif (
+            grade is not StrategyEvidenceGrade.INSUFFICIENT
+            and any(stage in _PAPER_OUTCOME_STAGES for stage in stages)
+        ):
+            # EvaluationUniverse validates these stages against canonical #623
+            # PAPER attempt evidence. That proves a generic execution outcome,
+            # not the strategy-specific external-validity contract required by
+            # #634 (later-quote, complete multi-leg economics, or same-trajectory
+            # counterfactual evidence). Stay descriptive until that proof is
+            # explicitly composed and re-resolved here.
+            gaps.add("strategy_specific_paper_proof_not_verified")
 
     if protocol.strategy_class is StrategyClass.LIVE_PRICE_MOVEMENT:
         gaps.add("external_later_quote_execution_evidence_not_verified")

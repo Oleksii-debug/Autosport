@@ -4,6 +4,7 @@ from threading import Event, Thread
 
 import pytest
 
+import autosport.bookmaker_account_reconciliation as reconciliation
 from autosport.bookmaker_account_reconciliation import (
     AccountReconciliationIntegrityError,
     AccountSnapshotStaleError,
@@ -93,6 +94,7 @@ def _position(
     venue_id: str = "book-a",
     account_id: str = "acct-a",
     adapter_id: str = "adapter-a",
+    provider_status: str | None = None,
 ) -> BookmakerPositionObservation:
     return BookmakerPositionObservation(
         venue_id=venue_id,
@@ -107,6 +109,7 @@ def _position(
         provider_amount=Decimal("10"),
         provider_amount_semantics="backer_stake",
         decimal_odds=Decimal("2.0"),
+        provider_status=provider_status,
     )
 
 
@@ -694,6 +697,116 @@ def test_exact_current_checkpoint_reopens_idempotently(tmp_path) -> None:
     restarted = BookmakerAccountReconciliationStore(path)
     assert restarted.history() == (first,)
     assert restarted.append_snapshot(first) is False
+
+
+def test_provider_status_round_trips_through_schema_v2_and_restart(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    position = _position(
+        BookmakerPositionState.SETTLED,
+        _T1,
+        observation_id="native-status-1",
+        provider_status="PUSH_WIN",
+    )
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.SETTLED_POSITIONS_READ,),
+        settled_positions=(position,),
+    )
+
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(snapshot) is True
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 2
+    persisted = document["snapshots"][0]["snapshot"]["settled_positions"][0]
+    assert persisted["provider_status"] == "PUSH_WIN"
+
+    restarted = BookmakerAccountReconciliationStore(path)
+    reopened = restarted.latest_snapshot()
+    assert reopened is not None
+    [reopened_position] = reopened.settled_positions
+    assert reopened_position.provider_status == "PUSH_WIN"
+    assert reopened_position.state is BookmakerPositionState.SETTLED
+
+
+def test_provider_status_changes_fingerprint_and_conflicts_by_observation_id(
+    tmp_path,
+) -> None:
+    without_status = _position(
+        BookmakerPositionState.OPEN,
+        _T1,
+        observation_id="same-native-status-observation",
+    )
+    with_status = _position(
+        BookmakerPositionState.OPEN,
+        _T1,
+        observation_id="same-native-status-observation",
+        provider_status="PUSH",
+    )
+    first = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(without_status,),
+    )
+    same_time_with_status = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(with_status,),
+    )
+    changed = _snapshot(
+        _T2,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(with_status,),
+    )
+
+    assert snapshot_fingerprint(first) != snapshot_fingerprint(same_time_with_status)
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+    assert store.append_snapshot(first) is True
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="position observation_id was reused",
+    ):
+        store.append_snapshot(changed)
+
+
+def test_schema_v1_snapshot_without_provider_status_keeps_legacy_identity() -> None:
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(
+            _position(
+                BookmakerPositionState.OPEN,
+                _T1,
+                observation_id="legacy-position",
+            ),
+        ),
+    )
+    payload = reconciliation.snapshot_to_canonical_dict(snapshot)
+    [position_payload] = payload["open_positions"]
+    assert "provider_status" not in position_payload
+
+    decoded = reconciliation._decode_snapshot(payload, schema_version=1)
+    assert decoded.open_positions[0].provider_status is None
+    assert snapshot_fingerprint(decoded) == snapshot_fingerprint(snapshot)
+
+
+def test_schema_v1_rejects_provider_status_field() -> None:
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.SETTLED_POSITIONS_READ,),
+        settled_positions=(
+            _position(
+                BookmakerPositionState.SETTLED,
+                _T1,
+                observation_id="v2-only-position",
+                provider_status="PUSH_LOSE",
+            ),
+        ),
+    )
+    payload = reconciliation.snapshot_to_canonical_dict(snapshot)
+
+    with pytest.raises(AccountReconciliationIntegrityError, match="position schema"):
+        reconciliation._decode_snapshot(payload, schema_version=1)
 
 
 def test_schema_version_bool_is_not_integer_schema_version(tmp_path) -> None:

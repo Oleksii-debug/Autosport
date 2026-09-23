@@ -73,7 +73,11 @@ def test_packaged_machine_audit_rejects_disabled_emergency_stop(monkeypatch, tmp
 
     semantic, keyboard = _audit_candidate(monkeypatch, tmp_path, html)
 
-    assert semantic["status"] == "PASS", semantic["failures"]
+    assert semantic["status"] == "FAIL"
+    assert (
+        "emergency STOP must remain enabled in static shell semantics"
+        in semantic["failures"]
+    )
     assert keyboard["status"] == "FAIL"
     assert any(
         "emergency-stop-action" in failure

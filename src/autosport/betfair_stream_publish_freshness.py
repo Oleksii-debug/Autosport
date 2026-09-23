@@ -47,6 +47,9 @@ class BetfairStreamSubscriptionContext:
     provider_request_id: int
     subscription_generation: int
     criteria_sha256: str
+    market_filter_sha256: str
+    market_data_fields: tuple[str, ...]
+    ladder_levels: int | None
     requested_heartbeat_ms: int
     requested_conflate_ms: int
     provider_id: str = BETFAIR_PROVIDER_ID
@@ -71,6 +74,11 @@ class BetfairStreamSubscriptionContext:
             raise ValueError("subscription_generation must be a non-negative integer")
         if not _is_sha256(self.criteria_sha256):
             raise ValueError("criteria_sha256 must be a lowercase SHA-256 hex digest")
+        _validate_projection(
+            self.market_filter_sha256,
+            self.market_data_fields,
+            self.ladder_levels,
+        )
         if type(self.requested_heartbeat_ms) is not int or self.requested_heartbeat_ms <= 0:
             raise ValueError("requested_heartbeat_ms must be a positive integer")
         if type(self.requested_conflate_ms) is not int or self.requested_conflate_ms < 0:
@@ -111,6 +119,9 @@ class BetfairStreamPublicationEvidence:
     provider_request_id: int
     subscription_generation: int
     criteria_sha256: str
+    market_filter_sha256: str
+    market_data_fields: tuple[str, ...]
+    ladder_levels: int | None
     upstream_context_sha256: str
     requested_heartbeat_ms: int
     requested_conflate_ms: int
@@ -140,6 +151,11 @@ class BetfairStreamPublicationEvidence:
             _text(getattr(self, name), name)
         if not _is_sha256(self.criteria_sha256):
             raise ValueError("criteria_sha256 must be a lowercase SHA-256 hex digest")
+        _validate_projection(
+            self.market_filter_sha256,
+            self.market_data_fields,
+            self.ladder_levels,
+        )
         if not _is_sha256(self.upstream_context_sha256):
             raise ValueError("upstream_context_sha256 must be a lowercase SHA-256 hex digest")
         if not _is_sha256(self.frame_sha256):
@@ -382,6 +398,9 @@ class _BetfairStreamPublishFreshnessTracker:
                 record.context_id != context.context_id
                 or record.subscription_generation != context.subscription_generation
                 or record.criteria_sha256 != context.criteria_sha256
+                or record.market_filter_sha256 != context.market_filter_sha256
+                or record.market_data_fields != context.market_data_fields
+                or record.ladder_levels != context.ladder_levels
                 or record.upstream_context_sha256 != context.upstream_context_sha256
                 or record.provider_request_id != context.provider_request_id
                 or record.requested_heartbeat_ms != context.requested_heartbeat_ms
@@ -488,6 +507,40 @@ def _is_sha256(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
+def _validate_projection(
+    market_filter_sha256: object,
+    market_data_fields: object,
+    ladder_levels: object,
+) -> None:
+    if not _is_sha256(market_filter_sha256):
+        raise ValueError("market_filter_sha256 must be a lowercase SHA-256 hex digest")
+    if type(market_data_fields) is not tuple or not market_data_fields:
+        raise ValueError("market_data_fields must be a non-empty canonical tuple")
+    fields = tuple(_text(field, "market_data_field") for field in market_data_fields)
+    if fields != tuple(sorted(set(fields))):
+        raise ValueError("market_data_fields must be sorted and contain no duplicates")
+    best_offer_projection = any(
+        field in {"EX_BEST_OFFERS", "EX_BEST_OFFERS_DISP"}
+        for field in fields
+    )
+    if ladder_levels is None:
+        if best_offer_projection:
+            raise ValueError(
+                "ladder_levels is required for EX_BEST_OFFERS/EX_BEST_OFFERS_DISP"
+            )
+        return
+    if (
+        type(ladder_levels) is not int
+        or ladder_levels < 1
+        or ladder_levels > 10
+    ):
+        raise ValueError("ladder_levels must be null or an integer in 1..10")
+    if not best_offer_projection:
+        raise ValueError(
+            "ladder_levels is only authoritative for best-offer stream projections"
+        )
+
+
 def _digest(payload: object) -> str:
     data = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
@@ -509,6 +562,9 @@ def _context_payload(context: BetfairStreamSubscriptionContext, *, include_id: b
         "provider_request_id": context.provider_request_id,
         "subscription_generation": context.subscription_generation,
         "criteria_sha256": context.criteria_sha256,
+        "market_filter_sha256": context.market_filter_sha256,
+        "market_data_fields": list(context.market_data_fields),
+        "ladder_levels": context.ladder_levels,
         "requested_heartbeat_ms": context.requested_heartbeat_ms,
         "requested_conflate_ms": context.requested_conflate_ms,
         "provider_id": context.provider_id,
@@ -522,12 +578,18 @@ def _context_payload(context: BetfairStreamSubscriptionContext, *, include_id: b
 def _context_from_payload(raw: object) -> BetfairStreamSubscriptionContext:
     if type(raw) is not dict or raw.get("version") != SCHEMA_VERSION:
         raise ValueError("invalid subscription context payload")
+    raw_fields = raw.get("market_data_fields")
+    if type(raw_fields) is not list:
+        raise ValueError("market_data_fields must be a JSON array")
     context = BetfairStreamSubscriptionContext(
         upstream_context_sha256=raw.get("upstream_context_sha256"),
         subscription_id=raw.get("subscription_id"),
         provider_request_id=raw.get("provider_request_id"),
         subscription_generation=raw.get("subscription_generation"),
         criteria_sha256=raw.get("criteria_sha256"),
+        market_filter_sha256=raw.get("market_filter_sha256"),
+        market_data_fields=tuple(raw_fields),
+        ladder_levels=raw.get("ladder_levels"),
         requested_heartbeat_ms=raw.get("requested_heartbeat_ms"),
         requested_conflate_ms=raw.get("requested_conflate_ms"),
         provider_id=raw.get("provider_id"),
@@ -566,6 +628,9 @@ def _evidence_payload(record: BetfairStreamPublicationEvidence, *, include_id: b
         "provider_request_id": record.provider_request_id,
         "subscription_generation": record.subscription_generation,
         "criteria_sha256": record.criteria_sha256,
+        "market_filter_sha256": record.market_filter_sha256,
+        "market_data_fields": list(record.market_data_fields),
+        "ladder_levels": record.ladder_levels,
         "upstream_context_sha256": record.upstream_context_sha256,
         "requested_heartbeat_ms": record.requested_heartbeat_ms,
         "requested_conflate_ms": record.requested_conflate_ms,
@@ -605,6 +670,9 @@ def _record(
         provider_request_id=context.provider_request_id,
         subscription_generation=context.subscription_generation,
         criteria_sha256=context.criteria_sha256,
+        market_filter_sha256=context.market_filter_sha256,
+        market_data_fields=context.market_data_fields,
+        ladder_levels=context.ladder_levels,
         upstream_context_sha256=context.upstream_context_sha256,
         requested_heartbeat_ms=context.requested_heartbeat_ms,
         requested_conflate_ms=context.requested_conflate_ms,
@@ -628,6 +696,9 @@ def _record(
         "provider_request_id": context.provider_request_id,
         "subscription_generation": context.subscription_generation,
         "criteria_sha256": context.criteria_sha256,
+        "market_filter_sha256": context.market_filter_sha256,
+        "market_data_fields": list(context.market_data_fields),
+        "ladder_levels": context.ladder_levels,
         "upstream_context_sha256": context.upstream_context_sha256,
         "requested_heartbeat_ms": context.requested_heartbeat_ms,
         "requested_conflate_ms": context.requested_conflate_ms,
@@ -692,6 +763,9 @@ def _quote_from_payload(raw: object) -> BetfairQuoteState:
 def _evidence_from_payload(raw: object) -> BetfairStreamPublicationEvidence:
     if type(raw) is not dict or raw.get("version") != SCHEMA_VERSION:
         raise ValueError("invalid publication record")
+    raw_fields = raw.get("market_data_fields")
+    if type(raw_fields) is not list:
+        raise ValueError("invalid publication record")
     try:
         record = BetfairStreamPublicationEvidence(
             quote=_quote_from_payload(raw.get("quote")),
@@ -700,6 +774,9 @@ def _evidence_from_payload(raw: object) -> BetfairStreamPublicationEvidence:
             provider_request_id=raw.get("provider_request_id"),
             subscription_generation=raw.get("subscription_generation"),
             criteria_sha256=raw.get("criteria_sha256"),
+            market_filter_sha256=raw.get("market_filter_sha256"),
+            market_data_fields=tuple(raw_fields),
+            ladder_levels=raw.get("ladder_levels"),
             upstream_context_sha256=raw.get("upstream_context_sha256"),
             requested_heartbeat_ms=raw.get("requested_heartbeat_ms"),
             requested_conflate_ms=raw.get("requested_conflate_ms"),

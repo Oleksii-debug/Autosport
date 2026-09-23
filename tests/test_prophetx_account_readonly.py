@@ -466,9 +466,9 @@ def test_clock_must_be_timezone_aware():
     "token",
     [
         "abc def",
-        "abc\\tdef",
-        "abc\\r\\nX-Injected: yes",
-        "abc\\x7fdef",
+        "abc\tdef",
+        "abc\r\nX-Injected: yes",
+        "abc\x7fdef",
     ],
 )
 def test_session_token_rejects_whitespace_and_header_control_characters(token: str):
@@ -488,8 +488,11 @@ def test_default_transport_disables_environment_proxies():
         if isinstance(handler, ProxyHandler)
     ]
 
-    assert len(proxy_handlers) == 1
-    assert proxy_handlers[0].proxies == {}
+    # urllib.build_opener intentionally omits an empty ProxyHandler from
+    # opener.handlers because it has no proxy_* dispatch methods to register.
+    # The security contract is therefore absence of any configured proxy handler,
+    # not presence of an inert empty handler object.
+    assert proxy_handlers == []
 
 
 @pytest.mark.parametrize(

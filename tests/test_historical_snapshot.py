@@ -177,6 +177,31 @@ class HistoricalSnapshotTests(unittest.TestCase):
         ):
             assert_historical_snapshot_provider_origin(reconstructed)
 
+    def test_product_owned_capture_rejects_live_constructor_rebind_before_io(self) -> None:
+        calls: list[str] = []
+
+        def forged_init(provider, *args, **kwargs):
+            calls.append("forged-init")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            ParlayApiTableTennisProvider,
+            "__init__",
+            forged_init,
+        ):
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "authority changed before acquisition",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=Path(temp) / "market.jsonl",
+                    evidence_path=Path(temp) / "evidence.json",
+                )
+
+        self.assertEqual(calls, [])
+
+
     def test_product_owned_capture_rejects_provider_dispatch_drift_before_io(self) -> None:
         calls: list[str] = []
 

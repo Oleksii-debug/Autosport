@@ -474,7 +474,9 @@ def _build_historical_snapshot_provider_origin_authority():
         if any(type(value) is not str or not value or value != value.strip() for value in markets):
             raise ValueError("markets must contain canonical non-empty text")
 
-        provider = provider_type(
+        provider = object.__new__(provider_type)
+        canonical_provider_init(
+            provider,
             api_key,
             public_preview=False,
             regions=regions,

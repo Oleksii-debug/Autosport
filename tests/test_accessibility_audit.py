@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -257,6 +258,99 @@ class AccessibilityAuditTests(unittest.TestCase):
         report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("list rows are not exposed" in item for item in report["failures"]))
+
+    def test_provider_trouble_is_redacted_before_evidence_projection(self):
+        description = self._passing_description()
+        secret_bearer = "ProviderTroubleBearer804"
+        secret_key = "ProviderTroubleApiKey804"
+        provider_trouble = (
+            f"Authorization: Bearer {secret_bearer}; "
+            f"api_key={secret_key}; ordinary=provider-timeout"
+        )
+        report = self._summarize(
+            SimpleNamespace(
+                **{
+                    **description.__dict__,
+                    "provider_trouble": (provider_trouble,),
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "FAIL")
+        rendered = "\n".join(report["provider_trouble"] + report["failures"])
+        self.assertIn("[REDACTED]", rendered)
+        self.assertIn("ordinary=provider-timeout", rendered)
+        self.assertNotIn(secret_bearer, rendered)
+        self.assertNotIn(secret_key, rendered)
+
+    def test_provider_stand_down_reason_is_redacted_without_changing_status_semantics(self):
+        description = self._passing_description()
+        secret_bearer = "StandDownBearer804"
+        secret_key = "StandDownApiKey804"
+        stand_down = (
+            f"Authorization: Bearer {secret_bearer}; "
+            f"api_key={secret_key}; ordinary=provider-disabled"
+        )
+        report = self._summarize(
+            SimpleNamespace(
+                **{
+                    **description.__dict__,
+                    "providers_stood_down_because": stand_down,
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "PASS")
+        rendered = report["providers_stood_down_because"]
+        self.assertIsInstance(rendered, str)
+        self.assertIn("[REDACTED]", rendered)
+        self.assertIn("ordinary=provider-disabled", rendered)
+        self.assertNotIn(secret_bearer, rendered)
+        self.assertNotIn(secret_key, rendered)
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+        self.assertFalse(report["real_money_execution"])
+
+    def test_provider_stand_down_reason_preserves_none(self):
+        report = self._summarize(self._passing_description())
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertIsNone(report["providers_stood_down_because"])
+
+    def test_failure_artifact_uses_shared_secret_redaction_boundary(self):
+        class ProviderOpaqueMarker804Error(RuntimeError):
+            pass
+
+        secret_bearer = "BearerSecret804Token"
+        secret_key = "ApiKeySecret804Value"
+        error = ProviderOpaqueMarker804Error(
+            f"Authorization: Bearer {secret_bearer}; "
+            f"api_key={secret_key}; ordinary=market-open"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "accessibility.json"
+            with patch.object(
+                accessibility_audit,
+                "WindowsAutosportApp",
+                side_effect=error,
+            ):
+                result = accessibility_audit.run_accessibility_audit(destination)
+
+            self.assertEqual(result, 1)
+            report = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "FAIL")
+            self.assertFalse(report["human_tested"])
+            self.assertFalse(report["nvda_verified"])
+            self.assertFalse(report["real_money_execution"])
+
+            failure = report["failures"][0]
+            self.assertTrue(failure.startswith("RuntimeError:"))
+            self.assertIn("[REDACTED]", failure)
+            self.assertIn("ordinary=market-open", failure)
+            self.assertNotIn(secret_bearer, failure)
+            self.assertNotIn(secret_key, failure)
+            self.assertNotIn("ProviderOpaqueMarker804Error", failure)
 
     def test_machine_evidence_publication_failure_preserves_existing_file(self):
         class _AuditApp:

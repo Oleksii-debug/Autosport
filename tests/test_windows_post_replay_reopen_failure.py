@@ -79,7 +79,7 @@ class WindowsPostReplayReopenFailureTests(unittest.TestCase):
                 ],
             )
             self.assertIn("заблоковано закрито при помилці", app.status.value)
-            fallback = "_HostileReopenError: <повідомлення недоступне>"
+            fallback = "Exception: <повідомлення недоступне>"
             self.assertTrue(any(fallback in line for line in app._logs), app._logs)
             error.assert_called_once()
             self.assertIn(fallback, error.call_args.args[1])

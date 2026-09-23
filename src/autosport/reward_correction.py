@@ -12,9 +12,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
 
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+
 CORRECTION_SCHEMA: Final = "autosport.reward_correction_ledger"
-CORRECTION_SCHEMA_VERSION: Final = 1
+CORRECTION_SCHEMA_VERSION: Final = 2
 _MAX_FIXED_DECIMAL_CHARS: Final = 512
+_MONOTONIC_DOMAIN: Final = "learning.reward-correction-ledger"
+_MONOTONIC_BINDING_SCHEMA: Final = "autosport.reward-correction-ledger-state.v1"
 
 class RewardCorrectionError(ValueError): pass
 
@@ -102,11 +109,7 @@ class RewardCorrectionAssertion:
         if self.superseded_reward==self.corrected_reward: raise RewardCorrectionError("correction must produce a distinct reward identity")
         if self.superseded_reward.authority_family!=self.corrected_reward.authority_family: raise RewardCorrectionError("reward correction cannot change reward authority family")
         _dec("corrected_reward_value",self.corrected_reward_value)
-        object.__setattr__(
-            self,
-            "corrected_available_at",
-            _tid("corrected_available_at",self.corrected_available_at),
-        )
+        object.__setattr__(self,"corrected_available_at",_tid("corrected_available_at",self.corrected_available_at))
         if not isinstance(self.correction_source,EvidenceRef): raise RewardCorrectionError("correction_source must be EvidenceRef")
         if isinstance(self.generation,bool) or not isinstance(self.generation,int) or self.generation<=0: raise RewardCorrectionError("generation must be a positive integer")
         if self.generation==1:
@@ -133,6 +136,7 @@ CREATE TABLE artifacts(family TEXT NOT NULL,id TEXT NOT NULL,sha TEXT NOT NULL,r
 CREATE TABLE dependencies(artifact_family TEXT NOT NULL,artifact_id TEXT NOT NULL,dep_family TEXT NOT NULL,dep_id TEXT NOT NULL,dep_sha TEXT NOT NULL,PRIMARY KEY(artifact_family,artifact_id,dep_family,dep_id),FOREIGN KEY(artifact_family,artifact_id) REFERENCES artifacts(family,id)) WITHOUT ROWID;
 CREATE TABLE corrections(correction_id TEXT PRIMARY KEY,action_id TEXT NOT NULL,transition_id TEXT NOT NULL,generation INTEGER NOT NULL,predecessor TEXT,sup_family TEXT NOT NULL,sup_id TEXT NOT NULL,sup_sha TEXT NOT NULL,new_family TEXT NOT NULL,new_id TEXT NOT NULL,new_sha TEXT NOT NULL,corrected_reward_value TEXT NOT NULL,available_at TEXT NOT NULL,source_family TEXT NOT NULL,source_id TEXT NOT NULL,source_sha TEXT NOT NULL,record_sha TEXT NOT NULL,UNIQUE(action_id,transition_id,generation)) WITHOUT ROWID;
 CREATE TABLE invalidations(correction_id TEXT NOT NULL,artifact_family TEXT NOT NULL,artifact_id TEXT NOT NULL,artifact_sha TEXT NOT NULL,PRIMARY KEY(correction_id,artifact_family,artifact_id),FOREIGN KEY(correction_id) REFERENCES corrections(correction_id)) WITHOUT ROWID;
+CREATE TABLE state_chain(generation INTEGER PRIMARY KEY,event_kind TEXT NOT NULL,event_id TEXT NOT NULL,event_sha TEXT NOT NULL,previous_state_sha TEXT NOT NULL,state_sha TEXT NOT NULL,UNIQUE(event_kind,event_id)) WITHOUT ROWID;
 CREATE INDEX dependencies_by_dependency ON dependencies(dep_family,dep_id,dep_sha);
 CREATE INDEX invalidations_by_artifact ON invalidations(artifact_family,artifact_id,artifact_sha);
 CREATE INDEX corrections_by_superseded ON corrections(sup_family,sup_id,sup_sha);
@@ -145,6 +149,8 @@ CREATE TRIGGER corrections_no_update BEFORE UPDATE ON corrections BEGIN SELECT R
 CREATE TRIGGER corrections_no_delete BEFORE DELETE ON corrections BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END;
 CREATE TRIGGER invalidations_no_update BEFORE UPDATE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END;
 CREATE TRIGGER invalidations_no_delete BEFORE DELETE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END;
+CREATE TRIGGER state_chain_no_update BEFORE UPDATE ON state_chain BEGIN SELECT RAISE(ABORT,'reward correction state chain is immutable'); END;
+CREATE TRIGGER state_chain_no_delete BEFORE DELETE ON state_chain BEGIN SELECT RAISE(ABORT,'reward correction state chain is immutable'); END;
 """
 _TRIGGER_SQL={
     "artifacts_no_update": "CREATE TRIGGER artifacts_no_update BEFORE UPDATE ON artifacts BEGIN SELECT RAISE(ABORT,'reward correction artifacts are immutable'); END",
@@ -155,6 +161,8 @@ _TRIGGER_SQL={
     "corrections_no_delete": "CREATE TRIGGER corrections_no_delete BEFORE DELETE ON corrections BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END",
     "invalidations_no_update": "CREATE TRIGGER invalidations_no_update BEFORE UPDATE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END",
     "invalidations_no_delete": "CREATE TRIGGER invalidations_no_delete BEFORE DELETE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END",
+    "state_chain_no_update": "CREATE TRIGGER state_chain_no_update BEFORE UPDATE ON state_chain BEGIN SELECT RAISE(ABORT,'reward correction state chain is immutable'); END",
+    "state_chain_no_delete": "CREATE TRIGGER state_chain_no_delete BEFORE DELETE ON state_chain BEGIN SELECT RAISE(ABORT,'reward correction state chain is immutable'); END",
 }
 _TRIGGERS=set(_TRIGGER_SQL)
 _INDEX_SQL={
@@ -195,40 +203,128 @@ def _reserve_new_ledger_path(path:Path):
         _discard_owned_ledger_path(path)
         raise RewardCorrectionError("cannot reserve reward correction ledger path") from exc
 
+def _state_binding_sha256(state_sha256:str)->str:
+    return _hash({"schema":_MONOTONIC_BINDING_SCHEMA,"state_sha256":_sha("state_sha256",state_sha256)})
+
+def _state_tx_id(state_sha256:str)->str:
+    return f"reward-correction-state-{_sha('state_sha256',state_sha256)}"
+
 class RewardCorrectionLedger:
-    def __init__(self,path:Path,connection:sqlite3.Connection): self.path=path; self._connection=connection
+    def __init__(self,path:Path,connection:sqlite3.Connection,authority:MonotonicWorkspaceAuthority):
+        self.path=path; self._connection=connection; self._authority=authority
     @staticmethod
     def _connect(path:Path):
         try:
             c=sqlite3.connect(str(path),timeout=.25,isolation_level=None); c.row_factory=sqlite3.Row; c.execute("PRAGMA foreign_keys=ON"); c.execute("PRAGMA busy_timeout=250"); return c
         except sqlite3.Error as exc: raise RewardCorrectionError("cannot open reward correction ledger") from exc
+    @staticmethod
+    def _new_authority(path:Path,authority_root:str|Path|None):
+        try:
+            return MonotonicWorkspaceAuthority(
+                workspace=path.parent.resolve(strict=False),
+                domain=_MONOTONIC_DOMAIN,
+                key=path.name,
+                authority_root=authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise RewardCorrectionError("cannot initialize reward correction monotonic authority") from exc
+    @staticmethod
+    def _genesis_state_sha256():
+        return _hash({"schema":_MONOTONIC_BINDING_SCHEMA,"genesis":True})
     @classmethod
-    def create(cls,path:str|Path):
+    def create(cls,path:str|Path,*,monotonic_authority_root:str|Path|None=None):
         path=Path(path)
         if not path.parent.is_dir(): raise RewardCorrectionError("reward correction ledger parent must already exist")
         _reserve_new_ledger_path(path)
-        c=None
+        c=None; authority=None; prepared=False
+        intended=cls._genesis_state_sha256(); tx_id=_state_tx_id(intended); binding=_state_binding_sha256(intended)
         try:
+            authority=cls._new_authority(path,monotonic_authority_root)
+            authority.prepare(tx_id=tx_id,observed_state_sha256=None,intended_state_sha256=intended,semantic_binding_sha256=binding)
+            prepared=True
             c=cls._connect(path)
             c.executescript(_SCHEMA); c.executemany("INSERT INTO metadata VALUES (?,?)",(("schema",CORRECTION_SCHEMA),("schema_version",str(CORRECTION_SCHEMA_VERSION))))
-            obj=cls(path,c); obj.verify_integrity(); return obj
+            obj=cls(path,c,authority); obj.verify_integrity()
+            if obj._current_state_sha256()!=intended: raise RewardCorrectionError("new reward correction ledger state mismatch")
+            authority.commit(tx_id=tx_id,observed_state_sha256=intended,semantic_binding_sha256=binding)
+            return obj
         except Exception:
             if c is not None: c.close()
             _discard_owned_ledger_path(path)
+            if prepared and authority is not None:
+                try: authority.abort(tx_id=tx_id,observed_state_sha256=None,semantic_binding_sha256=binding)
+                except MonotonicWorkspaceAuthorityError: pass
             raise
     @classmethod
-    def open(cls,path:str|Path):
+    def open(cls,path:str|Path,*,monotonic_authority_root:str|Path|None=None):
         path=Path(path)
         if not path.is_file(): raise RewardCorrectionError("reward correction ledger does not exist")
         c=cls._connect(path)
-        try: obj=cls(path,c); obj.verify_integrity(); return obj
-        except Exception: c.close(); raise
+        try:
+            authority=cls._new_authority(path,monotonic_authority_root)
+            obj=cls(path,c,authority)
+            c.execute("BEGIN IMMEDIATE")
+            obj.verify_integrity(); obj._recover_authority_state(obj._current_state_sha256())
+            c.execute("COMMIT")
+            return obj
+        except Exception:
+            try: c.execute("ROLLBACK")
+            except sqlite3.Error: pass
+            c.close(); raise
     def close(self): self._connection.close()
     def __enter__(self): return self
     def __exit__(self,*_): self.close()
     def _rollback(self):
         try: self._connection.execute("ROLLBACK")
         except sqlite3.Error: pass
+    def _current_state_sha256(self):
+        row=self._connection.execute("SELECT state_sha FROM state_chain ORDER BY generation DESC LIMIT 1").fetchone()
+        return self._genesis_state_sha256() if row is None else _sha("state_sha",row[0])
+    @staticmethod
+    def _artifact_state_event(node:DependencyArtifact):
+        event_id=_hash({"kind":"ARTIFACT","artifact":node.artifact.payload()})
+        event_sha=_hash({"kind":"ARTIFACT","artifact":node.artifact.payload(),"record_sha256":node.record_sha256})
+        return event_id,event_sha
+    @staticmethod
+    def _correction_state_event(a:RewardCorrectionAssertion,invalid:tuple[EvidenceRef,...]):
+        event_sha=_hash({"kind":"CORRECTION","correction_id":a.correction_id,"invalidated":[x.payload() for x in invalid]})
+        return a.correction_id,event_sha
+    def _append_state_event(self,kind:str,event_id:str,event_sha:str):
+        if kind not in {"ARTIFACT","CORRECTION"}: raise RewardCorrectionError("unsupported reward correction state event")
+        event_id=_sha("event_id",event_id); event_sha=_sha("event_sha",event_sha)
+        row=self._connection.execute("SELECT generation,state_sha FROM state_chain ORDER BY generation DESC LIMIT 1").fetchone()
+        generation=1 if row is None else int(row[0])+1
+        previous=self._genesis_state_sha256() if row is None else _sha("previous state",row[1])
+        state=_hash({"schema":_MONOTONIC_BINDING_SCHEMA,"generation":generation,"event_kind":kind,"event_id":event_id,"event_sha":event_sha,"previous_state_sha256":previous})
+        self._connection.execute("INSERT INTO state_chain VALUES (?,?,?,?,?,?)",(generation,kind,event_id,event_sha,previous,state))
+        return state
+    def _recover_authority_state(self,state:str):
+        state=_sha("state_sha256",state); tx_id=_state_tx_id(state); binding=_state_binding_sha256(state)
+        try:
+            self._authority.recover(observed_state_sha256=state,tx_id=tx_id,semantic_binding_sha256=binding)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise RewardCorrectionError("reward correction ledger rolled back or diverged from monotonic authority") from exc
+    def _seal_transaction(self,before_state:str,after_state:str):
+        before_state=_sha("before_state",before_state); after_state=_sha("after_state",after_state)
+        if after_state==before_state: raise RewardCorrectionError("reward correction mutation did not advance canonical state")
+        if self._current_state_sha256()!=after_state: raise RewardCorrectionError("reward correction state-chain tip mismatch")
+        tx_id=_state_tx_id(after_state); binding=_state_binding_sha256(after_state)
+        try:
+            self._authority.prepare(tx_id=tx_id,observed_state_sha256=before_state,intended_state_sha256=after_state,semantic_binding_sha256=binding)
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._rollback()
+            raise RewardCorrectionError("reward correction monotonic authority rejected mutation") from exc
+        try:
+            self._connection.execute("COMMIT")
+        except sqlite3.Error as exc:
+            self._rollback()
+            try: self._authority.abort(tx_id=tx_id,observed_state_sha256=before_state,semantic_binding_sha256=binding)
+            except MonotonicWorkspaceAuthorityError: pass
+            raise RewardCorrectionError("cannot commit reward correction ledger mutation") from exc
+        try:
+            self._authority.commit(tx_id=tx_id,observed_state_sha256=after_state,semantic_binding_sha256=binding)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise RewardCorrectionError("reward correction mutation committed locally but monotonic authority recovery is required") from exc
     def _deps(self,a:EvidenceRef):
         rows=self._connection.execute("SELECT dep_family,dep_id,dep_sha FROM dependencies WHERE artifact_family=? AND artifact_id=? ORDER BY dep_family,dep_id,dep_sha",(a.authority_family,a.evidence_id)).fetchall()
         return tuple(EvidenceRef(r[0],r[1],r[2]) for r in rows)
@@ -240,7 +336,7 @@ class RewardCorrectionLedger:
     def append_artifact(self,node:DependencyArtifact):
         if not isinstance(node,DependencyArtifact): raise TypeError("node must be DependencyArtifact")
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute("BEGIN IMMEDIATE"); before=self._current_state_sha256(); self._recover_authority_state(before)
             old=self._connection.execute("SELECT sha,record_sha FROM artifacts WHERE family=? AND id=?",(node.artifact.authority_family,node.artifact.evidence_id)).fetchone()
             if old:
                 if old[0]!=node.artifact.evidence_sha256 or old[1]!=node.record_sha256: raise RewardCorrectionError("artifact identity is already bound differently")
@@ -253,7 +349,8 @@ class RewardCorrectionLedger:
                 if known and known[0]!=d.evidence_sha256: raise RewardCorrectionError("dependency digest conflicts with registered artifact")
             self._connection.execute("INSERT INTO artifacts VALUES (?,?,?,?)",(*node.artifact.payload(),node.record_sha256))
             self._connection.executemany("INSERT INTO dependencies VALUES (?,?,?,?,?)",((node.artifact.authority_family,node.artifact.evidence_id,*d.payload()) for d in node.dependencies))
-            self._connection.execute("COMMIT"); return node.artifact
+            event_id,event_sha=self._artifact_state_event(node); after=self._append_state_event("ARTIFACT",event_id,event_sha)
+            self._seal_transaction(before,after); return node.artifact
         except RewardCorrectionError: self._rollback(); raise
         except sqlite3.Error as exc: self._rollback(); raise RewardCorrectionError("cannot append dependency artifact") from exc
     def _from_row(self,r:sqlite3.Row):
@@ -290,7 +387,7 @@ class RewardCorrectionLedger:
     def append_correction(self,a:RewardCorrectionAssertion):
         if not isinstance(a,RewardCorrectionAssertion): raise TypeError("assertion must be RewardCorrectionAssertion")
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute("BEGIN IMMEDIATE"); before=self._current_state_sha256(); self._recover_authority_state(before)
             row=self._connection.execute("SELECT * FROM corrections WHERE correction_id=?",(a.correction_id,)).fetchone()
             if row:
                 if self._from_row(row)!=a: raise RewardCorrectionError("correction identity payload is corrupt")
@@ -299,7 +396,8 @@ class RewardCorrectionLedger:
             self._connection.execute("INSERT INTO corrections VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(a.correction_id,a.action_id,a.transition_id,a.generation,a.predecessor_correction_id,*a.superseded_reward.payload(),*a.corrected_reward.payload(),_decimal_text("corrected_reward_value",a.corrected_reward_value),_tid("corrected_available_at",a.corrected_available_at),*a.correction_source.payload(),a.correction_id))
             invalid=self._closure(a.superseded_reward)
             self._connection.executemany("INSERT INTO invalidations VALUES (?,?,?,?)",((a.correction_id,*x.payload()) for x in invalid))
-            self._connection.execute("COMMIT"); return RewardCorrectionReceipt(a.correction_id,a.generation,invalid)
+            event_id,event_sha=self._correction_state_event(a,invalid); after=self._append_state_event("CORRECTION",event_id,event_sha)
+            self._seal_transaction(before,after); return RewardCorrectionReceipt(a.correction_id,a.generation,invalid)
         except RewardCorrectionError: self._rollback(); raise
         except sqlite3.IntegrityError as exc: self._rollback(); raise RewardCorrectionError("correction generation conflicts with durable history") from exc
         except sqlite3.Error as exc: self._rollback(); raise RewardCorrectionError("cannot append reward correction") from exc
@@ -332,6 +430,23 @@ class RewardCorrectionLedger:
                 seen_rewards.add(new_key)
                 if self._invalidated(a.correction_id)!=self._closure(a.superseded_reward): raise RewardCorrectionError("reward correction invalidation closure mismatch")
                 prior[key]=a
+            expected_events={}
+            for a in arts.values():
+                node=DependencyArtifact(a,self._deps(a)); event_id,event_sha=self._artifact_state_event(node); expected_events[("ARTIFACT",event_id)]=event_sha
+            for r in self._connection.execute("SELECT * FROM corrections ORDER BY action_id,transition_id,generation"):
+                a=self._from_row(r); event_id,event_sha=self._correction_state_event(a,self._invalidated(a.correction_id)); expected_events[("CORRECTION",event_id)]=event_sha
+            actual_events={}; previous=self._genesis_state_sha256(); generation=0
+            for r in self._connection.execute("SELECT generation,event_kind,event_id,event_sha,previous_state_sha,state_sha FROM state_chain ORDER BY generation"):
+                generation+=1
+                if r[0]!=generation or r[1] not in {"ARTIFACT","CORRECTION"}: raise RewardCorrectionError("reward correction state chain sequence mismatch")
+                event_id=_sha("state event id",r[2]); event_sha=_sha("state event sha",r[3]); stored_previous=_sha("state previous",r[4]); stored_state=_sha("state sha",r[5])
+                if stored_previous!=previous: raise RewardCorrectionError("reward correction state chain predecessor mismatch")
+                expected_state=_hash({"schema":_MONOTONIC_BINDING_SCHEMA,"generation":generation,"event_kind":r[1],"event_id":event_id,"event_sha":event_sha,"previous_state_sha256":previous})
+                if stored_state!=expected_state: raise RewardCorrectionError("reward correction state chain digest mismatch")
+                key=(r[1],event_id)
+                if key in actual_events: raise RewardCorrectionError("duplicate reward correction state event")
+                actual_events[key]=event_sha; previous=stored_state
+            if actual_events!=expected_events: raise RewardCorrectionError("reward correction state chain does not cover durable ledger state")
             if self._connection.execute("SELECT 1 FROM invalidations i LEFT JOIN corrections c ON c.correction_id=i.correction_id WHERE c.correction_id IS NULL LIMIT 1").fetchone(): raise RewardCorrectionError("orphan correction invalidation evidence")
             for a in arts.values():
                 for d in self._deps(a):

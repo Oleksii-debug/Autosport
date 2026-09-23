@@ -25,6 +25,7 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 THE_ODDS_API_BASE_URL = "https://api.the-odds-api.com"
 THE_ODDS_API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 THE_ODDS_API_TERMS_SOURCE_REF = "https://the-odds-api.com/terms-and-conditions.html"
+THE_ODDS_API_TERMS_LAST_UPDATED = "2026-08-31"
 THE_ODDS_API_DOCS_SOURCE_REF = "https://the-odds-api.com/liveapi/guides/v4/"
 
 
@@ -1057,9 +1058,11 @@ class TheOddsApiProvider:
                         "request": evidence.metadata(),
                         "terms": {
                             "source_ref": THE_ODDS_API_TERMS_SOURCE_REF,
-                            "analytics_research_training_permitted": True,
-                            "standalone_raw_redistribution_permitted": False,
-                            "wagering_operator": False,
+                            "last_updated": THE_ODDS_API_TERMS_LAST_UPDATED,
+                            "provider_stated_analytics_research_training_permitted": True,
+                            "provider_stated_standalone_raw_redistribution_permitted": False,
+                            "provider_stated_wagering_operator": False,
+                            "lawful_use_authority": False,
                         },
                     }
                     yield ProviderQuote(

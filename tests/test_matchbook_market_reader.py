@@ -31,6 +31,7 @@ def test_time_and_raw_binding():
     with pytest.raises(MatchbookMarketReadError): snap(observed_at="2026-09-23T00:00:06Z")
     with pytest.raises(MatchbookMarketReadError): snap(evaluated_at="2026-09-23T00:00:16Z")
     a=snap(observed_at="2026-09-23T02:00:00+02:00",raw_response=b'{}'); b=snap(raw_response=b'{ }'); assert a.observed_at.endswith('Z') and a.snapshot_sha256!=b.snapshot_sha256
+    assert snap(evaluated_at="2026-09-23T00:00:05Z").snapshot_sha256 != snap(evaluated_at="2026-09-23T00:00:06Z").snapshot_sha256
 def test_truth_fences_and_market_state():
     x=snap(); assert x.semantically_open and not x.research_usable and not x.actionable and not x.provider_origin_verified and not x.execution_authorized and not x.redistribution_authorized
     for s in (MatchbookMarketState.SUSPENDED,MatchbookMarketState.CLOSED,MatchbookMarketState.GRADED): assert not snap(market_state=s).semantically_open
@@ -51,3 +52,10 @@ def test_poll_fail_closed():
     a=plan_matchbook_poll(items(2),now="2026-09-23T00:00:10Z",cursor=None,max_requests_per_minute=2,batch_limit=1)
     with pytest.raises(MatchbookMarketReadError,match="different universe"): plan_matchbook_poll(items(3),now="2026-09-23T00:00:11Z",cursor=a.next_cursor,max_requests_per_minute=2,batch_limit=1)
     with pytest.raises(MatchbookMarketReadError,match="regressed"): plan_matchbook_poll(items(2),now="2026-09-23T00:00:09Z",cursor=a.next_cursor,max_requests_per_minute=2,batch_limit=1)
+
+
+def test_forged_poll_cursor_cannot_expand_budget():
+    with pytest.raises(MatchbookMarketReadError,match="cursor budget"):
+        MatchbookPollCursor("0"*64,0,"2026-09-23T00:00:00Z",-1)
+    with pytest.raises(MatchbookMarketReadError,match="cursor index"):
+        MatchbookPollCursor("0"*64,-1,"2026-09-23T00:00:00Z",0)

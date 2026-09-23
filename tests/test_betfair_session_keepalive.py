@@ -331,6 +331,71 @@ def test_issuer_fails_closed_if_json_loads_code_is_mutated(monkeypatch):
         )
 
 
+def test_issuer_fails_closed_if_json_scanner_make_scanner_is_rebound(monkeypatch):
+    def forged_make_scanner(_decoder):
+        def forged_scan_once(payload, _index):
+            return (
+                {
+                    "token": "session",
+                    "product": "app",
+                    "status": "SUCCESS",
+                    "error": "",
+                },
+                len(payload),
+            )
+
+        return forged_scan_once
+
+    monkeypatch.setattr(
+        subject.json.scanner,
+        "make_scanner",
+        forged_make_scanner,
+    )
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session")
+    )
+
+    with pytest.raises(
+        BetfairSessionKeepAliveError,
+        match="canonical authenticated-session authority binding changed",
+    ):
+        keep_alive_betfair_session(
+            _forged_jurisdiction(),
+            client=client,
+        )
+
+
+def test_issuer_fails_closed_if_json_object_parser_is_rebound(monkeypatch):
+    def forged_object(*args, **kwargs):
+        return (
+            {
+                "token": "session",
+                "product": "app",
+                "status": "SUCCESS",
+                "error": "",
+            },
+            0,
+        )
+
+    monkeypatch.setattr(
+        subject.json.decoder,
+        "JSONObject",
+        forged_object,
+    )
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session")
+    )
+
+    with pytest.raises(
+        BetfairSessionKeepAliveError,
+        match="canonical authenticated-session authority binding changed",
+    ):
+        keep_alive_betfair_session(
+            _forged_jurisdiction(),
+            client=client,
+        )
+
+
 def test_module_exposes_no_issuance_registry_or_factory_hook():
     for name in (
         "_ISSUED_KEEPALIVE",

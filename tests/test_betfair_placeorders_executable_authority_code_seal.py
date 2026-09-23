@@ -197,3 +197,45 @@ def test_midflight_place_action_code_replacement_cannot_mint_terminal_truth() ->
             )
         finally:
             target.__code__ = original_code
+
+def test_provider_http_post_closure_replacement_fails_before_durable_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        target = betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_POST
+        closure = target.__closure__
+        assert closure is not None
+        assert "private_opener" in target.__code__.co_freevars
+        cell = closure[target.__code__.co_freevars.index("private_opener")]
+        original_value = cell.cell_contents
+        try:
+            # Function identity and __code__ stay canonical while a captured
+            # provider-network authority object is persistently replaced.
+            cell.cell_contents = object()
+            assert (
+                target
+                is betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_POST
+            )
+            assert (
+                target.__code__
+                is betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_POST_CODE
+            )
+
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-provider-http-closure-replaced",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            cell.cell_contents = original_value
+

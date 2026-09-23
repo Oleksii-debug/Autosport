@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest import mock
 
 from autosport.causal_collector import CollectorDeltaStore
-from autosport.scheduled_source_universe import resolve_scheduled_source_universe
+from autosport.scheduled_source_universe import (
+    ScheduledSourceUniverseError,
+    resolve_scheduled_source_universe,
+)
 from autosport.source_universe_commitment import build_source_universe_commitment
 
 
@@ -93,7 +96,7 @@ class ScheduledSourceUniverseReadSeamTests(unittest.TestCase):
                 staticmethod(lambda _start, _end: (0, 0)),
             ):
                 with self.assertRaisesRegex(
-                    Exception,
+                    ScheduledSourceUniverseError,
                     "class-rebound",
                 ):
                     _resolve(store, path, candidate)

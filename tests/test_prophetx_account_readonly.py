@@ -5,7 +5,7 @@ from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException
 from urllib.error import HTTPError
-from urllib.request import ProxyHandler
+from urllib.request import OpenerDirector, ProxyHandler
 
 import pytest
 
@@ -86,25 +86,46 @@ def canonical_client_for(monkeypatch, *responses: ProphetXHttpResponse):
     pending = list(responses)
     calls: list[dict[str, object]] = []
 
-    def get(
-        self,
-        url: str,
-        *,
-        headers,
-        timeout_seconds: float,
-    ) -> ProphetXHttpResponse:
+    class FakeNetworkResponse:
+        def __init__(self, response: ProphetXHttpResponse) -> None:
+            self._response = response
+            self.headers = {
+                "Content-Type": response.content_type,
+            }
+            if response.content_encoding is not None:
+                self.headers["Content-Encoding"] = response.content_encoding
+            self.headers["Content-Length"] = str(len(response.body))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, limit: int) -> bytes:
+            return self._response.body
+
+        def getcode(self) -> int:
+            return self._response.status
+
+        def geturl(self) -> str:
+            return self._response.final_url
+
+    def open_response(self, request, timeout=None):
         calls.append(
             {
-                "url": url,
-                "headers": dict(headers),
-                "timeout_seconds": timeout_seconds,
+                "url": request.full_url,
+                "timeout_seconds": timeout,
             }
         )
         if not pending:
             raise AssertionError("unexpected canonical transport call")
-        return pending.pop(0)
+        return FakeNetworkResponse(pending.pop(0))
 
-    monkeypatch.setattr(UrllibProphetXHttpTransport, "get", get)
+    # The positive-path fixture substitutes the stdlib network boundary before
+    # product construction; it does not replace product transport/get/fetch
+    # authority after construction.
+    monkeypatch.setattr(OpenerDirector, "open", open_response)
     client = ProphetXReadOnlyClient(
         ProphetXSessionToken("session-secret"),
         clock=lambda: FIXED_NOW,
@@ -216,7 +237,57 @@ def test_replacing_product_owned_transport_invalidates_positive_authority():
             frozenset({BookmakerCapability.BALANCE_READ})
         )
 
-    assert len(replacement.calls) == 1
+    assert replacement.calls == []
+
+
+def test_canonical_wallet_authority_rejects_class_get_rebinding_before_network(
+    monkeypatch,
+):
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    calls: list[str] = []
+
+    def fake_get(self, url, *, headers, timeout_seconds):
+        calls.append(url)
+        return http_response()
+
+    monkeypatch.setattr(UrllibProphetXHttpTransport, "get", fake_get)
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="requires product-owned transport",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert calls == []
+
+
+def test_canonical_wallet_authority_rejects_hidden_fetch_replacement_before_network():
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    calls: list[str] = []
+
+    def fake_fetch(url, *, headers, timeout_seconds):
+        calls.append(url)
+        return http_response()
+
+    client._transport._provider_fetch = fake_fetch  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="requires product-owned transport",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert calls == []
 
 
 def test_failed_unmatched_balance_sync_is_preserved_but_cannot_mint_account_snapshot():

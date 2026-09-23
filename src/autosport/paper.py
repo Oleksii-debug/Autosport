@@ -428,6 +428,119 @@ def _make_ticket_opening_authority_registry():
 ) = _make_ticket_opening_authority_registry()
 
 
+def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
+    lifecycle = getattr(book, "_lifecycle", None)
+    settlement_times = getattr(book, "_settlement_times", None)
+    if type(lifecycle) is not list or type(settlement_times) is not dict:
+        raise ValueError("PaperBook causal history state is not canonical")
+    return (
+        tuple(lifecycle),
+        tuple(sorted(settlement_times.items())),
+    )
+
+
+def _make_paperbook_causal_history_authority_registry():
+    authorities = WeakKeyDictionary()
+    guard = threading.Lock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            authorities[book] = ((), ())
+
+    def install_verified_snapshot(book: object) -> None:
+        snapshot = _paperbook_causal_history_snapshot(book)
+        with guard:
+            if book not in authorities:
+                raise RuntimeError(
+                    "PaperBook causal history authority registry is unavailable"
+                )
+            authorities[book] = snapshot
+
+    def require(book: object) -> None:
+        actual = _paperbook_causal_history_snapshot(book)
+        with guard:
+            expected = authorities.get(book)
+        if expected is None:
+            raise ValueError(
+                "PaperBook lacks product-issued causal history authority"
+            )
+        if actual != expected:
+            raise ValueError(
+                "PaperBook causal history changed outside product-issued transitions"
+            )
+
+    def require_candidate(source_book: object, candidate_book: object) -> None:
+        candidate = _paperbook_causal_history_snapshot(candidate_book)
+        with guard:
+            expected = authorities.get(source_book)
+        if expected is None:
+            raise ValueError(
+                "PaperBook lacks product-issued causal history authority"
+            )
+        if candidate != expected:
+            raise ValueError(
+                "PaperBook serialized candidate causal history differs from "
+                "product-issued authority"
+            )
+
+    def advance_open(book: object, ticket_id: str) -> None:
+        with guard:
+            expected = authorities.get(book)
+            if expected is None:
+                raise RuntimeError(
+                    "PaperBook causal history authority registry is unavailable"
+                )
+            lifecycle, settlement_times = expected
+            authorities[book] = (
+                lifecycle + (("open", ticket_id, (), ()),),
+                settlement_times,
+            )
+
+    def advance_settle(
+        book: object,
+        ticket_id: str,
+        winners: tuple[str, ...],
+        voids: tuple[str, ...],
+        settled_at: str | None,
+    ) -> None:
+        with guard:
+            expected = authorities.get(book)
+            if expected is None:
+                raise RuntimeError(
+                    "PaperBook causal history authority registry is unavailable"
+                )
+            lifecycle, settlement_times = expected
+            settlement_mapping = dict(settlement_times)
+            if ticket_id in settlement_mapping:
+                raise ValueError(
+                    "PaperBook causal history settlement authority cannot be rebound"
+                )
+            settlement_mapping[ticket_id] = settled_at
+            authorities[book] = (
+                lifecycle + (("settle", ticket_id, winners, voids),),
+                tuple(sorted(settlement_mapping.items())),
+            )
+
+    return (
+        register_book,
+        install_verified_snapshot,
+        require,
+        require_candidate,
+        advance_open,
+        advance_settle,
+    )
+
+
+(
+    _register_paperbook_causal_history_authority_book,
+    _install_verified_paperbook_causal_history_authority,
+    _require_paperbook_causal_history_authority,
+    _require_snapshot_candidate_causal_history_authority,
+    _advance_paperbook_causal_history_open,
+    _advance_paperbook_causal_history_settle,
+) = _make_paperbook_causal_history_authority_registry()
+
+
 def _snapshot_witness_digest(payload: dict[str, object]) -> str:
     try:
         encoded = json.dumps(
@@ -703,6 +816,7 @@ class PaperBook:
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
         _register_paperbook_state_lock(self)
         _register_ticket_opening_authority_book(self)
+        _register_paperbook_causal_history_authority_book(self)
         initial = Decimal(str(initial_bankroll))
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
@@ -810,6 +924,7 @@ class PaperBook:
         currency: str | None = None,
     ) -> PaperTicket:
         self._require_snapshot_authority_for_economic_mutation()
+        _require_paperbook_causal_history_authority(self)
         amount = Decimal(str(stake))
         new_balance = self._debit_balance(self.balance, amount)
 
@@ -851,6 +966,7 @@ class PaperBook:
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
+        _advance_paperbook_causal_history_open(self, ticket.ticket_id)
         return ticket
 
     @staticmethod
@@ -920,6 +1036,7 @@ class PaperBook:
         settled_at: str | None = None,
     ) -> PaperTicket:
         self._require_snapshot_authority_for_economic_mutation()
+        _require_paperbook_causal_history_authority(self)
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -964,6 +1081,13 @@ class PaperBook:
             )
         )
         self._settlement_times[ticket.ticket_id] = settlement_time
+        _advance_paperbook_causal_history_settle(
+            self,
+            ticket.ticket_id,
+            tuple(sorted(winners)),
+            tuple(sorted(voids)),
+            settlement_time,
+        )
         return ticket
 
     def _lifecycle_to_json(self) -> list[dict[str, object]]:
@@ -1089,6 +1213,7 @@ class PaperBook:
         # opening history from self-baselining when the candidate is decoded.
         candidate = self._decode_snapshot_bytes(snapshot_bytes)
         _require_snapshot_candidate_opening_authority(self, candidate)
+        _require_snapshot_candidate_causal_history_authority(self, candidate)
         snapshot_sha = _snapshot_sha256(snapshot_bytes)
 
         temporary: Path | None = None
@@ -1571,6 +1696,7 @@ class PaperBook:
         book: "PaperBook",
         *,
         require_private_opening_authority: bool = True,
+        require_private_causal_history_authority: bool = True,
     ) -> None:
         cls._require_finite(book.initial_bankroll, "initial_bankroll")
         cls._require_finite(book.balance, "balance")
@@ -1631,6 +1757,8 @@ class PaperBook:
                 raise ValueError("PaperBook snapshot won ticket payout must exceed stake")
 
         cls._validate_lifecycle_reachability(book)
+        if require_private_causal_history_authority:
+            _require_paperbook_causal_history_authority(book)
 
     @classmethod
     def _parse_lifecycle_key_list(cls, value: object, label: str) -> tuple[str, ...]:
@@ -1946,6 +2074,7 @@ class PaperBook:
         cls._validate_loaded_state(
             book,
             require_private_opening_authority=False,
+            require_private_causal_history_authority=False,
         )
         _revoke_snapshot_authority(book)
         return book
@@ -2009,6 +2138,7 @@ class PaperBook:
                     return book
                 raise
             _install_verified_ticket_opening_authority(book)
+            _install_verified_paperbook_causal_history_authority(book)
             cls._validate_loaded_state(book)
             _bind_snapshot_authority(
                 book,

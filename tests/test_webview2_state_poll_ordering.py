@@ -154,3 +154,38 @@ def test_mutating_dispatch_invalidates_pre_and_mid_action_state_snapshots() -> N
     assert "Do not overwrite a newer action result with an obsolete error." in refresh_body
 
     assert "globalThis.autosportDispatch = dispatch;" in javascript
+
+def test_beforeunload_closes_refresh_scheduler_before_late_state_projection() -> None:
+    javascript = _APP_JS.read_text(encoding="utf-8")
+    refresh_body = _javascript_function_body(javascript, "refreshState")
+
+    assert "let refreshClosed = false;" in javascript
+    assert "if (refreshClosed) return;" in refresh_body
+
+    state_read = refresh_body.find("const state = await apiState();")
+    post_read_close_fence = refresh_body.find(
+        "if (refreshClosed) break;",
+        state_read,
+    )
+    render = refresh_body.find("renderState(state);")
+    assert state_read >= 0
+    assert post_read_close_fence > state_read
+    assert render > post_read_close_fence
+
+    assert refresh_body.count("if (refreshClosed) break;") >= 2
+    assert "} while (refreshPending && !refreshClosed);" in refresh_body
+
+    unload_marker = 'window.addEventListener("beforeunload", () => {'
+    unload_start = javascript.find(unload_marker)
+    assert unload_start >= 0
+    unload_end = javascript.find("});", unload_start)
+    assert unload_end > unload_start
+    unload_body = javascript[unload_start:unload_end]
+
+    close_position = unload_body.find("refreshClosed = true;")
+    pending_position = unload_body.find("refreshPending = false;")
+    clear_position = unload_body.find("window.clearInterval(pollHandle)")
+    assert close_position >= 0
+    assert pending_position > close_position
+    assert clear_position > pending_position
+

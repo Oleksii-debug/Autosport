@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import runpy
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
+    BetfairReadOnlyError,
+    BetfairSessionCredentials,
+)
 from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
     _evaluate_betfair_provider_state_semantics,
@@ -66,4 +72,194 @@ def test_injected_transport_semantic_result_is_not_transferable_provider_authori
         match="not issued by canonical verifier",
     ):
         assert_verified_provider_evidence_authoritative(evidence)
+
+def _find_closure_value(root, predicate):
+    pending = [root]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if predicate(current):
+            return current
+        closure = getattr(current, "__closure__", None)
+        if closure is None:
+            continue
+        for cell in closure:
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if predicate(value):
+                return value
+            if callable(value) and getattr(value, "__closure__", None) is not None:
+                pending.append(value)
+    raise AssertionError("expected authority closure value was not found")
+
+
+def _trusted_capture_matcher():
+    return _find_closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        lambda value: (
+            callable(value)
+            and getattr(value, "__name__", "")
+            == "trusted_capture_matches"
+        ),
+    )
+
+
+def _private_authority_opener():
+    return _find_closure_value(
+        BetfairReadOnlyClient._rpc,
+        lambda value: (
+            type(value).__module__ == "urllib.request"
+            and hasattr(value, "_open")
+            and hasattr(value, "_call_chain")
+            and hasattr(value, "handlers")
+        ),
+    )
+
+
+def _current_capture_witnesses(capture):
+    current_order = capture.current_pages[0].orders[0]
+    current_result = {
+        "currentOrders": [
+            {
+                "betId": current_order.bet_id,
+                "marketId": current_order.market_id,
+                "selectionId": current_order.selection_id,
+                "side": current_order.side,
+                "status": current_order.status,
+                "placedDate": current_order.placed_date,
+                "priceSize": {
+                    "price": current_order.price,
+                    "size": current_order.requested_size,
+                },
+                "averagePriceMatched": current_order.average_price_matched,
+                "sizeMatched": current_order.size_matched,
+                "sizeRemaining": current_order.size_remaining,
+                "customerOrderRef": current_order.customer_order_ref,
+            }
+        ],
+        "moreAvailable": False,
+    }
+    witnesses = [
+        (
+            "SportsAPING/v1.0/listMarketCatalogue",
+            {
+                "filter": {"marketIds": [capture.market_id]},
+                "marketProjection": ["EVENT"],
+                "maxResults": 1,
+            },
+            [
+                {
+                    "marketId": capture.market_id,
+                    "event": {"id": capture.market_event.event_id},
+                }
+            ],
+            capture.market_event.evidence,
+        ),
+        (
+            "SportsAPING/v1.0/listCurrentOrders",
+            {
+                "orderProjection": "ALL",
+                "fromRecord": 0,
+                "recordCount": capture.page_size,
+                "customerOrderRefs": [capture.provider_order_ref],
+                "marketIds": [capture.market_id],
+            },
+            current_result,
+            capture.current_pages[0].evidence,
+        ),
+    ]
+    for status, pages in capture.cleared_pages_by_status:
+        witnesses.append(
+            (
+                "SportsAPING/v1.0/listClearedOrders",
+                {
+                    "betStatus": status,
+                    "groupBy": "BET",
+                    "fromRecord": 0,
+                    "recordCount": capture.page_size,
+                    "customerOrderRefs": [capture.provider_order_ref],
+                    "marketIds": [capture.market_id],
+                },
+                {"clearedOrders": [], "moreAvailable": False},
+                pages[0].evidence,
+            )
+        )
+    return witnesses
+
+
+def test_private_opener_internal_dispatch_shadow_fails_before_network() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+    opener = _private_authority_opener()
+    called = False
+
+    def synthetic_open(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("synthetic opener must never be trusted")
+
+    opener._open = synthetic_open
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair network authority changed",
+        ):
+            client.read_execution_readback(
+                action_id="action-private-opener-falsifier",
+                market_id="1.234",
+            )
+    finally:
+        del opener._open
+
+    assert called is False
+
+
+def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
+    action = _action()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+    matcher = _trusted_capture_matcher()
+    witnesses = _current_capture_witnesses(capture)
+
+    assert matcher(
+        capture,
+        witnesses,
+        action_id=capture.action_id,
+        market_id=capture.market_id,
+        provider_order_ref=capture.provider_order_ref,
+        page_size=capture.page_size,
+    )
+
+    order = capture.current_pages[0].orders[0]
+    original = order.average_price_matched
+    object.__setattr__(
+        order,
+        "average_price_matched",
+        Decimal("999"),
+    )
+    try:
+        assert not matcher(
+            capture,
+            witnesses,
+            action_id=capture.action_id,
+            market_id=capture.market_id,
+            provider_order_ref=capture.provider_order_ref,
+            page_size=capture.page_size,
+        )
+    finally:
+        object.__setattr__(
+            order,
+            "average_price_matched",
+            original,
+        )
 

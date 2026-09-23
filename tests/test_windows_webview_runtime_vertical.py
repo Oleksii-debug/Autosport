@@ -106,6 +106,8 @@ def _bare_controller(tmp_path: Path) -> AutosportWebController:
     controller.workspace = tmp_path
     controller._active_workspace = tmp_path
     controller._recovery_required_workspaces = set()
+    controller.strategy_id = "baseline-v1"
+    controller.research_plan = None
     controller.dataset_worker = _IdleWorker()
     controller.replay_worker = _IdleWorker()
     controller.live_worker = _IdleWorker()

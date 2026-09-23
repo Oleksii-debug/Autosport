@@ -143,7 +143,7 @@ class ReferencePriceProtocol:
     """
 
     eligible_source_ids: tuple[str, ...]
-    target_source_id: str
+    target_price_source_id: str
     target_inclusion_policy: ReferenceTargetInclusionPolicy
     price_semantics: str
     max_age_seconds: int
@@ -195,7 +195,7 @@ class ReferencePriceProtocol:
             price_source_ids,
         )
 
-        target = _text(self.target_source_id, "target_source_id")
+        target = _text(self.target_price_source_id, "target_price_source_id")
         if type(self.target_inclusion_policy) is not ReferenceTargetInclusionPolicy:
             raise ReferencePriceEvidenceError(
                 "target_inclusion_policy must be ReferenceTargetInclusionPolicy"
@@ -206,7 +206,7 @@ class ReferencePriceProtocol:
             and target in price_source_ids
         ):
             raise ReferencePriceEvidenceError(
-                "excluded target_source_id cannot appear in eligible_source_ids"
+                "excluded target_price_source_id cannot appear in eligible_price_source_ids"
             )
         if (
             self.target_inclusion_policy
@@ -214,7 +214,7 @@ class ReferencePriceProtocol:
             and target not in price_source_ids
         ):
             raise ReferencePriceEvidenceError(
-                "included target_source_id must appear in eligible_source_ids"
+                "included target_price_source_id must appear in eligible_price_source_ids"
             )
 
         semantics = _text(self.price_semantics, "price_semantics")
@@ -246,7 +246,7 @@ class ReferencePriceProtocol:
                 "unsupported reference aggregation_method"
             )
 
-        object.__setattr__(self, "target_source_id", target)
+        object.__setattr__(self, "target_price_source_id", target)
         object.__setattr__(self, "price_semantics", semantics)
         object.__setattr__(self, "max_age_seconds", max_age)
         object.__setattr__(self, "max_skew_seconds", max_skew)
@@ -264,7 +264,7 @@ class ReferencePriceProtocol:
             "schema_version": 1,
             "eligible_source_ids": list(self.eligible_source_ids),
             "eligible_price_source_ids": list(self.eligible_price_source_ids),
-            "target_source_id": self.target_source_id,
+            "target_price_source_id": self.target_price_source_id,
             "target_inclusion_policy": self.target_inclusion_policy.value,
             "price_semantics": self.price_semantics,
             "max_age_seconds": self.max_age_seconds,

@@ -15,7 +15,9 @@ from .real_execution_ledger import (
     RealExecutionLedger,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
 
 TIMING_STATUS_UNKNOWN = "UNKNOWN"
 TIMING_REASON_NO_MONOTONIC_WITNESS = "NO_MONOTONIC_WITNESS"
@@ -186,6 +188,8 @@ def _reconciliation_tuple_present(
 class EmpiricalExecutionEvidence:
     source_ledger_sha256: str
     source_event_count: int
+    source_product_authority_verified: bool
+    source_root_authority_status: str
 
     plan_id: str
     plan_fingerprint: str
@@ -252,6 +256,20 @@ class EmpiricalExecutionEvidence:
     def __post_init__(self, _issuance_token: object | None) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise EmpiricalExecutionEvidenceError("unsupported empirical evidence schema")
+        if type(self.source_product_authority_verified) is not bool:
+            raise EmpiricalExecutionEvidenceError(
+                "source_product_authority_verified must be bool"
+            )
+        _text(self.source_root_authority_status, "source_root_authority_status")
+        if (
+            self.source_product_authority_verified is not False
+            or self.source_root_authority_status
+            != SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "current empirical projection does not verify product-owned "
+                "ledger/workspace authority"
+            )
 
         for name in (
             "plan_id",
@@ -522,6 +540,8 @@ class EmpiricalExecutionEvidence:
         )
 
     def assert_projection_issued(self) -> None:
+        """Verify canonical projection integrity, not product-root provenance."""
+
         issued = _ISSUED_EMPIRICAL_EVIDENCE.get(id(self))
         try:
             current_fingerprint = _digest(
@@ -552,6 +572,8 @@ class EmpiricalExecutionEvidence:
             "schema_version": self.schema_version,
             "source_ledger_sha256": self.source_ledger_sha256,
             "source_event_count": self.source_event_count,
+            "source_product_authority_verified": self.source_product_authority_verified,
+            "source_root_authority_status": self.source_root_authority_status,
             "plan_id": self.plan_id,
             "plan_fingerprint": self.plan_fingerprint,
             "action_id": self.action_id,
@@ -652,7 +674,9 @@ def build_empirical_execution_evidence(
     complete readback authority. A future typed upstream authority may qualify that
     state without rewriting this legacy evidence. This function remains read-only
     and grants no provider-write, retry, settlement, profitability, real-money, or
-    readiness authority.
+    readiness authority. Builder issuance proves projection integrity only: because
+    the ledger object is caller-supplied, this API also records that product-owned
+    workspace/ledger-root provenance is currently unverified.
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be canonical RealExecutionLedger")
@@ -843,6 +867,8 @@ def build_empirical_execution_evidence(
     evidence = EmpiricalExecutionEvidence(
         source_ledger_sha256=snapshot.sha256,
         source_event_count=snapshot.event_count,
+        source_product_authority_verified=False,
+        source_root_authority_status=SOURCE_ROOT_AUTHORITY_UNQUALIFIED,
         plan_id=plan_id,
         plan_fingerprint=plan_fingerprint,
         action_id=action_id,
@@ -912,7 +938,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 2
+POPULATION_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -930,6 +956,8 @@ class EmpiricalExecutionPopulationEvidence:
 
     source_ledger_sha256: str
     source_event_count: int
+    source_product_authority_verified: bool
+    source_root_authority_status: str
     evaluation_protocol_sha256: str
     samples: tuple[EmpiricalExecutionEvidence, ...]
     schema_version: int = POPULATION_SCHEMA_VERSION
@@ -961,6 +989,20 @@ class EmpiricalExecutionPopulationEvidence:
                 "unsupported empirical population evidence schema"
             )
         _sha256(self.source_ledger_sha256, "source_ledger_sha256")
+        if type(self.source_product_authority_verified) is not bool:
+            raise EmpiricalExecutionEvidenceError(
+                "source_product_authority_verified must be bool"
+            )
+        _text(self.source_root_authority_status, "source_root_authority_status")
+        if (
+            self.source_product_authority_verified is not False
+            or self.source_root_authority_status
+            != SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "current empirical population does not verify product-owned "
+                "ledger/workspace authority"
+            )
         _sha256(self.evaluation_protocol_sha256, "evaluation_protocol_sha256")
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError(
@@ -992,6 +1034,15 @@ class EmpiricalExecutionPopulationEvidence:
             if sample.source_event_count != self.source_event_count:
                 raise EmpiricalExecutionEvidenceError(
                     "population sample source event-count mismatch"
+                )
+            if (
+                sample.source_product_authority_verified
+                is not self.source_product_authority_verified
+                or sample.source_root_authority_status
+                != self.source_root_authority_status
+            ):
+                raise EmpiricalExecutionEvidenceError(
+                    "population sample source-root authority mismatch"
                 )
 
         total = len(self.samples)
@@ -1190,6 +1241,8 @@ class EmpiricalExecutionPopulationEvidence:
             "schema_version": self.schema_version,
             "source_ledger_sha256": self.source_ledger_sha256,
             "source_event_count": self.source_event_count,
+            "source_product_authority_verified": self.source_product_authority_verified,
+            "source_root_authority_status": self.source_root_authority_status,
             "evaluation_protocol_sha256": self.evaluation_protocol_sha256,
             "denominator_sha256": self.denominator_sha256,
             "attempt_ids": [sample.attempt_id for sample in self.samples],
@@ -1291,6 +1344,12 @@ def _issue_empirical_execution_population_evidence(
     evidence = object.__new__(EmpiricalExecutionPopulationEvidence)
     object.__setattr__(evidence, "source_ledger_sha256", source_ledger_sha256)
     object.__setattr__(evidence, "source_event_count", source_event_count)
+    object.__setattr__(evidence, "source_product_authority_verified", False)
+    object.__setattr__(
+        evidence,
+        "source_root_authority_status",
+        SOURCE_ROOT_AUTHORITY_UNQUALIFIED,
+    )
     object.__setattr__(
         evidence,
         "evaluation_protocol_sha256",
@@ -1313,6 +1372,8 @@ def build_empirical_execution_population_evidence(
     The function deliberately takes no caller-provided sample/attempt subset.
     Every ATTEMPT_RESERVED identity in the verified snapshot is projected. A
     concurrent ledger mutation fails closed rather than silently mixing snapshots.
+    The aggregate is still explicitly unqualified as product-owned root provenance
+    until a separate durable workspace authority is composed on this lineage.
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be canonical RealExecutionLedger")

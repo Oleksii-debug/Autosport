@@ -189,7 +189,7 @@ def test_session_issued_statement_row_preserves_provider_economics_and_scope(
     assert page.source_read_evidence_sha256 == read.evidence_sha256
     assert page.pagination_present is True
     assert page.next_page_query is None
-    assert page.query_exhausted is True
+    assert page.request_page_chain_exhausted is True
     assert len(page.rows) == 1
 
     row = page.rows[0]
@@ -231,7 +231,30 @@ def test_missing_pagination_never_mints_complete_query_claim(monkeypatch) -> Non
 
     assert page.pagination_present is False
     assert page.next_page_query is None
-    assert page.query_exhausted is False
+    assert page.request_page_chain_exhausted is False
+
+
+def test_continuation_request_exhaustion_is_not_global_history_completeness(
+    monkeypatch,
+) -> None:
+    query = SmarketsAccountActivityQuery(
+        limit=20,
+        pagination_last_seq=40,
+        pagination_last_subseq=2,
+        sort="-seq,-subseq",
+    )
+    session, read = _session_with_activity(
+        monkeypatch,
+        _activity_payload([_row(seq=39, subseq=1)], pagination={"next_page": None}),
+        query=query,
+    )
+
+    page = parse_smarkets_account_activity_page(session, read)
+
+    assert page.request_page_chain_exhausted is True
+    assert not hasattr(page, "history_complete")
+    assert not hasattr(page, "statement_complete")
+    assert not hasattr(page, "complete_history")
 
 
 def test_zero_limit_query_never_mints_exhausted_window(monkeypatch) -> None:
@@ -244,7 +267,7 @@ def test_zero_limit_query_never_mints_exhausted_window(monkeypatch) -> None:
 
     page = parse_smarkets_account_activity_page(session, read)
 
-    assert page.query_exhausted is False
+    assert page.request_page_chain_exhausted is False
 
 
 def test_next_page_binds_last_provider_cursor_and_original_scope(monkeypatch) -> None:
@@ -267,7 +290,7 @@ def test_next_page_binds_last_provider_cursor_and_original_scope(monkeypatch) ->
 
     page = parse_smarkets_account_activity_page(session, read)
 
-    assert page.query_exhausted is False
+    assert page.request_page_chain_exhausted is False
     assert page.next_page_query == next_page
 
 

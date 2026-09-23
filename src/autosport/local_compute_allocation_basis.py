@@ -715,10 +715,10 @@ class LocalComputeAllocationBasisAuthorityStore:
             available_at = _instant(record.available_at, "available_at")
             if (
                 previous_available_at is not None
-                and available_at < previous_available_at
+                and available_at <= previous_available_at
             ):
                 raise LocalComputeAllocationBasisError(
-                    "allocation basis availability history regressed"
+                    "allocation basis availability history did not strictly advance"
                 )
             previous_available_at = available_at
             ids.add(record.basis_id)
@@ -828,10 +828,10 @@ class LocalComputeAllocationBasisAuthorityStore:
             if (
                 self._records
                 and available_instant
-                < _instant(self._records[-1].available_at, "available_at")
+                <= _instant(self._records[-1].available_at, "available_at")
             ):
                 raise LocalComputeAllocationBasisError(
-                    "product clock regressed before allocation basis publication"
+                    "product clock did not advance before allocation basis publication"
                 )
             if _instant(
                 review.measurement_period_end,

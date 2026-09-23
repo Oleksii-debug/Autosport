@@ -157,7 +157,13 @@ _TRIGGER_SQL={
     "invalidations_no_delete": "CREATE TRIGGER invalidations_no_delete BEFORE DELETE ON invalidations BEGIN SELECT RAISE(ABORT,'reward invalidations are immutable'); END",
 }
 _TRIGGERS=set(_TRIGGER_SQL)
-_INDEXES={"dependencies_by_dependency","invalidations_by_artifact","corrections_by_superseded","corrections_by_corrected"}
+_INDEX_SQL={
+    "dependencies_by_dependency": "CREATE INDEX dependencies_by_dependency ON dependencies(dep_family,dep_id,dep_sha)",
+    "invalidations_by_artifact": "CREATE INDEX invalidations_by_artifact ON invalidations(artifact_family,artifact_id,artifact_sha)",
+    "corrections_by_superseded": "CREATE INDEX corrections_by_superseded ON corrections(sup_family,sup_id,sup_sha)",
+    "corrections_by_corrected": "CREATE INDEX corrections_by_corrected ON corrections(new_family,new_id,new_sha)",
+}
+_INDEXES=set(_INDEX_SQL)
 
 def _normalized_trigger_sql(value:object):
     if not isinstance(value,str): return None
@@ -165,6 +171,11 @@ def _normalized_trigger_sql(value:object):
 
 def _is_canonical_trigger_sql(name:str,value:object):
     expected=_TRIGGER_SQL.get(name)
+    if expected is None: return False
+    return _normalized_trigger_sql(value)==_normalized_trigger_sql(expected)
+
+def _is_canonical_index_sql(name:str,value:object):
+    expected=_INDEX_SQL.get(name)
     if expected is None: return False
     return _normalized_trigger_sql(value)==_normalized_trigger_sql(expected)
 
@@ -297,8 +308,8 @@ class RewardCorrectionLedger:
             if dict(self._connection.execute("SELECT key,value FROM metadata"))!={"schema":CORRECTION_SCHEMA,"schema_version":str(CORRECTION_SCHEMA_VERSION)}: raise RewardCorrectionError("reward correction metadata mismatch")
             triggers={r[0]:r[1] for r in self._connection.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'")}
             if set(triggers)!=_TRIGGERS or any(not _is_canonical_trigger_sql(name,triggers[name]) for name in _TRIGGERS): raise RewardCorrectionError("reward correction immutability triggers mismatch")
-            indexes={r[0] for r in self._connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL")}
-            if indexes!=_INDEXES: raise RewardCorrectionError("reward correction performance indexes mismatch")
+            indexes={r[0]:r[1] for r in self._connection.execute("SELECT name,sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL")}
+            if set(indexes)!=_INDEXES or any(not _is_canonical_index_sql(name,indexes[name]) for name in _INDEXES): raise RewardCorrectionError("reward correction performance indexes mismatch")
             arts={}
             for r in self._connection.execute("SELECT family,id,sha,record_sha FROM artifacts"):
                 a=EvidenceRef(r[0],r[1],r[2]); node=DependencyArtifact(a,self._deps(a))

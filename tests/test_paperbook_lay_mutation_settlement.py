@@ -493,3 +493,47 @@ def test_bound_book_rejects_save_as_authority_rebinding(
         loaded.save(other_path)
 
     assert not other_path.exists()
+
+
+
+def test_empty_prewitness_legacy_snapshot_remains_read_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-authority-empty-legacy"),
+    )
+    path = tmp_path / "legacy-paper-book.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 7,
+                "initial_bankroll": "100",
+                "balance": "100",
+                "tickets": [],
+                "lifecycle": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    legacy = PaperBook.load(path)
+    assert legacy.balance == Decimal("100")
+    assert legacy.tickets == {}
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks independent durable witness authority",
+    ):
+        legacy.open_ticket(
+            [_leg("back", odds="2")],
+            "10",
+            placed_at=_PLACED_AT,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks independent durable witness authority",
+    ):
+        legacy.save(path)

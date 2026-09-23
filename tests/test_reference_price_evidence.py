@@ -58,7 +58,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         self,
         source_ids,
         *,
-        target_source_id: str = "target-provider",
+        target_price_source_id: str = "target-provider",
         target_inclusion_policy: ReferenceTargetInclusionPolicy = (
             ReferenceTargetInclusionPolicy.EXCLUDE
         ),
@@ -70,7 +70,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
     ) -> ReferencePriceProtocol:
         return ReferencePriceProtocol(
             eligible_source_ids=tuple(source_ids),
-            target_source_id=target_source_id,
+            target_price_source_id=target_price_source_id,
             target_inclusion_policy=target_inclusion_policy,
             price_semantics=price_semantics,
             max_age_seconds=max_age_seconds,
@@ -105,8 +105,8 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             )
             protocol = self.protocol(
                 eligible_source_ids,
-                target_source_id=kwargs.pop(
-                    "target_source_id",
+                target_price_source_id=kwargs.pop(
+                    "target_price_source_id",
                     "target-provider",
                 ),
                 target_inclusion_policy=kwargs.pop(
@@ -485,17 +485,17 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
     def test_target_inclusion_policy_is_structural_and_explicit(self) -> None:
         with self.assertRaisesRegex(
             ReferencePriceEvidenceError,
-            "excluded target_source_id",
+            "excluded target_price_source_id",
         ):
             self.protocol(
                 ("provider-a", "provider-b"),
-                target_source_id="provider-a",
+                target_price_source_id="provider-a",
                 target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
             )
 
         included = self.protocol(
             ("provider-a", "provider-b"),
-            target_source_id="provider-a",
+            target_price_source_id="provider-a",
             target_inclusion_policy=ReferenceTargetInclusionPolicy.INCLUDE,
         )
         evidence = self.build(
@@ -511,10 +511,51 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         )
         self.assertIn("provider-a", evidence.source_ids)
 
+    def test_target_policy_uses_underlying_price_source_identity(self) -> None:
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "excluded target_price_source_id",
+        ):
+            self.protocol(
+                ("the-odds-api:football",),
+                target_price_source_id="pinnacle",
+                target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
+                eligible_price_source_ids=("draftkings", "pinnacle"),
+                minimum_sources=2,
+            )
+
+        included = self.protocol(
+            ("the-odds-api:football",),
+            target_price_source_id="pinnacle",
+            target_inclusion_policy=ReferenceTargetInclusionPolicy.INCLUDE,
+            eligible_price_source_ids=("draftkings", "pinnacle"),
+            minimum_sources=2,
+        )
+        evidence = self.build(
+            (
+                self.event(
+                    "the-odds-api:football",
+                    "2.00",
+                    bookmaker_key="pinnacle",
+                    sequence=1,
+                ),
+                self.event(
+                    "the-odds-api:football",
+                    "2.04",
+                    bookmaker_key="draftkings",
+                    sequence=2,
+                ),
+            ),
+            protocol=included,
+        )
+        self.assertEqual(included.target_price_source_id, "pinnacle")
+        self.assertIn("pinnacle", evidence.price_source_ids)
+        self.assertEqual(set(evidence.source_ids), {"the-odds-api:football"})
+
     def test_excluded_target_cannot_enter_evidence_as_unexpected_source(self) -> None:
         protocol = self.protocol(
             ("provider-b", "provider-c"),
-            target_source_id="provider-a",
+            target_price_source_id="provider-a",
             target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
         )
 
@@ -556,7 +597,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         ):
             ReferencePriceProtocol(
                 eligible_source_ids=("provider-a", "provider-b"),
-                target_source_id="target-provider",
+                target_price_source_id="target-provider",
                 target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
                 price_semantics="best_available_to_back",
                 max_age_seconds=30,

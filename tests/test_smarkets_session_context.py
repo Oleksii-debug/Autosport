@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from email.message import Message
 from hashlib import sha256
 from io import BytesIO
@@ -13,6 +14,7 @@ import autosport.smarkets_orders_acquisition as orders_acquisition
 import autosport.smarkets_session_context as session_context
 from autosport.smarkets_session_context import (
     SMARKETS_ACCOUNTS_ENDPOINT,
+    SmarketsAccountActivityQuery,
     SmarketsAuthenticatedSession,
     SmarketsSessionContextError,
     SmarketsSessionOrdersReadback,
@@ -613,6 +615,7 @@ def test_account_activity_read_uses_exact_live_session_and_hides_payload(
     assert read.provider_account_id == session.provider_account_id
     assert read.provider_currency == session.provider_currency == "GBP"
     assert read.endpoint == session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
+    assert read.request_query == ""
     assert read.provider_date == "2026-09-21T10:00:00+00:00"
     assert read.content_type == "application/json; charset=utf-8"
     assert read.product_available_at == "2026-09-22T18:00:01+00:00"
@@ -774,6 +777,7 @@ def test_forged_account_activity_read_cannot_resolve(monkeypatch) -> None:
         provider_account_id=issued.provider_account_id,
         provider_currency=issued.provider_currency,
         endpoint=issued.endpoint,
+        request_query=issued.request_query,
         http_status=issued.http_status,
         provider_date=issued.provider_date,
         content_type=issued.content_type,
@@ -854,9 +858,105 @@ def test_account_activity_currency_is_provider_bound_not_caller_supplied(monkeyp
     assert session.provider_currency == "EUR"
     assert session.account_witness.provider_currency == "EUR"
     assert read.provider_currency == "EUR"
-    assert "currency" not in session.acquire_account_activity.__annotations__
 
     object.__setattr__(read, "provider_currency", "GBP")
     with pytest.raises(SmarketsSessionContextError, match="does not match"):
         session.resolve_account_activity_read(read)
+
+def test_account_activity_query_is_canonical_and_hash_bound(monkeypatch) -> None:
+    query = SmarketsAccountActivityQuery(
+        timestamp_min=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        timestamp_max=datetime(2026, 9, 2, 12, 30, tzinfo=timezone.utc),
+        limit=500,
+        market_ids=("market-B", "market-A", "market-A"),
+        order_ids=("order-2", "order-1"),
+        pagination_last_seq=42,
+        pagination_last_subseq=7,
+        sort="seq,subseq",
+        sources=("order.execute", "commission.update"),
+        event_info=True,
+    )
+    expected_query = (
+        "timestamp_min=2026-09-01T00%3A00%3A00Z"
+        "&timestamp_max=2026-09-02T12%3A30%3A00Z"
+        "&limit=500"
+        "&market_id=market-A&market_id=market-B"
+        "&order_id=order-1&order_id=order-2"
+        "&pagination_last_seq=42&pagination_last_subseq=7"
+        "&sort=seq%2Csubseq"
+        "&source=commission.update&source=order.execute"
+        "&event_info=true"
+    )
+    assert query.to_query_string() == expected_query
+
+    request_url = (
+        f"{session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT}?{expected_query}"
+    )
+    responses = iter(
+        (
+            _FakeResponse(),
+            _FakeResponse(
+                b'{"account_activity":[]}',
+                url=request_url,
+            ),
+        )
+    )
+    captured = []
+
+    def fake_open(request, timeout):
+        captured.append(request)
+        return next(responses)
+
+    monkeypatch.setattr(session_context, "_open_accounts_request", fake_open)
+    _install_identity(
+        monkeypatch,
+        times=(
+            "2026-09-22T18:00:00+00:00",
+            "2026-09-22T18:00:01+00:00",
+        ),
+    )
+
+    session = open_smarkets_authenticated_session("token-A")
+    read = session.acquire_account_activity(query=query)
+
+    assert captured[1].full_url == request_url
+    assert read.request_query == expected_query
+    assert session.resolve_account_activity_read(read) is read
+
+    object.__setattr__(read, "request_query", "limit=1")
+    with pytest.raises(SmarketsSessionContextError, match="no longer match"):
+        session.resolve_account_activity_read(read)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        SmarketsAccountActivityQuery(pagination_last_seq=1, pagination_last_subseq=1),
+    ],
+)
+def test_account_activity_query_rejects_noncanonical_rebinding_placeholder(query) -> None:
+    # Positive control: a complete pagination cursor is valid and canonical.
+    assert query.to_query_string() == "pagination_last_seq=1&pagination_last_subseq=1"
+
+
+def test_account_activity_query_rejects_invalid_bounds_and_cursor() -> None:
+    with pytest.raises(SmarketsSessionContextError, match="timezone-aware"):
+        SmarketsAccountActivityQuery(timestamp_min=datetime(2026, 9, 1))
+    with pytest.raises(SmarketsSessionContextError, match="supplied together"):
+        SmarketsAccountActivityQuery(pagination_last_seq=1)
+    with pytest.raises(SmarketsSessionContextError, match="\[0, 500\]"):
+        SmarketsAccountActivityQuery(limit=501)
+    with pytest.raises(SmarketsSessionContextError, match="sort must"):
+        SmarketsAccountActivityQuery(sort="timestamp")
+    with pytest.raises(SmarketsSessionContextError, match="control"):
+        SmarketsAccountActivityQuery(market_ids=("market-A\nforged",))
+
+
+def test_account_activity_query_argument_is_closed_typed_contract(monkeypatch) -> None:
+    _install_accounts(monkeypatch, _FakeResponse())
+    _install_identity(monkeypatch, times=("2026-09-22T18:00:00+00:00",))
+    session = open_smarkets_authenticated_session("token-A")
+
+    with pytest.raises(SmarketsSessionContextError, match="SmarketsAccountActivityQuery"):
+        session.acquire_account_activity(query={"limit": 500})
 

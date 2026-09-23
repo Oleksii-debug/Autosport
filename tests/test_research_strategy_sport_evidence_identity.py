@@ -87,7 +87,12 @@ def test_research_hashes_bind_concrete_optional_market_identity(
     second = replace(baseline, **{field_name: second_value})
     lookup_key = "fixed-research-slot"
 
-    assert first.quote_key == second.quote_key or field_name == "exchange_side"
+    if field_name == "exchange_side":
+        assert first.quote_key != second.quote_key
+    else:
+        # These semantics are intentionally outside quote coordinates; the
+        # research evidence projection must still distinguish them.
+        assert first.quote_key == second.quote_key
     assert market_event_evidence_hash(first) != market_event_evidence_hash(second)
     assert research_market_snapshot_hash(
         {lookup_key: first},

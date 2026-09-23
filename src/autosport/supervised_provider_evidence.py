@@ -529,6 +529,10 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider order exists but matched execution economics remain unresolved"
         )
+    if action.side == "BACK" and accepted_odds < action.requested_odds:
+        raise ProviderEvidenceError(
+            "provider matched price is worse than submitted Betfair BACK limit"
+        )
     if accepted_stake > action.requested_stake:
         raise ProviderEvidenceError("provider matched stake exceeds requested stake")
     status = (

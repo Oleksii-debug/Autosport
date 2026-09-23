@@ -552,6 +552,10 @@ class ResolvedPolicyOutcome:
                 "economic_cost_incurred_at",
                 cost_incurred,
             )
+            if cost_incurred < committed:
+                raise ForwardEconomicEvidenceError(
+                    "economic cost cannot be incurred before the committed decision"
+                )
         cost_available = None
         if self.economic_cost_evidence_sha256 is not None:
             object.__setattr__(

@@ -10,6 +10,7 @@ from secrets import token_hex
 from typing import Callable, Protocol
 import xml.etree.ElementTree as ET
 
+from . import betdaq_account_readonly as _account_readonly
 from .betdaq_account_readonly import BetdaqCredentials, UrllibBetdaqSoapTransport
 from .betdaq_odds_ladder_wire import BetdaqOddsLadderEntry, parse_get_odds_ladder_response
 from .betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
@@ -23,6 +24,7 @@ BETDAQ_DECIMAL_PRICE_FORMAT = 1
 _SCHEMA = "autosport.betdaq-odds-ladder-acquisition-v1"
 _ACQ_PREFIX = "betdaq-ladder-acq:"
 _CANONICAL_POST = UrllibBetdaqSoapTransport.post
+_CANONICAL_URLOPEN = _account_readonly.urlopen
 _ORIGIN_WITNESS = object()
 _CLOCK_WITNESS = object()
 
@@ -253,7 +255,6 @@ class BetdaqOddsLadderAcquirer:
         self._timeout = float(timeout_seconds)
         self._clock = clock
         self._id_factory = acquisition_id_factory
-        self._origin_verified = _canonical_transport(selected)
         self._clock_verified = clock is utc_now_iso
 
     def acquire(
@@ -310,7 +311,9 @@ class BetdaqOddsLadderAcquirer:
             provider_message_created_at=wire.provider_created_at_text,
             call_id=wire.call_id,
             evidence_sha256=evidence_sha,
-            _origin_witness=_ORIGIN_WITNESS if self._origin_verified else object(),
+            _origin_witness=(
+                _ORIGIN_WITNESS if _canonical_transport(self._transport) else object()
+            ),
             _clock_witness=_CLOCK_WITNESS if self._clock_verified else object(),
         )
 
@@ -422,6 +425,7 @@ def _canonical_transport(transport: object) -> bool:
     return (
         getattr(post, "__self__", None) is transport
         and getattr(post, "__func__", None) is _CANONICAL_POST
+        and _account_readonly.urlopen is _CANONICAL_URLOPEN
     )
 
 

@@ -226,6 +226,28 @@ class ProductDecisionActivationTests(unittest.TestCase):
             BuiltInIntentProducer.REGISTERED_STRATEGY.value,
         )
 
+    def test_activation_filename_rebind_cannot_create_second_namespace(self) -> None:
+        committed = self._initialize()
+        canonical_path = self.store.path
+        alternate_name = "alternate_product_decision_activation.json"
+        alternate_path = self.workspace / alternate_name
+
+        with mock.patch.object(
+            ProductDecisionActivationStore,
+            "FILE_NAME",
+            alternate_name,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "canonical product decision activation store namespace changed",
+            ):
+                ProductDecisionActivationStore(self.workspace)
+
+        self.assertTrue(canonical_path.exists())
+        self.assertFalse(alternate_path.exists())
+        reopened = ProductDecisionActivationStore(self.workspace)
+        self.assertEqual(reopened.load(), committed)
+
     def test_committed_activation_deletion_cannot_reinitialize(self) -> None:
         committed = self._initialize()
         self.store.path.unlink()

@@ -91,6 +91,7 @@ class ProviderReadScopeEvidence:
     complete: bool = True
     _issuer: InitVar[object | None] = None
     _issuer_token: object | None = field(init=False, repr=False, compare=False, default=None)
+    _authority_seal_sha256: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self, _issuer: object | None) -> None:
         if not isinstance(self.capability, BookmakerCapability):
@@ -104,11 +105,29 @@ class ProviderReadScopeEvidence:
             raise ProviderReadbackHealthError('complete must be bool')
         if self.complete and _issuer is not _ISSUER:
             raise ProviderReadbackHealthError('complete provider read scope must be product-issued')
-        object.__setattr__(self, '_issuer_token', _ISSUER if _issuer is _ISSUER else None)
+        issuer_token = _ISSUER if _issuer is _ISSUER else None
+        object.__setattr__(self, '_issuer_token', issuer_token)
+        object.__setattr__(
+            self,
+            '_authority_seal_sha256',
+            self.evidence_id if self.complete and issuer_token is _ISSUER else None,
+        )
 
     @property
     def evidence_id(self) -> str:
         return _digest({'capability': self.capability.value, 'request_scope_sha256': self.request_scope_sha256, 'response_sha256': self.response_sha256, 'observed_at': self.observed_at, 'snapshot_sha256': self.snapshot_sha256, 'complete': self.complete})
+
+def _scope_has_intact_complete_authority(scope: ProviderReadScopeEvidence) -> bool:
+    try:
+        return (
+            isinstance(scope, ProviderReadScopeEvidence)
+            and scope.complete
+            and scope._issuer_token is _ISSUER
+            and scope._authority_seal_sha256 is not None
+            and scope._authority_seal_sha256 == scope.evidence_id
+        )
+    except (AttributeError, ProviderReadbackHealthError, TypeError, ValueError):
+        return False
 
 def _issue_complete_provider_read_scope_evidence(*, capability: BookmakerCapability, request_scope_sha256: str, response_sha256: str, observed_at: str, snapshot: BookmakerAccountSnapshot) -> ProviderReadScopeEvidence:
     if not isinstance(snapshot, BookmakerAccountSnapshot):
@@ -133,6 +152,8 @@ class ProviderReadbackHealth:
     last_known_snapshot_sha256: str | None
     failure_class: ProviderReadbackFailureClass | None = None
     _issuer: InitVar[object | None] = None
+    _issuer_token: object | None = field(init=False, repr=False, compare=False, default=None)
+    _authority_seal_sha256: str | None = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self, _issuer: object | None) -> None:
         _text(self.venue_id, 'venue_id')
@@ -171,19 +192,67 @@ class ProviderReadbackHealth:
                 raise ProviderReadbackHealthError('FRESH_COMPLETE requires every exact required scope')
             if any((not scope.complete for scope in self.successful_scopes)):
                 raise ProviderReadbackHealthError('FRESH_COMPLETE requires complete scopes')
-            if any((scope._issuer_token is not _ISSUER for scope in self.successful_scopes)):
-                raise ProviderReadbackHealthError('FRESH_COMPLETE requires product-issued complete scopes')
+            if any((not _scope_has_intact_complete_authority(scope) for scope in self.successful_scopes)):
+                raise ProviderReadbackHealthError('FRESH_COMPLETE requires intact product-issued complete scopes')
             if any((scope.snapshot_sha256 != self.current_snapshot_sha256 for scope in self.successful_scopes)):
                 raise ProviderReadbackHealthError('FRESH_COMPLETE requires scopes bound to the exact current snapshot')
 
+        issued_positive = (
+            self.state is ProviderReadbackHealthState.FRESH_COMPLETE
+            and _issuer is _ISSUER
+        )
+        object.__setattr__(
+            self,
+            '_issuer_token',
+            _ISSUER if issued_positive else None,
+        )
+        object.__setattr__(
+            self,
+            '_authority_seal_sha256',
+            _digest(self.to_canonical_dict()) if issued_positive else None,
+        )
+
+    def _positive_authority_is_intact(self) -> bool:
+        if (
+            self.state is not ProviderReadbackHealthState.FRESH_COMPLETE
+            or self._issuer_token is not _ISSUER
+            or self._authority_seal_sha256 is None
+        ):
+            return False
+        try:
+            if self.current_snapshot_sha256 is None or self.failure_class is not None:
+                return False
+            if set(scope.capability for scope in self.successful_scopes) != set(
+                self.required_capabilities
+            ):
+                return False
+            if any(
+                not _scope_has_intact_complete_authority(scope)
+                for scope in self.successful_scopes
+            ):
+                return False
+            if any(
+                scope.snapshot_sha256 != self.current_snapshot_sha256
+                for scope in self.successful_scopes
+            ):
+                return False
+            return self._authority_seal_sha256 == _digest(self.to_canonical_dict())
+        except (AttributeError, ProviderReadbackHealthError, TypeError, ValueError):
+            return False
+
     @property
     def can_authorize_current_state(self) -> bool:
-        return self.state is ProviderReadbackHealthState.FRESH_COMPLETE
+        return self._positive_authority_is_intact()
 
     def scope_is_authoritative(self, capability: BookmakerCapability) -> bool:
         if not self.can_authorize_current_state:
             return False
-        return any((scope.capability is capability and scope.complete and scope._issuer_token is _ISSUER and (scope.snapshot_sha256 == self.current_snapshot_sha256) for scope in self.successful_scopes))
+        return any(
+            scope.capability is capability
+            and _scope_has_intact_complete_authority(scope)
+            and scope.snapshot_sha256 == self.current_snapshot_sha256
+            for scope in self.successful_scopes
+        )
 
     @property
     def operator_status_uk(self) -> str:
@@ -257,7 +326,9 @@ def classify_provider_readback_health(*, required_capabilities: Iterable[Bookmak
         snapshot_fresh = (now - snapshot_time).total_seconds() <= freshness_limit_seconds
     required_set = set(required)
     scope_set = {scope.capability for scope in scopes}
-    all_complete = scope_set == required_set and all((scope.complete and scope._issuer_token is _ISSUER for scope in scopes))
+    all_complete = scope_set == required_set and all(
+        _scope_has_intact_complete_authority(scope) for scope in scopes
+    )
     snapshot_covers_required = snapshot is not None and required_set.issubset(observed_capabilities)
     scopes_bind_current_snapshot = current_sha is not None and scope_set == required_set and all((scope.snapshot_sha256 == current_sha for scope in scopes))
     if failure_class in {ProviderReadbackFailureClass.UNAUTHORIZED, ProviderReadbackFailureClass.SESSION_EXPIRED}:

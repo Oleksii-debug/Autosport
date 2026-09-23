@@ -5,7 +5,6 @@ from decimal import Decimal
 
 import pytest
 
-import autosport.portfolio_joint_stress as joint_stress
 from autosport.domain import PaperTicket, TicketLeg
 from autosport.portfolio_joint_stress import (
     JointDependenceGrade,
@@ -591,32 +590,38 @@ def test_duplicate_ticket_identity_is_rejected() -> None:
         evaluate_joint_stress(tickets=tickets, protocol=protocol(tickets=tickets))
 
 
-def test_direct_result_construction_cannot_mint_product_stress_evidence() -> None:
-    with pytest.raises(TypeError, match="must be issued"):
-        JointStressResult(
-            protocol_sha256=A,
-            portfolio_scope_sha256=B,
-            currency="GBP",
-            ticket_ids=("t-1",),
-            quote_keys=("q-1",),
-            structural_groups=(),
-            evaluations=(),
-            unresolved_relation_ids=(),
-            worst_observed_profit=Decimal("-1"),
-            best_observed_profit=Decimal("1"),
-        )
+def test_direct_result_construction_is_structural_and_non_authoritative() -> None:
+    evaluation = JointScenarioEvaluation(
+        scenario_id="manual",
+        scenario_sha256=A,
+        profit=Decimal("-1"),
+    )
+    result = JointStressResult(
+        protocol_sha256=A,
+        portfolio_scope_sha256=B,
+        currency="GBP",
+        ticket_ids=("t-1",),
+        quote_keys=("q-1",),
+        structural_groups=(),
+        evaluations=(evaluation,),
+        unresolved_relation_ids=(),
+        worst_observed_profit=Decimal("-1"),
+        best_observed_profit=Decimal("-1"),
+    )
 
-
-def test_result_issuance_capability_is_not_module_reachable() -> None:
-    assert "_RESULT_ISSUANCE_TOKEN" not in vars(joint_stress)
-    assert "_evaluate_joint_stress_impl" not in vars(joint_stress)
-    assert "_install_joint_stress_result_issuance" not in vars(joint_stress)
+    assert "_issuance_token" not in JointStressResult.__dataclass_fields__
+    assert result.product_issued_evidence_authority is False
+    assert result.diversification_credit_authorized is False
+    assert result.risk_reduction_authorized is False
+    assert result.financial_permission_expansion_authorized is False
+    assert result.exact_terminal_authority is False
 
 
 def test_machine_stress_result_never_expands_external_permission() -> None:
     tickets = (ticket("t-1", "s-1"),)
     result = evaluate_joint_stress(tickets=tickets, protocol=protocol(tickets=tickets))
 
+    assert result.product_issued_evidence_authority is False
     assert result.diversification_credit_authorized is False
     assert result.risk_reduction_authorized is False
     assert result.financial_permission_expansion_authorized is False
@@ -670,7 +675,7 @@ def test_scenario_committed_after_causal_cutoff_is_rejected() -> None:
         )
 
 
-def test_product_issued_result_cannot_transfer_issuance_via_dataclass_replace() -> None:
+def test_structural_result_replace_cannot_gain_authority() -> None:
     tickets = (ticket("t-1", "s-1"),)
     result = evaluate_joint_stress(tickets=tickets, protocol=protocol(tickets=tickets))
     original = result.evaluations[0]
@@ -680,14 +685,19 @@ def test_product_issued_result_cannot_transfer_issuance_via_dataclass_replace() 
         profit=Decimal("999"),
     )
 
-    with pytest.raises(TypeError, match="must be issued"):
-        replace(
-            result,
-            evaluations=(forged,),
-            worst_observed_profit=Decimal("999"),
-            best_observed_profit=Decimal("999"),
-        )
+    derived = replace(
+        result,
+        evaluations=(forged,),
+        worst_observed_profit=Decimal("999"),
+        best_observed_profit=Decimal("999"),
+    )
+    relabelled = replace(result, protocol_sha256=B)
 
-    with pytest.raises(TypeError, match="must be issued"):
-        replace(result, protocol_sha256=B)
-
+    assert derived.product_issued_evidence_authority is False
+    assert derived.diversification_credit_authorized is False
+    assert derived.risk_reduction_authorized is False
+    assert derived.financial_permission_expansion_authorized is False
+    assert derived.exact_terminal_authority is False
+    assert derived.result_sha256 != result.result_sha256
+    assert relabelled.product_issued_evidence_authority is False
+    assert relabelled.result_sha256 != result.result_sha256

@@ -12,7 +12,7 @@ credit, risk reduction, permission expansion, or real-money execution.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -420,10 +420,12 @@ class JointScenarioEvaluation:
 
 @dataclass(frozen=True, slots=True)
 class JointStressResult:
-    """Product-issued safety projection.
+    """Strictly structural safety projection with no origin authority.
 
-    Direct construction is rejected.  Even product-issued results remain
-    non-authoritative for diversification/risk reduction/permission expansion.
+    evaluate_joint_stress is the canonical derivation helper, but this DTO
+    deliberately makes no unforgeable same-process product-issued claim.
+    Consumers that need positive provenance must re-derive or verify against
+    canonical ticket/protocol evidence at their own authority boundary.
     """
 
     protocol_sha256: str
@@ -436,7 +438,6 @@ class JointStressResult:
     unresolved_relation_ids: tuple[str, ...]
     worst_observed_profit: Decimal
     best_observed_profit: Decimal
-    _issuance_token: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _sha256_text(self.protocol_sha256, "protocol_sha256")
@@ -502,6 +503,10 @@ class JointStressResult:
             )
 
     @property
+    def product_issued_evidence_authority(self) -> bool:
+        return False
+
+    @property
     def diversification_credit_authorized(self) -> bool:
         return False
 
@@ -542,6 +547,7 @@ class JointStressResult:
                 "unresolved_relation_ids": list(self.unresolved_relation_ids),
                 "worst_observed_profit": _decimal_text(self.worst_observed_profit),
                 "best_observed_profit": _decimal_text(self.best_observed_profit),
+                "product_issued_evidence_authority": False,
                 "diversification_credit_authorized": False,
                 "risk_reduction_authorized": False,
                 "financial_permission_expansion_authorized": False,
@@ -704,11 +710,10 @@ def _structural_groups(
     )
 
 
-def _evaluate_joint_stress_impl(
+def evaluate_joint_stress(
     *,
     tickets: tuple[PaperTicket, ...],
     protocol: JointStressProtocol,
-    _issuance_token: object,
 ) -> JointStressResult:
     """Evaluate explicit joint-tail stress without granting diversification authority."""
 
@@ -802,42 +807,5 @@ def _evaluate_joint_stress_impl(
         unresolved_relation_ids=unresolved,
         worst_observed_profit=min(profits),
         best_observed_profit=max(profits),
-        _issuance_token=_issuance_token,
     )
 
-
-def _install_joint_stress_result_issuance() -> None:
-    # Keep the constructor capability out of module globals.  The generated
-    # dataclass __init__ dispatches self.__post_init__ at runtime, so replacing
-    # the method here preserves direct-construction rejection while the public
-    # evaluator alone retains the issuance capability in its closure.
-    issuance_token = object()
-    validate_result = JointStressResult.__post_init__
-    implementation = _evaluate_joint_stress_impl
-
-    def guarded_post_init(self: JointStressResult) -> None:
-        if self._issuance_token is not issuance_token:
-            raise TypeError("JointStressResult must be issued by evaluate_joint_stress")
-        validate_result(self)
-        # Issuance is one-shot.  A product-issued result cannot transfer the
-        # constructor capability through dataclasses.replace()/copy.
-        object.__setattr__(self, "_issuance_token", None)
-
-    def evaluate_joint_stress(
-        *,
-        tickets: tuple[PaperTicket, ...],
-        protocol: JointStressProtocol,
-    ) -> JointStressResult:
-        return implementation(
-            tickets=tickets,
-            protocol=protocol,
-            _issuance_token=issuance_token,
-        )
-
-    JointStressResult.__post_init__ = guarded_post_init
-    globals()["evaluate_joint_stress"] = evaluate_joint_stress
-
-
-_install_joint_stress_result_issuance()
-del _install_joint_stress_result_issuance
-del _evaluate_joint_stress_impl

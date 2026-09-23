@@ -1151,7 +1151,7 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
 # authority for caller-constructed DTOs.
 def _install_execution_readback_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
-    trusted_clients: dict[int, tuple[object, object, object, object]] = {}
+    trusted_clients: dict[int, tuple[object, ...]] = {}
     active_capture_session: ContextVar[list[object] | None] = ContextVar(
         "betfair_authoritative_readback_capture",
         default=None,
@@ -1195,8 +1195,11 @@ def _install_execution_readback_authority() -> None:
     sealed_envelope_type = BetfairExecutionReadbackEnvelope
     sealed_decimal_type = Decimal
     sealed_json_loads = json.loads
+    sealed_json_dumps = json.dumps
     sealed_json_decode_error = json.JSONDecodeError
     sealed_sha256 = sha256
+    sealed_adapter_id = ADAPTER_ID
+    sealed_adapter_version = ADAPTER_VERSION
     sealed_list_current = _LIST_CURRENT_ORDERS
     sealed_list_cleared = _LIST_CLEARED_ORDERS
     sealed_list_market = _LIST_MARKET_CATALOGUE
@@ -1373,6 +1376,21 @@ def _install_execution_readback_authority() -> None:
             raise sealed_error_type(
                 "Betfair response is not valid UTF-8 JSON"
             ) from None
+
+    def trusted_sha(value: object) -> str:
+        try:
+            payload = sealed_json_dumps(
+                value,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise sealed_error_type(
+                "trusted readback evidence is not canonical JSON"
+            ) from exc
+        return sealed_sha256(payload).hexdigest()
 
     def trusted_mapping(value: object, field: str) -> dict[str, object]:
         if type(value) is not dict or any(type(key) is not str for key in value):
@@ -1655,12 +1673,46 @@ def _install_execution_readback_authority() -> None:
         capture: BetfairExecutionReadbackEnvelope,
         witnesses: list[object],
         *,
+        venue_id: str,
+        account_id: str,
         action_id: str,
         market_id: str,
         provider_order_ref: str | None,
         page_size: int,
     ) -> bool:
         if type(capture) is not sealed_envelope_type:
+            return False
+        try:
+            trusted_text(venue_id, "venue_id")
+            trusted_text(account_id, "account_id")
+            trusted_text(action_id, "action_id")
+            trusted_text(market_id, "market_id")
+        except sealed_error_type:
+            return False
+        if (
+            type(page_size) is not int
+            or page_size <= 0
+            or page_size > 1000
+            or capture.venue_id != venue_id
+            or capture.account_id != account_id
+            or capture.adapter_id != sealed_adapter_id
+            or capture.adapter_version != sealed_adapter_version
+            or capture.action_id != action_id
+            or capture.market_id != market_id
+            or capture.provider_order_ref != provider_order_ref
+            or capture.page_size != page_size
+        ):
+            return False
+        if provider_order_ref is not None and (
+            type(provider_order_ref) is not str
+            or not provider_order_ref
+            or provider_order_ref != provider_order_ref.strip()
+            or len(provider_order_ref) > 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in provider_order_ref
+            )
+        ):
             return False
         order_ref = provider_order_ref or action_id
         expected_methods = [sealed_list_market]
@@ -1738,6 +1790,9 @@ def _install_execution_readback_authority() -> None:
                 trusted_current_order_projection(raw, evidence, index)
                 for index, raw in enumerate(raw_orders)
             )
+            expected_bet_ids = tuple(order[0] for order in expected_orders)
+            if len(set(expected_bet_ids)) != len(expected_bet_ids):
+                return False
             actual_orders = tuple(
                 actual_current_order_projection(order)
                 for order in page.orders
@@ -1795,6 +1850,11 @@ def _install_execution_readback_authority() -> None:
                     )
                     for index, raw in enumerate(raw_orders)
                 )
+                expected_bet_ids = tuple(
+                    order[0] for order in expected_orders
+                )
+                if len(set(expected_bet_ids)) != len(expected_bet_ids):
+                    return False
                 actual_orders = tuple(
                     actual_cleared_order_projection(order)
                     for order in page.orders
@@ -1860,11 +1920,96 @@ def _install_execution_readback_authority() -> None:
             capture.market_event.source,
             trusted_evidence_tuple(capture.market_event.evidence),
         )
-        return actual_market_event == expected_market_event
+        if actual_market_event != expected_market_event:
+            return False
+
+        evidence_times = [
+            trusted_evidence_tuple(witness[3])[0]
+            for witness in witnesses
+        ]
+        expected_observed_at = max(
+            evidence_times,
+            key=lambda value: sealed_datetime.fromisoformat(value),
+        )
+        if capture.observed_at != expected_observed_at:
+            return False
+
+        request_scope: dict[str, object] = {
+            "schema": "autosport.betfair_execution_readback_scope",
+            "schema_version": 2 if provider_order_ref is not None else 1,
+            "venue_id": venue_id,
+            "account_id": account_id,
+            "adapter_id": sealed_adapter_id,
+            "adapter_version": sealed_adapter_version,
+            "action_id": action_id,
+            "market_id": market_id,
+            "market_catalogue": {
+                "method": sealed_list_market,
+                "filter": {"marketIds": [market_id]},
+                "marketProjection": ["EVENT"],
+                "maxResults": 1,
+            },
+            "current": {
+                "method": sealed_list_current,
+                "orderProjection": "ALL",
+                "customerOrderRefs": [order_ref],
+                "marketIds": [market_id],
+                "page_size": page_size,
+            },
+            "cleared": {
+                "method": sealed_list_cleared,
+                "statuses": list(sealed_cleared_statuses),
+                "groupBy": "BET",
+                "customerOrderRefs": [order_ref],
+                "marketIds": [market_id],
+                "settledDateRange": None,
+                "page_size": page_size,
+            },
+        }
+        if provider_order_ref is not None:
+            request_scope["provider_order_ref"] = provider_order_ref
+        expected_scope_sha = trusted_sha(request_scope)
+        if capture.request_scope_sha256 != expected_scope_sha:
+            return False
+
+        evidence_payload = {
+            "request_scope_sha256": expected_scope_sha,
+            "market_event": {
+                "market_id": capture.market_event.market_id,
+                "event_id": capture.market_event.event_id,
+                "source": capture.market_event.source,
+                "response_sha256": capture.market_event.evidence.source_payload_sha256,
+            },
+            "current_pages": [
+                {
+                    "from_record": page.from_record,
+                    "record_count": page.record_count,
+                    "more_available": page.more_available,
+                    "response_sha256": page.evidence.source_payload_sha256,
+                }
+                for page in capture.current_pages
+            ],
+            "cleared_pages": [
+                {
+                    "status": status,
+                    "pages": [
+                        {
+                            "from_record": page.from_record,
+                            "record_count": page.record_count,
+                            "more_available": page.more_available,
+                            "response_sha256": page.evidence.source_payload_sha256,
+                        }
+                        for page in pages
+                    ],
+                }
+                for status, pages in capture.cleared_pages_by_status
+            ],
+        }
+        return capture.evidence_sha256 == trusted_sha(evidence_payload)
 
     def trusted_record(
         self: BetfairReadOnlyClient,
-    ) -> tuple[object, object, object, object] | None:
+    ) -> tuple[object, ...] | None:
         record = trusted_clients.get(id(self))
         if record is None or record[0]() is not self:
             return None
@@ -1876,6 +2021,11 @@ def _install_execution_readback_authority() -> None:
             or type(transport) is not sealed_transport_type
             or self._clock is not trusted_clock
             or getattr(trusted_clock, "__code__", None) is not trusted_clock_code
+            or self._credentials is not record[4]
+            or self._credentials.application_key != record[5]
+            or self._credentials.session_token != record[6]
+            or self._venue_id != record[7]
+            or self._account_id != record[8]
         ):
             return None
         return record
@@ -1964,6 +2114,11 @@ def _install_execution_readback_authority() -> None:
             trusted_transport,
             product_clock,
             product_clock.__code__,
+            self._credentials,
+            self._credentials.application_key,
+            self._credentials.session_token,
+            self._venue_id,
+            self._account_id,
         )
 
     def has_trusted_transport(self: BetfairReadOnlyClient) -> bool:
@@ -2177,6 +2332,8 @@ def _install_execution_readback_authority() -> None:
             and trusted_capture_matches(
                 capture,
                 session[4],
+                venue_id=self._venue_id,
+                account_id=self._account_id,
                 action_id=action_id,
                 market_id=market_id,
                 provider_order_ref=provider_order_ref,

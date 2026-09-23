@@ -1545,6 +1545,14 @@ def _install_execution_readback_authority() -> None:
         size_remaining = trusted_number(
             raw, "sizeRemaining", "size_remaining", nonnegative=True
         )
+        if status == "EXECUTABLE" and size_remaining <= 0:
+            raise sealed_error_type(
+                "EXECUTABLE current order must retain positive size_remaining"
+            )
+        if status == "EXECUTION_COMPLETE" and size_remaining != 0:
+            raise sealed_error_type(
+                "EXECUTION_COMPLETE current order must have zero size_remaining"
+            )
         if (
             requested_size is not None
             and size_matched + size_remaining > requested_size

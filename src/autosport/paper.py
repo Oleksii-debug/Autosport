@@ -222,6 +222,13 @@ class PaperBook:
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
 
+        # PaperTicket is intentionally mutable during a paper run. Revalidate
+        # the current leg identities immediately before settlement so caller
+        # mutation cannot route an unsupported LAY identity through BACK-only
+        # payout arithmetic.
+        for leg in ticket.legs:
+            self._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+
         winners = self._normalize_resolution_keys(winning_quote_keys, "winning_quote_keys")
         voids = (
             set()

@@ -94,12 +94,14 @@ def acquire_balance(
     payload=None,
     clock=None,
     account_id="caller-label",
+    venue_id="betdaq",
 ):
     opener = QueueUrlopen(payload or balance())
     monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
     client = BetdaqAccountContinuityClient(
         credentials,
         account_id=account_id,
+        venue_id=venue_id,
         clock=clock or at(0, 0),
     )
     evidence = client.read_account_evidence(
@@ -154,6 +156,21 @@ def test_different_authenticated_usernames_never_collapse(monkeypatch):
         != second.principal_context.principal_context_id
     )
     assert first.snapshot.profile.account_id != second.snapshot.profile.account_id
+
+
+def test_caller_cannot_fork_continuity_identity_with_custom_venue(monkeypatch):
+    credentials = BetdaqCredentials("alice", "password", "app")
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="venue_id is product-owned and must be canonical",
+    ):
+        acquire_balance(
+            monkeypatch,
+            credentials,
+            venue_id="caller-fork",
+            clock=at(0, 1),
+        )
 
 
 def test_caller_account_label_and_credentials_do_not_enter_continuity_identity(

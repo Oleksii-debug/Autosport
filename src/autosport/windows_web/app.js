@@ -361,6 +361,25 @@
     setTextIfChanged(byId("manual-status"), state.manual.status || "");
     setValueIfChanged(byId(334), state.manual.result || "");
 
+    const productSource = state.product_source || {};
+    const sourceSelect = byId("product-source-select");
+    setSelectOptions(sourceSelect, productSource.choices || []);
+    if (document.activeElement !== sourceSelect && productSource.selected_id) {
+      sourceSelect.value = productSource.selected_id;
+    }
+    setValueIfChanged(
+      byId("product-source-status"),
+      productSource.status || "Стан джерела даних недоступний.",
+    );
+    setDisabledWithFocusFallback(
+      sourceSelect,
+      productSource.can_configure !== true,
+    );
+    setDisabledWithFocusFallback(
+      byId("product-source-save"),
+      productSource.can_configure !== true,
+    );
+
     const productRuntime = state.product_runtime || {};
     setValueIfChanged(
       byId("product-runtime-status"),
@@ -466,6 +485,11 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("product-source-save").addEventListener("click", () => {
+    dispatch("product_source.configure", {
+      source_id: byId("product-source-select").value,
+    });
   });
   byId("product-runtime-start").addEventListener("click", () => {
     dispatch("product_runtime.start");

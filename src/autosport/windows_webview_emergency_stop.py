@@ -1,49 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from pathlib import Path
 from typing import Any, Mapping
 
 from .windows_emergency_stop import WindowsEmergencyStopBridge
-from .windows_webview_shell import AutosportWebController, _PRODUCT_SOURCE_FACTORY_ENV
+from .windows_webview_shell import AutosportWebController
 
 
 _EMERGENCY_ACTION_ID = "emergency_stop.activate"
-
-
-def _product_runtime_source_configuration_error() -> str:
-    source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
-    if source_factory is None or not source_factory:
-        return "AUTOSPORT_PRODUCT_SOURCE_FACTORY не задано."
-    if source_factory.strip() != source_factory:
-        return "AUTOSPORT_PRODUCT_SOURCE_FACTORY має неоднозначний формат."
-    return ""
-
-
-def _project_product_runtime_configuration(state: dict[str, Any]) -> None:
-    """Keep packaged START actionability aligned with its existing precondition.
-
-    The source-factory value can name provider composition and must never become
-    operator-visible state.  Only a bounded product-owned reason is projected, and
-    an already-running runtime keeps its lifecycle status even if the environment
-    changes after START.
-    """
-
-    product_runtime = state.get("product_runtime")
-    if not isinstance(product_runtime, dict) or product_runtime.get("running") is True:
-        return
-    configuration_error = _product_runtime_source_configuration_error()
-    if not configuration_error:
-        return
-
-    product_runtime["can_start"] = False
-    current_status = product_runtime.get("status")
-    status = current_status if isinstance(current_status, str) else ""
-    product_runtime["status"] = (
-        f"{status} Запуск недоступний: {configuration_error}"
-    ).strip()
 
 
 class EmergencyStopWebController(AutosportWebController):
@@ -72,7 +38,6 @@ class EmergencyStopWebController(AutosportWebController):
 
     def state(self) -> dict[str, Any]:
         state = super().state()
-        _project_product_runtime_configuration(state)
         stop_status = self._emergency_stop.status()
         state["emergency_stop"] = {
             "status": stop_status.message_uk,

@@ -196,6 +196,28 @@ class SupportedProductEntrypointTests(unittest.TestCase):
         self.assertEqual(lines.count("AUTOSPORT RECORD"), 1)
         self.assertEqual(lines.count("END AUTOSPORT RECORD"), 1)
 
+
+    def test_text_formatter_escapes_unicode_controls_but_preserves_readable_unicode(self) -> None:
+        text = _format_text_record(
+            {
+                "kind": "product_status",
+                "paper_only": True,
+                "real_money_execution": False,
+                "value": {
+                    "message": "Український стан",
+                    "hostile": "left\u202eright\u2028next\u0085end",
+                },
+            }
+        )
+
+        self.assertIn('value.message: "Український стан"', text)
+        self.assertIn("\\u202e", text)
+        self.assertIn("\\u2028", text)
+        self.assertIn("\\u0085", text)
+        self.assertNotIn("\u202e", text)
+        self.assertNotIn("\u2028", text)
+        self.assertNotIn("\u0085", text)
+
     def test_main_routes_explicit_text_format_without_changing_default_contract(self) -> None:
         with patch(
             "autosport.product_entrypoint.run_product_command",

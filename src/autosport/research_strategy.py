@@ -92,7 +92,7 @@ def _canonical_plan_json(raw: Any) -> str:
 def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
     """Stable causal quote projection used to bind offline research evidence to replay state."""
 
-    return {
+    projection: dict[str, Any] = {
         "event_id": event.event_id,
         "market_id": event.market_id,
         "selection_id": event.selection_id,
@@ -107,6 +107,18 @@ def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
         "score_state": event.score_state,
         "metadata": event.metadata,
     }
+    # Preserve the exact legacy/None research projection while making concrete
+    # canonical market/provenance semantics identity-bearing.
+    for field_name in (
+        "competition_id",
+        "market_semantics_id",
+        "provider_source_class",
+        "exchange_side",
+    ):
+        value = getattr(event, field_name)
+        if value is not None:
+            projection[field_name] = value
+    return projection
 
 
 def market_event_evidence_hash(event: MarketEvent) -> str:

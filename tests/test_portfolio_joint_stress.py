@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.portfolio_joint_stress as joint_stress
 from autosport.domain import PaperTicket, TicketLeg
 from autosport.portfolio_joint_stress import (
     JointDependenceGrade,
@@ -604,6 +605,12 @@ def test_direct_result_construction_cannot_mint_product_stress_evidence() -> Non
             worst_observed_profit=Decimal("-1"),
             best_observed_profit=Decimal("1"),
         )
+
+
+def test_result_issuance_capability_is_not_module_reachable() -> None:
+    assert "_RESULT_ISSUANCE_TOKEN" not in vars(joint_stress)
+    assert "_evaluate_joint_stress_impl" not in vars(joint_stress)
+    assert "_install_joint_stress_result_issuance" not in vars(joint_stress)
 
 
 def test_machine_stress_result_never_expands_external_permission() -> None:

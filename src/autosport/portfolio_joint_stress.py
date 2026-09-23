@@ -26,7 +26,6 @@ from .portfolio import PortfolioEngine
 
 _HEX = frozenset("0123456789abcdef")
 _ALLOWED_SETTLEMENTS = frozenset({"win", "loss", "void"})
-_RESULT_ISSUANCE_TOKEN = object()
 
 
 class JointDependenceGrade(str, Enum):
@@ -440,8 +439,6 @@ class JointStressResult:
     _issuance_token: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._issuance_token is not _RESULT_ISSUANCE_TOKEN:
-            raise TypeError("JointStressResult must be issued by evaluate_joint_stress")
         _sha256_text(self.protocol_sha256, "protocol_sha256")
         _sha256_text(self.portfolio_scope_sha256, "portfolio_scope_sha256")
         currency = _text(self.currency, "currency")
@@ -503,11 +500,6 @@ class JointStressResult:
             raise ValueError(
                 "result extrema must exactly match scenario evaluation profits"
             )
-
-        # The constructor token is a one-shot issuance capability, not durable
-        # result state.  Retaining it would let dataclasses.replace() copy the
-        # product-issued marker into caller-modified fields.
-        object.__setattr__(self, "_issuance_token", None)
 
     @property
     def diversification_credit_authorized(self) -> bool:
@@ -712,10 +704,11 @@ def _structural_groups(
     )
 
 
-def evaluate_joint_stress(
+def _evaluate_joint_stress_impl(
     *,
     tickets: tuple[PaperTicket, ...],
     protocol: JointStressProtocol,
+    _issuance_token: object,
 ) -> JointStressResult:
     """Evaluate explicit joint-tail stress without granting diversification authority."""
 
@@ -809,5 +802,42 @@ def evaluate_joint_stress(
         unresolved_relation_ids=unresolved,
         worst_observed_profit=min(profits),
         best_observed_profit=max(profits),
-        _issuance_token=_RESULT_ISSUANCE_TOKEN,
+        _issuance_token=_issuance_token,
     )
+
+
+def _install_joint_stress_result_issuance() -> None:
+    # Keep the constructor capability out of module globals.  The generated
+    # dataclass __init__ dispatches self.__post_init__ at runtime, so replacing
+    # the method here preserves direct-construction rejection while the public
+    # evaluator alone retains the issuance capability in its closure.
+    issuance_token = object()
+    validate_result = JointStressResult.__post_init__
+    implementation = _evaluate_joint_stress_impl
+
+    def guarded_post_init(self: JointStressResult) -> None:
+        if self._issuance_token is not issuance_token:
+            raise TypeError("JointStressResult must be issued by evaluate_joint_stress")
+        validate_result(self)
+        # Issuance is one-shot.  A product-issued result cannot transfer the
+        # constructor capability through dataclasses.replace()/copy.
+        object.__setattr__(self, "_issuance_token", None)
+
+    def evaluate_joint_stress(
+        *,
+        tickets: tuple[PaperTicket, ...],
+        protocol: JointStressProtocol,
+    ) -> JointStressResult:
+        return implementation(
+            tickets=tickets,
+            protocol=protocol,
+            _issuance_token=issuance_token,
+        )
+
+    JointStressResult.__post_init__ = guarded_post_init
+    globals()["evaluate_joint_stress"] = evaluate_joint_stress
+
+
+_install_joint_stress_result_issuance()
+del _install_joint_stress_result_issuance
+del _evaluate_joint_stress_impl

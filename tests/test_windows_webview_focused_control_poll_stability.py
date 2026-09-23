@@ -35,6 +35,35 @@ def test_focused_operator_controls_are_not_overwritten_by_state_poll() -> None:
         assert projection not in source
 
 
+def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
+    source = _source()
+
+    assert "function setValueIfChanged(node, value)" in source
+    assert "if (node.value !== text) node.value = text;" in source
+
+    stable_readbacks = (
+        'setValueIfChanged(byId(205), state.bank || "");',
+        'setValueIfChanged(byId(202), (state.log || []).join("\\n"));',
+        'setValueIfChanged(byId(302), state.surface_state || "");',
+        'setValueIfChanged(byId(306), state.owner.summary || "");',
+        'setValueIfChanged(byId(334), state.manual.result || "");',
+        'byId("product-runtime-status"),',
+    )
+    for projection in stable_readbacks:
+        assert projection in source
+
+    stale_unconditional_readbacks = (
+        'byId(205).value = state.bank || "";',
+        'byId(202).value = (state.log || []).join("\\n");',
+        'byId(302).value = state.surface_state || "";',
+        'byId(306).value = state.owner.summary || "";',
+        'byId(334).value = state.manual.result || "";',
+        'byId("product-runtime-status").value =',
+    )
+    for projection in stale_unconditional_readbacks:
+        assert projection not in source
+
+
 def test_poll_and_native_accessibility_contract_remain_intact() -> None:
     source = _source()
 

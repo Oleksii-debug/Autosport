@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -270,6 +269,8 @@ def test_canonical_origin_rejects_hidden_fetch_replacement_before_network():
     with pytest.raises(ProphetXReadOnlyError, match="intact product-owned network authority"):
         c.read_page()
     assert calls == []
+
+
 def test_tampered_live_page_changes_authority_fingerprint():
     c, _ = client(payload(row()))
     page = c.read_page()

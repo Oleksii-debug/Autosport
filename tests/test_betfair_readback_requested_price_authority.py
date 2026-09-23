@@ -175,12 +175,19 @@ def _capture(
     )
 
 
-def _verify(action: ExecutionAction, *, surface: str, requested_price: float | None):
+def _verify(
+    action: ExecutionAction,
+    *,
+    surface: str,
+    requested_price: float | None,
+    matched_price: float = 3.5,
+):
     profile = _profile()
     capture = _capture(
         action,
         surface=surface,
         provider_requested_price=requested_price,
+        matched_price=matched_price,
     )
     return verify_betfair_provider_state(
         action,
@@ -230,3 +237,34 @@ def test_cleared_order_exact_requested_price_preserves_favorable_execution() -> 
     assert isinstance(evidence, VerifiedProviderEffectEvidence)
     assert evidence.accepted_odds == Decimal("3.5")
     assert evidence.accepted_stake == Decimal("10.0")
+
+
+@pytest.mark.parametrize("surface", ["current", "cleared"])
+def test_back_match_cannot_be_worse_than_submitted_limit(surface: str) -> None:
+    action = _action()
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="worse than submitted Betfair BACK limit",
+    ):
+        _verify(
+            action,
+            surface=surface,
+            requested_price=2.0,
+            matched_price=1.99,
+        )
+
+
+@pytest.mark.parametrize("surface", ["current", "cleared"])
+def test_back_match_at_submitted_limit_remains_authoritative(surface: str) -> None:
+    action = _action()
+
+    evidence = _verify(
+        action,
+        surface=surface,
+        requested_price=2.0,
+        matched_price=2.0,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+    assert evidence.accepted_odds == Decimal("2.0")

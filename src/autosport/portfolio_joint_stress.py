@@ -504,6 +504,11 @@ class JointStressResult:
                 "result extrema must exactly match scenario evaluation profits"
             )
 
+        # The constructor token is a one-shot issuance capability, not durable
+        # result state.  Retaining it would let dataclasses.replace() copy the
+        # product-issued marker into caller-modified fields.
+        object.__setattr__(self, "_issuance_token", None)
+
     @property
     def diversification_credit_authorized(self) -> bool:
         return False

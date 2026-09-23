@@ -90,11 +90,53 @@ def _canonical_path_key(path: Path) -> str:
 def _make_snapshot_authority_registry():
     # Authority is intentionally kept in an installation-private weak registry.
     # A caller-visible attribute on PaperBook is not authority: byte-loaded books
-    # must not become mutable merely by flipping a boolean field.
+    # must not become mutable merely by flipping a boolean field. Bound authority
+    # also carries an optimistic concurrency token: the exact durable witness
+    # generation and snapshot SHA from which the object was loaded/published.
     bindings = WeakKeyDictionary()
 
+    def validated_generation_state(
+        generation: int,
+        snapshot_sha256: str,
+    ) -> tuple[int, str]:
+        if type(generation) is not int or generation < 0:
+            raise ValueError("PaperBook snapshot authority generation is invalid")
+        if generation == 0:
+            if snapshot_sha256 != "":
+                raise ValueError(
+                    "PaperBook virgin snapshot authority cannot carry a snapshot SHA"
+                )
+            return generation, snapshot_sha256
+        if (
+            type(snapshot_sha256) is not str
+            or len(snapshot_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in snapshot_sha256)
+        ):
+            raise ValueError("PaperBook snapshot authority SHA-256 is invalid")
+        return generation, snapshot_sha256
+
+    def candidate(
+        snapshot_path: Path,
+        witness_path: Path,
+        *,
+        generation: int,
+        snapshot_sha256: str,
+    ) -> tuple[str, str, str, str, int, str]:
+        generation, snapshot_sha256 = validated_generation_state(
+            generation,
+            snapshot_sha256,
+        )
+        return (
+            "BOUND",
+            _snapshot_identity(snapshot_path),
+            _canonical_path_key(snapshot_path),
+            _canonical_path_key(witness_path),
+            generation,
+            snapshot_sha256,
+        )
+
     def register_fresh(book: object) -> None:
-        bindings[book] = ("FRESH", "", "", "")
+        bindings[book] = ("FRESH", "", "", "", 0, "")
 
     def revoke(book: object) -> None:
         bindings.pop(book, None)
@@ -102,21 +144,69 @@ def _make_snapshot_authority_registry():
     def current(book: object):
         return bindings.get(book)
 
-    def bind(book: object, snapshot_path: Path, witness_path: Path) -> None:
-        candidate = (
-            "BOUND",
-            _snapshot_identity(snapshot_path),
-            _canonical_path_key(snapshot_path),
-            _canonical_path_key(witness_path),
+    def bind(
+        book: object,
+        snapshot_path: Path,
+        witness_path: Path,
+        *,
+        generation: int = 0,
+        snapshot_sha256: str = "",
+    ) -> None:
+        next_binding = candidate(
+            snapshot_path,
+            witness_path,
+            generation=generation,
+            snapshot_sha256=snapshot_sha256,
         )
         existing = bindings.get(book)
-        if existing is not None and existing[0] == "BOUND" and existing != candidate:
+        if (
+            existing is not None
+            and existing[0] == "BOUND"
+            and existing[:4] != next_binding[:4]
+        ):
             raise ValueError("PaperBook snapshot authority cannot be rebound to another path")
+        if (
+            existing is not None
+            and existing[0] == "BOUND"
+            and existing != next_binding
+        ):
+            raise ValueError(
+                "PaperBook snapshot authority generation can advance only after commit"
+            )
         if existing is not None and existing[0] not in {"FRESH", "BOUND"}:
             raise ValueError("PaperBook snapshot authority state is invalid")
-        bindings[book] = candidate
+        bindings[book] = next_binding
 
-    return register_fresh, revoke, current, bind
+    def advance(
+        book: object,
+        snapshot_path: Path,
+        witness_path: Path,
+        *,
+        expected_generation: int,
+        expected_snapshot_sha256: str,
+        new_generation: int,
+        new_snapshot_sha256: str,
+    ) -> None:
+        expected = candidate(
+            snapshot_path,
+            witness_path,
+            generation=expected_generation,
+            snapshot_sha256=expected_snapshot_sha256,
+        )
+        if bindings.get(book) != expected:
+            raise ValueError(
+                "PaperBook snapshot authority changed before durable generation advance"
+            )
+        if new_generation <= expected_generation:
+            raise ValueError("PaperBook snapshot authority generation did not advance")
+        bindings[book] = candidate(
+            snapshot_path,
+            witness_path,
+            generation=new_generation,
+            snapshot_sha256=new_snapshot_sha256,
+        )
+
+    return register_fresh, revoke, current, bind, advance
 
 
 (
@@ -124,6 +214,7 @@ def _make_snapshot_authority_registry():
     _revoke_snapshot_authority,
     _snapshot_authority_binding,
     _bind_snapshot_authority,
+    _advance_snapshot_authority,
 ) = _make_snapshot_authority_registry()
 
 
@@ -373,7 +464,7 @@ def _verify_snapshot_witness(
     payload: bytes,
     *,
     witness_path: Path | None = None,
-) -> None:
+) -> tuple[int, str]:
     witness_path = (
         _snapshot_witness_path(snapshot_path)
         if witness_path is None
@@ -393,6 +484,7 @@ def _verify_snapshot_witness(
         raise ValueError(
             "PaperBook snapshot bytes do not match independent durable opening witness"
         )
+    return committed
 
 
 class PaperBook:
@@ -421,7 +513,11 @@ class PaperBook:
         _register_fresh_snapshot_authority(self)
         self._snapshot_schema_version: int | None = _PAPER_SNAPSHOT_SCHEMA_VERSION
 
-    def _require_snapshot_authority_for_economic_mutation(self) -> None:
+    def _require_snapshot_authority_for_economic_mutation(
+        self,
+        *,
+        verify_bound_head: bool = True,
+    ) -> None:
         binding = _snapshot_authority_binding(self)
         if binding is None:
             raise ValueError(
@@ -429,11 +525,38 @@ class PaperBook:
             )
         if binding[0] == "BOUND":
             snapshot_path = Path(binding[2])
+            witness_path = Path(binding[3])
             current_witness_path = _snapshot_witness_path(snapshot_path)
             if _canonical_path_key(current_witness_path) != binding[3]:
                 raise ValueError(
                     "PaperBook independent snapshot authority root changed after binding"
                 )
+            if verify_bound_head:
+                _, committed, pending = _read_snapshot_witnesses(
+                    snapshot_path,
+                    witness_path=witness_path,
+                )
+                current_sha = _file_sha256(snapshot_path)
+                expected_generation = int(binding[4])
+                expected_snapshot_sha = str(binding[5])
+                if expected_generation == 0:
+                    if (
+                        pending is not None
+                        or committed is not None
+                        or current_sha is not None
+                    ):
+                        raise ValueError(
+                            "PaperBook snapshot authority is stale; reload current durable snapshot"
+                        )
+                elif (
+                    pending is not None
+                    or committed
+                    != (expected_generation, expected_snapshot_sha)
+                    or current_sha != expected_snapshot_sha
+                ):
+                    raise ValueError(
+                        "PaperBook snapshot authority is stale; reload current durable snapshot"
+                    )
 
     @property
     def committed_stake(self) -> Decimal:
@@ -640,7 +763,9 @@ class PaperBook:
         return payload
 
     def save(self, path: str | Path) -> None:
-        self._require_snapshot_authority_for_economic_mutation()
+        self._require_snapshot_authority_for_economic_mutation(
+            verify_bound_head=False,
+        )
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
         # Revalidate the complete economic/identity state immediately before any
         # durable replacement so caller/agent mutation cannot persist a snapshot
@@ -662,19 +787,30 @@ class PaperBook:
                     "load the existing PaperBook first"
                 )
             # Bind before PREPARE so even an interrupted first save cannot later
-            # retry against a different path or authority root.
-            _bind_snapshot_authority(self, destination, witness_path)
+            # retry against a different path or authority root. Generation zero is
+            # a virgin pre-publication state, not a durable snapshot generation.
+            _bind_snapshot_authority(
+                self,
+                destination,
+                witness_path,
+                generation=0,
+                snapshot_sha256="",
+            )
+            expected_generation = 0
+            expected_snapshot_sha = ""
         else:
-            expected = (
+            expected_prefix = (
                 "BOUND",
                 _snapshot_identity(destination),
                 _canonical_path_key(destination),
                 _canonical_path_key(witness_path),
             )
-            if binding != expected:
+            if binding[:4] != expected_prefix:
                 raise ValueError(
                     "PaperBook snapshot authority is bound to another path or witness root"
                 )
+            expected_generation = int(binding[4])
+            expected_snapshot_sha = str(binding[5])
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
@@ -790,9 +926,25 @@ class PaperBook:
                         "PaperBook snapshot witness pending state did not close"
                     )
 
-            # Existing witnessed state must still match its independent authority
-            # before a new generation can extend it.
+            # Existing witnessed state must still match both its independent
+            # authority and the exact durable generation from which THIS object
+            # was loaded/last published. Without this object-level CAS, a stale
+            # PaperBook can overwrite a newer valid generation and turn rollback
+            # into a new apparently legitimate witness generation.
             current_sha = _file_sha256(destination)
+            if expected_generation == 0:
+                if committed is not None or current_sha is not None:
+                    raise ValueError(
+                        "PaperBook snapshot authority is stale; reload current durable snapshot"
+                    )
+            elif (
+                committed
+                != (expected_generation, expected_snapshot_sha)
+                or current_sha != expected_snapshot_sha
+            ):
+                raise ValueError(
+                    "PaperBook snapshot authority is stale; reload current durable snapshot"
+                )
             if committed is None and current_sha is not None:
                 raise ValueError(
                     "PaperBook existing snapshot lacks independent durable witness"
@@ -824,6 +976,15 @@ class PaperBook:
                 generation=generation,
                 snapshot_sha256=snapshot_sha,
                 witness_path=witness_path,
+            )
+            _advance_snapshot_authority(
+                self,
+                destination,
+                witness_path,
+                expected_generation=expected_generation,
+                expected_snapshot_sha256=expected_snapshot_sha,
+                new_generation=generation,
+                new_snapshot_sha256=snapshot_sha,
             )
         finally:
             if temporary is not None:
@@ -1576,7 +1737,7 @@ class PaperBook:
             # Skipping verification must never promote them into economic authority.
             return book
         try:
-            _verify_snapshot_witness(
+            verified_head = _verify_snapshot_witness(
                 source,
                 payload,
                 witness_path=witness_path,
@@ -1593,5 +1754,11 @@ class PaperBook:
             ) and "missing independent durable opening witness" in str(exc):
                 return book
             raise
-        _bind_snapshot_authority(book, source, witness_path)
+        _bind_snapshot_authority(
+            book,
+            source,
+            witness_path,
+            generation=verified_head[0],
+            snapshot_sha256=verified_head[1],
+        )
         return book

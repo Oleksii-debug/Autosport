@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import threading
 
 import pytest
 
@@ -197,3 +198,97 @@ def test_load_recovers_replaced_snapshot_after_commit_publication_interruption(
     reread = PaperBook.load(path)
     assert reread.balance == Decimal("90")
     assert tuple(reread.tickets) == (ticket.ticket_id,)
+
+
+def test_save_and_open_ticket_are_linearized_on_same_paperbook(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    book.save(path)
+
+    import autosport.paper as paper_module
+
+    save_entered_lifecycle = threading.Event()
+    allow_save_to_finish = threading.Event()
+    open_started = threading.Event()
+    open_finished = threading.Event()
+    errors: list[BaseException] = []
+    opened_ticket_ids: list[str] = []
+
+    original_lifecycle_to_json = PaperBook._lifecycle_to_json
+
+    def _blocked_lifecycle_to_json(self):
+        save_entered_lifecycle.set()
+        if not allow_save_to_finish.wait(timeout=5):
+            raise AssertionError("timed out waiting to release save serialization")
+        return original_lifecycle_to_json(self)
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_lifecycle_to_json",
+        _blocked_lifecycle_to_json,
+    )
+
+    def _save_worker() -> None:
+        try:
+            book.save(path)
+        except BaseException as exc:
+            errors.append(exc)
+
+    save_thread = threading.Thread(target=_save_worker, daemon=True)
+    save_thread.start()
+    assert save_entered_lifecycle.wait(timeout=5)
+
+    # save() must own the same per-book state lock used by open_ticket().
+    state_lock = paper_module._paperbook_state_lock(book)
+    assert state_lock.acquire(blocking=False) is False
+
+    def _open_worker() -> None:
+        open_started.set()
+        try:
+            ticket = book.open_ticket(
+                [_leg("concurrent-selection")],
+                "10",
+                placed_at=_BASE_TS,
+            )
+            opened_ticket_ids.append(ticket.ticket_id)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            open_finished.set()
+
+    open_thread = threading.Thread(target=_open_worker, daemon=True)
+    open_thread.start()
+    assert open_started.wait(timeout=5)
+    assert not open_finished.wait(timeout=0.1)
+
+    allow_save_to_finish.set()
+    save_thread.join(timeout=5)
+    open_thread.join(timeout=5)
+    assert not save_thread.is_alive()
+    assert not open_thread.is_alive()
+    assert errors == []
+    assert len(opened_ticket_ids) == 1
+
+    # The first durable snapshot linearized before the open transition.
+    monkeypatch.setattr(
+        PaperBook,
+        "_lifecycle_to_json",
+        original_lifecycle_to_json,
+    )
+    before_open = PaperBook.load(path)
+    assert before_open.balance == Decimal("100")
+    assert before_open.tickets == {}
+
+    # In-memory state then contains the complete open transition, and a later
+    # save persists that whole epoch rather than a balance/ticket/lifecycle mix.
+    assert book.balance == Decimal("90")
+    assert tuple(book.tickets) == (opened_ticket_ids[0],)
+    book.save(path)
+    after_open = PaperBook.load(path)
+    assert after_open.balance == Decimal("90")
+    assert tuple(after_open.tickets) == (opened_ticket_ids[0],)

@@ -490,6 +490,15 @@ class PaperTicket:
     bankroll_id: str | None = None
     currency: str | None = None
     settled_at: str | None = None
+    _opening_stake: Decimal = field(init=False, repr=False, compare=False)
+    _opening_legs: tuple[TicketLeg, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Settlement state is mutable, but the admitted monetary identity is not.
+        # Keep an internal witness so PaperBook can fail closed if a caller
+        # rewrites stake or locked legs after the opening debit was committed.
+        object.__setattr__(self, "_opening_stake", self.stake)
+        object.__setattr__(self, "_opening_legs", self.legs)
 
     @property
     def combined_odds(self) -> Decimal:

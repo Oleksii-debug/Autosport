@@ -106,10 +106,16 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertEqual(quote.metadata["outcome_sid"], "outcome-99")
         self.assertFalse(quote.metadata["coverage_complete"])
         self.assertEqual(quote.metadata["request"]["quota"]["remaining"], 499)
-        self.assertFalse(
-            quote.metadata["terms"]["standalone_raw_redistribution_permitted"]
+        terms = quote.metadata["terms"]
+        self.assertEqual(terms["last_updated"], "2026-08-31")
+        self.assertTrue(
+            terms["provider_stated_analytics_research_training_permitted"]
         )
-        self.assertFalse(quote.metadata["terms"]["wagering_operator"])
+        self.assertFalse(
+            terms["provider_stated_standalone_raw_redistribution_permitted"]
+        )
+        self.assertFalse(terms["provider_stated_wagering_operator"])
+        self.assertFalse(terms["lawful_use_authority"])
         self.assertIn("apiKey=secret", calls[0][0])
         self.assertNotIn("secret", repr(quote.metadata))
 

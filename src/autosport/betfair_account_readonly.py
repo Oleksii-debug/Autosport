@@ -1200,6 +1200,36 @@ def _install_execution_readback_authority() -> None:
     sealed_json_dumps = json.dumps
     sealed_json_dumps_code = getattr(sealed_json_dumps, "__code__", None)
     sealed_json_decode_error = json.JSONDecodeError
+    sealed_json_decoder = json.JSONDecoder
+    sealed_json_decoder_init = sealed_json_decoder.__init__
+    sealed_json_decoder_init_code = getattr(
+        sealed_json_decoder_init, "__code__", None
+    )
+    sealed_json_decoder_decode = sealed_json_decoder.decode
+    sealed_json_decoder_decode_code = getattr(
+        sealed_json_decoder_decode, "__code__", None
+    )
+    sealed_json_decoder_raw_decode = sealed_json_decoder.raw_decode
+    sealed_json_decoder_raw_decode_code = getattr(
+        sealed_json_decoder_raw_decode, "__code__", None
+    )
+    sealed_json_encoder = json.JSONEncoder
+    sealed_json_encoder_init = sealed_json_encoder.__init__
+    sealed_json_encoder_init_code = getattr(
+        sealed_json_encoder_init, "__code__", None
+    )
+    sealed_json_encoder_encode = sealed_json_encoder.encode
+    sealed_json_encoder_encode_code = getattr(
+        sealed_json_encoder_encode, "__code__", None
+    )
+    sealed_json_encoder_iterencode = sealed_json_encoder.iterencode
+    sealed_json_encoder_iterencode_code = getattr(
+        sealed_json_encoder_iterencode, "__code__", None
+    )
+    sealed_json_encoder_default = sealed_json_encoder.default
+    sealed_json_encoder_default_code = getattr(
+        sealed_json_encoder_default, "__code__", None
+    )
     sealed_sha256 = sha256
     sealed_adapter_id = ADAPTER_ID
     sealed_adapter_version = ADAPTER_VERSION
@@ -1219,6 +1249,38 @@ def _install_execution_readback_authority() -> None:
             is sealed_json_dumps_code
             and getattr(sealed_json_module, "JSONDecodeError", None)
             is sealed_json_decode_error
+            and getattr(sealed_json_module, "JSONDecoder", None)
+            is sealed_json_decoder
+            and getattr(sealed_json_decoder, "__init__", None)
+            is sealed_json_decoder_init
+            and getattr(sealed_json_decoder_init, "__code__", None)
+            is sealed_json_decoder_init_code
+            and getattr(sealed_json_decoder, "decode", None)
+            is sealed_json_decoder_decode
+            and getattr(sealed_json_decoder_decode, "__code__", None)
+            is sealed_json_decoder_decode_code
+            and getattr(sealed_json_decoder, "raw_decode", None)
+            is sealed_json_decoder_raw_decode
+            and getattr(sealed_json_decoder_raw_decode, "__code__", None)
+            is sealed_json_decoder_raw_decode_code
+            and getattr(sealed_json_module, "JSONEncoder", None)
+            is sealed_json_encoder
+            and getattr(sealed_json_encoder, "__init__", None)
+            is sealed_json_encoder_init
+            and getattr(sealed_json_encoder_init, "__code__", None)
+            is sealed_json_encoder_init_code
+            and getattr(sealed_json_encoder, "encode", None)
+            is sealed_json_encoder_encode
+            and getattr(sealed_json_encoder_encode, "__code__", None)
+            is sealed_json_encoder_encode_code
+            and getattr(sealed_json_encoder, "iterencode", None)
+            is sealed_json_encoder_iterencode
+            and getattr(sealed_json_encoder_iterencode, "__code__", None)
+            is sealed_json_encoder_iterencode_code
+            and getattr(sealed_json_encoder, "default", None)
+            is sealed_json_encoder_default
+            and getattr(sealed_json_encoder_default, "__code__", None)
+            is sealed_json_encoder_default_code
         )
 
     def capture_opener_dispatch() -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
@@ -1387,6 +1449,7 @@ def _install_execution_readback_authority() -> None:
         try:
             decoded = sealed_json_loads(
                 payload.decode("utf-8"),
+                cls=sealed_json_decoder,
                 parse_float=sealed_decimal_type,
                 object_pairs_hook=reject_duplicate_pairs,
                 parse_constant=reject_constant,
@@ -1411,6 +1474,7 @@ def _install_execution_readback_authority() -> None:
         try:
             payload = sealed_json_dumps(
                 value,
+                cls=sealed_json_encoder,
                 ensure_ascii=True,
                 sort_keys=True,
                 separators=(",", ":"),

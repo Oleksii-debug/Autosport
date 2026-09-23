@@ -444,7 +444,9 @@ class MarketImpliedBaselineCohortEvidence:
             "method_id": METHOD_ID,
             "row_evidence_sha256": list(self.row_evidence_sha256),
             "truth": {
-                "same_frozen_cohort": True,
+                "same_frozen_cohort": False,
+                "same_frozen_cohort_labels": True,
+                "canonical_evaluation_universe_bound": False,
                 "same_frozen_market_evidence": True,
                 "source_stream_continuity_proven": False,
                 "forecast_comparator_only": True,
@@ -486,7 +488,12 @@ def bind_market_implied_baseline_cohort(
     baseline_definition: BaselineDefinition,
     evidence: Sequence[MarketImpliedBaselineEvidence],
 ) -> MarketImpliedBaselineCohortEvidence:
-    """Bind complete issued rows to one frozen predictive external-validity protocol."""
+    """Bind caller labels/manifest to a protocol without claiming canonical row identity.
+
+    This structural step is intentionally insufficient for positive same-cohort truth.
+    Consumers that need canonical evaluation membership must additionally pass through
+    ``market_implied_universe_binding.bind_market_implied_baseline_to_evaluation_universe``.
+    """
 
     if not isinstance(protocol, FrozenBaselineProtocol):
         raise TypeError("protocol must be FrozenBaselineProtocol")

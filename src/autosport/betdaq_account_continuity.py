@@ -38,6 +38,7 @@ from .betdaq_account_readonly import (
 )
 from .bookmaker_capability import BookmakerAccountSnapshot, BookmakerCapability
 from .bookmaker_account_reconciliation import BookmakerAccountReconciliationStore
+from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 
 
 _PRINCIPAL_ID_PREFIX = "betdaq-authenticated-principal:"
@@ -101,6 +102,24 @@ _CANONICAL_RECONCILIATION_HELPER_CODES = {
     )
     for name, descriptor in _CANONICAL_RECONCILIATION_HELPER_DESCRIPTORS.items()
 }
+
+_CANONICAL_RECONCILIATION_AUTHORITY_CLASS = MonotonicWorkspaceAuthority
+_CANONICAL_RECONCILIATION_AUTHORITY_METHOD_NAMES = (
+    "read_history",
+    "prepare",
+    "recover",
+)
+_CANONICAL_RECONCILIATION_AUTHORITY_METHODS = {
+    name: getattr(MonotonicWorkspaceAuthority, name)
+    for name in _CANONICAL_RECONCILIATION_AUTHORITY_METHOD_NAMES
+}
+_CANONICAL_RECONCILIATION_AUTHORITY_METHOD_CODES = {
+    name: getattr(method, "__code__", None)
+    for name, method in _CANONICAL_RECONCILIATION_AUTHORITY_METHODS.items()
+}
+_CANONICAL_RECONCILIATION_AUTHORITY_DOMAIN = (
+    "provider.account-snapshot-reconciliation-v1"
+)
 
 
 class BetdaqAccountContinuityError(RuntimeError):
@@ -332,6 +351,42 @@ def _require_canonical_reconciliation_store(store: object) -> None:
     ):
         raise BetdaqAccountContinuityError(
             "canonical BETDAQ reconciliation store dispatch was shadowed"
+        )
+
+    authority = getattr(store, "_authority", None)
+    if type(authority) is not _CANONICAL_RECONCILIATION_AUTHORITY_CLASS:
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ reconciliation monotonic authority was replaced"
+        )
+    for method_name in _CANONICAL_RECONCILIATION_AUTHORITY_METHOD_NAMES:
+        expected_method = _CANONICAL_RECONCILIATION_AUTHORITY_METHODS[method_name]
+        current_class_method = getattr(
+            _CANONICAL_RECONCILIATION_AUTHORITY_CLASS,
+            method_name,
+            None,
+        )
+        bound_method = getattr(authority, method_name, None)
+        if (
+            current_class_method is not expected_method
+            or getattr(current_class_method, "__code__", None)
+            is not _CANONICAL_RECONCILIATION_AUTHORITY_METHOD_CODES[method_name]
+            or getattr(bound_method, "__self__", None) is not authority
+            or getattr(bound_method, "__func__", None) is not expected_method
+        ):
+            raise BetdaqAccountContinuityError(
+                "canonical BETDAQ reconciliation monotonic authority dispatch changed"
+            )
+
+    expected_workspace = store.path.parent.resolve(strict=False)
+    expected_key = f"account-reconciliation:{store.path.name}"
+    if (
+        store._workspace != expected_workspace
+        or authority.workspace != store._workspace
+        or authority.domain != _CANONICAL_RECONCILIATION_AUTHORITY_DOMAIN
+        or authority.key != expected_key
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ reconciliation monotonic authority binding changed"
         )
 
 

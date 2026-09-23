@@ -84,6 +84,87 @@ class UncertaintySizingTests(unittest.TestCase):
         self.assertEqual(decision.stake_ceiling, Decimal("25.0000"))
         self.assertEqual(len(decision.evidence_fingerprint_sha256), 64)
 
+    def test_runtime_subclasses_cannot_override_sizing_authority(self) -> None:
+        class ForgedEvidence(UncertaintySizingEvidence):
+            @property
+            def uncertainty_width(self) -> Decimal:
+                return Decimal("0")
+
+            @property
+            def conservative_ev_per_stake(self) -> Decimal:
+                return Decimal("999")
+
+            @property
+            def conservative_full_kelly_fraction(self) -> Decimal:
+                return Decimal("1")
+
+        base = self._evidence(
+            probability_lower=Decimal("0.10"),
+            probability_point=Decimal("0.20"),
+            probability_upper=Decimal("0.30"),
+        )
+        forged = ForgedEvidence(
+            evidence_id=base.evidence_id,
+            candidate_id=base.candidate_id,
+            quote_sha256=base.quote_sha256,
+            probability_model_version_id=base.probability_model_version_id,
+            calibration_bundle_sha256=base.calibration_bundle_sha256,
+            causal_cutoff=base.causal_cutoff,
+            produced_at=base.produced_at,
+            valid_until=base.valid_until,
+            probability_lower=base.probability_lower,
+            probability_point=base.probability_point,
+            probability_upper=base.probability_upper,
+            net_win_profit_per_stake=base.net_win_profit_per_stake,
+            evidence_refs=base.evidence_refs,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact UncertaintySizingEvidence"):
+            evaluate_uncertainty_sizing(
+                forged,
+                self._request(),
+                self._policy(),
+            )
+
+        class RequestSubclass(UncertaintySizingRequest):
+            pass
+
+        request = self._request()
+        forged_request = RequestSubclass(
+            candidate_id=request.candidate_id,
+            quote_sha256=request.quote_sha256,
+            decision_ts=request.decision_ts,
+            bankroll_id=request.bankroll_id,
+            currency=request.currency,
+            bankroll=request.bankroll,
+        )
+        with self.assertRaisesRegex(TypeError, "exact UncertaintySizingRequest"):
+            evaluate_uncertainty_sizing(
+                self._evidence(),
+                forged_request,
+                self._policy(),
+            )
+
+        class PolicySubclass(UncertaintySizingPolicy):
+            @property
+            def fingerprint_sha256(self) -> str:
+                return "0" * 64
+
+        policy = self._policy()
+        forged_policy = PolicySubclass(
+            policy_id=policy.policy_id,
+            fractional_kelly=policy.fractional_kelly,
+            max_bankroll_fraction=policy.max_bankroll_fraction,
+            max_uncertainty_width=policy.max_uncertainty_width,
+            min_conservative_ev_per_stake=policy.min_conservative_ev_per_stake,
+        )
+        with self.assertRaisesRegex(TypeError, "exact UncertaintySizingPolicy"):
+            evaluate_uncertainty_sizing(
+                self._evidence(),
+                self._request(),
+                forged_policy,
+            )
+
     def test_bankroll_fraction_cap_tightens_positive_kelly_size(self) -> None:
         evidence = self._evidence(
             probability_lower=Decimal("0.80"),

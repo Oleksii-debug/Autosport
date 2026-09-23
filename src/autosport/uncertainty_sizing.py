@@ -429,12 +429,12 @@ def evaluate_uncertainty_sizing(
     may reduce it to zero.
     """
 
-    if not isinstance(evidence, UncertaintySizingEvidence):
-        raise TypeError("evidence must be UncertaintySizingEvidence")
-    if not isinstance(request, UncertaintySizingRequest):
-        raise TypeError("request must be UncertaintySizingRequest")
-    if not isinstance(policy, UncertaintySizingPolicy):
-        raise TypeError("policy must be UncertaintySizingPolicy")
+    if type(evidence) is not UncertaintySizingEvidence:
+        raise TypeError("evidence must be exact UncertaintySizingEvidence")
+    if type(request) is not UncertaintySizingRequest:
+        raise TypeError("request must be exact UncertaintySizingRequest")
+    if type(policy) is not UncertaintySizingPolicy:
+        raise TypeError("policy must be exact UncertaintySizingPolicy")
 
     _, decision = _utc("decision_ts", request.decision_ts)
     _, produced = _utc("produced_at", evidence.produced_at)

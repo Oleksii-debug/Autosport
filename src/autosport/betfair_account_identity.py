@@ -188,6 +188,9 @@ def _make_account_identity_authority():
     abstract_http_handler_type = _urllib_request.AbstractHTTPHandler
     http_error_processor_type = _urllib_request.HTTPErrorProcessor
     canonical_opener_open = opener_type.open
+    canonical_opener_internal_open = opener_type._open
+    canonical_opener_call_chain = opener_type._call_chain
+    canonical_opener_error = opener_type.error
     canonical_https_open = https_handler_type.https_open
     canonical_https_request = https_handler_type.https_request
     canonical_do_open = abstract_http_handler_type.do_open
@@ -360,6 +363,9 @@ def _make_account_identity_authority():
             and redirect_handler_type.redirect_request
             is canonical_redirect_request
             and opener_type.open is canonical_opener_open
+            and opener_type._open is canonical_opener_internal_open
+            and opener_type._call_chain is canonical_opener_call_chain
+            and opener_type.error is canonical_opener_error
             and details_type.__init__ is canonical_details_init
             and details_type.__post_init__ is canonical_details_post_init
             and evidence_type.__init__ is canonical_evidence_init
@@ -449,7 +455,10 @@ def _make_account_identity_authority():
         if type(opener) is not opener_type or type(opener).open is not canonical_opener_open:
             return False
         opener_dict = getattr(opener, "__dict__", None)
-        if type(opener_dict) is not dict or "open" in opener_dict:
+        if type(opener_dict) is not dict or any(
+            name in opener_dict
+            for name in ("open", "_open", "_call_chain", "error")
+        ):
             return False
         handlers = getattr(opener, "handlers", None)
         if type(handlers) is not list:

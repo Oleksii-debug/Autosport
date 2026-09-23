@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import tempfile
 from threading import RLock
+from weakref import ReferenceType, ref
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -52,6 +53,88 @@ _CANONICAL_AUTHORITY_METHOD_CODES = {
     for name, method in _CANONICAL_AUTHORITY_METHODS.items()
 }
 _MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
+
+
+def _build_authority_binding_registry():
+    """Keep constructor-issued authority trust outside caller-mutable store fields."""
+
+    records: dict[
+        int,
+        tuple[
+            ReferenceType[object],
+            MonotonicWorkspaceAuthority,
+            tuple[object, ...],
+            Path,
+            Path,
+        ],
+    ] = {}
+    lock = RLock()
+
+    def authority_binding(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[object, ...]:
+        return (
+            authority.authority_root,
+            authority.workspace,
+            authority.workspace_instance_id,
+            authority.domain,
+            authority.key,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.namespace_marker_path,
+            authority.workspace_binding_path,
+        )
+
+    def register(
+        store: object,
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        workspace: Path,
+        path: Path,
+    ) -> None:
+        key = id(store)
+
+        def release(
+            dead_ref: ReferenceType[object],
+            *,
+            issued_key: int = key,
+        ) -> None:
+            with lock:
+                record = records.get(issued_key)
+                if record is not None and record[0] is dead_ref:
+                    records.pop(issued_key, None)
+
+        store_ref = ref(store, release)
+        record = (
+            store_ref,
+            authority,
+            authority_binding(authority),
+            workspace,
+            path,
+        )
+        with lock:
+            records[key] = record
+
+    def lookup(
+        store: object,
+    ) -> tuple[
+        MonotonicWorkspaceAuthority,
+        tuple[object, ...],
+        Path,
+        Path,
+    ] | None:
+        with lock:
+            record = records.get(id(store))
+            if record is None or record[0]() is not store:
+                return None
+            return record[1], record[2], record[3], record[4]
+
+    return register, lookup
+
+
+_register_authority_binding, _lookup_authority_binding = (
+    _build_authority_binding_registry()
+)
 
 
 class AccountReconciliationError(RuntimeError):
@@ -593,22 +676,29 @@ class BookmakerAccountReconciliationStore:
             authority_root=authority_root,
         )
         self._authority = authority
-        self._authority_identity = authority
-        self._authority_binding = (
-            authority.authority_root,
-            authority.workspace,
-            authority.workspace_instance_id,
-            authority.domain,
-            authority.key,
-            authority.namespace_sha256,
-            authority.journal_dir,
-            authority.namespace_marker_path,
-            authority.workspace_binding_path,
+        _register_authority_binding(
+            self,
+            authority,
+            workspace=self._workspace,
+            path=self.path,
         )
 
-    def _require_canonical_authority(self) -> MonotonicWorkspaceAuthority:
+    def _require_canonical_authority(
+        self,
+        _registry_lookup=_lookup_authority_binding,
+    ) -> MonotonicWorkspaceAuthority:
         authority = self._authority
-        expected_binding = self._authority_binding
+        registered = _registry_lookup(self)
+        if registered is None:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority issuance is missing"
+            )
+        (
+            expected_authority,
+            expected_binding,
+            expected_workspace,
+            expected_path,
+        ) = registered
         current_binding = (
             getattr(authority, "authority_root", None),
             getattr(authority, "workspace", None),
@@ -622,11 +712,13 @@ class BookmakerAccountReconciliationStore:
         )
         if (
             type(authority) is not MonotonicWorkspaceAuthority
-            or authority is not self._authority_identity
+            or authority is not expected_authority
             or current_binding != expected_binding
-            or authority.workspace != self._workspace
+            or self._workspace != expected_workspace
+            or self.path != expected_path
+            or authority.workspace != expected_workspace
             or authority.domain != _RECONCILIATION_AUTHORITY_DOMAIN
-            or authority.key != f"account-reconciliation:{self.path.name}"
+            or authority.key != f"account-reconciliation:{expected_path.name}"
         ):
             raise AccountReconciliationIntegrityError(
                 "account reconciliation monotonic authority identity or binding changed"

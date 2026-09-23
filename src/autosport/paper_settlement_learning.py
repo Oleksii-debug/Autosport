@@ -787,6 +787,15 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "campaign plan anchor requires an existing ticket binding"
                 )
+            if binding.get("status") == INVALIDATED:
+                self._validate_acknowledged_invalidation(
+                    binding,
+                    binding.get("invalidation"),
+                )
+                raise PaperSettlementLearningBridgeError(
+                    "campaign plan anchor is unavailable because acknowledged "
+                    "learner reward is durably invalidated"
+                )
             anchor = binding.get("campaign_plan_anchor")
             if anchor is None:
                 return None
@@ -829,6 +838,15 @@ class PaperSettlementLearningBridge:
             if binding is None:
                 raise PaperSettlementLearningBridgeError(
                     "campaign plan anchor requires an existing ticket binding"
+                )
+            if binding.get("status") == INVALIDATED:
+                self._validate_acknowledged_invalidation(
+                    binding,
+                    binding.get("invalidation"),
+                )
+                raise PaperSettlementLearningBridgeError(
+                    "campaign plan anchor cannot bind because acknowledged "
+                    "learner reward is durably invalidated"
                 )
             if binding.get("outbox") is None:
                 raise PaperSettlementLearningBridgeError(

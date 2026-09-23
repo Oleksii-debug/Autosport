@@ -74,3 +74,41 @@ def test_pre_marker_same_name_trigger_is_reconciled_and_replaced(tmp_path) -> No
     finally:
         connection.close()
     assert marker == ("1",)
+
+def test_commit_sequence_is_immutable_after_integrity_guard(tmp_path) -> None:
+    path = tmp_path / "collector.db"
+    CollectorDeltaStore(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO collector_deltas("
+            "delta_id, source_id, stream_epoch, cursor_position, revision_number, "
+            "desktop_available_at, collector_committed_at, payload_sha256, payload_json"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                "raw-trigger-probe",
+                "source",
+                "epoch",
+                1,
+                0,
+                "2026-09-23T00:00:00Z",
+                "2026-09-23T00:00:00Z",
+                "0" * 64,
+                "{}",
+            ),
+        )
+        connection.commit()
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="collector delta indexed projections are immutable",
+        ):
+            connection.execute(
+                "UPDATE collector_deltas SET commit_seq=commit_seq+100 "
+                "WHERE delta_id='raw-trigger-probe'"
+            )
+    finally:
+        connection.rollback()
+        connection.close()
+

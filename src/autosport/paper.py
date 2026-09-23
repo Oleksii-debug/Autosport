@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import uuid
+from functools import wraps
 from decimal import (
     Context,
     Decimal,
@@ -297,6 +298,38 @@ def _make_snapshot_authority_registry():
 ) = _make_snapshot_authority_registry()
 
 
+def _make_paperbook_state_lock_registry():
+    locks = WeakKeyDictionary()
+    guard = threading.Lock()
+
+    def register(book: object) -> None:
+        with guard:
+            locks[book] = threading.RLock()
+
+    def current(book: object):
+        with guard:
+            lock = locks.get(book)
+        if lock is None:
+            raise RuntimeError("PaperBook state lock is unavailable")
+        return lock
+
+    return register, current
+
+
+_register_paperbook_state_lock, _paperbook_state_lock = (
+    _make_paperbook_state_lock_registry()
+)
+
+
+def _serialize_paperbook_state(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        with _paperbook_state_lock(self):
+            return method(self, *args, **kwargs)
+
+    return serialized
+
+
 def _snapshot_witness_digest(payload: dict[str, object]) -> str:
     try:
         encoded = json.dumps(
@@ -570,6 +603,7 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
+        _register_paperbook_state_lock(self)
         initial = Decimal(str(initial_bankroll))
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
@@ -642,6 +676,7 @@ class PaperBook:
                     _release_snapshot_publication_lock(publication_lock)
 
     @property
+    @_serialize_paperbook_state
     def committed_stake(self) -> Decimal:
         return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
 
@@ -662,6 +697,7 @@ class PaperBook:
             raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
         return new_balance
 
+    @_serialize_paperbook_state
     def open_ticket(
         self,
         legs,
@@ -774,6 +810,7 @@ class PaperBook:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance
 
+    @_serialize_paperbook_state
     def settle(
         self,
         ticket_id: str,
@@ -845,6 +882,7 @@ class PaperBook:
                 )
         return payload
 
+    @_serialize_paperbook_state
     def save(self, path: str | Path) -> None:
         self._require_snapshot_authority_for_economic_mutation(
             verify_bound_head=False,

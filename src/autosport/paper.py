@@ -386,7 +386,37 @@ def _make_ticket_opening_authority_registry():
                 "PaperBook ticket opening economic identity changed after admission"
             )
 
-    return register_book, record, install_verified_snapshot, require
+    def require_candidate(source_book: object, candidate_book: object) -> None:
+        with guard:
+            current = authorities.get(source_book)
+            if current is None:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            expected = dict(current)
+        candidate_tickets = getattr(candidate_book, "tickets", None)
+        if type(candidate_tickets) is not dict:
+            raise ValueError("PaperBook serialized candidate ticket mapping is invalid")
+        if set(candidate_tickets) != set(expected):
+            raise ValueError(
+                "PaperBook serialized candidate ticket set differs from "
+                "product-issued opening authority"
+            )
+        for ticket_id, ticket in candidate_tickets.items():
+            if (
+                type(ticket) is not PaperTicket
+                or _ticket_opening_commitment(ticket) != expected[ticket_id]
+            ):
+                raise ValueError(
+                    "PaperBook serialized candidate opening economic identity "
+                    "differs from product-issued authority"
+                )
+
+    return (
+        register_book,
+        record,
+        install_verified_snapshot,
+        require,
+        require_candidate,
+    )
 
 
 (
@@ -394,6 +424,7 @@ def _make_ticket_opening_authority_registry():
     _record_ticket_opening_authority,
     _install_verified_ticket_opening_authority,
     _require_ticket_opening_authority,
+    _require_snapshot_candidate_opening_authority,
 ) = _make_ticket_opening_authority_registry()
 
 
@@ -1048,6 +1079,16 @@ class PaperBook:
             ).encode("utf-8")
         except (TypeError, ValueError, UnicodeEncodeError) as exc:
             raise ValueError("PaperBook snapshot cannot be serialized canonically") from exc
+
+        # Validate the exact bytes that are about to become durable, not only
+        # the live object state observed before serialization. Direct caller
+        # mutation does not participate in the per-book state lock, so it can
+        # otherwise race the interval between the first validation and raw
+        # field collection. Structural replay catches mixed epochs, while the
+        # private opening-authority comparison prevents a coherently rewritten
+        # opening history from self-baselining when the candidate is decoded.
+        candidate = self._decode_snapshot_bytes(snapshot_bytes)
+        _require_snapshot_candidate_opening_authority(self, candidate)
         snapshot_sha = _snapshot_sha256(snapshot_bytes)
 
         temporary: Path | None = None

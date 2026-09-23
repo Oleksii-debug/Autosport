@@ -16,6 +16,13 @@ LEGACY_PREFIX = "Autosport-V1/"
 STAGE_NEUTRAL_PREFIX = "Autosport/"
 LEGACY_BUILD_VERSION = "0.1.0-v1-prehuman"
 STAGE_NEUTRAL_BUILD_VERSION = "0.1.0-prehuman"
+WINDOWS_START_GUIDE = "WINDOWS_START_HERE.txt"
+LEGACY_GUIDE_TITLE = "АВТОСПОРТ — V1 WINDOWS PAPER / MARKET LAB"
+STAGE_NEUTRAL_GUIDE_TITLE = (
+    "АВТОСПОРТ — WINDOWS: ПАПЕРОВЕ МОДЕЛЮВАННЯ ТА РИНКОВА ЛАБОРАТОРІЯ"
+)
+LEGACY_READY_LABEL = "V1_READY=false"
+STAGE_NEUTRAL_READY_LABEL = "WHOLE_PRODUCT_COMPLETE=false"
 
 _REQUIRED_TRUTH_LABELS = (
     "real_money_execution",
@@ -199,6 +206,31 @@ def _require_canonical_container(payload: bytes) -> None:
         raise ValueError("stage-neutral release package is not a valid ZIP") from exc
 
 
+def _transform_windows_start_guide(payload: bytes) -> bytes:
+    try:
+        guide = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("WINDOWS_START_HERE.txt is not valid UTF-8") from exc
+
+    if guide.startswith(f"{LEGACY_GUIDE_TITLE}\n"):
+        guide = STAGE_NEUTRAL_GUIDE_TITLE + guide[len(LEGACY_GUIDE_TITLE) :]
+    elif not guide.startswith(f"{STAGE_NEUTRAL_GUIDE_TITLE}\n"):
+        raise ValueError(
+            "WINDOWS_START_HERE.txt has an unrecognized product identity"
+        )
+
+    guide = guide.replace(LEGACY_ARCHIVE_NAME, STAGE_NEUTRAL_ARCHIVE_NAME)
+    guide = guide.replace(LEGACY_READY_LABEL, STAGE_NEUTRAL_READY_LABEL)
+
+    if LEGACY_GUIDE_TITLE in guide:
+        raise ValueError("stage-neutral guide retained the legacy V1 title")
+    if LEGACY_ARCHIVE_NAME in guide:
+        raise ValueError("stage-neutral guide retained the legacy archive name")
+    if LEGACY_READY_LABEL in guide:
+        raise ValueError("stage-neutral guide retained the legacy readiness label")
+    return guide.encode("utf-8")
+
+
 def _transform_members(
     legacy_members: dict[str, bytes],
     *,
@@ -221,11 +253,20 @@ def _transform_members(
             "legacy BUILD_INFO.json version is not the exact transitional version"
         )
 
+    guide_payload = legacy_members.get(WINDOWS_START_GUIDE)
+    if guide_payload is None:
+        raise ValueError(
+            "legacy release package is missing WINDOWS_START_HERE.txt"
+        )
+
     transformed = dict(legacy_members)
     transformed_build = dict(build_info)
     transformed_build["version"] = STAGE_NEUTRAL_BUILD_VERSION
     transformed_build["whole_product_complete"] = False
     transformed["BUILD_INFO.json"] = _canonical_json_bytes(transformed_build)
+    transformed[WINDOWS_START_GUIDE] = _transform_windows_start_guide(
+        guide_payload
+    )
 
     manifest = _decode_json_object(
         transformed["PACKAGE_MANIFEST.json"],
@@ -239,6 +280,9 @@ def _transform_members(
     }
     manifest_files["BUILD_INFO.json"] = _sha256_bytes(
         transformed["BUILD_INFO.json"]
+    )
+    manifest_files[WINDOWS_START_GUIDE] = _sha256_bytes(
+        transformed[WINDOWS_START_GUIDE]
     )
     transformed_manifest: dict[str, object] = {
         "schema_version": 1,

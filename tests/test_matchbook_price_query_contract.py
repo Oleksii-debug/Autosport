@@ -320,6 +320,23 @@ def test_provider_wire_depth_domain_fails_closed() -> None:
     assert _query(depth=(1 << 31) - 1).depth == (1 << 31) - 1
 
 
+def test_zero_with_extreme_negative_exponent_serializes_without_expansion() -> None:
+    query = _query(
+        minimum_liquidity=Decimal("0E-1000000000")
+    )
+    assert ("minimum-liquidity", "0") in query.query_params()
+    assert query.to_dict()["minimum_liquidity"] == "0"
+
+
+def test_minimum_liquidity_rejects_oversized_fixed_point_materialization() -> None:
+    oversized = Decimal("1." + ("1" * 600))
+    with pytest.raises(
+        MatchbookPriceQueryError,
+        match="serialized Decimal exceeds safety bound",
+    ):
+        _query(minimum_liquidity=oversized)
+
+
 @pytest.mark.parametrize(
     "minimum_liquidity",
     (

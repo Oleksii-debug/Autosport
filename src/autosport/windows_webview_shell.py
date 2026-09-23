@@ -331,6 +331,15 @@ class AutosportWebController:
         strategy_id, plan = self._selected_configuration()
         return Path(workspace_for_strategy(self.workspace, strategy_id, plan))
 
+    def _product_runtime_can_start(self) -> bool:
+        if self._busy():
+            return False
+        try:
+            workspace = self._product_runtime_target_workspace()
+        except Exception:
+            return False
+        return workspace not in self._recovery_required_workspaces
+
     def _refresh_economic_projection(self) -> None:
         strategy_id = self.strategy_id
         plan = self.research_plan
@@ -566,10 +575,6 @@ class AutosportWebController:
         with self._lock:
             self._poll_workers()
             spec = strategy_spec(self.strategy_id)
-            try:
-                product_runtime_workspace = self._product_runtime_target_workspace()
-            except Exception:
-                product_runtime_workspace = None
             surfaces = [
                 {
                     "key": item.key,
@@ -632,22 +637,7 @@ class AutosportWebController:
                 "product_runtime": {
                     "status": self.product_runtime_status,
                     "running": self.product_worker.busy,
-                    "can_start": (
-                        not self.product_worker.busy
-                        and not any(
-                            worker.busy
-                            for worker in (
-                                self.dataset_worker,
-                                self.replay_worker,
-                                self.live_worker,
-                                self.recovery_worker,
-                                self.evidence_export_worker,
-                            )
-                        )
-                        and product_runtime_workspace is not None
-                        and product_runtime_workspace
-                        not in self._recovery_required_workspaces
-                    ),
+                    "can_start": self._product_runtime_can_start(),
                     "can_stop": self.product_worker.busy,
                 },
                 "surface_key": self.surface_key,

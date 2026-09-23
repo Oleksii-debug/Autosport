@@ -20,7 +20,7 @@ from autosport.real_execution_ledger import ExecutionAction
 from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
     VerifiedProviderEffectEvidence,
-    verify_betfair_provider_state,
+    _evaluate_betfair_provider_state_semantics,
 )
 
 
@@ -174,7 +174,7 @@ def _verify(*, surface: str, matched_price: float):
     action = _action()
     profile = _profile()
     capture = _capture(action, surface=surface, matched_price=matched_price)
-    return verify_betfair_provider_state(
+    return _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,

@@ -406,6 +406,7 @@ def _build_keepalive_authority_runtime():
     utc = timezone.utc
     max_response_bytes = _MAX_RESPONSE_BYTES
     exact_keys = _KEEPALIVE_KEYS
+    venue_id = VENUE_ID
 
     def implementation_is_current() -> bool:
         return (
@@ -418,6 +419,7 @@ def _build_keepalive_authority_runtime():
             and require_authoritative_betfair_authenticated_jurisdiction
             is jurisdiction_require
             and _KEEPALIVE_ENDPOINTS is endpoint_table
+            and VENUE_ID == venue_id
             and _NoRedirectHandler is redirect_handler_type
             and redirect_handler_type.redirect_request
             is canonical_redirect_request
@@ -665,7 +667,7 @@ def _build_keepalive_authority_runtime():
             )
 
         value = observation_type(
-            venue_id=VENUE_ID,
+            venue_id=venue_id,
             session_context_id=jurisdiction.session_context_id,
             jurisdiction=jurisdiction.jurisdiction,
             endpoint=endpoint,
@@ -716,7 +718,7 @@ def _build_keepalive_authority_runtime():
                     return False
                 jurisdiction_require(jurisdiction, client=issued_client)
                 return (
-                    value.venue_id == VENUE_ID
+                    value.venue_id == venue_id
                     and value.session_context_id
                     == jurisdiction.session_context_id
                     and value.jurisdiction is jurisdiction.jurisdiction

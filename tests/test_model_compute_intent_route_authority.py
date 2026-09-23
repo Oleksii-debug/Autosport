@@ -653,6 +653,63 @@ def test_record_class_module_rebind_cannot_forge_durable_origin(
         )
 
 
+def test_module_namespace_rebind_cannot_create_second_origin_authority(
+    monkeypatch,
+) -> None:
+    first_intent = _canonical_intent(suffix="namespace-a")
+    other_intent = _canonical_intent(suffix="namespace-b")
+    issued_at = max(
+        _proposal(first_intent),
+        _proposal(other_intent),
+    ) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+    canonical_file_name = subject.FILE_NAME
+    canonical_domain = subject.AUTHORITY_DOMAIN
+    canonical_key = subject.AUTHORITY_KEY
+
+    temporary, workspace, authority_root = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        first_store = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        first = _issue(first_store, router, first_intent)
+        assert first.request_id == "intent-route-1"
+
+        alternate_file_name = "alternate-intent-route-authority.json"
+        monkeypatch.setattr(subject, "FILE_NAME", alternate_file_name)
+        monkeypatch.setattr(
+            subject,
+            "AUTHORITY_DOMAIN",
+            canonical_domain + ".alternate",
+        )
+        monkeypatch.setattr(
+            subject,
+            "AUTHORITY_KEY",
+            canonical_key + "-alternate",
+        )
+
+        second_store = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        assert second_store.path == first_store.path
+        assert second_store.path.name == canonical_file_name
+        assert second_store._authority.domain == canonical_domain
+        assert second_store._authority.key == canonical_key
+        assert not (workspace / alternate_file_name).exists()
+
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="immutable across intent identity",
+        ):
+            _issue(second_store, router, other_intent)
+
+        assert not (workspace / alternate_file_name).exists()
+        assert second_store._records[0].intent_id == first_intent.intent_id
+
+
 def test_deleted_authority_state_fails_monotonic_rollback_fence(
     monkeypatch,
 ) -> None:

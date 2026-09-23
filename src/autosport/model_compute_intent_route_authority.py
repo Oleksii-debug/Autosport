@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Mapping
@@ -107,6 +107,26 @@ def _instant(value: object, field: str) -> datetime:
 
 def _time(value: object, field: str) -> str:
     return _instant(value, field).isoformat().replace("+00:00", "Z")
+
+
+def _positive_window(value: object, field: str) -> timedelta:
+    if type(value) is not timedelta or value <= timedelta(0):
+        raise ModelComputeIntentRouteAuthorityError(
+            f"{field} must be an exact positive timedelta"
+        )
+    return value
+
+
+def _deadline_from_window(issued_at: object, window: object) -> str:
+    issued = _instant(issued_at, "issued_at")
+    duration = _positive_window(window, "decision_timeout")
+    try:
+        deadline = issued + duration
+    except OverflowError as exc:
+        raise ModelComputeIntentRouteAuthorityError(
+            "decision_timeout exceeds supported datetime range"
+        ) from exc
+    return _time(deadline, "decision_deadline")
 
 
 def _digest(payload: object) -> str:
@@ -215,9 +235,9 @@ class ModelComputeIntentRouteRecord:
         _sha(self.candidate_sha256, "candidate_sha256")
         proposal = _instant(self.proposal_ts, "proposal_ts")
         issued = _instant(self.issued_at, "issued_at")
-        if issued >= proposal:
+        if proposal > issued:
             raise ModelComputeIntentRouteAuthorityError(
-                "intent-route issuance must occur before proposal cutoff"
+                "intent proposal cannot be in the future at product issuance"
             )
         if type(self.request) is not dict:
             raise ModelComputeIntentRouteAuthorityError(
@@ -238,9 +258,9 @@ class ModelComputeIntentRouteRecord:
             raise ModelComputeIntentRouteAuthorityError(
                 "router request created_at must equal product issuance time"
             )
-        if _instant(request.decision_deadline, "request.decision_deadline") != proposal:
+        if _instant(request.decision_deadline, "request.decision_deadline") <= issued:
             raise ModelComputeIntentRouteAuthorityError(
-                "router request deadline must equal intent proposal cutoff"
+                "router request deadline must be after product issuance time"
             )
         if request.decision_input_sha256 != self.intent_sha256:
             raise ModelComputeIntentRouteAuthorityError(
@@ -501,6 +521,7 @@ class ModelComputeIntentRouteAuthorityStore:
         data_classification: DataClassification,
         allow_cloud: bool,
         max_cost: Decimal,
+        decision_timeout: timedelta,
         response_ttl_seconds: Decimal,
         baseline_candidate_id: str,
         cloud_candidate_id: str | None,
@@ -513,6 +534,8 @@ class ModelComputeIntentRouteAuthorityStore:
             and request.data_classification is data_classification
             and request.allow_cloud is allow_cloud
             and request.max_cost == max_cost
+            and request.decision_deadline
+            == _deadline_from_window(request.created_at, decision_timeout)
             and request.response_ttl_seconds == response_ttl_seconds
             and request.baseline_candidate_id == baseline_candidate_id
             and request.cloud_candidate_id == cloud_candidate_id
@@ -531,6 +554,7 @@ class ModelComputeIntentRouteAuthorityStore:
         data_classification: DataClassification,
         allow_cloud: bool,
         max_cost: Decimal,
+        decision_timeout: timedelta,
         response_ttl_seconds: Decimal,
         baseline_candidate_id: str,
         cloud_candidate_id: str | None = None,
@@ -540,8 +564,9 @@ class ModelComputeIntentRouteAuthorityStore:
     ) -> ComputeRouteRequest:
         """Issue or idempotently recover one exact request for one exact intent.
 
-        No caller-provided created_at, decision_deadline, decision-input digest, or
-        decision-evidence digest is accepted.
+        No caller-provided absolute created_at/deadline, decision-input digest, or
+        decision-evidence digest is accepted. The caller supplies only a positive
+        routing window; the absolute deadline is derived from the product clock.
         """
 
         identity = _intent_identity(intent)
@@ -581,6 +606,7 @@ class ModelComputeIntentRouteAuthorityStore:
                     data_classification=data_classification,
                     allow_cloud=allow_cloud,
                     max_cost=max_cost,
+                    decision_timeout=decision_timeout,
                     response_ttl_seconds=response_ttl_seconds,
                     baseline_candidate_id=baseline_candidate_id,
                     cloud_candidate_id=cloud_candidate_id,
@@ -609,17 +635,21 @@ class ModelComputeIntentRouteAuthorityStore:
                 )
 
             issued_at = _time(_authority_now(), "issued_at")
-            if _instant(issued_at, "issued_at") >= _instant(
-                identity["proposal_ts"],
-                "proposal_ts",
+            if _instant(identity["proposal_ts"], "proposal_ts") > _instant(
+                issued_at,
+                "issued_at",
             ):
                 raise ModelComputeIntentRouteAuthorityError(
-                    "new model-compute request must be issued before intent proposal cutoff"
+                    "intent proposal cannot be in the future at product issuance"
                 )
+            decision_deadline = _deadline_from_window(
+                issued_at,
+                decision_timeout,
+            )
             request = ComputeRouteRequest(
                 request_id=canonical_request_id,
                 created_at=issued_at,
-                decision_deadline=identity["proposal_ts"],
+                decision_deadline=decision_deadline,
                 required_capability=_text(
                     required_capability,
                     "required_capability",
@@ -717,9 +747,9 @@ class ModelComputeIntentRouteAuthorityStore:
         self._reject_router_method_shadow(router_store)
         canonical_request_id = _text(request_id, "request_id")
         cutoff = _instant(decision_at, "decision_at")
-        if cutoff != _instant(identity["proposal_ts"], "proposal_ts"):
+        if cutoff < _instant(identity["proposal_ts"], "proposal_ts"):
             raise ModelComputeIntentRouteAuthorityError(
-                "decision_at must equal canonical OpportunityIntent proposal_ts"
+                "decision_at cannot precede canonical OpportunityIntent proposal_ts"
             )
 
         with WorkspaceEconomicLock(self.workspace):
@@ -738,9 +768,9 @@ class ModelComputeIntentRouteAuthorityStore:
                 raise ModelComputeIntentRouteAuthorityError(
                     "intent-route issuance does not match canonical intent"
                 )
-            if _instant(record.issued_at, "issued_at") >= cutoff:
+            if _instant(record.issued_at, "issued_at") > cutoff:
                 raise ModelComputeIntentRouteAuthorityError(
-                    "intent-route issuance was not causally available before cutoff"
+                    "intent-route issuance was not causally available by cutoff"
                 )
             router_request = ModelComputeRouterStore.get_request(
                 router_store,

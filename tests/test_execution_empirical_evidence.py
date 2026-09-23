@@ -10,6 +10,7 @@ from autosport.execution_empirical_evidence import (
     EmpiricalExecutionEvidenceError,
     EmpiricalExecutionEvidenceUnavailable,
     EmpiricalExecutionPopulationEvidence,
+    EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED,
     PROVIDER_OUTCOME_NOT_APPLICABLE,
     PROVIDER_OUTCOME_UNVERIFIED_ABSENCE,
     PROVIDER_OUTCOME_UNVERIFIED_ACK,
@@ -782,6 +783,11 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         aggregate.source_root_authority_status
         == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
     )
+    assert aggregate.evaluation_protocol_authority_verified is False
+    assert (
+        aggregate.evaluation_protocol_authority_status
+        == EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED
+    )
     assert all(
         sample.source_product_authority_verified is False
         and sample.source_root_authority_status == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
@@ -818,6 +824,11 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert (
         payload["source_root_authority_status"]
         == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+    )
+    assert payload["evaluation_protocol_authority_verified"] is False
+    assert (
+        payload["evaluation_protocol_authority_status"]
+        == EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED
     )
     assert payload["state_rates"]["ACCEPTED"] == {
         "numerator": 1,
@@ -892,6 +903,51 @@ def test_population_aggregate_rejects_noncanonical_protocol_digest(tmp_path):
             evaluation_protocol_sha256="caller-label",
         )
 
+
+
+
+def test_population_protocol_digest_is_explicitly_non_authoritative(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="9" * 64,
+    )
+
+    payload = aggregate.to_dict()
+    assert payload["evaluation_protocol_sha256"] == "9" * 64
+    assert payload["evaluation_protocol_authority_verified"] is False
+    assert (
+        payload["evaluation_protocol_authority_status"]
+        == EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED
+    )
+
+    object.__setattr__(
+        aggregate,
+        "evaluation_protocol_authority_verified",
+        True,
+    )
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by whole-ledger projection",
+    ):
+        aggregate.to_dict()
+
+
+def test_population_protocol_authority_status_mutation_revokes_issuance(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="8" * 64,
+    )
+
+    object.__setattr__(
+        aggregate,
+        "evaluation_protocol_authority_status",
+        "PRODUCT_PROTOCOL_VERIFIED",
+    )
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by whole-ledger projection",
+    ):
+        _ = aggregate.evidence_sha256
 
 def test_population_evidence_cannot_be_caller_constructed_or_subset_with_replace(
     tmp_path,

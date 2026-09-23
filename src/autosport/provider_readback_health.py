@@ -256,6 +256,11 @@ class ProviderReadbackHealth:
 
     @property
     def operator_status_uk(self) -> str:
+        if (
+            self.state is ProviderReadbackHealthState.FRESH_COMPLETE
+            and not self.can_authorize_current_state
+        ):
+            return 'стан даних букмекера невідомий'
         return {ProviderReadbackHealthState.FRESH_COMPLETE: 'дані букмекера актуальні', ProviderReadbackHealthState.FRESH_PARTIAL: 'дані букмекера неповні', ProviderReadbackHealthState.STALE_LAST_KNOWN: 'дані букмекера застарілі', ProviderReadbackHealthState.UNAVAILABLE_TRANSIENT: 'дані букмекера тимчасово недоступні', ProviderReadbackHealthState.UNAUTHORIZED_OR_SESSION_EXPIRED: 'сесію букмекера треба відновити', ProviderReadbackHealthState.CONFLICTING: 'дані букмекера суперечливі', ProviderReadbackHealthState.UNKNOWN: 'стан даних букмекера невідомий'}[self.state]
 
     @property

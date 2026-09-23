@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.local_compute_allocation_basis as basis_subject
 import autosport.local_compute_tariff_authority as subject
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthorityError
@@ -32,6 +33,9 @@ def _store(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         subject, "_authority_now", lambda: "2026-09-23T09:30:00Z"
     )
+    monkeypatch.setattr(
+        basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z"
+    )
     tariff_store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority_root
     )
@@ -49,22 +53,24 @@ def _publish(
     basis_id = f"basis-{tariff_id}"
     target_amount = Decimal(amount)
     denominator = 100
-    store.publish_allocation_basis(
+    basis_store = store._basis_authority()
+    review = basis_store.prepare_owner_review(
         basis_id=basis_id,
         backend_id="local-backend",
         model_id="local-model",
         config_sha256="c" * 64,
         allocation_policy_id="owner-full-cost-v1",
-        components=(
-            subject.LocalComputeCostComponent(
-                component_id=f"cost-{tariff_id}",
-                kind=subject.LocalComputeCostComponentKind.OTHER_ALLOCABLE,
-                amount=target_amount * Decimal(denominator),
-                currency="USD",
-            ),
-        ),
-        denominator_request_count=denominator,
+        measurement_source_id=f"owner-reviewed-{tariff_id}",
+        measurement_period_start="2026-09-01T00:00:00Z",
+        measurement_period_end="2026-09-20T00:00:00Z",
+        total_allocable_cost=target_amount * Decimal(denominator),
+        request_denominator=denominator,
+        measurement_document=(
+            f'{{"tariff_id":"{tariff_id}","amount":"{amount}",'
+            f'"requests":{denominator}}}'
+        ).encode("utf-8"),
     )
+    basis_store.publish_owner_basis(review, confirmed=True)
     return store.publish_owner_tariff(
         tariff_id=tariff_id,
         backend_id="local-backend",

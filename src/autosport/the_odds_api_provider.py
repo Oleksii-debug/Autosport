@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
@@ -204,9 +204,23 @@ def _bounded_response_body(response: object) -> bytes:
     return raw_body
 
 
-def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
+def _perform_http_json_response(
+    url: str,
+    timeout: float,
+    *,
+    opener_factory: Callable[..., Any],
+    proxy_handler_factory: Callable[..., Any],
+    request_factory: Callable[..., Any],
+) -> HttpJsonResponse:
+    """Perform one bounded HTTPS read using explicitly supplied network constructors.
+
+    This helper is intentionally not provider-origin authority. Tests may inject fake
+    constructors here, while the product default transport below captures the real
+    urllib constructors once at module initialization.
+    """
+
     _canonical_provider_url(url)
-    request = Request(
+    request = request_factory(
         url,
         headers={
             "Accept": "application/json",
@@ -216,7 +230,7 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
     )
     http_status: int | None = None
     transport_failed = False
-    opener = build_opener(_RejectRedirects())
+    opener = opener_factory(proxy_handler_factory({}), _RejectRedirects())
     try:
         with opener.open(request, timeout=timeout) as response:
             final_url = str(response.geturl())
@@ -245,6 +259,33 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
         raise TheOddsApiTransportError("The Odds API transport unavailable")
     raise AssertionError("unreachable transport outcome")
 
+
+def _build_product_transport(
+    opener_factory: Callable[..., Any],
+    proxy_handler_factory: Callable[..., Any],
+    request_factory: Callable[..., Any],
+    performer: Callable[..., HttpJsonResponse],
+) -> Transport:
+    """Capture the product-owned network stack outside caller-mutable module globals."""
+
+    def product_transport(url: str, timeout: float) -> HttpJsonResponse:
+        return performer(
+            url,
+            timeout,
+            opener_factory=opener_factory,
+            proxy_handler_factory=proxy_handler_factory,
+            request_factory=request_factory,
+        )
+
+    return product_transport
+
+
+_default_transport = _build_product_transport(
+    build_opener,
+    ProxyHandler,
+    Request,
+    _perform_http_json_response,
+)
 def _plain_text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise TheOddsApiPayloadError(f"{field} must be a non-empty trimmed string")

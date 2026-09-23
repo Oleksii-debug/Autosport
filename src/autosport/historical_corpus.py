@@ -878,13 +878,22 @@ def assemble_historical_corpus(
                 "event_count": len(events),
             }
         )
+        canonical_acquisition_rows = sorted(
+            evidence_rows,
+            key=lambda row: json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
         acquisition_identity = _canonical_json_sha256(
             {
                 "schema_version": 1,
                 "kind": "parlay_historical_acquisition_identity",
                 "content_identity": content_identity,
                 "scope": "selected_point_in_time_snapshots_only",
-                "snapshots": evidence_rows,
+                "snapshots": canonical_acquisition_rows,
             }
         )
         governance_identity = _canonical_json_sha256(

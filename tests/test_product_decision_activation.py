@@ -579,6 +579,86 @@ class ProductDecisionActivationTests(unittest.TestCase):
         ):
             self._verify(risk_policy=changed_risk)
 
+    def test_risk_policy_provenance_descriptor_rebind_cannot_relabel_executable_policy(self) -> None:
+        canonical_provenance = self.risk.provenance_sha256
+        forged = PaperRiskPolicy(
+            max_ticket_fraction=Decimal("0.90"),
+            economic_goal=self.goal,
+        )
+        original_descriptor = PaperRiskPolicy.provenance_sha256
+
+        try:
+            PaperRiskPolicy.provenance_sha256 = property(  # type: ignore[assignment]
+                lambda _self: canonical_provenance
+            )
+            self.assertEqual(forged.provenance_sha256, canonical_provenance)
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "PaperRiskPolicy provenance authority changed",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=self.goal,
+                    risk_policy=forged,
+                    execution_config=self.execution,
+                )
+        finally:
+            PaperRiskPolicy.provenance_sha256 = original_descriptor  # type: ignore[assignment]
+
+        self.assertFalse(self.store.path.exists())
+        binding = self._initialize()
+        self.assertEqual(
+            binding.risk_policy_provenance_sha256,
+            canonical_provenance,
+        )
+
+    def test_risk_policy_module_class_rebind_cannot_replace_authority(self) -> None:
+        class ReboundRiskPolicy:
+            pass
+
+        forged = ReboundRiskPolicy()
+        forged.economic_goal = self.goal
+        forged.provenance_sha256 = self.risk.provenance_sha256
+
+        with mock.patch.object(
+            activation_module,
+            "PaperRiskPolicy",
+            ReboundRiskPolicy,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "exact canonical PaperRiskPolicy",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=self.goal,
+                    risk_policy=forged,  # type: ignore[arg-type]
+                    execution_config=self.execution,
+                )
+
+        self.assertFalse(self.store.path.exists())
+        binding = self._initialize()
+        self.assertEqual(
+            binding.risk_policy_provenance_sha256,
+            self.risk.provenance_sha256,
+        )
+
+    def test_risk_file_policy_body_must_match_exact_executable_policy(self) -> None:
+        path = self.workspace / "paper_risk_policy.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["policy"]["max_ticket_fraction"] = "0.90"
+        self._write_json(path, payload)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "does not match exact executable risk policy",
+        ):
+            self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+
     def test_risk_file_must_match_executable_policy_and_goal(self) -> None:
         payload = json.loads(
             (self.workspace / "paper_risk_policy.json").read_text(

@@ -83,6 +83,7 @@ def test_external_imports_and_nested_authority_assignment_are_not_minted(tmp_pat
 
     assert one.internal_imports == ()
     assert one.authority_families == ()
+    assert one.unresolved_authority_declarations == ()
     assert report.duplicate_authority_families == ()
 
 
@@ -114,3 +115,40 @@ def test_invalid_package_name_and_empty_package_fail_closed(tmp_path: Path) -> N
         analyze_package(empty, package_name="autosport")
     with pytest.raises(ArchitectureFitnessError, match="canonical Python identifier"):
         analyze_package(empty, package_name="not-valid")
+
+
+def test_dynamic_or_malformed_authority_declaration_remains_observable(tmp_path: Path) -> None:
+    package = tmp_path / "autosport"
+    _write(package, "__init__.py", "")
+    _write(
+        package,
+        "dynamic.py",
+        "PREFIX = 'risk'\nAUTHORITY_FAMILY = PREFIX + '.dynamic'\n",
+    )
+    _write(package, "bad.py", "RISK_AUTHORITY_FAMILY = ' bad ' \n")
+
+    report = analyze_package(package)
+    dynamic = next(item for item in report.modules if item.module == "autosport.dynamic")
+    bad = next(item for item in report.modules if item.module == "autosport.bad")
+
+    assert dynamic.authority_families == ()
+    assert dynamic.unresolved_authority_declarations == ("AUTHORITY_FAMILY",)
+    assert bad.authority_families == ()
+    assert bad.unresolved_authority_declarations == ("RISK_AUTHORITY_FAMILY",)
+
+
+def test_keyword_package_name_and_symlinked_source_fail_closed(tmp_path: Path) -> None:
+    package = tmp_path / "autosport"
+    _write(package, "__init__.py", "")
+    with pytest.raises(ArchitectureFitnessError, match="canonical Python identifier"):
+        analyze_package(package, package_name="class")
+
+    target = tmp_path / "outside.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    link = package / "linked.py"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ArchitectureFitnessError, match="symlinked source is not canonical"):
+        analyze_package(package)

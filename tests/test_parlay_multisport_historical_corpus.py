@@ -635,3 +635,47 @@ def test_generic_provider_capture_flows_into_governed_second_sport_corpus(tmp_pa
     assert secret not in evidence_text
     assert secret not in market_text
     assert secret not in manifest_text
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("sport_key", " basketball", "canonical Parlay sport identity"),
+        ("response_sha256", " " + ("1" * 64), "canonical lowercase SHA-256"),
+        ("market_sha256", ("A" * 64), "canonical lowercase SHA-256"),
+    ],
+)
+def test_identity_fields_reject_normalized_aliases(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    match: str,
+) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix=f"alias-{field}",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload[field] = value
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix=f"alias-{field}",
+    )
+
+    with pytest.raises(ValueError, match=match):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix=f"alias-{field}",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / f"blocked-alias-{field}",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )

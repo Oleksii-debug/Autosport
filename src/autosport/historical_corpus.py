@@ -877,6 +877,15 @@ def assemble_historical_corpus(
                 }
             )
 
+        outcome_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_outcome_identity",
+                "results_sha256": results_sha,
+                "outcome_evidence": outcome_evidence,
+            }
+        )
+
         content_identity = _canonical_json_sha256(
             {
                 "schema_version": 1,
@@ -927,6 +936,7 @@ def assemble_historical_corpus(
                 "schema_version": 1,
                 "kind": "parlay_historical_qualified_corpus_identity",
                 "content_identity": content_identity,
+                "outcome_identity": outcome_identity,
                 "acquisition_identity": acquisition_identity,
                 "governance_identity": governance_identity,
                 "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
@@ -982,6 +992,8 @@ def assemble_historical_corpus(
                     "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
                     "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
                     "content_identity": content_identity,
+                    "content_identity_scope": "market_snapshot_only",
+                    "outcome_identity": outcome_identity,
                     "acquisition_identity": acquisition_identity,
                     "governance_identity": governance_identity,
                     "qualified_corpus_identity": qualified_corpus_identity,

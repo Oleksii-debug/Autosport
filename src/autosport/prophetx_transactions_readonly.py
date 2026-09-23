@@ -190,9 +190,8 @@ class ProphetXTransactionsClient:
         if not isinstance(raw, list) or len(raw) > query.limit:
             raise ProphetXReadOnlyError("transactions must be an array within requested limit")
         transactions = tuple(_parse_row(item, i) for i, item in enumerate(raw))
-        cursor = _provider_text(data.get("next_cursor"), "next_cursor")
-        if cursor == "":
-            cursor = None
+        cursor_raw = data.get("next_cursor")
+        cursor = None if cursor_raw is None else _filter_text(cursor_raw, "next_cursor")
         observed_at = self._observed_at()
         page = ProphetXTransactionPage(
             query, transactions, cursor, observed_at, sha256(response.body).hexdigest()
@@ -284,8 +283,9 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
 def _fingerprint(page: ProphetXTransactionPage) -> str:
     parts = [
         page.query.request_url, page.observed_at, page.source_payload_sha256, page.next_cursor or "",
-        *(f"{t.status}|{t.user_id}|{t.transaction_type}|{t.amount}|{t.change}|{t.balance}|"
-          f"{t.balance_before}|{t.details}|{t.market_id}|{t.event_id}|{t.trade_id}|{t.created_at}"
+        *(f"{t.status}|{t.user_id}|{t.transaction_type}|{t.transaction_sub_type}|"
+          f"{t.amount}|{t.change}|{t.balance}|{t.balance_before}|{t.details}|"
+          f"{t.market_id}|{t.event_id}|{t.trade_id}|{t.description}|{t.created_at}|{t.currency}"
           for t in page.transactions),
     ]
     return sha256("\n".join(parts).encode("utf-8")).hexdigest()

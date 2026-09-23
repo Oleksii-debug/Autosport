@@ -793,6 +793,10 @@ class PaperBook:
             # Existing witnessed state must still match its independent authority
             # before a new generation can extend it.
             current_sha = _file_sha256(destination)
+            if committed is None and current_sha is not None:
+                raise ValueError(
+                    "PaperBook existing snapshot lacks independent durable witness"
+                )
             if committed is not None and current_sha != committed[1]:
                 raise ValueError(
                     "PaperBook current snapshot differs from independent durable witness"

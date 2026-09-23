@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import signal
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -23,6 +24,17 @@ class ProductRuntimeError(ProductEntrypointError):
     def __init__(self, error_type: str) -> None:
         super().__init__("product runtime failed after start")
         self.error_type = error_type
+
+
+class _SecretSafeArgumentParser(argparse.ArgumentParser):
+    """Argument parser that never echoes rejected caller-controlled values."""
+
+    def error(self, _message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(
+            2,
+            f"{self.prog}: error: invalid command-line arguments; use --help\n",
+        )
 
 
 class _SignalStopRequest:
@@ -269,7 +281,7 @@ def run_product_command(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SecretSafeArgumentParser(
         prog="autosport-product",
         description=(
             "Run the canonical durable Autosport PAPER product. Provider credentials "

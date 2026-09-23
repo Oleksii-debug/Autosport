@@ -7,10 +7,7 @@ import pytest
 
 from autosport.betdaq_account_readonly import BetdaqCredentials
 from autosport.betdaq_readonly_live_provider import BetdaqLiveReadOnlyProvider
-from autosport.betdaq_readonly_live_transport import (
-    BetdaqReadOnlyLiveTransport,
-    canonical_get_prices_origin_verified,
-)
+from autosport.betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from autosport.betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
 from autosport.betdaq_readonly_provider import (
     BETDAQ_GET_PRICES_ENDPOINT,
@@ -111,32 +108,22 @@ def test_bridge_delegates_exactly_one_getprices_post_without_own_retry() -> None
     assert method is not None
 
 
-def test_injected_post_transport_cannot_mint_provider_origin() -> None:
+def test_injected_post_transport_is_not_the_canonical_product_transport() -> None:
     bridge = BetdaqReadOnlyLiveTransport(
         credentials=_credentials(),
         transport=_PostTransport(),
     )
-    assert bridge.provider_origin_verified is False
-    assert canonical_get_prices_origin_verified(bridge) is False
+    assert bridge.canonical_transport_selected is False
 
 
-def test_default_bridge_reuses_product_owned_canonical_https_transport() -> None:
+def test_default_bridge_reuses_product_owned_transport_without_claiming_origin() -> None:
     bridge = BetdaqReadOnlyLiveTransport(credentials=_credentials())
-    assert bridge.provider_origin_verified is True
-    assert canonical_get_prices_origin_verified(bridge) is True
+    assert bridge.canonical_transport_selected is True
     text = repr(bridge)
     assert "fixture-user" not in text
     assert "fixture-password" not in text
     assert "fixture-app" not in text
-
-
-def test_lookalike_or_subclass_cannot_mint_canonical_origin() -> None:
-    class Child(BetdaqReadOnlyLiveTransport):
-        pass
-
-    child = Child(credentials=_credentials())
-    assert child.provider_origin_verified is True
-    assert canonical_get_prices_origin_verified(child) is False
+    assert "provider_origin_verified" not in text
 
 
 def test_bridge_redacts_arbitrary_transport_exception() -> None:
@@ -168,7 +155,7 @@ def test_provider_owns_bounded_retry_not_the_bridge() -> None:
     assert provider.last_request_evidence is None
 
 
-def test_injected_live_provider_keeps_origin_unverified_after_valid_snapshot() -> None:
+def test_live_provider_keeps_origin_unverified_after_valid_snapshot() -> None:
     post = _PostTransport()
     provider = BetdaqLiveReadOnlyProvider(
         credentials=_credentials(),
@@ -183,17 +170,18 @@ def test_injected_live_provider_keeps_origin_unverified_after_valid_snapshot() -
 
     assert len(batch.quotes) == 2
     assert "UNVERIFIED_PROVIDER_ORIGIN" in batch.quality_flags
+    assert "LIVE_ENTITLEMENT_UNVERIFIED" in batch.quality_flags
     evidence = provider.last_request_evidence
     assert evidence is not None
     assert evidence.provider_origin_verified is False
     assert evidence.live_entitlement_verified is False
 
 
-def test_default_live_provider_is_wired_to_canonical_origin_without_network_call() -> None:
+def test_default_live_provider_composes_canonical_transport_without_origin_promotion() -> None:
     provider = BetdaqLiveReadOnlyProvider(
         credentials=_credentials(),
         market_bindings=[BetdaqMarketBinding(9001, "event-1", "football")],
         threshold_amount=Decimal("1.50"),
     )
-    assert provider.live_transport.provider_origin_verified is True
-    assert canonical_get_prices_origin_verified(provider.live_transport) is True
+    assert provider.live_transport.canonical_transport_selected is True
+    assert provider.last_request_evidence is None

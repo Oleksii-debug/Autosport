@@ -263,6 +263,22 @@ def test_observation_endpoint_cannot_be_relabelled_to_other_jurisdiction():
         )
 
 
+def test_issuer_fails_closed_if_venue_identity_is_rebound(monkeypatch):
+    monkeypatch.setattr(subject, "VENUE_ID", "not-betfair")
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session")
+    )
+
+    with pytest.raises(
+        BetfairSessionKeepAliveError,
+        match="canonical authenticated-session authority binding changed",
+    ):
+        keep_alive_betfair_session(
+            _forged_jurisdiction(),
+            client=client,
+        )
+
+
 def test_module_exposes_no_issuance_registry_or_factory_hook():
     for name in (
         "_ISSUED_KEEPALIVE",

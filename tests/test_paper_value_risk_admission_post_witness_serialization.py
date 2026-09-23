@@ -4,8 +4,6 @@ from datetime import timedelta
 from decimal import Decimal
 from threading import Event, Thread
 
-import pytest
-
 from autosport import _paper_value_execution_authority as _authority
 from autosport.agents import AgentContext
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger

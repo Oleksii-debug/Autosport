@@ -74,12 +74,14 @@ class BetdaqEconomicEvidence:
 
     @property
     def evidence_id(self) -> str:
-        # Intentionally excludes product receive time. Re-reading the exact provider
-        # response for the exact query after restart resolves the same evidence ID.
+        # Product receive time is intentionally excluded, while the current canonical
+        # authenticated account context remains part of identity. Cross-process continuity
+        # is not claimed here; the separate durable-principal authority owns that upgrade.
         return "betdaq-economic:" + _canonical_sha256(
             {
                 "schema": _ECONOMIC_SCHEMA,
                 "method": self.method,
+                "account_context_id": self.account_context_id,
                 "request_identity_sha256": self.request_identity_sha256,
                 "source_payload_sha256": self.source_payload_sha256,
             }
@@ -474,7 +476,7 @@ class BetdaqEconomicReadbackClient:
                 "BETDAQ economic read transport must return bytes"
             )
         try:
-            result = _account._parse_soap_result(payload, method)
+            result = _parse_economic_soap_result(payload, method)
             context = _account._authenticated_account_context(
                 client._credentials, client._venue_id
             )
@@ -516,9 +518,7 @@ def _request_xml(
         },
     )
     body = ET.SubElement(envelope, f"{{{_account._SOAP11_NS}}}Body")
-    method_element = ET.SubElement(
-        body, f"{{{_account._EXTERNAL_NS}}}{method}"
-    )
+    method_element = ET.SubElement(body, f"{{{_account._EXTERNAL_NS}}}{method}")
     request_name = _REQUEST_ELEMENT[method]
     ET.SubElement(
         method_element,
@@ -526,6 +526,101 @@ def _request_xml(
         attributes,
     )
     return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
+
+
+def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
+    """Parse generated BETDAQ SOAP results without inventing ReturnStatus.
+
+    Current generated SecureService examples for these methods contain the method
+    Result directly and no ReturnStatus child. If a provider deployment does include
+    ReturnStatus, it is only an additional failure gate: exactly one integer Code=0
+    is accepted; nonzero, duplicate, or malformed status fails closed.
+    """
+
+    upper = payload.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic SOAP payload contains forbidden DTD/entity"
+        )
+    try:
+        root = ET.fromstring(payload)
+    except (ET.ParseError, UnicodeError):
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic response is not valid SOAP XML"
+        ) from None
+    namespace, local = _split_tag(root.tag)
+    if local != "Envelope" or namespace not in {
+        _account._SOAP11_NS,
+        _account._SOAP12_NS,
+    }:
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic response has invalid SOAP Envelope"
+        )
+    bodies = [child for child in root if child.tag == f"{{{namespace}}}Body"]
+    if len(bodies) != 1:
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic response must contain one SOAP Body"
+        )
+    body = bodies[0]
+    for child in body:
+        child_namespace, child_local = _split_tag(child.tag)
+        if child_namespace == namespace and child_local == "Fault":
+            raise BetdaqEconomicReadbackError("BETDAQ economic SOAP Fault")
+    responses = [
+        child
+        for child in body
+        if child.tag == f"{{{_account._EXTERNAL_NS}}}{method}Response"
+    ]
+    if len(responses) != 1:
+        raise BetdaqEconomicReadbackError(
+            f"BETDAQ economic response is missing exact {method}Response"
+        )
+    results = [
+        child
+        for child in responses[0]
+        if child.tag == f"{{{_account._EXTERNAL_NS}}}{method}Result"
+    ]
+    if len(results) != 1:
+        raise BetdaqEconomicReadbackError(
+            f"BETDAQ economic response is missing exact {method}Result"
+        )
+    result = results[0]
+    statuses = [
+        child
+        for child in result
+        if child.tag == f"{{{_account._EXTERNAL_NS}}}ReturnStatus"
+    ]
+    if len(statuses) > 1:
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic result has duplicate ReturnStatus"
+        )
+    if statuses:
+        raw_code = statuses[0].attrib.get("Code")
+        if (
+            type(raw_code) is not str
+            or raw_code != raw_code.strip()
+            or not raw_code
+            or not raw_code.lstrip("-").isdigit()
+        ):
+            raise BetdaqEconomicReadbackError(
+                "BETDAQ economic ReturnStatus Code must be provider integer text"
+            )
+        if int(raw_code) != 0:
+            raise BetdaqEconomicReadbackError(
+                f"BETDAQ economic ReturnStatus reported failure code {int(raw_code)}"
+            )
+    return result
+
+
+def _split_tag(tag: str) -> tuple[str, str]:
+    if type(tag) is not str:
+        raise BetdaqEconomicReadbackError("BETDAQ XML tag must be text")
+    if tag.startswith("{"):
+        if "}" not in tag:
+            raise BetdaqEconomicReadbackError("BETDAQ XML namespace is malformed")
+        namespace, local = tag[1:].split("}", 1)
+        return namespace, local
+    return "", tag
 
 
 def _parse_postings_result(

@@ -255,7 +255,6 @@ class ExecutionReportObservation:
             f"{_PROTOCOL}.exec-report",
             {
                 "environment": self.identity.environment.value,
-                "credential_identity_sha256": self.identity.credential_identity_sha256,
                 "exec_id": self.exec_id,
                 "client_order_id": self.client_order_id,
                 "provider_order_id": self.provider_order_id,
@@ -270,7 +269,6 @@ class ExecutionReportObservation:
             f"{_PROTOCOL}.economic-event",
             {
                 "environment": self.identity.environment.value,
-                "credential_identity_sha256": self.identity.credential_identity_sha256,
                 "exec_id": self.exec_id,
             },
         )
@@ -344,7 +342,6 @@ class ProphetXFixContinuityStore:
                         economic_event_key TEXT PRIMARY KEY,
                         semantic_sha256 TEXT NOT NULL,
                         environment TEXT NOT NULL,
-                        credential_identity_sha256 TEXT NOT NULL,
                         exec_id TEXT NOT NULL,
                         client_order_id TEXT NOT NULL,
                         provider_order_id TEXT NOT NULL,
@@ -766,14 +763,13 @@ class ProphetXFixContinuityStore:
                     conn.execute(
                         """INSERT INTO execution_events(
                             economic_event_key, semantic_sha256, environment,
-                            credential_identity_sha256, exec_id, client_order_id,
+                            exec_id, client_order_id,
                             provider_order_id, transact_time, economic_payload_sha256
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             event_key,
                             semantic,
                             identity.environment.value,
-                            identity.credential_identity_sha256,
                             observation.exec_id,
                             observation.client_order_id,
                             observation.provider_order_id,
@@ -880,7 +876,6 @@ class ProphetXFixContinuityStore:
                 f"{_PROTOCOL}.economic-event",
                 {
                     "environment": row["environment"],
-                    "credential_identity_sha256": row["credential_identity_sha256"],
                     "exec_id": row["exec_id"],
                 },
             )
@@ -890,7 +885,6 @@ class ProphetXFixContinuityStore:
                 f"{_PROTOCOL}.exec-report",
                 {
                     "environment": row["environment"],
-                    "credential_identity_sha256": row["credential_identity_sha256"],
                     "exec_id": row["exec_id"],
                     "client_order_id": row["client_order_id"],
                     "provider_order_id": row["provider_order_id"],

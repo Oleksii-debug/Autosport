@@ -32,20 +32,27 @@ def _install_betfair_lay_price_bound_guard() -> None:
     ) -> None:
         # Do not dispatch through caller-polymorphic objects before the canonical
         # verifier performs its own exact-type/origin checks. This prefilter only
-        # inspects exact canonical DTOs and can only reject, never strengthen truth.
+        # inspects exact canonical DTOs/built-in tuples and can only reject, never
+        # strengthen truth.
         if (
             type(action) is not _provider.ExecutionAction
             or type(readback) is not _provider.BetfairExecutionReadbackEnvelope
             or action.side != "LAY"
-            or type(readback.current_pages) is not tuple
-            or type(readback.cleared_pages_by_status) is not tuple
         ):
             return
 
-        for page in readback.current_pages:
+        current_pages = readback.current_pages
+        cleared_entries = readback.cleared_pages_by_status
+        if type(current_pages) is not tuple or type(cleared_entries) is not tuple:
+            return
+
+        for page in current_pages:
             if type(page) is not _provider.BetfairCurrentOrderPage:
                 return
-            for order in page.orders:
+            orders = page.orders
+            if type(orders) is not tuple:
+                return
+            for order in orders:
                 if type(order) is not _provider.BetfairCurrentOrderObservation:
                     return
                 if (
@@ -57,7 +64,10 @@ def _install_betfair_lay_price_bound_guard() -> None:
                         "provider matched price is worse than submitted Betfair LAY limit"
                     )
 
-        for status, pages in readback.cleared_pages_by_status:
+        for entry in cleared_entries:
+            if type(entry) is not tuple or len(entry) != 2:
+                return
+            status, pages = entry
             if status != "SETTLED":
                 continue
             if type(pages) is not tuple:
@@ -65,7 +75,10 @@ def _install_betfair_lay_price_bound_guard() -> None:
             for page in pages:
                 if type(page) is not _provider.BetfairClearedOrderPage:
                     return
-                for order in page.orders:
+                orders = page.orders
+                if type(orders) is not tuple:
+                    return
+                for order in orders:
                     if type(order) is not _provider.BetfairClearedOrderObservation:
                         return
                     if (

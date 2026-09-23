@@ -43,9 +43,10 @@ _RECONCILIATION_TRANSITION_SCHEMA = (
     "autosport.account-reconciliation-transition-v1"
 )
 
+_CANONICAL_AUTHORITY_CLASS = MonotonicWorkspaceAuthority
 _CANONICAL_AUTHORITY_METHOD_NAMES = ("read_history", "prepare", "recover")
 _CANONICAL_AUTHORITY_METHODS = {
-    name: getattr(MonotonicWorkspaceAuthority, name)
+    name: getattr(_CANONICAL_AUTHORITY_CLASS, name)
     for name in _CANONICAL_AUTHORITY_METHOD_NAMES
 }
 _CANONICAL_AUTHORITY_METHOD_CODES = {
@@ -674,7 +675,11 @@ class BookmakerAccountReconciliationStore:
     ) -> None:
         self.path = Path(path)
         self._workspace = self.path.parent.resolve(strict=False)
-        authority = MonotonicWorkspaceAuthority(
+        if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority class identity changed"
+            )
+        authority = _CANONICAL_AUTHORITY_CLASS(
             workspace=self._workspace,
             domain=_RECONCILIATION_AUTHORITY_DOMAIN,
             key=f"account-reconciliation:{self.path.name}",
@@ -692,6 +697,10 @@ class BookmakerAccountReconciliationStore:
         self,
         _registry_lookup=_lookup_authority_binding,
     ) -> MonotonicWorkspaceAuthority:
+        if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority class identity changed"
+            )
         authority = self._authority
         registered = _registry_lookup(self)
         if registered is None:
@@ -716,7 +725,7 @@ class BookmakerAccountReconciliationStore:
             getattr(authority, "workspace_binding_path", None),
         )
         if (
-            type(authority) is not MonotonicWorkspaceAuthority
+            type(authority) is not _CANONICAL_AUTHORITY_CLASS
             or authority is not expected_authority
             or current_binding != expected_binding
             or self._workspace != expected_workspace
@@ -732,7 +741,7 @@ class BookmakerAccountReconciliationStore:
         for method_name in _CANONICAL_AUTHORITY_METHOD_NAMES:
             expected_method = _CANONICAL_AUTHORITY_METHODS[method_name]
             current_class_method = getattr(
-                MonotonicWorkspaceAuthority,
+                _CANONICAL_AUTHORITY_CLASS,
                 method_name,
                 None,
             )

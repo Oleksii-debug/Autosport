@@ -14,6 +14,7 @@ def test_owner_confirmation_is_disabled_until_latest_preview_completes() -> None
     source = _source()
 
     assert "let ownerReviewFresh = false;" in source
+    assert "let ownerReviewEpoch = 0;" in source
     assert "function syncOwnerConfirmationAvailability(canInitialize)" in source
     assert "canInitialize !== true || ownerReviewFresh !== true" in source
     assert 'setDisabledWithFocusFallback(byId("owner-confirm-checkbox"), disabled);' in source
@@ -22,18 +23,22 @@ def test_owner_confirmation_is_disabled_until_latest_preview_completes() -> None
 
     preview = source.index('byId(328).addEventListener("click", async () => {')
     preview_invalidate = source.index("invalidateOwnerReview();", preview)
+    preview_epoch = source.index("const reviewEpoch = ownerReviewEpoch;", preview)
     preview_dispatch = source.index('dispatch("owner.preview", {', preview)
-    preview_fresh = source.index("markOwnerReviewFresh();", preview)
-    assert preview < preview_invalidate < preview_dispatch < preview_fresh
+    preview_fresh = source.index("markOwnerReviewFresh(reviewEpoch);", preview)
+    assert preview < preview_invalidate < preview_epoch < preview_dispatch < preview_fresh
     assert 'result && result.status === "completed"' in source[preview:preview_fresh]
 
 
 def test_any_owner_contract_edit_invalidates_prior_confirmation() -> None:
     source = _source()
 
-    assert "function invalidateOwnerReview()" in source
-    assert "ownerReviewFresh = false;" in source
-    assert 'byId("owner-confirm-checkbox").checked = false;' in source
+    invalidate = source.index("function invalidateOwnerReview()")
+    request_id = source.index("function requestId()", invalidate)
+    body = source[invalidate:request_id]
+    assert "ownerReviewEpoch += 1;" in body
+    assert "ownerReviewFresh = false;" in body
+    assert 'byId("owner-confirm-checkbox").checked = false;' in body
     assert 'document.querySelectorAll("[data-owner-field]").forEach((node) => {' in source
     assert 'node.addEventListener("input", invalidateOwnerReview);' in source
     assert 'node.addEventListener("change", invalidateOwnerReview);' in source
@@ -49,6 +54,21 @@ def test_any_owner_contract_edit_invalidates_prior_confirmation() -> None:
     assert source.index("invalidateOwnerReview();", plan) < source.index(
         'dispatch("research_plan.select"', plan
     )
+
+
+def test_stale_preview_response_cannot_restore_confirmation_after_newer_edit() -> None:
+    source = _source()
+
+    mark = source.index("function markOwnerReviewFresh(epoch)")
+    request_id = source.index("function requestId()", mark)
+    body = source[mark:request_id]
+    assert "if (epoch !== ownerReviewEpoch) return false;" in body
+    assert "ownerReviewFresh = true;" in body
+    assert "return true;" in body
+
+    preview = source.index('byId(328).addEventListener("click", async () => {')
+    assert "const reviewEpoch = ownerReviewEpoch;" in source[preview:]
+    assert "markOwnerReviewFresh(reviewEpoch);" in source[preview:]
 
 
 def test_initialize_requires_fresh_review_and_fresh_explicit_checkbox() -> None:
@@ -71,7 +91,7 @@ def test_initialize_requires_fresh_review_and_fresh_explicit_checkbox() -> None:
 def test_preview_always_clears_checkbox_even_if_previous_review_was_confirmed() -> None:
     source = _source()
 
-    mark = source.index("function markOwnerReviewFresh()")
+    mark = source.index("function markOwnerReviewFresh(epoch)")
     checked_false = source.index(
         'byId("owner-confirm-checkbox").checked = false;',
         mark,

@@ -37,6 +37,9 @@ _XSD_INT_MAX = 2**31 - 1
 _XSD_LONG_MIN = -(2**63)
 _XSD_LONG_MAX = 2**63 - 1
 _XSD_INTEGER_LEXICAL = re.compile(r"\A[+-]?[0-9]+\Z")
+_XSD_DECIMAL_LEXICAL = re.compile(
+    r"\A[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z"
+)
 
 _RETURN_STATUS_ATTRIBUTES = frozenset({"Code", "Description", "CallId"})
 _CURRENT_SEQUENCE_RESULT_ATTRIBUTES = frozenset({"SelectionSequenceNumber"})
@@ -167,6 +170,19 @@ def _xsd_integer(
     return parsed
 
 
+def _xsd_decimal(
+    value: str,
+    field: str,
+    *,
+    nonnegative: bool = False,
+) -> Decimal:
+    if _XSD_DECIMAL_LEXICAL.fullmatch(value) is None:
+        raise BetdaqSoapProtocolError(
+            f"{field} must use the XML Schema decimal lexical form"
+        )
+    return _decimal(value, field, nonnegative=nonnegative)
+
+
 def _reject_unknown_attributes(
     element: ET.Element,
     allowed: frozenset[str],
@@ -283,17 +299,17 @@ def _parse_settlement_information(
             _required_attr(element, "SettledTime"),
             "SettlementInformation SettledTime",
         ),
-        void_percentage=_decimal(
+        void_percentage=_xsd_decimal(
             _required_attr(element, "VoidPercentage"),
             "SettlementInformation VoidPercentage",
             nonnegative=True,
         ),
-        left_side_factor=_decimal(
+        left_side_factor=_xsd_decimal(
             _required_attr(element, "LeftSideFactor"),
             "SettlementInformation LeftSideFactor",
             nonnegative=True,
         ),
-        right_side_factor=_decimal(
+        right_side_factor=_xsd_decimal(
             _required_attr(element, "RightSideFactor"),
             "SettlementInformation RightSideFactor",
             nonnegative=True,
@@ -353,7 +369,7 @@ def _parse_changed_selection(element: ET.Element) -> BetdaqChangedSelection:
             minimum=0,
             maximum=_XSD_SHORT_MAX,
         ),
-        withdrawal_factor=_decimal(
+        withdrawal_factor=_xsd_decimal(
             _required_attr(element, "WithdrawalFactor"),
             "selection WithdrawalFactor",
             nonnegative=True,

@@ -461,6 +461,14 @@ def verify_betfair_provider_state(
                 raise ProviderEvidenceError(
                     "provider cleared order requested price conflicts with execution action"
                 )
+    cleared_statuses_by_receipt: dict[str, set[str]] = {}
+    for status, order in cleared:
+        cleared_statuses_by_receipt.setdefault(order.bet_id, set()).add(status)
+    if any(len(statuses) > 1 for statuses in cleared_statuses_by_receipt.values()):
+        raise ProviderEvidenceError(
+            "provider receipt has contradictory cleared terminal statuses"
+        )
+
     receipt_ids = {order.bet_id for _, _, order in candidates}
     if len(receipt_ids) > 1:
         raise ProviderEvidenceError(

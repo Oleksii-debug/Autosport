@@ -64,6 +64,24 @@ def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
         assert projection not in source
 
 
+def test_runtime_start_stop_transition_keeps_focus_on_an_action() -> None:
+    source = _source()
+
+    assert "function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop)" in source
+    assert "const focused = document.activeElement;" in source
+    assert "startButton.disabled = canStart !== true;" in source
+    assert "stopButton.disabled = canStop !== true;" in source
+    assert "focused === startButton && startButton.disabled && !stopButton.disabled" in source
+    assert "stopButton.focus();" in source
+    assert "focused === stopButton && stopButton.disabled && !startButton.disabled" in source
+    assert "startButton.focus();" in source
+    assert 'byId("product-runtime-start").disabled = productRuntime.can_start !== true;' not in source
+    assert 'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true;' not in source
+    assert "syncRuntimeActionAvailability(" in source
+    assert "productRuntime.can_start," in source
+    assert "productRuntime.can_stop," in source
+
+
 def test_poll_and_native_accessibility_contract_remain_intact() -> None:
     source = _source()
 

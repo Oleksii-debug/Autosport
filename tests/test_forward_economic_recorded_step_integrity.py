@@ -247,3 +247,50 @@ def test_record_revalidates_aggregate_cache_before_appending_next_step() -> None
 
     assert accumulator.steps == committed_steps
     assert accumulator.next_sequence == 1
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("challenger_settlement_evidence_sha256", SUBSTITUTED_SETTLEMENT_SHA),
+        ("challenger_decision_sha256", "8" * 64),
+    ),
+)
+def test_private_recorded_step_identity_mutation_fails_closed_on_read_paths(
+    field_name: str,
+    replacement: object,
+) -> None:
+    accumulator, _resolver = _filled_accumulator()
+    before = accumulator.summary()
+    assert before.evidence_sha256
+
+    object.__setattr__(accumulator._steps[-1], field_name, replacement)
+
+    for access in (
+        lambda: accumulator.steps,
+        lambda: accumulator.next_sequence,
+        lambda: accumulator.summary(),
+    ):
+        with pytest.raises(
+            ForwardEconomicEvidenceError,
+            match="internal recorded step identity integrity drift",
+        ):
+            access()
+
+
+def test_record_fails_closed_before_append_on_private_step_identity_drift() -> None:
+    accumulator, resolver = _filled_accumulator(event_count=1)
+    assert len(accumulator._steps) == 1
+    object.__setattr__(
+        accumulator._steps[-1],
+        "challenger_settlement_evidence_sha256",
+        SUBSTITUTED_SETTLEMENT_SHA,
+    )
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity integrity drift",
+    ):
+        accumulator.record(_observation(1), resolver)
+
+    assert len(accumulator._steps) == 1

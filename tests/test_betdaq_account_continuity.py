@@ -551,3 +551,48 @@ def test_rebound_reconciliation_store_class_cannot_replace_790_authority(
         append_to_reconciliation(store, current)
 
     assert store.latest_snapshot() is None
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_load_history",
+        "_recover_authority",
+        "_require_same_account",
+        "_require_nested_evidence_after",
+        "_reconcile",
+        "_write_history",
+        "_encode_history",
+        "_next_authority_tx_id",
+        "_publish_history_bytes",
+    ),
+)
+def test_reconciliation_lower_helper_rebind_cannot_report_success(
+    monkeypatch,
+    tmp_path,
+    helper_name,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    monkeypatch.setattr(
+        BookmakerAccountReconciliationStore,
+        helper_name,
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation store helper dispatch changed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert not store_path.exists()
+

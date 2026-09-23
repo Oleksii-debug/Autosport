@@ -131,6 +131,51 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         self.assertFalse(report.provider_response_origin_verified)
         self.assertFalse(report.trusted_outcome_source_admissible)
 
+    def test_sport_scope_mutation_during_request_fails_before_publication(self) -> None:
+        provider = ParlayApiTableTennisProvider(
+            "unit-test-key",
+            clock=lambda: "2026-09-13T03:00:00+00:00",
+        )
+        response = HttpJsonResponse(
+            [],
+            200,
+            {
+                "x-historical-window-hours": "168",
+                "x-historical-window-from": "2026-09-06T00:00:00Z",
+            },
+        )
+
+        def mutate_sport(_url: str) -> HttpJsonResponse:
+            provider.sport_key = "football"
+            return response
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "matches.json"
+            evidence = Path(temp) / "matches.evidence.json"
+            with patch.object(provider, "_request", side_effect=mutate_sport):
+                with self.assertRaisesRegex(ProviderPayloadError, "sport_key changed"):
+                    capture_historical_matches(
+                        provider,
+                        requested_date="2026-09-10",
+                        output_path=output,
+                        evidence_path=evidence,
+                    )
+            self.assertFalse(output.exists())
+            self.assertFalse(evidence.exists())
+
+    def test_noncanonical_initial_sport_scope_fails_before_network(self) -> None:
+        transport = _Transport([])
+        provider = self._provider(transport)
+        provider.sport_key = "football"
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ProviderPayloadError, "canonical table-tennis sport scope"):
+                capture_historical_matches(
+                    provider,
+                    requested_date="2026-09-10",
+                    output_path=Path(temp) / "matches.json",
+                )
+        self.assertEqual(transport.urls, [])
+
     def test_retry_transport_and_clock_mutation_cannot_mint_positive_trust(self) -> None:
         payload = [{"provider_defined_id": "retry-match"}]
         second_transport = _Transport(payload)

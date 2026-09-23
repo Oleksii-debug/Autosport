@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.bookmaker_account_reconciliation as reconciliation_module
 from autosport.bookmaker_account_reconciliation import (
     AccountReconciliationIntegrityError,
     BookmakerAccountReconciliationStore,
@@ -133,6 +134,48 @@ def test_reconciliation_delta_treats_zero_exponent_as_scale_neutral(
     assert state.unexplained_balance_delta.amount == Decimal("-1")
     assert state.unexplained_balance_delta.previous_observation_id == "balance-1"
     assert state.unexplained_balance_delta.current_observation_id == "balance-2"
+
+
+def test_authority_class_rebind_cannot_redirect_requested_root(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    canonical_authority_class = MonotonicWorkspaceAuthority
+    root_a = tmp_path / "authority-a"
+    root_b = tmp_path / "authority-b"
+
+    class RedirectedAuthority(canonical_authority_class):
+        def __init__(self, *args, **kwargs):
+            kwargs["authority_root"] = root_b
+            super().__init__(*args, **kwargs)
+
+    # The redirector deliberately preserves the exact canonical durability method
+    # objects. Method/code seals alone therefore cannot distinguish this class.
+    assert (
+        RedirectedAuthority.read_history
+        is canonical_authority_class.read_history
+    )
+    assert RedirectedAuthority.prepare is canonical_authority_class.prepare
+    assert RedirectedAuthority.recover is canonical_authority_class.recover
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "MonotonicWorkspaceAuthority",
+        RedirectedAuthority,
+    )
+    path = tmp_path / "workspace" / "account.json"
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority class identity changed",
+    ):
+        BookmakerAccountReconciliationStore(
+            path,
+            authority_root=root_a,
+        )
+
+    assert not path.exists()
+    assert not root_b.exists()
 
 
 def test_genuine_authority_root_swap_is_rejected_before_publication(tmp_path) -> None:

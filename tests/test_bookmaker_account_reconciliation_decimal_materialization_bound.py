@@ -372,6 +372,18 @@ def test_product_default_authority_root_ignores_environment_override(
     tmp_path,
 ) -> None:
     baseline = reconciliation_module._product_account_reconciliation_authority_root()
+    if reconciliation_module.os.name == "nt":
+        assert baseline.parts[-3:] == (
+            "Autosport",
+            "application-state",
+            "monotonic-authority-v1",
+        )
+    else:
+        assert baseline.parts[-3:] == (
+            "state",
+            "autosport",
+            "monotonic-authority-v1",
+        )
 
     monkeypatch.setenv(
         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",

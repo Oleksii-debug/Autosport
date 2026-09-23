@@ -853,8 +853,11 @@ class BetfairReadOnlyClient:
         method: str,
         params: Mapping[str, object],
         post: Callable[..., bytes],
+        *,
+        endpoint_map: Mapping[str, str] | None = None,
     ) -> _RpcResult:
-        endpoint = _READ_METHOD_ENDPOINT.get(method)
+        endpoints = _READ_METHOD_ENDPOINT if endpoint_map is None else endpoint_map
+        endpoint = endpoints.get(method)
         if endpoint is None:
             raise BetfairReadOnlyError("Betfair RPC method is outside the strict read-only allowlist")
         request_id = self._next_request_id()
@@ -1158,6 +1161,9 @@ def _install_execution_readback_authority() -> None:
     sealed_transport_type = UrllibBetfairHttpTransport
     sealed_transport_post = UrllibBetfairHttpTransport.post
     sealed_transport_post_code = sealed_transport_post.__code__
+    sealed_datetime = datetime
+    sealed_timezone_utc = timezone.utc
+    sealed_read_method_endpoint = MappingProxyType(dict(_READ_METHOD_ENDPOINT))
     sealed_request_type = Request
     sealed_build_opener = build_opener
     sealed_http_error = HTTPError
@@ -1219,16 +1225,25 @@ def _install_execution_readback_authority() -> None:
         venue_id: str = "betfair",
         account_id: str = "default-account",
     ) -> None:
+        caller_supplied_clock = clock is not None
+
+        def product_clock() -> datetime:
+            return sealed_datetime.now(sealed_timezone_utc)
+
         raw_init(
             self,
             credentials,
             transport=transport,
             timeout_seconds=timeout_seconds,
-            clock=clock,
+            clock=clock if caller_supplied_clock else product_clock,
             venue_id=venue_id,
             account_id=account_id,
         )
-        if type(self) is not BetfairReadOnlyClient or transport is not None:
+        if (
+            type(self) is not BetfairReadOnlyClient
+            or transport is not None
+            or caller_supplied_clock
+        ):
             return
         trusted_transport = self._transport
         if type(trusted_transport) is not sealed_transport_type:
@@ -1314,7 +1329,13 @@ def _install_execution_readback_authority() -> None:
                 timeout_seconds=timeout_seconds,
             )
 
-        result = raw_rpc_with_post(self, method, params, post)
+        result = raw_rpc_with_post(
+            self,
+            method,
+            params,
+            post,
+            endpoint_map=sealed_read_method_endpoint,
+        )
         if tracking:
             session[2] = int(session[2]) + 1
         return result

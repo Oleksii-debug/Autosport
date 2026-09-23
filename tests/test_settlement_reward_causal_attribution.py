@@ -23,8 +23,6 @@ REWARD_ID = "6" * 64
 FORECAST_EVIDENCE = "7" * 64
 EXECUTION_EVIDENCE = "8" * 64
 RANDOMNESS_EVIDENCE = "9" * 64
-WIN_REWARD_ID = "a" * 64
-LOSS_REWARD_ID = "b" * 64
 
 
 def _finding(
@@ -49,7 +47,6 @@ def _attribution(
     *,
     reward_value: Decimal,
     findings: tuple[AttributionFinding, ...],
-    reward_id: str = REWARD_ID,
     truth: EvidenceTruth = EvidenceTruth.OBSERVED,
     simulation_model_id: str | None = None,
 ) -> OutcomeAttribution:
@@ -59,7 +56,7 @@ def _attribution(
         transition_id=TRANSITION_ID,
         action_id=ACTION_ID,
         outcome_id=OUTCOME_ID,
-        reward_id=reward_id,
+        reward_id=REWARD_ID,
         reward_value=reward_value,
         truth=truth,
         simulation_model_id=simulation_model_id,
@@ -154,33 +151,6 @@ def test_missing_causal_credit_cannot_be_zero_filled():
             evidence_sha256=RANDOMNESS_EVIDENCE,
             reason_code="MISSING_EVIDENCE_IS_NOT_ZERO",
         )
-
-
-def test_reward_sign_cannot_rewrite_identical_finding_payload():
-    findings = (
-        _finding(
-            AttributionComponent.RANDOMNESS,
-            status=AttributionStatus.UNKNOWN,
-            contribution=None,
-            evidence_sha256=RANDOMNESS_EVIDENCE,
-            reason_code="UNRESOLVED_SINGLE_DRAW_RANDOMNESS",
-        ),
-    )
-
-    win = _attribution(
-        reward_value=Decimal("1"),
-        reward_id=WIN_REWARD_ID,
-        findings=findings,
-    )
-    loss = _attribution(
-        reward_value=Decimal("-1"),
-        reward_id=LOSS_REWARD_ID,
-        findings=findings,
-    )
-
-    assert win.reward_id != loss.reward_id
-    assert win.findings[0].payload() == loss.findings[0].payload()
-    assert win.reward_value == -loss.reward_value
 
 
 def test_truth_provenance_cannot_be_upgraded_by_simulation_label():

@@ -226,6 +226,49 @@ class ProductDecisionActivationTests(unittest.TestCase):
             BuiltInIntentProducer.REGISTERED_STRATEGY.value,
         )
 
+    def test_store_subclass_cannot_mint_durable_start_authority(self) -> None:
+        canonical_expected = self.store._derive(
+            scientific_registry=self.registry,
+            strategy_version_id=self.STRATEGY_ID,
+            economic_goal=self.goal,
+            risk_policy=self.risk,
+            execution_config=self.execution,
+            intent_producer=BuiltInIntentProducer.REGISTERED_STRATEGY,
+        )
+        forged_binding = replace(
+            canonical_expected,
+            product_source_id="caller-forged-provider",
+        )
+        derive_calls: list[bool] = []
+
+        class ForgedStore(ProductDecisionActivationStore):
+            def _derive(self, **_kwargs):
+                derive_calls.append(True)
+                return forged_binding
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "exact canonical class",
+        ):
+            forged_store = ForgedStore(self.workspace)
+            forged_store.initialize_owner(
+                scientific_registry=self.registry,
+                strategy_version_id=self.STRATEGY_ID,
+                economic_goal=self.goal,
+                risk_policy=self.risk,
+                execution_config=self.execution,
+            )
+
+        self.assertEqual(derive_calls, [])
+        self.assertFalse(self.store.path.exists())
+
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(
+            ProductDecisionActivationStore(self.workspace).load(),
+            canonical,
+        )
+
     def test_activation_filename_rebind_cannot_create_second_namespace(self) -> None:
         committed = self._initialize()
         canonical_path = self.store.path

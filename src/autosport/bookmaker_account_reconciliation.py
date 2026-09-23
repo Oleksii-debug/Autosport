@@ -41,6 +41,7 @@ _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
 _RECONCILIATION_TRANSITION_SCHEMA = (
     "autosport.account-reconciliation-transition-v1"
 )
+_MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
 
 
 class AccountReconciliationError(RuntimeError):
@@ -173,6 +174,23 @@ def _decimal_text(value: Decimal) -> str:
     while digits[-1] == 0:
         digits.pop()
         exponent += 1
+
+    coefficient_length = len(digits)
+    if exponent >= 0:
+        fixed_length = coefficient_length + exponent
+    else:
+        point = coefficient_length + exponent
+        fixed_length = (
+            coefficient_length + 1
+            if point > 0
+            else 2 + (-point) + coefficient_length
+        )
+    if sign:
+        fixed_length += 1
+    if fixed_length > _MAX_CANONICAL_DECIMAL_TEXT_LENGTH:
+        raise AccountReconciliationIntegrityError(
+            "money canonical Decimal text exceeds bounded length"
+        )
 
     coefficient = "".join(str(digit) for digit in digits)
     if exponent >= 0:
@@ -1021,4 +1039,3 @@ class BookmakerAccountReconciliationStore:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation publication did not preserve intended history"
             )
-

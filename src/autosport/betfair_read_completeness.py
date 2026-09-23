@@ -619,7 +619,6 @@ class BetfairReadCompletenessObserver:
         return value.isoformat()
 
 
-
 def _provider_end_completeness(
     pages: list[tuple[int, int, bool, str]],
 ) -> tuple[BetfairObservationCompleteness, str | None]:
@@ -658,8 +657,16 @@ def _classify_failure(
     *,
     partial: bool,
 ) -> tuple[BetfairObservationCompleteness, str]:
+    completeness, code = _classify_terminal_failure(exc)
     if partial:
-        return BetfairObservationCompleteness.PARTIAL, "acquisition_interrupted"
+        return BetfairObservationCompleteness.PARTIAL, f"partial_{code}"
+    return completeness, code
+
+
+def _classify_terminal_failure(
+    exc: BetfairReadOnlyError,
+) -> tuple[BetfairObservationCompleteness, str]:
+    """Classify the terminal provider/transport cause without losing partialness."""
 
     provider_error_code = getattr(exc, "provider_error_code", None)
     if provider_error_code is not None:

@@ -189,13 +189,15 @@ def _positive_request_count(value: object) -> int:
     return value
 
 
-def _exact_per_request_amount(total: Decimal, denominator: int) -> Decimal:
-    """Derive an exact finite Decimal amount; never round recurring money."""
+def _decimal_from_fraction_exact(
+    value: Fraction,
+    field: str,
+) -> Decimal:
+    """Create one finite Decimal without consulting the ambient Decimal context."""
 
-    total = _money(total, "total_allocable_cost")
-    denominator = _positive_request_count(denominator)
-    fraction = Fraction(total) / denominator
-    remaining = fraction.denominator
+    if value < 0:
+        raise LocalComputeTariffError(f"{field} must be non-negative")
+    remaining = value.denominator
     twos = 0
     fives = 0
     while remaining % 2 == 0:
@@ -206,21 +208,39 @@ def _exact_per_request_amount(total: Decimal, denominator: int) -> Decimal:
         remaining //= 5
     if remaining != 1:
         raise LocalComputeTariffError(
-            "allocation does not produce an exact finite Decimal per request"
+            f"{field} does not have an exact finite Decimal representation"
         )
     scale = max(twos, fives)
     if scale > _MAX_FRACTIONAL_DIGITS:
         raise LocalComputeTariffError(
-            "derived per-request amount exceeds supported exact monetary precision"
+            f"{field} exceeds supported exact monetary precision"
         )
-    scaled_numerator = (
-        fraction.numerator
+    coefficient = (
+        value.numerator
         * (2 ** (scale - twos))
         * (5 ** (scale - fives))
     )
-    amount = Decimal(scaled_numerator).scaleb(-scale)
-    _money(amount, "amount_per_request")
-    if amount * Decimal(denominator) != total:
+    digits_text = str(coefficient)
+    digits = tuple(ord(ch) - ord("0") for ch in digits_text)
+    amount = Decimal((0, digits or (0,), -scale))
+    return _money(amount, field)
+
+
+def _sum_money_exact(values: Sequence[Decimal]) -> Decimal:
+    total = Fraction(0)
+    for value in values:
+        total += Fraction(_money(value, "component amount"))
+    return _decimal_from_fraction_exact(total, "total_allocable_cost")
+
+
+def _exact_per_request_amount(total: Decimal, denominator: int) -> Decimal:
+    """Derive an exact finite Decimal amount; never round recurring money."""
+
+    canonical_total = _money(total, "total_allocable_cost")
+    canonical_denominator = _positive_request_count(denominator)
+    fraction = Fraction(canonical_total) / canonical_denominator
+    amount = _decimal_from_fraction_exact(fraction, "amount_per_request")
+    if Fraction(amount) * canonical_denominator != Fraction(canonical_total):
         raise LocalComputeTariffError("derived per-request amount is not exact")
     return amount
 
@@ -351,7 +371,7 @@ class LocalComputeAllocationBasisRecord:
 
     @property
     def total_allocable_cost(self) -> Decimal:
-        return sum((item.amount for item in self.components), Decimal("0"))
+        return _sum_money_exact(tuple(item.amount for item in self.components))
 
     @property
     def amount_per_request(self) -> Decimal:
@@ -599,7 +619,7 @@ class LocalComputeAllocationBasisAuthorityStore:
             sorted(raw_components, key=lambda item: item.component_id)
         )
         canonical_denominator = _positive_request_count(denominator_request_count)
-        total = sum((item.amount for item in canonical_components), Decimal("0"))
+        total = _sum_money_exact(tuple(item.amount for item in canonical_components))
         _exact_per_request_amount(total, canonical_denominator)
 
         with WorkspaceEconomicLock(self.workspace):

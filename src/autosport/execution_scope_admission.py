@@ -2,7 +2,7 @@
 
 This module deliberately does not create provider-write entitlement. It composes already
 existing canonical evidence into a deterministic pre-admission report and keeps every
-authority-bearing gap explicit. Until a provider-specific, product-issued write-entitlement
+authority-bearing gap explicit. Until a provider-specific, product-issued
 resolver is integrated, execution_admitted is unconditionally false.
 
 The report is diagnostic/staging evidence only. It is not an execution token, capability
@@ -192,7 +192,7 @@ class ExecutionScopePreAdmission:
     provider_action_documented: bool
     governance_automation_permitted: bool
     integration_channel_bound: bool
-    product_supervised_action_issued: bool
+    supervised_action_binding_structurally_valid: bool
     blocking_reasons: tuple[ExecutionAdmissionBlocker, ...]
 
     def __post_init__(self) -> None:
@@ -227,6 +227,12 @@ class ExecutionScopePreAdmission:
             raise ExecutionScopeAdmissionError(
                 "blocking_reasons must be unique ExecutionAdmissionBlocker values"
             )
+
+    @property
+    def product_supervised_action_issued(self) -> bool:
+        """Structural plan validity is not durable product issuance."""
+
+        return False
 
     @property
     def provider_write_entitlement_proven(self) -> bool:
@@ -423,6 +429,7 @@ def assess_execution_scope_pre_admission(
             ExecutionAdmissionBlocker.SETTLEMENT_RULE_UNPROVEN,
             ExecutionAdmissionBlocker.ECONOMIC_RISK_GATES_UNPROVEN,
             ExecutionAdmissionBlocker.DISPATCH_REQUEST_UNBOUND,
+            ExecutionAdmissionBlocker.PRODUCT_SUPERVISED_ACTION_UNPROVEN,
             ExecutionAdmissionBlocker.SINGLE_USE_RESTART_UNPROVEN,
         )
     )
@@ -449,6 +456,6 @@ def assess_execution_scope_pre_admission(
         provider_action_documented=provider_action_documented,
         governance_automation_permitted=governance_permitted,
         integration_channel_bound=True,
-        product_supervised_action_issued=True,
+        supervised_action_binding_structurally_valid=True,
         blocking_reasons=tuple(blockers),
     )

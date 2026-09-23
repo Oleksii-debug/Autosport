@@ -69,6 +69,6 @@ def test_forward_wall_clock_jump_cannot_shorten_provider_remaining_ms(
     )
     with pytest.raises(BetdaqRateDeferred) as denied:
         governor.admit("GetPrices")
-    assert denied.value.reason == "provider_blacklist_active"
+    assert denied.value.reason == "provider_api_blacklisted"
     assert denied.value.retry_after_seconds is not None
     assert denied.value.retry_after_seconds >= 60.0

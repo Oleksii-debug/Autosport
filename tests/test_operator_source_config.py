@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import autosport.operator_source_config as operator_source_config
 from autosport.operator_source_config import (
     OperatorSourceConfigError,
     OperatorSourceSelectionState,
@@ -89,6 +90,41 @@ def test_noncanonical_json_encoding_is_rejected():
     payload = json.dumps(obj, sort_keys=False, indent=2).encode()
     with pytest.raises(OperatorSourceConfigError, match="non-canonical"):
         parse_operator_source_config(payload)
+
+
+def test_recursive_json_decoder_failure_is_normalized_and_invalid(monkeypatch):
+    payload = build_operator_source_config("betfair-exchange").to_json_bytes()
+
+    def raise_recursion(*args, **kwargs):
+        raise RecursionError("decoder recursion limit exceeded")
+
+    monkeypatch.setattr(operator_source_config.json, "loads", raise_recursion)
+
+    with pytest.raises(OperatorSourceConfigError, match="JSON is invalid"):
+        parse_operator_source_config(payload)
+
+    result = resolve_operator_source_selection(
+        persisted_payload=payload,
+        admin_override_source_id=None,
+    )
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.reason_code == "persisted_config_invalid"
+    assert result.runtime_authorized is False
+
+
+def test_bounded_deep_json_never_escapes_first_run_recovery():
+    depth = 1024
+    payload = b"[" * depth + b"0" + b"]" * depth
+    assert len(payload) < 4096
+
+    result = resolve_operator_source_selection(
+        persisted_payload=payload,
+        admin_override_source_id=None,
+    )
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.runtime_authorized is False
 
 
 def test_missing_config_is_explicit_first_run_state():

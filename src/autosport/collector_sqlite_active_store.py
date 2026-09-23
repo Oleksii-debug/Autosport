@@ -33,6 +33,12 @@ _INDEXED_PROJECTION_FIELDS = (
     "collector_committed_at",
 )
 _IMMUTABLE_INDEX_FIELDS = ("commit_seq", *_INDEXED_PROJECTION_FIELDS)
+_PREDECESSOR_PROJECTION_IMMUTABILITY_TRIGGER_SQL = (
+    f"CREATE TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER} BEFORE UPDATE OF "
+    + ", ".join(_INDEXED_PROJECTION_FIELDS)
+    + " ON collector_deltas BEGIN "
+    + f"SELECT RAISE(ABORT, '{_PROJECTION_IMMUTABILITY_ERROR}'); END"
+)
 _PROJECTION_IMMUTABILITY_TRIGGER_SQL = (
     f"CREATE TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER} BEFORE UPDATE OF "
     + ", ".join(_IMMUTABLE_INDEX_FIELDS)
@@ -50,9 +56,9 @@ def _normalized_trigger_sql(value: object) -> str | None:
     return " ".join(value.strip().rstrip(";").split())
 
 
-def _is_canonical_projection_trigger(value: object) -> bool:
+def _matches_projection_trigger_sql(value: object, expected_sql: str) -> bool:
     normalized = _normalized_trigger_sql(value)
-    expected = _normalized_trigger_sql(_PROJECTION_IMMUTABILITY_TRIGGER_SQL)
+    expected = _normalized_trigger_sql(expected_sql)
     assert expected is not None
     legacy_expected = expected.replace(
         "CREATE TRIGGER ",
@@ -60,6 +66,20 @@ def _is_canonical_projection_trigger(value: object) -> bool:
         1,
     )
     return normalized in {expected, legacy_expected}
+
+
+def _is_canonical_projection_trigger(value: object) -> bool:
+    return _matches_projection_trigger_sql(
+        value,
+        _PROJECTION_IMMUTABILITY_TRIGGER_SQL,
+    )
+
+
+def _is_predecessor_projection_trigger(value: object) -> bool:
+    return _matches_projection_trigger_sql(
+        value,
+        _PREDECESSOR_PROJECTION_IMMUTABILITY_TRIGGER_SQL,
+    )
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -177,14 +197,23 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
                     (_PROJECTION_INTEGRITY_META_KEY,),
                 )
-            elif (
-                marker[0] != "1"
-                or trigger is None
-                or not _is_canonical_projection_trigger(trigger[0])
-            ):
+            elif marker[0] != "1" or trigger is None:
                 raise ValueError(
                     "collector indexed projection integrity guard is missing or noncanonical"
                 )
+            elif not _is_canonical_projection_trigger(trigger[0]):
+                if not _is_predecessor_projection_trigger(trigger[0]):
+                    raise ValueError(
+                        "collector indexed projection integrity guard is missing or noncanonical"
+                    )
+                # The predecessor marker proves the payload-derived projections were
+                # reconciled before its exact canonical trigger was installed. Extend
+                # that known trigger atomically to the local commit-order key without
+                # rejecting healthy databases created by the previous product build.
+                connection.execute(
+                    f"DROP TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER}"
+                )
+                connection.execute(_PROJECTION_IMMUTABILITY_TRIGGER_SQL)
             connection.commit()
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:

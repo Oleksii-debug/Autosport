@@ -1622,6 +1622,8 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 settled_ticket_ids=(ticket.ticket_id,),
                 at="2026-09-19T21:20:00+00:00",
             )
+            state_path = root / "paper_learning_bridge.json"
+            exact_acked_state = state_path.read_bytes()
             before = runtime.snapshot()
             correction = SettlementResolution(
                 event_identity=f"provider-a:{leg.event_id}",
@@ -1646,7 +1648,6 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             after = runtime.snapshot()
             self.assertEqual(after.transition_id, before.transition_id)
             self.assertEqual(after.reward_id, before.reward_id)
-            state_path = root / "paper_learning_bridge.json"
             durable = json.loads(state_path.read_text(encoding="utf-8"))
             binding = durable["bindings"][ticket.ticket_id]
             self.assertEqual(binding["status"], "INVALIDATED")
@@ -1778,6 +1779,20 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 PaperSettlementLearningBridgeError,
                 "conflicts differ from source evidence",
+            ):
+                PaperSettlementLearningBridge(
+                    state_path,
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+            state_path.write_bytes(exact_acked_state)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "rollback authority",
             ):
                 PaperSettlementLearningBridge(
                     state_path,

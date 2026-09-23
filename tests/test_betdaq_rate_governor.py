@@ -500,6 +500,22 @@ def test_same_workspace_shares_one_governor_and_rejects_policy_or_clock_rebindin
             wall_clock=wall,
             authority_root=authority_root,
         )
+    with pytest.raises(BetdaqRateGovernorError, match="different authority root"):
+        resolve_betdaq_rate_governor(
+            workspace,
+            configured,
+            clock=clock,
+            wall_clock=wall,
+            authority_root=(tmp_path / "other-machine-authority").resolve(),
+        )
+    with pytest.raises(BetdaqRateGovernorError, match="different authority root"):
+        resolve_betdaq_rate_governor(
+            workspace,
+            configured,
+            clock=clock,
+            wall_clock=wall,
+            authority_root=None,
+        )
 
 
 def test_admission_receipt_is_deterministic_secret_free_non_authority(

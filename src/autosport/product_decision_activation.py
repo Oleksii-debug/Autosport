@@ -567,9 +567,9 @@ class ProductDecisionActivationStore:
         execution_config: PaperExecutionModelConfig,
         intent_producer: BuiltInIntentProducer,
     ) -> ProductDecisionActivationBinding:
-        if not isinstance(economic_goal, EconomicGoalContract):
+        if type(economic_goal) is not EconomicGoalContract:
             raise ProductDecisionActivationError(
-                "economic_goal must be the canonical EconomicGoalContract"
+                "economic_goal must be the exact canonical EconomicGoalContract"
             )
         if type(risk_policy) is not PaperRiskPolicy:
             raise ProductDecisionActivationError(

@@ -95,8 +95,6 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
     private_opener = _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER()
     opener_open = _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
     request_type = _CANONICAL_URLLIB_BETFAIR_REQUEST
-    canonical_http_post = _CANONICAL_URLLIB_BETFAIR_HTTP_POST
-    original_urlopen = _ORIGINAL_URLLIB_BETFAIR_URLOPEN
 
     def product_owned_provider_http_post(
         transport: UrllibBetfairHttpTransport,
@@ -106,19 +104,9 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
         body: bytes,
         timeout_seconds: float,
     ) -> bytes:
-        # Preserve the repository's explicit deterministic network test seam.
-        # Production keeps the original urlopen binding and therefore always
-        # follows the private opener below.
-        live_urlopen = canonical_http_post.__globals__.get("urlopen")
-        if live_urlopen is not original_urlopen:
-            return canonical_http_post(
-                transport,
-                url,
-                headers=headers,
-                body=body,
-                timeout_seconds=timeout_seconds,
-            )
-
+        # Terminal provider truth always uses the product-owned private opener.
+        # Deterministic tests intercept below this application trust boundary;
+        # mutable account-module urlopen state never selects provider bytes.
         request = request_type(
             url,
             data=body,
@@ -1303,6 +1291,8 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_URLLIB_BETFAIR_REQUEST
             or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
             is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            is not _ORIGINAL_URLLIB_BETFAIR_URLOPEN
             or _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
             is not _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS
             or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("build_opener")
@@ -1471,6 +1461,8 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_URLLIB_BETFAIR_REQUEST
             or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
             is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            is not _ORIGINAL_URLLIB_BETFAIR_URLOPEN
             or _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
             is not _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS
             or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("build_opener")

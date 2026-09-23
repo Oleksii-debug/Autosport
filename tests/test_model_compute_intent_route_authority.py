@@ -137,11 +137,10 @@ def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
             workspace,
             authority_root=authority_root,
         )
-        record = reopened_authority.resolve(
+        record = reopened_authority.resolve_current(
             intent=intent,
             router_store=reopened_router,
             request_id=request.request_id,
-            decision_at=issued_at + timedelta(seconds=3),
         )
 
         assert record.request == request.payload()
@@ -319,11 +318,10 @@ def test_resolve_rejects_cross_intent_substitution(monkeypatch) -> None:
             subject.ModelComputeIntentRouteAuthorityError,
             match="does not match canonical intent",
         ):
-            authority.resolve(
+            authority.resolve_current(
                 intent=other_intent,
                 router_store=router,
                 request_id=request.request_id,
-                decision_at=issued_at + timedelta(seconds=1),
             )
 
 
@@ -380,11 +378,10 @@ def test_resolve_rejects_same_id_router_request_substitution(
             subject.ModelComputeIntentRouteAuthorityError,
             match="differs from product issuance",
         ):
-            authority.resolve(
+            authority.resolve_current(
                 intent=intent,
                 router_store=router,
                 request_id=issued.request_id,
-                decision_at=issued_at + timedelta(seconds=1),
             )
 
 
@@ -406,15 +403,14 @@ def test_resolve_requires_router_request_to_exist(monkeypatch) -> None:
             subject.ModelComputeIntentRouteAuthorityError,
             match="missing from canonical router",
         ):
-            authority.resolve(
+            authority.resolve_current(
                 intent=intent,
                 router_store=router,
                 request_id=request.request_id,
-                decision_at=issued_at + timedelta(seconds=1),
             )
 
 
-def test_resolution_cutoff_cannot_precede_physical_issuance(monkeypatch) -> None:
+def test_timestamp_only_historical_resolution_fails_closed(monkeypatch) -> None:
     intent = _canonical_intent(suffix="cutoff")
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
@@ -429,25 +425,28 @@ def test_resolution_cutoff_cannot_precede_physical_issuance(monkeypatch) -> None
         request = _issue(authority, router, intent)
         _route(router, request)
 
-        with pytest.raises(
-            subject.ModelComputeIntentRouteAuthorityError,
-            match="not causally available by cutoff",
+        for decision_at in (
+            issued_at - timedelta(microseconds=1),
+            issued_at,
+            issued_at + timedelta(days=365),
         ):
-            authority.resolve(
-                intent=intent,
-                router_store=router,
-                request_id=request.request_id,
-                decision_at=issued_at - timedelta(microseconds=1),
-            )
+            with pytest.raises(
+                subject.ModelComputeIntentRouteAuthorityError,
+                match="timestamp-only historical",
+            ):
+                authority.resolve(
+                    intent=intent,
+                    router_store=router,
+                    request_id=request.request_id,
+                    decision_at=decision_at,
+                )
 
-        resolved = authority.resolve(
+        resolved = authority.resolve_current(
             intent=intent,
             router_store=router,
             request_id=request.request_id,
-            decision_at=issued_at,
         )
         assert resolved.request_id == request.request_id
-
 
 def test_router_instance_get_request_shadow_is_rejected(monkeypatch) -> None:
     intent = _canonical_intent(suffix="shadow")
@@ -637,11 +636,10 @@ def test_record_class_module_rebind_cannot_forge_durable_origin(
             workspace,
             authority_root=authority_root,
         )
-        resolved = reopened.resolve(
+        resolved = reopened.resolve_current(
             intent=intent,
             router_store=router,
             request_id=issued.request_id,
-            decision_at=issued_at + timedelta(seconds=1),
         )
 
         assert type(resolved) is canonical_record_class

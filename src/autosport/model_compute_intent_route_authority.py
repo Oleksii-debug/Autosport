@@ -757,25 +757,24 @@ class ModelComputeIntentRouteAuthorityStore:
             )
             return request
 
-    def resolve(
+    def resolve_current(
         self,
         *,
         intent: OpportunityIntent,
         router_store: ModelComputeRouterStore,
         request_id: str,
-        decision_at: datetime | str,
     ) -> ModelComputeIntentRouteRecord:
-        """Re-resolve exact intent origin against the immutable router request."""
+        """Re-resolve exact intent origin for a new decision after this lookup.
+
+        A successful lookup proves only that the exact product-issued origin and
+        immutable router request exist now. It does not prove that the issuance
+        existed at any caller-selected historical timestamp.
+        """
 
         identity = _intent_identity(intent)
         relpath = self._router_relpath(router_store)
         self._reject_router_method_shadow(router_store)
         canonical_request_id = _text(request_id, "request_id")
-        cutoff = _instant(decision_at, "decision_at")
-        if cutoff < _instant(identity["proposal_ts"], "proposal_ts"):
-            raise ModelComputeIntentRouteAuthorityError(
-                "decision_at cannot precede canonical OpportunityIntent proposal_ts"
-            )
 
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
@@ -792,10 +791,6 @@ class ModelComputeIntentRouteAuthorityStore:
             if not self._record_matches_intent(record, identity):
                 raise ModelComputeIntentRouteAuthorityError(
                     "intent-route issuance does not match canonical intent"
-                )
-            if _instant(record.issued_at, "issued_at") > cutoff:
-                raise ModelComputeIntentRouteAuthorityError(
-                    "intent-route issuance was not causally available by cutoff"
                 )
             router_request = _CANONICAL_ROUTER_GET_REQUEST(
                 router_store,
@@ -818,6 +813,27 @@ class ModelComputeIntentRouteAuthorityStore:
                     "canonical router request differs from product issuance"
                 )
             return record
+
+    def resolve(
+        self,
+        *,
+        intent: OpportunityIntent,
+        router_store: ModelComputeRouterStore,
+        request_id: str,
+        decision_at: datetime | str,
+    ) -> ModelComputeIntentRouteRecord:
+        """Fail closed for timestamp-only historical origin resolution.
+
+        The issuance wall-clock timestamp is operational metadata, not durable
+        proof that the origin existed before a historical decision. Historical
+        positive authority requires a separate durable causal decision witness.
+        """
+
+        _instant(decision_at, "decision_at")
+        raise ModelComputeIntentRouteAuthorityError(
+            "timestamp-only historical intent-route resolution requires "
+            "durable causal decision authority"
+        )
 
 
 __all__ = [

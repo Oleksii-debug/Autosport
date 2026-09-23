@@ -14,12 +14,17 @@ from .betdaq_readonly_provider import (
 _MAX_HEADER_TEXT_CHARS = 4096
 
 
-def _xml_attribute_text(value: object, field: str) -> str:
+def _xml_attribute_text(
+    value: object,
+    field: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
     """Validate an opaque SOAP-header value without ever echoing it in errors."""
 
     if not isinstance(value, str):
         raise TypeError(f"{field} must be str")
-    if not value:
+    if not value and not allow_empty:
         raise ValueError(f"{field} must be non-empty")
     if len(value) > _MAX_HEADER_TEXT_CHARS:
         raise ValueError(f"{field} is too long")
@@ -38,6 +43,11 @@ def _xml_attribute_text(value: object, field: str) -> str:
 class BetdaqExternalApiHeader:
     """Ephemeral BETDAQ SOAP header material.
 
+    BETDAQ's read-only documentation says those methods require only a username,
+    while the live ASMX schema sample still exposes password and applicationIdentifier
+    attributes. The latter therefore remain optional/empty here rather than becoming
+    fabricated read-only requirements.
+
     Username, password and application identifier are intentionally excluded from
     ``repr``. This object is an in-memory request input, not durable provider
     evidence and not proof of API entitlement.
@@ -55,9 +65,9 @@ class BetdaqExternalApiHeader:
         self,
         *,
         username: str,
-        password: str,
-        application_identifier: str,
         language_code: str,
+        password: str = "",
+        application_identifier: str = "",
         version: Decimal = Decimal("2.0"),
     ) -> None:
         if not isinstance(version, Decimal) or not version.is_finite() or version <= 0:
@@ -66,10 +76,15 @@ class BetdaqExternalApiHeader:
         self._version = version
         self._language_code = _xml_attribute_text(language_code, "language_code")
         self._username = _xml_attribute_text(username, "username")
-        self._password = _xml_attribute_text(password, "password")
+        self._password = _xml_attribute_text(
+            password,
+            "password",
+            allow_empty=True,
+        )
         self._application_identifier = _xml_attribute_text(
             application_identifier,
             "application_identifier",
+            allow_empty=True,
         )
 
     @property

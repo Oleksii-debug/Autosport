@@ -361,20 +361,20 @@ def test_sandbox_and_production_execid_do_not_alias() -> None:
         assert first.economic_event_key != prod.economic_event_key
 
 
-def test_credential_identity_change_cannot_inherit_sequence_state() -> None:
+def test_credential_identity_change_cannot_inherit_or_mint_reset_state() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
         old = ident()
         store.initialize_session(old, next_expected_inbound=50, observed_at=T0)
         new = replace(old, credential_identity_sha256="f" * 64)
-        plan = store.plan_reconnect(
-            new,
-            provider_logon_msg_seq_num=50,
-            observed_at=T1,
-            disconnected_since=T0,
-        )
-        assert plan.disposition is ReconnectDisposition.RESET_LOCAL_STORE_LOST
-        assert plan.application_reconciliation_required is True
+        with pytest.raises(ProphetXFixCheckpointMissing):
+            store.plan_reconnect(
+                new,
+                provider_logon_msg_seq_num=50,
+                observed_at=T1,
+                disconnected_since=T0,
+            )
+        assert store.load_checkpoint(old).next_expected_inbound == 50
 
 
 def test_stale_checkpoint_revision_cannot_overwrite_newer_state() -> None:

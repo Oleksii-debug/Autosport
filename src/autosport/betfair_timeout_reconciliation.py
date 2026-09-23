@@ -102,6 +102,9 @@ def _install_betfair_readback_capture_start_authority() -> None:
 
     issued: dict[int, tuple[object, str, int]] = {}
     raw_read = BetfairReadOnlyClient.read_execution_readback
+    capture_datetime = datetime
+    capture_timezone_utc = timezone.utc
+    capture_monotonic_ns = monotonic_ns
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -112,8 +115,8 @@ def _install_betfair_readback_capture_start_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
-        capture_started_at = datetime.now(timezone.utc).isoformat()
-        capture_started_monotonic_ns = monotonic_ns()
+        capture_started_at = capture_datetime.now(capture_timezone_utc).isoformat()
+        capture_started_monotonic_ns = capture_monotonic_ns()
         capture = raw_read(
             self,
             action_id=action_id,

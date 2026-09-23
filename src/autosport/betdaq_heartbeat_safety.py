@@ -8,6 +8,7 @@ real-money execution permission.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import IntEnum, StrEnum
@@ -17,7 +18,7 @@ import os
 from pathlib import Path
 from secrets import token_hex
 import tempfile
-from typing import Any
+from typing import Any, Iterator
 import xml.etree.ElementTree as ET
 
 from .betdaq_account_readonly import (
@@ -33,6 +34,7 @@ from .betdaq_account_readonly import (
 from .execution_stop_authority import (
     ExecutionAuthorityMode,
     ExecutionStopAuthority,
+    _exclusive_file_lock,
 )
 
 
@@ -820,7 +822,7 @@ class BetdaqHeartbeatSafetyController:
         threshold = _threshold(threshold_ms)
         if not isinstance(action, HeartbeatAction):
             raise TypeError("action must be HeartbeatAction")
-        self._require_armed()
+        stop_revision = self._require_armed()
         latest = self._latest()
         if latest is not None and latest.state.value in _REMOTE_ACTIVE_STATES:
             raise BetdaqHeartbeatSafetyError(
@@ -842,46 +844,56 @@ class BetdaqHeartbeatSafetyController:
                 threshold_ms=threshold,
                 action=action,
             )
-        if evidence.provider_return_code != 0:
-            return self._degraded(
-                operation="RegisterHeartbeat",
-                latest=latest,
-                threshold_ms=threshold,
-                action=action,
-                evidence=evidence,
-            )
-        generation = _digest(
-            {
-                "kind": "betdaq-heartbeat-generation",
-                "process_instance_id": _PROCESS_INSTANCE_ID,
-                "account_context_id": self._context_id(),
-                "predecessor_generation_id": predecessor,
-                "threshold_ms": threshold,
-                "action": int(action),
-                "response_sha256": evidence.response_sha256,
-                "observed_at": evidence.observed_at,
-            }
-        )
-        carry_reconciliation = bool(
-            latest is not None and latest.reconciliation_required
-        )
-        return self._store.append(
-            generation_id=generation,
-            predecessor_generation_id=predecessor,
-            account_context_id=self._context_id(),
-            state=(
-                HeartbeatState.RECONCILIATION_REQUIRED
-                if carry_reconciliation
-                else HeartbeatState.ACTIVE
-            ),
-            threshold_ms=threshold,
-            registered_action=action,
+        with self._post_call_stop_guard(
+            expected_stop_revision=stop_revision,
             operation="RegisterHeartbeat",
-            observed_at=evidence.observed_at,
-            provider_return_code=evidence.provider_return_code,
-            response_sha256=evidence.response_sha256,
-            reconciliation_required=carry_reconciliation,
-        )
+            latest=latest,
+            threshold_ms=threshold,
+            action=action,
+            evidence=evidence,
+        ) as stop_fence:
+            if stop_fence is not None:
+                return stop_fence
+            if evidence.provider_return_code != 0:
+                return self._degraded(
+                    operation="RegisterHeartbeat",
+                    latest=latest,
+                    threshold_ms=threshold,
+                    action=action,
+                    evidence=evidence,
+                )
+            generation = _digest(
+                {
+                    "kind": "betdaq-heartbeat-generation",
+                    "process_instance_id": _PROCESS_INSTANCE_ID,
+                    "account_context_id": self._context_id(),
+                    "predecessor_generation_id": predecessor,
+                    "threshold_ms": threshold,
+                    "action": int(action),
+                    "response_sha256": evidence.response_sha256,
+                    "observed_at": evidence.observed_at,
+                }
+            )
+            carry_reconciliation = bool(
+                latest is not None and latest.reconciliation_required
+            )
+            return self._store.append(
+                generation_id=generation,
+                predecessor_generation_id=predecessor,
+                account_context_id=self._context_id(),
+                state=(
+                    HeartbeatState.RECONCILIATION_REQUIRED
+                    if carry_reconciliation
+                    else HeartbeatState.ACTIVE
+                ),
+                threshold_ms=threshold,
+                registered_action=action,
+                operation="RegisterHeartbeat",
+                observed_at=evidence.observed_at,
+                provider_return_code=evidence.provider_return_code,
+                response_sha256=evidence.response_sha256,
+                reconciliation_required=carry_reconciliation,
+            )
 
     def change_registration(
         self,
@@ -893,7 +905,7 @@ class BetdaqHeartbeatSafetyController:
         threshold = _threshold(threshold_ms)
         if not isinstance(action, HeartbeatAction):
             raise TypeError("action must be HeartbeatAction")
-        self._require_armed()
+        stop_revision = self._require_armed()
         latest = self._require_remote_active()
         try:
             evidence = self._call(
@@ -910,47 +922,57 @@ class BetdaqHeartbeatSafetyController:
                 threshold_ms=threshold,
                 action=action,
             )
-        if evidence.provider_return_code != 0:
-            return self._degraded(
-                operation="ChangeHeartbeatRegistration",
-                latest=latest,
-                threshold_ms=threshold,
-                action=action,
-                evidence=evidence,
-            )
-        generation = _digest(
-            {
-                "kind": "betdaq-heartbeat-generation",
-                "process_instance_id": _PROCESS_INSTANCE_ID,
-                "account_context_id": self._context_id(),
-                "predecessor_generation_id": latest.generation_id,
-                "threshold_ms": threshold,
-                "action": int(action),
-                "response_sha256": evidence.response_sha256,
-                "observed_at": evidence.observed_at,
-            }
-        )
-        return self._store.append(
-            generation_id=generation,
-            predecessor_generation_id=latest.generation_id,
-            account_context_id=self._context_id(),
-            state=(
-                HeartbeatState.RECONCILIATION_REQUIRED
-                if latest.reconciliation_required
-                else HeartbeatState.ACTIVE
-            ),
-            threshold_ms=threshold,
-            registered_action=action,
+        with self._post_call_stop_guard(
+            expected_stop_revision=stop_revision,
             operation="ChangeHeartbeatRegistration",
-            observed_at=evidence.observed_at,
-            provider_return_code=evidence.provider_return_code,
-            response_sha256=evidence.response_sha256,
-            reconciliation_required=latest.reconciliation_required,
-        )
+            latest=latest,
+            threshold_ms=threshold,
+            action=action,
+            evidence=evidence,
+        ) as stop_fence:
+            if stop_fence is not None:
+                return stop_fence
+            if evidence.provider_return_code != 0:
+                return self._degraded(
+                    operation="ChangeHeartbeatRegistration",
+                    latest=latest,
+                    threshold_ms=threshold,
+                    action=action,
+                    evidence=evidence,
+                )
+            generation = _digest(
+                {
+                    "kind": "betdaq-heartbeat-generation",
+                    "process_instance_id": _PROCESS_INSTANCE_ID,
+                    "account_context_id": self._context_id(),
+                    "predecessor_generation_id": latest.generation_id,
+                    "threshold_ms": threshold,
+                    "action": int(action),
+                    "response_sha256": evidence.response_sha256,
+                    "observed_at": evidence.observed_at,
+                }
+            )
+            return self._store.append(
+                generation_id=generation,
+                predecessor_generation_id=latest.generation_id,
+                account_context_id=self._context_id(),
+                state=(
+                    HeartbeatState.RECONCILIATION_REQUIRED
+                    if latest.reconciliation_required
+                    else HeartbeatState.ACTIVE
+                ),
+                threshold_ms=threshold,
+                registered_action=action,
+                operation="ChangeHeartbeatRegistration",
+                observed_at=evidence.observed_at,
+                provider_return_code=evidence.provider_return_code,
+                response_sha256=evidence.response_sha256,
+                reconciliation_required=latest.reconciliation_required,
+            )
 
     def pulse(self) -> HeartbeatEvent:
         self._require_open()
-        self._require_armed()
+        stop_revision = self._require_armed()
         latest = self._require_remote_active()
         try:
             evidence = self._call("Pulse", {})
@@ -961,100 +983,110 @@ class BetdaqHeartbeatSafetyController:
                 threshold_ms=latest.threshold_ms,
                 action=latest.registered_action,
             )
-        if evidence.provider_return_code == 462:
+        with self._post_call_stop_guard(
+            expected_stop_revision=stop_revision,
+            operation="Pulse",
+            latest=latest,
+            threshold_ms=latest.threshold_ms,
+            action=latest.registered_action,
+            evidence=evidence,
+        ) as stop_fence:
+            if stop_fence is not None:
+                return stop_fence
+            if evidence.provider_return_code == 462:
+                return self._store.append(
+                    generation_id=latest.generation_id,
+                    predecessor_generation_id=latest.predecessor_generation_id,
+                    account_context_id=latest.account_context_id,
+                    state=HeartbeatState.LOST_PROVIDER_REGISTRATION,
+                    threshold_ms=latest.threshold_ms,
+                    registered_action=latest.registered_action,
+                    operation="Pulse",
+                    observed_at=evidence.observed_at,
+                    provider_return_code=462,
+                    response_sha256=evidence.response_sha256,
+                    reconciliation_required=True,
+                )
+            if evidence.provider_return_code != 0:
+                return self._degraded(
+                    operation="Pulse",
+                    latest=latest,
+                    threshold_ms=latest.threshold_ms,
+                    action=latest.registered_action,
+                    evidence=evidence,
+                )
+            previous_pulse = self._latest_pulse_for_generation(latest.generation_id)
+            if (
+                previous_pulse is not None
+                and previous_pulse.provider_performed_at
+                == evidence.provider_performed_at
+            ):
+                if (
+                    previous_pulse.response_sha256 == evidence.response_sha256
+                    and previous_pulse.performed_action == evidence.performed_action
+                ):
+                    return previous_pulse
+                return self._degraded(
+                    operation="Pulse",
+                    latest=latest,
+                    threshold_ms=latest.threshold_ms,
+                    action=latest.registered_action,
+                    evidence=evidence,
+                )
+            if (
+                previous_pulse is not None
+                and previous_pulse.provider_performed_at is not None
+                and evidence.provider_performed_at is not None
+                and _instant(
+                    evidence.provider_performed_at,
+                    "provider_performed_at",
+                )
+                < _instant(
+                    previous_pulse.provider_performed_at,
+                    "previous provider_performed_at",
+                )
+            ):
+                return self._degraded(
+                    operation="Pulse",
+                    latest=latest,
+                    threshold_ms=latest.threshold_ms,
+                    action=latest.registered_action,
+                    evidence=evidence,
+                )
+            action_performed = evidence.performed_action
+            if (
+                action_performed is not None
+                and action_performed is not latest.registered_action
+            ):
+                return self._degraded(
+                    operation="Pulse",
+                    latest=latest,
+                    threshold_ms=latest.threshold_ms,
+                    action=latest.registered_action,
+                    evidence=evidence,
+                )
+            reconciliation_required = (
+                latest.reconciliation_required or action_performed is not None
+            )
             return self._store.append(
                 generation_id=latest.generation_id,
                 predecessor_generation_id=latest.predecessor_generation_id,
                 account_context_id=latest.account_context_id,
-                state=HeartbeatState.LOST_PROVIDER_REGISTRATION,
+                state=(
+                    HeartbeatState.RECONCILIATION_REQUIRED
+                    if reconciliation_required
+                    else HeartbeatState.ACTIVE
+                ),
                 threshold_ms=latest.threshold_ms,
                 registered_action=latest.registered_action,
                 operation="Pulse",
                 observed_at=evidence.observed_at,
-                provider_return_code=462,
+                provider_performed_at=evidence.provider_performed_at,
+                performed_action=evidence.performed_action,
+                provider_return_code=evidence.provider_return_code,
                 response_sha256=evidence.response_sha256,
-                reconciliation_required=True,
+                reconciliation_required=reconciliation_required,
             )
-        if evidence.provider_return_code != 0:
-            return self._degraded(
-                operation="Pulse",
-                latest=latest,
-                threshold_ms=latest.threshold_ms,
-                action=latest.registered_action,
-                evidence=evidence,
-            )
-        previous_pulse = self._latest_pulse_for_generation(latest.generation_id)
-        if (
-            previous_pulse is not None
-            and previous_pulse.provider_performed_at
-            == evidence.provider_performed_at
-        ):
-            if (
-                previous_pulse.response_sha256 == evidence.response_sha256
-                and previous_pulse.performed_action == evidence.performed_action
-            ):
-                return previous_pulse
-            return self._degraded(
-                operation="Pulse",
-                latest=latest,
-                threshold_ms=latest.threshold_ms,
-                action=latest.registered_action,
-                evidence=evidence,
-            )
-        if (
-            previous_pulse is not None
-            and previous_pulse.provider_performed_at is not None
-            and evidence.provider_performed_at is not None
-            and _instant(
-                evidence.provider_performed_at,
-                "provider_performed_at",
-            )
-            < _instant(
-                previous_pulse.provider_performed_at,
-                "previous provider_performed_at",
-            )
-        ):
-            return self._degraded(
-                operation="Pulse",
-                latest=latest,
-                threshold_ms=latest.threshold_ms,
-                action=latest.registered_action,
-                evidence=evidence,
-            )
-        action_performed = evidence.performed_action
-        if (
-            action_performed is not None
-            and action_performed is not latest.registered_action
-        ):
-            return self._degraded(
-                operation="Pulse",
-                latest=latest,
-                threshold_ms=latest.threshold_ms,
-                action=latest.registered_action,
-                evidence=evidence,
-            )
-        reconciliation_required = (
-            latest.reconciliation_required or action_performed is not None
-        )
-        return self._store.append(
-            generation_id=latest.generation_id,
-            predecessor_generation_id=latest.predecessor_generation_id,
-            account_context_id=latest.account_context_id,
-            state=(
-                HeartbeatState.RECONCILIATION_REQUIRED
-                if reconciliation_required
-                else HeartbeatState.ACTIVE
-            ),
-            threshold_ms=latest.threshold_ms,
-            registered_action=latest.registered_action,
-            operation="Pulse",
-            observed_at=evidence.observed_at,
-            provider_performed_at=evidence.provider_performed_at,
-            performed_action=evidence.performed_action,
-            provider_return_code=evidence.provider_return_code,
-            response_sha256=evidence.response_sha256,
-            reconciliation_required=reconciliation_required,
-        )
 
     def deregister(self) -> HeartbeatEvent:
         self._require_open()
@@ -1139,13 +1171,87 @@ class BetdaqHeartbeatSafetyController:
         if self._closed:
             raise BetdaqHeartbeatSafetyError("heartbeat controller is closed")
 
-    def _require_armed(self) -> None:
+    def _require_armed(self) -> int:
         self._fence_stop_if_needed()
         decision = self._stop.decision()
-        if not decision.allowed or decision.mode is not ExecutionAuthorityMode.ARMED:
+        if (
+            not decision.allowed
+            or decision.mode is not ExecutionAuthorityMode.ARMED
+            or type(decision.revision) is not int
+        ):
             raise BetdaqHeartbeatSafetyError(
                 "execution STOP authority forbids heartbeat activation/pulse"
             )
+        return decision.revision
+
+    @contextmanager
+    def _post_call_stop_guard(
+        self,
+        *,
+        expected_stop_revision: int,
+        operation: str,
+        latest: HeartbeatEvent | None,
+        threshold_ms: int | None,
+        action: HeartbeatAction | None,
+        evidence: HeartbeatProviderEvidence,
+    ) -> Iterator[HeartbeatEvent | None]:
+        """Serialize final STOP reread with heartbeat publication after provider I/O."""
+
+        with self._stop._thread_lock, _exclusive_file_lock(self._stop._lock_path):
+            records = self._stop._read_journal_unlocked()
+            current = (
+                None
+                if not records
+                else self._stop._state_from_record(records[-1])
+            )
+            same_armed_revision = bool(
+                current is not None
+                and current.mode is ExecutionAuthorityMode.ARMED
+                and current.revision == expected_stop_revision
+            )
+            if same_armed_revision:
+                yield None
+                return
+
+            context_id = (
+                self._context_id()
+                if latest is None
+                else latest.account_context_id
+            )
+            generation_id = (
+                latest.generation_id
+                if latest is not None
+                else _digest(
+                    {
+                        "kind": "betdaq-heartbeat-post-call-stop-fence",
+                        "process_instance_id": _PROCESS_INSTANCE_ID,
+                        "account_context_id": context_id,
+                        "operation": operation,
+                        "response_sha256": evidence.response_sha256,
+                        "observed_at": evidence.observed_at,
+                    }
+                )
+            )
+            revoked = self._store.append(
+                generation_id=generation_id,
+                predecessor_generation_id=(
+                    None
+                    if latest is None
+                    else latest.predecessor_generation_id
+                ),
+                account_context_id=context_id,
+                state=HeartbeatState.REVOKED,
+                threshold_ms=threshold_ms,
+                registered_action=action,
+                operation=f"{operation}:POST_CALL_STOP_FENCE",
+                observed_at=evidence.observed_at,
+                provider_performed_at=evidence.provider_performed_at,
+                performed_action=evidence.performed_action,
+                provider_return_code=evidence.provider_return_code,
+                response_sha256=evidence.response_sha256,
+                reconciliation_required=True,
+            )
+            yield revoked
 
     def _require_remote_active(self) -> HeartbeatEvent:
         latest = self._latest()

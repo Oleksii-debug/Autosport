@@ -357,3 +357,139 @@ def test_empty_current_schema_snapshot_cannot_bypass_external_witness(
     ):
         PaperBook.load(path)
 
+
+
+
+def test_fresh_book_cannot_overwrite_existing_witnessed_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f"{tmp_path.name}-authority-fresh-overwrite"
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(authority_root),
+    )
+    path = tmp_path / "paper-book.json"
+
+    current = PaperBook("100")
+    current.open_ticket(
+        [_leg("back", odds="2")],
+        "10",
+        placed_at=_PLACED_AT,
+    )
+    current.save(path)
+    expected_bytes = path.read_bytes()
+
+    attacker_fresh = PaperBook("1000")
+    with pytest.raises(
+        ValueError,
+        match="fresh PaperBook cannot overwrite an existing snapshot authority",
+    ):
+        attacker_fresh.save(path)
+
+    assert path.read_bytes() == expected_bytes
+    restored = PaperBook.load(path)
+    assert restored.initial_bankroll == Decimal("100")
+    assert restored.balance == Decimal("90")
+
+
+def test_bound_book_rejects_snapshot_witness_root_drift_before_valid_old_save(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root_1 = tmp_path.parent / f"{tmp_path.name}-authority-root-1"
+    authority_root_2 = tmp_path.parent / f"{tmp_path.name}-authority-root-2"
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(authority_root_1),
+    )
+    path = tmp_path / "paper-book.json"
+
+    current = PaperBook("100")
+    current.open_ticket(
+        [_leg("back", selection_id="selection-1", odds="2")],
+        "10",
+        placed_at=_PLACED_AT,
+    )
+    current.save(path)
+
+    stale = PaperBook.load(path)
+
+    current.open_ticket(
+        [_leg("back", selection_id="selection-2", odds="3")],
+        "5",
+        placed_at="2026-09-23T01:00:30+00:00",
+    )
+    current.save(path)
+    latest_bytes = path.read_bytes()
+
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(authority_root_2),
+    )
+    with pytest.raises(
+        ValueError,
+        match="independent snapshot authority root changed after binding",
+    ):
+        stale.save(path)
+
+    assert path.read_bytes() == latest_bytes
+
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(authority_root_1),
+    )
+    restored = PaperBook.load(path)
+    assert restored.balance == Decimal("85")
+    assert len(restored.tickets) == 2
+
+
+def test_load_bytes_cannot_mint_mutation_authority_by_flipping_public_field(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-authority-byte-flip"),
+    )
+    path = tmp_path / "paper-book.json"
+    canonical = PaperBook("100")
+    canonical.save(path)
+
+    untrusted = PaperBook.load_bytes(path.read_bytes())
+    # A caller-visible Python attribute must never be the authority boundary.
+    untrusted._snapshot_authority_verified = True
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks independent durable witness authority",
+    ):
+        untrusted.open_ticket(
+            [_leg("back", odds="2")],
+            "10",
+            placed_at=_PLACED_AT,
+        )
+
+
+def test_bound_book_rejects_save_as_authority_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-authority-save-as"),
+    )
+    path = tmp_path / "paper-book.json"
+    other_path = tmp_path / "paper-book-copy.json"
+
+    canonical = PaperBook("100")
+    canonical.save(path)
+    loaded = PaperBook.load(path)
+
+    with pytest.raises(
+        ValueError,
+        match="snapshot authority is bound to another path or witness root",
+    ):
+        loaded.save(other_path)
+
+    assert not other_path.exists()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import autosport.betfair_supervised_execution as betfair_execution
 from autosport.betfair_account_readonly import BetfairSessionCredentials
 from autosport.betfair_supervised_execution import (
     BetfairSupervisedExecutionGate,
@@ -312,6 +314,7 @@ def test_explicit_armed_execution_stop_authority_keeps_bounded_write_reachable(
 
 def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
     stopped = authority.initialize_stopped(
@@ -331,7 +334,20 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
         tmp_path,
         transport=transport,
     )
-    stop_started = Event()
+    stop_lock_attempted = Event()
+    original_authority_lock = authority._authority_operation_lock
+
+    @contextmanager
+    def observed_authority_lock():
+        stop_lock_attempted.set()
+        with original_authority_lock():
+            yield
+
+    monkeypatch.setattr(
+        authority,
+        "_authority_operation_lock",
+        observed_authority_lock,
+    )
 
     def place():
         return client.place_action(
@@ -343,7 +359,6 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
         )
 
     def stop():
-        stop_started.set()
         return authority.stop(
             operator_id="owner",
             reason="concurrent operator STOP",
@@ -355,7 +370,7 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
         place_future = pool.submit(place)
         assert transport.entered.wait(timeout=5)
         stop_future = pool.submit(stop)
-        assert stop_started.wait(timeout=5)
+        assert stop_lock_attempted.wait(timeout=5)
         assert not stop_future.done()
 
         transport.release.set()
@@ -378,6 +393,41 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
             execution_workspace=tmp_path,
         )
     assert denied_transport.calls == []
+
+
+def test_stop_authority_global_rebind_cannot_bypass_provider_fence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
+    authority.initialize_stopped(
+        operator_id="owner",
+        reason="operator STOP",
+        command_id="stop-composition-rebind-init",
+    )
+    client, bound, profile, transport = _client_and_bound(tmp_path)
+
+    class _BypassAuthority:
+        @contextmanager
+        def admission_lease(self):
+            yield None
+
+    monkeypatch.setattr(
+        betfair_execution,
+        "ExecutionStopAuthority",
+        _BypassAuthority,
+    )
+
+    with pytest.raises(Exception, match="STOP admission authority changed"):
+        client.place_action(
+            _action(),
+            profile=profile,
+            bound=bound,
+            provider_order_ref="e" * 16,
+            execution_workspace=tmp_path,
+        )
+
+    assert transport.calls == []
 
 
 def test_transport_exception_releases_stop_admission_lease(tmp_path: Path) -> None:

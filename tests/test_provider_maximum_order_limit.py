@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from autosport.provider_maximum_order_limit import (
+    ProviderMaximumOrderLimitComparison,
     ProviderMaximumOrderLimitError,
     ProviderMaximumOrderLimitEvidence,
     ProviderMaximumOrderLimitKind,
@@ -103,11 +104,12 @@ def test_structural_exact_boundary_is_numerically_within_but_not_provider_suppor
         as_of=NOW,
         evidence=item, requested_amount=Decimal("50.00")
     )
-    assert result.state is ProviderMaximumOrderLimitState.WITHIN_LIMIT
+    assert result.state is ProviderMaximumOrderLimitState.UNKNOWN_UNPROVEN
     assert result.maximum_amount == Decimal("50.00")
+    assert result.comparison is ProviderMaximumOrderLimitComparison.AT_OR_BELOW_UNPROVEN_MAXIMUM
     assert result.provider_origin_proven is False
     assert result.supports_requested_amount is False
-    assert result.reason == "requested_amount_within_structural_maximum_only"
+    assert result.reason == "requested_amount_at_or_below_unproven_structural_maximum"
     assert result.execution_authority is False
 
 
@@ -117,10 +119,11 @@ def test_structural_one_quantum_above_is_numerically_exceeds_but_not_provider_tr
         as_of=NOW,
         evidence=item, requested_amount=Decimal("50.01")
     )
-    assert result.state is ProviderMaximumOrderLimitState.EXCEEDS_LIMIT
+    assert result.state is ProviderMaximumOrderLimitState.UNKNOWN_UNPROVEN
+    assert result.comparison is ProviderMaximumOrderLimitComparison.ABOVE_UNPROVEN_MAXIMUM
     assert result.provider_origin_proven is False
     assert result.supports_requested_amount is False
-    assert result.reason == "requested_amount_exceeds_structural_maximum_only"
+    assert result.reason == "requested_amount_above_unproven_structural_maximum"
 
 
 def test_dataclass_replace_cannot_copy_structural_seal():
@@ -223,7 +226,8 @@ def test_versioned_rule_may_be_structurally_scope_bound_without_action_digest():
         as_of=NOW,
         evidence=sealed, requested_amount=Decimal("10")
     )
-    assert result.state is ProviderMaximumOrderLimitState.WITHIN_LIMIT
+    assert result.state is ProviderMaximumOrderLimitState.UNKNOWN_UNPROVEN
+    assert result.comparison is ProviderMaximumOrderLimitComparison.AT_OR_BELOW_UNPROVEN_MAXIMUM
     assert result.provider_origin_proven is False
     assert result.supports_requested_amount is False
 
@@ -282,10 +286,11 @@ def test_fabricated_maximum_can_be_structurally_compared_but_never_supports_requ
         as_of=NOW,
         evidence=item, requested_amount=Decimal("500000")
     )
-    assert result.state is ProviderMaximumOrderLimitState.WITHIN_LIMIT
+    assert result.state is ProviderMaximumOrderLimitState.UNKNOWN_UNPROVEN
+    assert result.comparison is ProviderMaximumOrderLimitComparison.AT_OR_BELOW_UNPROVEN_MAXIMUM
     assert result.provider_origin_proven is False
     assert result.supports_requested_amount is False
-    assert result.reason == "requested_amount_within_structural_maximum_only"
+    assert result.reason == "requested_amount_at_or_below_unproven_structural_maximum"
     with pytest.raises(
         ProviderMaximumOrderLimitError,
         match="origin authority is not proven",

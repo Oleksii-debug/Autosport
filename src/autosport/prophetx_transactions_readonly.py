@@ -48,6 +48,10 @@ def _filter_text(value: object, field: str) -> str:
     text = _required_text(value, field)
     if len(text) > 4096 or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
         raise ProphetXReadOnlyError(f"{field} is not a safe request value")
+    try:
+        text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise ProphetXReadOnlyError(f"{field} must be valid UTF-8 text") from None
     return text
 
 
@@ -58,6 +62,10 @@ def _provider_text(value: object, field: str) -> str | None:
         raise ProphetXReadOnlyError(f"{field} must be a bounded string or null")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ProphetXReadOnlyError(f"{field} contains control characters")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise ProphetXReadOnlyError(f"{field} must be valid UTF-8 text") from None
     return value
 
 
@@ -72,8 +80,10 @@ def _money(value: object, field: str, *, nonnegative: bool = False) -> Decimal:
         raise ProphetXReadOnlyError(
             f"{field} exceeds bounded exact-money representation"
         )
-    if nonnegative and value < 0:
-        raise ProphetXReadOnlyError(f"{field} must be non-negative")
+    if nonnegative and (value < 0 or value.as_tuple().sign):
+        raise ProphetXReadOnlyError(
+            f"{field} must use an unsigned non-negative representation"
+        )
     return value
 
 
@@ -297,7 +307,7 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
     tx_type = _required_text(row.get("transaction_type"), "transaction_type")
     if status not in STATUSES or tx_type not in TYPES:
         raise ProphetXReadOnlyError("transaction status/type is outside documented ProphetX vocabulary")
-    created_at = _required_text(row.get("created_at"), "created_at")
+    created_at = _filter_text(row.get("created_at"), "created_at")
     _iso_timestamp(created_at, "created_at")
     amount = _money(row.get("amount"), "amount", nonnegative=True)
     change = _money(row.get("change"), "change")
@@ -309,7 +319,7 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
         )
     return ProphetXWalletTransaction(
         status=status,
-        user_id=_required_text(row.get("user_id"), "user_id"),
+        user_id=_filter_text(row.get("user_id"), "user_id"),
         transaction_type=tx_type,
         transaction_sub_type=_provider_text(row.get("transaction_sub_type"), "transaction_sub_type"),
         amount=amount,

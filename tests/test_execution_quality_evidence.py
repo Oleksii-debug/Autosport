@@ -3,7 +3,13 @@ from __future__ import annotations
 from decimal import Decimal
 from types import SimpleNamespace
 
-from autosport.evaluation_universe import EvaluationUniverseLedger, FunnelStage
+import pytest
+
+from autosport.evaluation_universe import (
+    EvaluationUniverseIntegrityError,
+    EvaluationUniverseLedger,
+    FunnelStage,
+)
 from autosport.execution_quality_evidence import (
     ClockStatus,
     EvidenceReadinessStatus,
@@ -283,3 +289,42 @@ def test_unresolved_attempt_remains_missing_when_another_attempt_has_outcome():
     assert report.fill_observation_count == 1
     assert report.fill_observation_missing_count == 1
     assert len(report.samples) == 1
+
+
+def test_outcome_cannot_numerically_mask_another_rows_unresolved_attempt():
+    rows = (_row(1), _row(2))
+    attempts = (
+        _attempt(
+            1,
+            PaperAttemptOutcome.ACCEPTED,
+            execution_odds="2.1",
+            execution_stake="10",
+        ),
+        _attempt(
+            2,
+            PaperAttemptOutcome.ACCEPTED,
+            execution_odds="2.2",
+            execution_stake="10",
+        ),
+    )
+    ledger = object.__new__(_FixtureLedger)
+    object.__setattr__(
+        ledger,
+        "universe",
+        SimpleNamespace(rows=rows, universe_sha256="b" * 64),
+    )
+    object.__setattr__(
+        ledger,
+        "events",
+        (
+            _event(rows[0], FunnelStage.ATTEMPTED, 1),
+            _event(rows[1], FunnelStage.ACCEPTED, 2),
+        ),
+    )
+    object.__setattr__(ledger, "paper_resolver", _Resolver(attempts))
+
+    with pytest.raises(
+        EvaluationUniverseIntegrityError,
+        match="outcome lacks a durable ATTEMPTED predecessor",
+    ):
+        project_paper_execution_quality(ledger)

@@ -136,14 +136,21 @@ def _reject_webview2_environment_overrides() -> None:
 
 def _reject_pywebview_release_settings(webview: object) -> None:
     settings = getattr(webview, "settings", None)
-    if not isinstance(settings, dict):
+    if not isinstance(settings, Mapping):
         raise WindowsWebViewUnavailable(
             "Автоспорт не може підтвердити безпечні параметри pywebview."
+        )
+    missing = [name for name in _PYWEBVIEW_RELEASE_SETTINGS if name not in settings]
+    if missing:
+        raise WindowsWebViewUnavailable(
+            "Автоспорт не може підтвердити параметри pywebview: "
+            + ", ".join(missing)
+            + "."
         )
     active = [
         name
         for name in _PYWEBVIEW_RELEASE_SETTINGS
-        if settings.get(name) not in (None, "")
+        if settings[name] not in (None, "")
     ]
     if active:
         raise WindowsWebViewUnavailable(

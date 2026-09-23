@@ -410,6 +410,20 @@ def _build_keepalive_authority_runtime():
     json_decoder_raw_decode_code = getattr(
         json_decoder_raw_decode, "__code__", None
     )
+    # JSONDecoder.__init__ resolves its lower parser graph dynamically from
+    # json.decoder globals. Capturing only JSONDecoder and its methods is not
+    # sufficient: scanner.make_scanner/JSONObject/JSONArray/scanstring can be
+    # rebound while every captured decoder method remains byte-identical.
+    json_decoder_module = json.decoder
+    json_scanner_module = json.scanner
+    json_scanner_make = json_scanner_module.make_scanner
+    json_scanner_make_code = getattr(json_scanner_make, "__code__", None)
+    json_object_parser = json_decoder_module.JSONObject
+    json_object_parser_code = getattr(json_object_parser, "__code__", None)
+    json_array_parser = json_decoder_module.JSONArray
+    json_array_parser_code = getattr(json_array_parser, "__code__", None)
+    json_scanstring = json_decoder_module.scanstring
+    json_scanstring_code = getattr(json_scanstring, "__code__", None)
     sha256_fn = sha256
     hmac_digest = hmac.digest
     hmac_compare_digest = hmac.compare_digest
@@ -427,6 +441,29 @@ def _build_keepalive_authority_runtime():
             and getattr(json_module, "JSONDecodeError", None)
             is json_decode_error
             and getattr(json_module, "JSONDecoder", None) is json_decoder
+            and getattr(json_module, "decoder", None) is json_decoder_module
+            and getattr(json_module, "scanner", None) is json_scanner_module
+            and getattr(json_decoder_module, "JSONDecodeError", None)
+            is json_decode_error
+            and getattr(json_decoder_module, "JSONDecoder", None) is json_decoder
+            and getattr(json_decoder_module, "scanner", None)
+            is json_scanner_module
+            and getattr(json_scanner_module, "make_scanner", None)
+            is json_scanner_make
+            and getattr(json_scanner_make, "__code__", None)
+            is json_scanner_make_code
+            and getattr(json_decoder_module, "JSONObject", None)
+            is json_object_parser
+            and getattr(json_object_parser, "__code__", None)
+            is json_object_parser_code
+            and getattr(json_decoder_module, "JSONArray", None)
+            is json_array_parser
+            and getattr(json_array_parser, "__code__", None)
+            is json_array_parser_code
+            and getattr(json_decoder_module, "scanstring", None)
+            is json_scanstring
+            and getattr(json_scanstring, "__code__", None)
+            is json_scanstring_code
             and getattr(json_decoder, "__init__", None) is json_decoder_init
             and getattr(json_decoder_init, "__code__", None)
             is json_decoder_init_code

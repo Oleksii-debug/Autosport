@@ -21,6 +21,7 @@ _METHOD = "SportsAPING/v1.0/listMarketBook"
 _SCHEMA = "autosport.betfair_decision_quote_evidence.v1"
 _SIDES = frozenset({"BACK", "LAY"})
 _MAX_DEPTH = 10
+_PRODUCT_MAX_DECISION_AGE_SECONDS = Decimal("5")
 
 
 class BetfairDecisionQuoteError(BetfairMarketBookFreshnessError):
@@ -326,6 +327,8 @@ def _read(
     decision_price: Decimal,
     requested_size: Decimal,
     best_prices_depth: int,
+    production_utc_now,
+    production_monotonic_ns,
 ) -> BetfairDecisionQuoteEvidence:
     if type(client) is not _base.BetfairReadOnlyClient:
         raise TypeError("client must be an exact BetfairReadOnlyClient")
@@ -373,10 +376,24 @@ def _read(
     )
     if not isinstance(payload, bytes):
         raise BetfairDecisionQuoteError("Betfair transport must return bytes")
-    received_ns = monotonic_ns()
-    observed_at = (
-        datetime.now(timezone.utc).isoformat() if network_origin else client._observed_at()
-    )
+    if network_origin:
+        received_ns = _integer(
+            production_monotonic_ns(),
+            "product received_monotonic_ns",
+        )
+        captured_utc = production_utc_now(timezone.utc)
+        if (
+            not isinstance(captured_utc, datetime)
+            or captured_utc.tzinfo is None
+            or captured_utc.utcoffset() is None
+        ):
+            raise BetfairDecisionQuoteError(
+                "product UTC clock must return timezone-aware datetime"
+            )
+        observed_at = captured_utc.astimezone(timezone.utc).isoformat()
+    else:
+        received_ns = _integer(monotonic_ns(), "received_monotonic_ns")
+        observed_at = client._observed_at()
 
     decoded = _base._decode_json(payload)
     envelope = _base._mapping(decoded, "JSON-RPC response")
@@ -439,6 +456,12 @@ def _read(
 
 
 def _install_authority() -> None:
+    # Freeze production clock callables inside the authority closure. Module-global
+    # rebinding remains useful for non-authoritative injected/test transports, but
+    # cannot redefine freshness for product-issued network evidence/assessments.
+    production_utc_now = datetime.now
+    production_monotonic_ns = monotonic_ns
+
     evidence_registry: dict[int, tuple[object, str, bool, object, object]] = {}
     assessment_registry: dict[int, tuple[object, str]] = {}
     validate = BetfairDecisionQuoteEvidence.__post_init__
@@ -465,6 +488,8 @@ def _install_authority() -> None:
             decision_price=decision_price,
             requested_size=requested_size,
             best_prices_depth=best_prices_depth,
+            production_utc_now=production_utc_now,
+            production_monotonic_ns=production_monotonic_ns,
         )
         if positive_origin and client._credentials is not credentials:
             raise BetfairDecisionQuoteError("authenticated context changed before issuance")
@@ -514,21 +539,52 @@ def _install_authority() -> None:
             or now_utc.utcoffset() is None
         ):
             raise BetfairDecisionQuoteError("now_utc must be timezone-aware datetime")
-        current_ns = _integer(now_monotonic_ns, "now_monotonic_ns")
-        max_age = _decimal(max_age_seconds, "max_age_seconds")
-        elapsed_ns = current_ns - self.received_monotonic_ns
-        mono_age = Decimal(elapsed_ns) / Decimal("1000000000")
-        observed = _base._iso_timestamp(self.observed_at, "observed_at")
-        delta = now_utc.astimezone(timezone.utc) - observed.astimezone(timezone.utc)
-        utc_age = Decimal(str(delta.total_seconds()))
+        caller_ns = _integer(now_monotonic_ns, "now_monotonic_ns")
+        requested_max_age = _decimal(max_age_seconds, "max_age_seconds")
+        if requested_max_age > _PRODUCT_MAX_DECISION_AGE_SECONDS:
+            raise BetfairDecisionQuoteError(
+                "max_age_seconds exceeds product freshness ceiling"
+            )
+
+        product_ns = _integer(
+            production_monotonic_ns(),
+            "product now_monotonic_ns",
+        )
+        product_utc = production_utc_now(timezone.utc)
+        if (
+            not isinstance(product_utc, datetime)
+            or product_utc.tzinfo is None
+            or product_utc.utcoffset() is None
+        ):
+            raise BetfairDecisionQuoteError(
+                "product UTC clock must return timezone-aware datetime"
+            )
+        product_utc = product_utc.astimezone(timezone.utc)
+        caller_utc = now_utc.astimezone(timezone.utc)
+
+        product_elapsed_ns = product_ns - self.received_monotonic_ns
+        caller_elapsed_ns = caller_ns - self.received_monotonic_ns
+        product_mono_age = Decimal(product_elapsed_ns) / Decimal("1000000000")
+        caller_mono_age = Decimal(caller_elapsed_ns) / Decimal("1000000000")
+        mono_age = max(product_mono_age, caller_mono_age)
+
+        observed = _base._iso_timestamp(self.observed_at, "observed_at").astimezone(
+            timezone.utc
+        )
+        product_delta = product_utc - observed
+        caller_delta = caller_utc - observed
+        product_utc_age = Decimal(str(product_delta.total_seconds()))
+        caller_utc_age = Decimal(str(caller_delta.total_seconds()))
+        utc_age = max(product_utc_age, caller_utc_age)
+
         reasons = []
-        if elapsed_ns < 0:
+        if product_elapsed_ns < 0 or caller_elapsed_ns < 0:
             reasons.append("MONOTONIC_CLOCK_PRECEDES_CAPTURE")
-        elif mono_age > max_age:
+        elif mono_age > requested_max_age:
             reasons.append("MONOTONIC_STALE")
-        if utc_age < 0:
+        if product_utc_age < 0 or caller_utc_age < 0:
             reasons.append("UTC_CLOCK_PRECEDES_CAPTURE")
-        elif utc_age > max_age:
+        elif utc_age > requested_max_age:
             reasons.append("UTC_STALE")
         if self.application_key_delay_data is not False:
             reasons.append("APPLICATION_KEY_DELAYED_OR_UNKNOWN")
@@ -548,9 +604,9 @@ def _install_authority() -> None:
             self.requested_size,
             mono_age,
             utc_age,
-            now_utc.astimezone(timezone.utc).isoformat(),
-            current_ns,
-            max_age,
+            product_utc.isoformat(),
+            product_ns,
+            requested_max_age,
             self.bet_delay_seconds > 0,
         )
         key = id(assessment)

@@ -141,3 +141,42 @@ def test_historical_cutoff_identity_normalizes_timezone_aliases() -> None:
     alias = alias_provider.read_historical_snapshot("2026-09-23T13:00:00+02:00")
 
     assert first.batch.source_id == alias.batch.source_id
+
+
+def test_request_scope_fields_are_read_only_after_construction() -> None:
+    provider = TheOddsApiProvider(
+        "synthetic-secret",
+        sport="soccer_epl",
+        regions=("eu",),
+        markets=("h2h", "totals"),
+        event_ids=("event-a",),
+        include_sids=True,
+        include_bet_limits=False,
+    )
+    original_source_id = provider.source_id
+
+    mutations = (
+        ("sport", "basketball_nba"),
+        ("regions", ("us",)),
+        ("bookmakers", ("pinnacle",)),
+        ("markets", ("h2h",)),
+        ("event_ids", ("event-b",)),
+        ("include_sids", False),
+        ("include_bet_limits", True),
+    )
+    for field, value in mutations:
+        try:
+            setattr(provider, field, value)
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError(f"{field} request scope must be read-only")
+
+    assert provider.sport == "soccer_epl"
+    assert provider.regions == ("eu",)
+    assert provider.bookmakers == ()
+    assert provider.markets == ("h2h", "totals")
+    assert provider.event_ids == ("event-a",)
+    assert provider.include_sids is True
+    assert provider.include_bet_limits is False
+    assert provider.source_id == original_source_id

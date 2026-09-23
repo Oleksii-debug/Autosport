@@ -522,12 +522,12 @@ class TheOddsApiProvider:
         if type(api_key) is not str or not api_key or api_key != api_key.strip():
             raise ValueError("api_key must be a non-empty trimmed string")
         requested_sport = _sport(sport, "sport")
-        self.regions = self._config_values(regions, "regions", allow_empty=True)
-        self.bookmakers = self._config_values(
+        self._regions = self._config_values(regions, "regions", allow_empty=True)
+        self._bookmakers = self._config_values(
             bookmakers, "bookmakers", allow_empty=True
         )
-        self.markets = self._config_values(markets, "markets")
-        self.event_ids = self._config_values(
+        self._markets = self._config_values(markets, "markets")
+        self._event_ids = self._config_values(
             event_ids,
             "event_ids",
             allow_empty=True,
@@ -556,9 +556,9 @@ class TheOddsApiProvider:
         if type(base_url) is not str or base_url.rstrip("/") != THE_ODDS_API_BASE_URL:
             raise ValueError("base_url must be the canonical The Odds API HTTPS origin")
         self.api_key = api_key
-        self.sport = requested_sport
-        self.include_sids = include_sids
-        self.include_bet_limits = include_bet_limits
+        self._sport = requested_sport
+        self._include_sids = include_sids
+        self._include_bet_limits = include_bet_limits
         self.max_market_age_seconds = max_market_age_seconds
         self.base_url = THE_ODDS_API_BASE_URL
         self.timeout_seconds = float(timeout_seconds)
@@ -590,6 +590,34 @@ class TheOddsApiProvider:
         if len(set(result)) != len(result):
             raise ValueError(f"{field} must not contain duplicates")
         return result
+
+    @property
+    def sport(self) -> str:
+        return self._sport
+
+    @property
+    def regions(self) -> tuple[str, ...]:
+        return self._regions
+
+    @property
+    def bookmakers(self) -> tuple[str, ...]:
+        return self._bookmakers
+
+    @property
+    def markets(self) -> tuple[str, ...]:
+        return self._markets
+
+    @property
+    def event_ids(self) -> tuple[str, ...]:
+        return self._event_ids
+
+    @property
+    def include_sids(self) -> bool:
+        return self._include_sids
+
+    @property
+    def include_bet_limits(self) -> bool:
+        return self._include_bet_limits
 
     @property
     def last_request_evidence(self) -> TheOddsApiRequestEvidence | None:

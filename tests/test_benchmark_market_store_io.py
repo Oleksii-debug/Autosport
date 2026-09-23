@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from benchmarks.benchmark_market_store_io import (
     MarketStoreIOProfile,
+    _current_projection_snapshot,
     _positive_elapsed,
     _positive_int,
     _sqlite_footprint,
     run_profile,
 )
+from autosport.storage import SQLiteMarketStore
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "1000"])
@@ -68,6 +72,75 @@ def test_small_profile_proves_closed_durable_counts_and_restart_projection() -> 
     ):
         assert math.isfinite(elapsed)
         assert elapsed > 0
+
+
+
+
+def test_projection_snapshot_is_order_independent_and_content_exact() -> None:
+    original = {
+        ("source-b", "quote-b"): run_profile.__globals__["_build_quotes"](2)[1],
+        ("source-a", "quote-a"): run_profile.__globals__["_build_quotes"](2)[0],
+    }
+    # The helper also proves key/event identity, so use canonical normalized
+    # MarketEvent values rather than provider-side fixture DTOs.
+    from autosport.providers import CanonicalNormalizer
+
+    normalizer = CanonicalNormalizer()
+    quotes = run_profile.__globals__["_build_quotes"](2)
+    current = {
+        ("benchmark-market-store-io", normalizer.normalize(
+            "benchmark-market-store-io", quotes[0]
+        ).quote_key): normalizer.normalize("benchmark-market-store-io", quotes[0]),
+        ("benchmark-market-store-io", normalizer.normalize(
+            "benchmark-market-store-io", quotes[1]
+        ).quote_key): normalizer.normalize("benchmark-market-store-io", quotes[1]),
+    }
+    reverse = dict(reversed(tuple(current.items())))
+
+    assert _current_projection_snapshot(current) == _current_projection_snapshot(reverse)
+
+    key = next(iter(current))
+    changed = dict(current)
+    changed[key] = replace(
+        changed[key],
+        decimal_odds=changed[key].decimal_odds + Decimal("0.01"),
+    )
+    assert _current_projection_snapshot(changed) != _current_projection_snapshot(current)
+
+
+def test_profile_rejects_same_cardinality_projection_corruption_after_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = SQLiteMarketStore.current_by_source
+    first_store: SQLiteMarketStore | None = None
+
+    def corrupt_only_reopened(
+        self: SQLiteMarketStore,
+    ):
+        nonlocal first_store
+        current = original(self)
+        if first_store is None:
+            first_store = self
+            return current
+        if self is first_store or not current:
+            return current
+
+        changed = dict(current)
+        key = next(iter(sorted(changed)))
+        changed[key] = replace(
+            changed[key],
+            decimal_odds=changed[key].decimal_odds + Decimal("0.01"),
+        )
+        return changed
+
+    monkeypatch.setattr(
+        SQLiteMarketStore,
+        "current_by_source",
+        corrupt_only_reopened,
+    )
+
+    with pytest.raises(RuntimeError, match="projection content changed"):
+        run_profile(count=7, batch_size=3)
 
 
 @pytest.mark.parametrize(

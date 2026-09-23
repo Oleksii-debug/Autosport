@@ -113,6 +113,11 @@ def _build_authority_binding_registry():
             path,
         )
         with lock:
+            existing = records.get(key)
+            if existing is not None and existing[0]() is store:
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation monotonic authority issuance is already registered"
+                )
             records[key] = record
 
     def lookup(

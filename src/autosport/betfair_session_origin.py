@@ -782,15 +782,62 @@ def _build_bound_authority_runtime(require_origin):
     client_type = BetfairReadOnlyClient
     credentials_type = BetfairSessionCredentials
     identity_type = BetfairAuthenticatedAccountIdentity
+    jurisdiction_type = BetfairLoginJurisdiction
     origin_type = BetfairSessionOrigin
     bound_type = BetfairAuthenticatedJurisdiction
     identity_require = require_authoritative_betfair_account_identity
     venue_id = VENUE_ID
+    login_method = LOGIN_METHOD
+    origin_schema = ORIGIN_SCHEMA
+    origin_schema_version = ORIGIN_SCHEMA_VERSION
+    endpoint_table = _CERT_LOGIN_ENDPOINTS
     hmac_compare_digest = hmac.compare_digest
+    sha256_fn = sha256
+    weakref_ref = ref
+    datetime_type = datetime
+    utc = timezone.utc
+
     bound_init = bound_type.__init__
     bound_init_code = getattr(bound_init, "__code__", None)
     bound_post_init = bound_type.__post_init__
     bound_post_init_code = getattr(bound_post_init, "__code__", None)
+
+    json_module = json
+    json_dumps = json.dumps
+    json_dumps_code = getattr(json_dumps, "__code__", None)
+    json_encoder = json.JSONEncoder
+    json_encoder_init = json_encoder.__init__
+    json_encoder_init_code = getattr(json_encoder_init, "__code__", None)
+    json_encoder_encode = json_encoder.encode
+    json_encoder_encode_code = getattr(json_encoder_encode, "__code__", None)
+    json_encoder_iterencode = json_encoder.iterencode
+    json_encoder_iterencode_code = getattr(
+        json_encoder_iterencode, "__code__", None
+    )
+    json_encoder_default = json_encoder.default
+    json_encoder_default_code = getattr(json_encoder_default, "__code__", None)
+
+    def json_executable_graph_matches() -> bool:
+        return bool(
+            json is json_module
+            and getattr(json_module, "dumps", None) is json_dumps
+            and getattr(json_dumps, "__code__", None) is json_dumps_code
+            and getattr(json_module, "JSONEncoder", None) is json_encoder
+            and getattr(json_encoder, "__init__", None) is json_encoder_init
+            and getattr(json_encoder_init, "__code__", None)
+            is json_encoder_init_code
+            and getattr(json_encoder, "encode", None) is json_encoder_encode
+            and getattr(json_encoder_encode, "__code__", None)
+            is json_encoder_encode_code
+            and getattr(json_encoder, "iterencode", None)
+            is json_encoder_iterencode
+            and getattr(json_encoder_iterencode, "__code__", None)
+            is json_encoder_iterencode_code
+            and getattr(json_encoder, "default", None)
+            is json_encoder_default
+            and getattr(json_encoder_default, "__code__", None)
+            is json_encoder_default_code
+        )
 
     def implementation_is_current() -> bool:
         return bool(
@@ -798,24 +845,76 @@ def _build_bound_authority_runtime(require_origin):
             and BetfairReadOnlyClient is client_type
             and BetfairSessionCredentials is credentials_type
             and BetfairAuthenticatedAccountIdentity is identity_type
+            and BetfairLoginJurisdiction is jurisdiction_type
             and BetfairSessionOrigin is origin_type
             and BetfairAuthenticatedJurisdiction is bound_type
             and require_authoritative_betfair_account_identity
             is identity_require
             and VENUE_ID == venue_id
+            and LOGIN_METHOD == login_method
+            and ORIGIN_SCHEMA == origin_schema
+            and ORIGIN_SCHEMA_VERSION == origin_schema_version
+            and _CERT_LOGIN_ENDPOINTS is endpoint_table
             and bound_type.__init__ is bound_init
             and getattr(bound_init, "__code__", None) is bound_init_code
             and bound_type.__post_init__ is bound_post_init
             and getattr(bound_post_init, "__code__", None)
             is bound_post_init_code
+            and json_executable_graph_matches()
         )
+
+    def canonical_origin_id(origin: BetfairSessionOrigin) -> str:
+        if type(origin) is not origin_type:
+            raise error_type("session origin type changed")
+        issued_at = origin.issued_at
+        if (
+            type(issued_at) is not datetime_type
+            or issued_at.tzinfo is None
+            or issued_at.utcoffset() is None
+            or origin.venue_id != venue_id
+            or origin.login_method != login_method
+            or type(origin.jurisdiction) is not jurisdiction_type
+            or endpoint_table.get(origin.jurisdiction) != origin.login_endpoint
+            or type(origin.response_sha256) is not str
+            or len(origin.response_sha256) != 64
+            or any(
+                ch not in "0123456789abcdef"
+                for ch in origin.response_sha256
+            )
+        ):
+            raise error_type("session origin fields are not canonical")
+        if not json_executable_graph_matches():
+            raise error_type("canonical session-origin JSON authority changed")
+        payload = {
+            "schema": origin_schema,
+            "schema_version": origin_schema_version,
+            "venue_id": origin.venue_id,
+            "login_method": origin.login_method,
+            "jurisdiction": origin.jurisdiction.value,
+            "login_endpoint": origin.login_endpoint,
+            "issued_at": issued_at.astimezone(utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "response_sha256": origin.response_sha256,
+        }
+        encoded = json_dumps(
+            payload,
+            cls=json_encoder,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        if not json_executable_graph_matches():
+            raise error_type("canonical session-origin JSON authority changed")
+        return sha256_fn(encoded).hexdigest()
 
     def bound_fingerprint(value: BetfairAuthenticatedJurisdiction) -> str:
         if type(value) is not bound_type:
             raise error_type("authenticated jurisdiction type changed")
         if (
             value.venue_id != venue_id
-            or type(value.jurisdiction) is not BetfairLoginJurisdiction
+            or type(value.jurisdiction) is not jurisdiction_type
             or type(value.session_context_id) is not str
             or not value.session_context_id
             or type(value.account_identity_id) is not str
@@ -829,7 +928,7 @@ def _build_bound_authority_runtime(require_origin):
             value.account_identity_id,
             value.session_origin_id,
         )
-        return sha256(repr(material).encode("utf-8")).hexdigest()
+        return sha256_fn(repr(material).encode("utf-8")).hexdigest()
 
     def remember(
         value: BetfairAuthenticatedJurisdiction,
@@ -847,11 +946,11 @@ def _build_bound_authority_runtime(require_origin):
 
         with lock:
             issued[key] = _IssuedBoundRecord(
-                value_ref=ref(value, discard),
+                value_ref=weakref_ref(value, discard),
                 authority_id=bound_fingerprint(value),
-                origin_ref=ref(origin),
-                identity_ref=ref(identity),
-                client_ref=ref(client),
+                origin_ref=weakref_ref(origin),
+                identity_ref=weakref_ref(identity),
+                client_ref=weakref_ref(client),
             )
 
     def bind(
@@ -886,12 +985,13 @@ def _build_bound_authority_runtime(require_origin):
             raise error_type(
                 "canonical K07 identity verifier changed during binding"
             )
+        origin_id = canonical_origin_id(origin)
         value = bound_type(
             venue_id=venue_id,
             jurisdiction=origin.jurisdiction,
             session_context_id=identity.session_context_id,
             account_identity_id=identity.identity_id,
-            session_origin_id=origin.origin_id,
+            session_origin_id=origin_id,
         )
         if (
             not implementation_is_current()
@@ -899,7 +999,7 @@ def _build_bound_authority_runtime(require_origin):
             or value.jurisdiction is not origin.jurisdiction
             or value.session_context_id != identity.session_context_id
             or value.account_identity_id != identity.identity_id
-            or value.session_origin_id != origin.origin_id
+            or value.session_origin_id != origin_id
         ):
             raise error_type(
                 "authenticated jurisdiction construction changed"
@@ -939,12 +1039,13 @@ def _build_bound_authority_runtime(require_origin):
             try:
                 require_origin(origin, credentials=credentials)
                 identity_require(identity, client=issued_client)
+                origin_id = canonical_origin_id(origin)
             except Exception:
                 return False
             return (
                 value.session_context_id == identity.session_context_id
                 and value.account_identity_id == identity.identity_id
-                and value.session_origin_id == origin.origin_id
+                and value.session_origin_id == origin_id
                 and value.jurisdiction is origin.jurisdiction
             )
 

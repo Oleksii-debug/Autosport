@@ -13,6 +13,7 @@ from autosport.execution_empirical_evidence import (
     PROVIDER_OUTCOME_NOT_APPLICABLE,
     PROVIDER_OUTCOME_UNVERIFIED_ABSENCE,
     PROVIDER_OUTCOME_UNVERIFIED_ACK,
+    SOURCE_ROOT_AUTHORITY_UNQUALIFIED,
     SLIPPAGE_STATUS_KNOWN,
     SLIPPAGE_STATUS_NOT_APPLICABLE,
     SLIPPAGE_STATUS_UNKNOWN,
@@ -167,6 +168,8 @@ def test_terminal_accepted_record_keeps_provider_correlation_but_slippage_unknow
         evidence.provider_outcome_verification_reason
         == PROVIDER_OUTCOME_UNVERIFIED_ACK
     )
+    assert evidence.source_product_authority_verified is False
+    assert evidence.source_root_authority_status == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
     assert evidence.right_censored is False
     assert evidence.censor_reason is None
     assert evidence.censor_cutoff_recorded_at is None
@@ -517,6 +520,30 @@ def test_wall_clock_cross_stage_inversion_is_not_reported_as_latency(tmp_path):
     assert evidence.submit_to_acknowledgement_us is None
 
 
+def test_builder_issuance_does_not_mint_product_root_provenance(tmp_path):
+    evidence = _accepted_evidence(tmp_path)
+
+    evidence.assert_projection_issued()
+    payload = evidence.to_dict()
+    assert payload["source_product_authority_verified"] is False
+    assert (
+        payload["source_root_authority_status"]
+        == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="does not verify product-owned ledger/workspace authority",
+    ):
+        replace(evidence, source_product_authority_verified=True)
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="does not verify product-owned ledger/workspace authority",
+    ):
+        replace(evidence, source_root_authority_status="PRODUCT_ROOT_VERIFIED")
+
+
 def test_direct_construction_cannot_turn_wall_timestamps_into_latency(tmp_path):
     evidence = _accepted_evidence(tmp_path)
 
@@ -750,6 +777,16 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
 
     assert isinstance(aggregate, EmpiricalExecutionPopulationEvidence)
     assert aggregate.total_attempts == 7
+    assert aggregate.source_product_authority_verified is False
+    assert (
+        aggregate.source_root_authority_status
+        == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+    )
+    assert all(
+        sample.source_product_authority_verified is False
+        and sample.source_root_authority_status == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+        for sample in aggregate.samples
+    )
     assert tuple(sample.attempt_id for sample in aggregate.samples) == tuple(
         sorted(sample.attempt_id for sample in aggregate.samples)
     )
@@ -777,6 +814,11 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert aggregate.causal_timing_unknown_count == 7
 
     payload = aggregate.to_dict()
+    assert payload["source_product_authority_verified"] is False
+    assert (
+        payload["source_root_authority_status"]
+        == SOURCE_ROOT_AUTHORITY_UNQUALIFIED
+    )
     assert payload["state_rates"]["ACCEPTED"] == {
         "numerator": 1,
         "denominator": 7,

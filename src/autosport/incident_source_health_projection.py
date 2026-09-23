@@ -68,15 +68,20 @@ def _canonical_evidence_ref(
     source_id: str,
     transition_order: int,
     recorded_at: str,
-    state_payload: dict[str, object],
+    status: str,
 ) -> str:
+    # Bind only structural authority needed by this projection. SourceHealthStore
+    # may retain provider exception/cursor text for diagnostics; copying or hashing
+    # those free-text values into operator evidence would create an unnecessary
+    # secret-bearing derivative. transition_order + canonical source/time/status
+    # uniquely identifies the validated transition used by this adapter.
     payload = {
         "schema": _EVIDENCE_SCHEMA,
         "schema_version": _EVIDENCE_SCHEMA_VERSION,
         "source_id": source_id,
         "transition_order": transition_order,
         "recorded_at": recorded_at,
-        "state": state_payload,
+        "status": status,
     }
     try:
         encoded = json.dumps(
@@ -169,7 +174,7 @@ def _evidence_stream(
                     source_id=source_id,
                     transition_order=transition_order,
                     recorded_at=recorded_at,
-                    state_payload=state_payload,
+                    status=state.status,
                 ),
                 source_scope_ref=source_scope,
             )

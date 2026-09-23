@@ -53,6 +53,45 @@ def _canonical_sha(value: object) -> str:
     return sha256(raw).hexdigest()
 
 
+def _positive_assessment_current(
+    *,
+    observed_at: str,
+    received_monotonic_ns: int,
+    max_age_seconds: Decimal,
+    now_utc: datetime,
+    now_monotonic_ns: int,
+) -> bool:
+    """Use-time freshness fence for positive decision authority."""
+
+    observed = _base._iso_timestamp(observed_at, "observed_at").astimezone(
+        timezone.utc
+    )
+    received_ns = _integer(
+        received_monotonic_ns, "received_monotonic_ns"
+    )
+    current_ns = _integer(now_monotonic_ns, "now_monotonic_ns")
+    maximum_age = _decimal(max_age_seconds, "max_age_seconds")
+    if (
+        not isinstance(now_utc, datetime)
+        or now_utc.tzinfo is None
+        or now_utc.utcoffset() is None
+    ):
+        raise BetfairDecisionQuoteError(
+            "now_utc must be timezone-aware datetime"
+        )
+    elapsed_ns = current_ns - received_ns
+    utc_seconds = Decimal(
+        str((now_utc.astimezone(timezone.utc) - observed).total_seconds())
+    )
+    if elapsed_ns < 0 or utc_seconds < 0:
+        return False
+    monotonic_seconds = Decimal(elapsed_ns) / Decimal("1000000000")
+    return (
+        monotonic_seconds <= maximum_age
+        and utc_seconds <= maximum_age
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairPriceLevel:
     price: Decimal
@@ -463,7 +502,9 @@ def _install_authority() -> None:
     production_monotonic_ns = monotonic_ns
 
     evidence_registry: dict[int, tuple[object, str, bool, object, object]] = {}
-    assessment_registry: dict[int, tuple[object, str]] = {}
+    assessment_registry: dict[
+        int, tuple[object, str, str, int, Decimal]
+    ] = {}
     validate = BetfairDecisionQuoteEvidence.__post_init__
 
     def read_betfair_decision_quote(
@@ -613,6 +654,9 @@ def _install_authority() -> None:
         assessment_registry[key] = (
             ref(assessment, lambda _r, key=key: assessment_registry.pop(key, None)),
             assessment.assessment_id,
+            self.observed_at,
+            self.received_monotonic_ns,
+            requested_max_age,
         )
         return assessment
 
@@ -620,6 +664,23 @@ def _install_authority() -> None:
         record = assessment_registry.get(id(self))
         if record is None or record[0]() is not self or record[1] != self.assessment_id:
             raise BetfairDecisionQuoteError("assessment is not product-issued")
+        if not self.decision_eligible:
+            return
+        current_ns = _integer(
+            production_monotonic_ns(),
+            "product use-time monotonic_ns",
+        )
+        current_utc = production_utc_now(timezone.utc)
+        if not _positive_assessment_current(
+            observed_at=record[2],
+            received_monotonic_ns=record[3],
+            max_age_seconds=record[4],
+            now_utc=current_utc,
+            now_monotonic_ns=current_ns,
+        ):
+            raise BetfairDecisionQuoteError(
+                "positive decision assessment freshness window has expired"
+            )
 
     globals()["read_betfair_decision_quote"] = read_betfair_decision_quote
     BetfairDecisionQuoteEvidence.assert_provider_authoritative = assert_provider_authoritative

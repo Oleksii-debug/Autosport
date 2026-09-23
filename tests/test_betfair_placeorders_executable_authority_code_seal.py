@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import runpy
+import tempfile
+from pathlib import Path
+
+import pytest
+
+import autosport.betfair_supervised_execution as betfair_supervised_execution
+from autosport.betfair_account_readonly import BetfairSessionCredentials
+from autosport.betfair_supervised_execution import (
+    BetfairSupervisedExecutionError,
+    BetfairSupervisedExecutionGate,
+    BetfairSupervisedPlaceOrdersClient,
+    PlaceOrdersOutcome,
+    execute_betfair_supervised_action,
+)
+from autosport.real_execution_ledger import AttemptState
+
+
+_HELPERS = runpy.run_path(
+    str(Path(__file__).with_name("test_betfair_supervised_execution.py"))
+)
+_prepared = _HELPERS["_prepared"]
+READBACK_AT = _HELPERS["READBACK_AT"]
+SUBMITTED_AT = _HELPERS["SUBMITTED_AT"]
+
+
+def _forged_http_post(
+    self,
+    url,
+    *,
+    headers,
+    body,
+    timeout_seconds,
+):
+    return b'{"jsonrpc":"2.0","id":1,"result":{}}'
+
+
+def _forged_parser(
+    payload,
+    *,
+    request_id,
+    request_sha256,
+    action,
+    provider_order_ref,
+    observed_at,
+):
+    return None
+
+
+def _forged_place_action(
+    self,
+    action,
+    *,
+    profile,
+    bound,
+    provider_order_ref,
+    execution_workspace,
+    _transport_post=None,
+    _response_parser=None,
+):
+    return BetfairPlaceExecutionReport(
+        bookmaker_id=action.bookmaker_id,
+        account_id=action.account_id,
+        action_id=action.action_id,
+        provider_order_ref=provider_order_ref,
+        market_id=action.market_id,
+        request_id=1,
+        request_sha256="0" * 64,
+        response_sha256="1" * 64,
+        observed_at="2026-09-23T10:00:00Z",
+        status="SUCCESS",
+        error_code=None,
+        instruction=BetfairInstructionReport(
+            status="SUCCESS",
+            error_code=None,
+            bet_id="bet-forged-code-object",
+            placed_date="2026-09-23T10:00:00Z",
+            average_price_matched=action.requested_odds,
+            size_matched=action.requested_stake,
+            order_status="EXECUTION_COMPLETE",
+        ),
+    )
+
+
+def _client_for(tmp: str):
+    profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+    gate = BetfairSupervisedExecutionGate.from_economic_goal_store(
+        goal_store,
+        bookmaker_id="betfair",
+        account_id="acct-1",
+        profile_sha256=profile.profile_id,
+    )
+    client = BetfairSupervisedPlaceOrdersClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        gate=gate,
+        clock=lambda: READBACK_AT,
+    )
+    return profile, bound, approval, ledger, action, client
+
+
+def test_in_place_http_code_replacement_fails_before_durable_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        target = betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST
+        original_code = target.__code__
+        assert target is betfair_supervised_execution.UrllibBetfairHttpTransport.post
+        try:
+            target.__code__ = _forged_http_post.__code__
+            assert target is betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_POST
+
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-http-code-replaced",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            target.__code__ = original_code
+
+
+def test_in_place_parser_code_replacement_fails_before_durable_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        target = betfair_supervised_execution._CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+        original_code = target.__code__
+        assert target is betfair_supervised_execution._parse_place_orders_response
+        try:
+            target.__code__ = _forged_parser.__code__
+            assert target is betfair_supervised_execution._CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-parser-code-replaced",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            target.__code__ = original_code
+
+
+def test_midflight_place_action_code_replacement_cannot_mint_terminal_truth() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        target = betfair_supervised_execution._CANONICAL_BETFAIR_PLACE_ACTION
+        original_code = target.__code__
+        mutated = False
+
+        def mutate_on_submit() -> str:
+            nonlocal mutated
+            if not mutated:
+                target.__code__ = _forged_place_action.__code__
+                mutated = True
+            return SUBMITTED_AT
+
+        try:
+            result = execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-midflight-code-replaced",
+                profile=profile,
+                client=client,
+                clock=mutate_on_submit,
+            )
+
+            assert mutated is True
+            assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+            assert result.attempt_state is AttemptState.UNKNOWN
+            assert result.evidence_id is None
+            assert result.external_receipt_id is None
+            assert (
+                ledger.attempt_state("attempt-midflight-code-replaced")
+                is AttemptState.UNKNOWN
+            )
+        finally:
+            target.__code__ = original_code

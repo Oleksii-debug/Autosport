@@ -64,7 +64,20 @@ _PRODUCT_SOURCE_LABELS_UK = {
 }
 _PRODUCT_POLL_SECONDS = 30.0
 _REQUEST_REPLAY_LIMIT = 256
-_WEBVIEW2_USER_DATA_FOLDER_ENV = "WEBVIEW2_USER_DATA_FOLDER"
+_WEBVIEW2_ENVIRONMENT_OVERRIDES = (
+    "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+    "WEBVIEW2_USER_DATA_FOLDER",
+    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+    "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE",
+    "WEBVIEW2_CHANNEL_SEARCH_KIND",
+    "WEBVIEW2_RELEASE_CHANNELS",
+    "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER",
+    "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER",
+)
+_PYWEBVIEW_RELEASE_SETTINGS = (
+    "WEBVIEW2_RUNTIME_PATH",
+    "REMOTE_DEBUGGING_PORT",
+)
 
 if set(_PRODUCT_SOURCE_LABELS_UK) != {
     entry.source_id for entry in list_product_source_entries()
@@ -105,6 +118,39 @@ class WindowsWebViewUnavailable(RuntimeError):
 
 class WindowsWebBridgeTrustError(RuntimeError):
     pass
+
+
+def _reject_webview2_environment_overrides() -> None:
+    active = [
+        name
+        for name in _WEBVIEW2_ENVIRONMENT_OVERRIDES
+        if (value := os.environ.get(name)) is not None and value.strip()
+    ]
+    if active:
+        raise WindowsWebViewUnavailable(
+            "Автоспорт заблокував зовнішнє перевизначення WebView2: "
+            + ", ".join(active)
+            + "."
+        )
+
+
+def _reject_pywebview_release_settings(webview: object) -> None:
+    settings = getattr(webview, "settings", None)
+    if not isinstance(settings, dict):
+        raise WindowsWebViewUnavailable(
+            "Автоспорт не може підтвердити безпечні параметри pywebview."
+        )
+    active = [
+        name
+        for name in _PYWEBVIEW_RELEASE_SETTINGS
+        if settings.get(name) not in (None, "")
+    ]
+    if active:
+        raise WindowsWebViewUnavailable(
+            "Автоспорт заблокував некваліфікований параметр pywebview: "
+            + ", ".join(active)
+            + "."
+        )
 
 
 def web_shell_index_path() -> Path:
@@ -1541,11 +1587,7 @@ def launch_windows_shell(
     *,
     title: str | None = None,
 ) -> int:
-    override = os.environ.get(_WEBVIEW2_USER_DATA_FOLDER_ENV)
-    if override is not None and override.strip():
-        raise WindowsWebViewUnavailable(
-            "Autosport refused an external WebView2 user-data-folder override"
-        )
+    _reject_webview2_environment_overrides()
 
     try:
         storage_path = default_webview_storage_path()
@@ -1564,6 +1606,7 @@ def launch_windows_shell(
         raise WindowsWebViewUnavailable(
             "pywebview is unavailable; the Windows semantic shell cannot start"
         ) from exc
+    _reject_pywebview_release_settings(webview)
 
     asset = web_shell_index_path()
     if not asset.is_file():

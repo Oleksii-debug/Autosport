@@ -143,6 +143,25 @@ def test_present_success_return_status_is_preserved() -> None:
     assert response.call_id == "call-7"
 
 
+def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
+    result_attribute = _response().replace(
+        "<GetEventSubTreeNoSelectionsResult>",
+        '<GetEventSubTreeNoSelectionsResult FutureSemanticField="x">',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="attributes"):
+        parse_get_event_subtree_no_selections_response(result_attribute)
+
+    status = (
+        '<ReturnStatus Code="0" Description="Success" CallId="call-7" '
+        'FutureSemanticField="x" />'
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="attributes"):
+        parse_get_event_subtree_no_selections_response(
+            _response(return_status=status)
+        )
+
+
 def test_non_success_return_status_fails_before_tree_publication() -> None:
     status = (
         '<ReturnStatus Code="533" '

@@ -997,8 +997,12 @@ class BookmakerAccountReconciliationStore:
         observed_state_sha256: str | None,
         *,
         history: list[BookmakerAccountSnapshot] | None = None,
+        _authority_guard=_require_canonical_authority,
     ) -> None:
-        authority = self._require_canonical_authority()
+        # Capture the product-owned validator at class-definition time.  Resolving
+        # self._require_canonical_authority here would let an exact store instance
+        # shadow the guard after construction and route durability to another root.
+        authority = _authority_guard(self)
         try:
             records = authority.read_history()
             pending = (
@@ -1048,9 +1052,14 @@ class BookmakerAccountReconciliationStore:
                 "account reconciliation failed independent monotonic authority validation"
             ) from exc
 
-    def _next_authority_tx_id(self, snapshot_id: str) -> str:
+    def _next_authority_tx_id(
+        self,
+        snapshot_id: str,
+        *,
+        _authority_guard=_require_canonical_authority,
+    ) -> str:
         prefix = _authority_tx_prefix(snapshot_id)
-        authority = self._require_canonical_authority()
+        authority = _authority_guard(self)
         try:
             records = authority.read_history()
         except MonotonicWorkspaceAuthorityError as exc:
@@ -1174,9 +1183,12 @@ class BookmakerAccountReconciliationStore:
                     pass
 
     def _write_history(
-        self, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
+        self,
+        history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot],
+        *,
+        _authority_guard=_require_canonical_authority,
     ) -> None:
-        authority = self._require_canonical_authority()
+        authority = _authority_guard(self)
         encoded = self._encode_history(history)
         intended_state_sha256 = sha256(encoded).hexdigest()
         previous_state_sha256: str | None = None

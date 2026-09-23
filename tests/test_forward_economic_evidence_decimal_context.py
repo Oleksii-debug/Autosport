@@ -138,6 +138,60 @@ def _protocol() -> ForwardEconomicProtocol:
     )
 
 
+def test_implicit_wager_pnl_keeps_exact_money_in_recorded_step() -> None:
+    exact = Decimal("0." + "1" * 81)
+    observation = ForwardDecisionObservation(
+        sequence=0,
+        universe_sha256=UNIVERSE_SHA,
+        universe_event_sha256="1" * 64,
+        challenger_decision_sha256="2" * 64,
+        champion_decision_sha256="3" * 64,
+    )
+    challenger = ResolvedPolicyOutcome(
+        policy_id="challenger",
+        sequence=0,
+        universe_event_sha256=observation.universe_event_sha256,
+        decision_sha256=observation.challenger_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.BACK,
+        accepted_odds=Decimal("2"),
+        accepted_stake=Decimal("1"),
+        net_pnl_currency=exact,
+        execution_evidence_sha256=EXECUTION_SHA,
+        execution_accepted_at=T0 + timedelta(minutes=3),
+        settlement_evidence_sha256=SETTLEMENT_SHA,
+        settlement_available_at=T0 + timedelta(minutes=5),
+        wager_pnl_currency=None,
+        economic_cost_currency=Decimal(0),
+    )
+    champion = ResolvedPolicyOutcome(
+        policy_id="champion",
+        sequence=0,
+        universe_event_sha256=observation.universe_event_sha256,
+        decision_sha256=observation.champion_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.NONE,
+        accepted_odds=None,
+        accepted_stake=None,
+        net_pnl_currency=Decimal(0),
+        execution_evidence_sha256=None,
+        execution_accepted_at=None,
+        settlement_evidence_sha256=None,
+        settlement_available_at=None,
+        economic_cost_currency=Decimal(0),
+    )
+
+    assert challenger.effective_wager_pnl_currency == exact
+    step = ForwardEconomicEvidenceAccumulator(_protocol()).record(
+        observation,
+        _Resolver(challenger, champion),
+    )
+
+    assert step.challenger_net_pnl_currency == exact
+    assert step.challenger_wager_pnl_currency == exact
+    assert step.challenger_economic_cost_currency == Decimal(0)
+
+
 def _cost_only_summary(*, precision: int, rounding: str):
     observation = ForwardDecisionObservation(
         sequence=0,

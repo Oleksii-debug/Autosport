@@ -151,6 +151,15 @@ class BetfairCurrentOrderObservation:
         _nonnegative_decimal(self.average_price_matched, "average_price_matched")
         _nonnegative_decimal(self.size_matched, "size_matched")
         _nonnegative_decimal(self.size_remaining, "size_remaining")
+        if self.requested_size is not None:
+            requested_num, requested_den = self.requested_size.as_integer_ratio()
+            matched_num, matched_den = self.size_matched.as_integer_ratio()
+            remaining_num, remaining_den = self.size_remaining.as_integer_ratio()
+            accounted_num = matched_num * remaining_den + remaining_num * matched_den
+            if accounted_num * requested_den > requested_num * matched_den * remaining_den:
+                raise BetfairReadOnlyError(
+                    "size_matched plus size_remaining cannot exceed requested_size"
+                )
         _optional_text(self.customer_order_ref, "customer_order_ref")
         _optional_text(self.customer_strategy_ref, "customer_strategy_ref")
 

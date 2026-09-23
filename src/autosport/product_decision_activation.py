@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -12,6 +13,11 @@ from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .paper_execution_reality import PaperExecutionModelConfig
 from .risk import PaperRiskPolicy
 from .scientific_registry import ScientificRegistry
@@ -22,6 +28,7 @@ ACTIVATION_SCHEMA: Final = "autosport.product_decision_activation"
 ACTIVATION_SCHEMA_VERSION: Final = 1
 DECISION_CYCLE_CONTRACT: Final = "autosport.product-paper-decision-cycle.v1"
 PAPER_EXECUTION_MODE: Final = "PAPER"
+_ACTIVATION_AUTHORITY_DOMAIN: Final = "autosport.product-decision-activation.v1"
 
 
 class ProductDecisionActivationError(ValueError):
@@ -83,6 +90,24 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _durable_json_bytes(value: object) -> bytes:
+    """Exact byte encoding emitted by integrity.atomic_write_json()."""
+
+    try:
+        text = json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        return (text + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ProductDecisionActivationError(
+            "activation evidence is not durably serializable"
+        ) from exc
 
 
 def _text(value: object, name: str) -> str:
@@ -428,9 +453,58 @@ class ProductDecisionActivationStore:
 
     FILE_NAME: Final = "product_decision_activation.json"
 
-    def __init__(self, workspace: str | Path) -> None:
-        self.workspace = Path(workspace)
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
+        self.workspace = Path(workspace).absolute().resolve(strict=False)
         self.path = self.workspace / self.FILE_NAME
+        try:
+            self._authority = MonotonicWorkspaceAuthority(
+                workspace=self.workspace,
+                domain=_ACTIVATION_AUTHORITY_DOMAIN,
+                key=self.FILE_NAME,
+                authority_root=authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductDecisionActivationError(
+                "cannot bind product decision activation anti-rollback authority"
+            ) from exc
+
+    def _observed_state_sha256(self) -> str | None:
+        if self.path.is_symlink():
+            raise ProductDecisionActivationError(
+                "product decision activation must be a regular file"
+            )
+        if not self.path.exists():
+            return None
+        raw = _read_regular_file(self.path, "product decision activation")
+        return hashlib.sha256(raw).hexdigest()
+
+    def _recover_authority(self) -> str | None:
+        observed = self._observed_state_sha256()
+        try:
+            history = self._authority.read_history()
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            if pending is None:
+                self._authority.recover(observed_state_sha256=observed)
+            else:
+                self._authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductDecisionActivationError(
+                "product decision activation anti-rollback authority rejected workspace state"
+            ) from exc
+        return observed
 
     def _derive(
         self,
@@ -554,9 +628,10 @@ class ProductDecisionActivationStore:
         execution_config: PaperExecutionModelConfig,
         intent_producer: BuiltInIntentProducer = BuiltInIntentProducer.REGISTERED_STRATEGY,
     ) -> ProductDecisionActivationBinding:
-        """Create once; exact retry is idempotent and semantic drift fails closed."""
+        """Create once with an independent freshness witness; exact retry is idempotent."""
 
         with WorkspaceEconomicLock(self.workspace):
+            observed = self._recover_authority()
             expected = self._derive(
                 scientific_registry=scientific_registry,
                 strategy_version_id=strategy_version_id,
@@ -566,21 +641,67 @@ class ProductDecisionActivationStore:
                 intent_producer=intent_producer,
             )
             if self.path.exists():
-                existing = self.load()
+                existing = self._load_local()
                 if existing != expected:
                     raise ProductDecisionActivationError(
                         "durable product decision activation conflicts with requested START"
                     )
                 return existing
-            atomic_write_json(self.path, self._root(expected))
-            persisted = self.load()
+            if observed is not None:
+                raise ProductDecisionActivationError(
+                    "activation state disappeared after anti-rollback verification"
+                )
+
+            root = self._root(expected)
+            intended = hashlib.sha256(_durable_json_bytes(root)).hexdigest()
+            semantic_binding = _digest(
+                {
+                    "kind": "PRODUCT_DECISION_ACTIVATION_CREATE",
+                    "activation_filename": self.FILE_NAME,
+                    "binding_sha256": expected.binding_sha256,
+                    "intended_state_sha256": intended,
+                }
+            )
+            tx_id = f"activation-{uuid.uuid4().hex}"
+            try:
+                self._authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=semantic_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise ProductDecisionActivationError(
+                    "cannot prepare product decision activation anti-rollback witness"
+                ) from exc
+
+            # A failure here deliberately leaves PREPARE durable. On restart,
+            # _recover_authority() aborts if the local file is still absent or
+            # commits only if the exact prepared bytes were published.
+            atomic_write_json(self.path, root)
+            published = self._observed_state_sha256()
+            if published != intended:
+                raise ProductDecisionActivationError(
+                    "published product decision activation differs from prepared bytes"
+                )
+            persisted = self._load_local()
             if persisted != expected:
                 raise ProductDecisionActivationError(
                     "persisted product decision activation does not match requested START"
                 )
+            try:
+                self._authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published,
+                    semantic_binding_sha256=semantic_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise ProductDecisionActivationError(
+                    "cannot commit product decision activation anti-rollback witness"
+                ) from exc
             return persisted
 
-    def load(self) -> ProductDecisionActivationBinding:
+    def _load_local(self) -> ProductDecisionActivationBinding:
         _, root = _strict_json_file(
             self.path, "product decision activation"
         )
@@ -604,6 +725,20 @@ class ProductDecisionActivationStore:
             )
         return binding
 
+    def load(self) -> ProductDecisionActivationBinding:
+        """Load only bytes that still match the independent monotonic witness."""
+
+        with WorkspaceEconomicLock(self.workspace):
+            # Preserve precise malformed-state diagnostics before freshness
+            # adjudication. Structurally valid old/rebound bytes are then rejected
+            # by the independent authority below.
+            if self.path.exists() or self.path.is_symlink():
+                binding = self._load_local()
+                self._recover_authority()
+                return binding
+            self._recover_authority()
+            return self._load_local()
+
     def verify(
         self,
         *,
@@ -616,17 +751,23 @@ class ProductDecisionActivationStore:
     ) -> ProductDecisionActivationBinding:
         """Re-resolve every child authority and reject START-time drift."""
 
-        persisted = self.load()
-        expected = self._derive(
-            scientific_registry=scientific_registry,
-            strategy_version_id=strategy_version_id,
-            economic_goal=economic_goal,
-            risk_policy=risk_policy,
-            execution_config=execution_config,
-            intent_producer=intent_producer,
-        )
-        if persisted != expected:
-            raise ProductDecisionActivationError(
-                "supported START activation evidence no longer matches durable authority"
+        with WorkspaceEconomicLock(self.workspace):
+            if self.path.exists() or self.path.is_symlink():
+                persisted = self._load_local()
+                self._recover_authority()
+            else:
+                self._recover_authority()
+                persisted = self._load_local()
+            expected = self._derive(
+                scientific_registry=scientific_registry,
+                strategy_version_id=strategy_version_id,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                execution_config=execution_config,
+                intent_producer=intent_producer,
             )
-        return persisted
+            if persisted != expected:
+                raise ProductDecisionActivationError(
+                    "supported START activation evidence no longer matches durable authority"
+                )
+            return persisted

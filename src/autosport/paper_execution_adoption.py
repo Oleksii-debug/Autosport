@@ -786,6 +786,10 @@ class PaperExecutionAdoptionRuntime:
             and leg.sport == binding.sport
             and action.side == "BACK"
             and attempt.side == action.side
-            and leg.exchange_side == "back"
+            # Existing #646-era adopted BACK tickets may predate durable
+            # exchange-side propagation. Exact action+attempt BACK authority is
+            # sufficient to keep that historical ticket readable/replayable,
+            # while every newly materialized ticket is bound to "back".
+            and leg.exchange_side in {None, "back"}
             and leg.market_semantics_id == binding.market_semantics_id
         )

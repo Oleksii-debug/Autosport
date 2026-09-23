@@ -420,7 +420,8 @@ def _atomic_write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
 
-        os.replace(temporary, path)
+        with durable_path_lock(path):
+            os.replace(temporary, path)
         temporary = None
     finally:
         if descriptor is not None:

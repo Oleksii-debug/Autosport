@@ -22,6 +22,19 @@ from .betfair_stream_codec import (
 
 BETFAIR_PROVIDER_ID = "betfair"
 SCHEMA_VERSION = "betfair-stream-publish-freshness-v1"
+BETFAIR_STREAM_MARKET_DATA_FIELDS = frozenset(
+    {
+        "EX_ALL_OFFERS",
+        "EX_BEST_OFFERS",
+        "EX_BEST_OFFERS_DISP",
+        "EX_LTP",
+        "EX_MARKET_DEF",
+        "EX_TRADED",
+        "EX_TRADED_VOL",
+        "SP_PROJECTED",
+        "SP_TRADED",
+    }
+)
 
 
 class BetfairStreamFreshnessVerdict(str, Enum):
@@ -519,6 +532,9 @@ def _validate_projection(
     fields = tuple(_text(field, "market_data_field") for field in market_data_fields)
     if fields != tuple(sorted(set(fields))):
         raise ValueError("market_data_fields must be sorted and contain no duplicates")
+    unsupported = set(fields) - BETFAIR_STREAM_MARKET_DATA_FIELDS
+    if unsupported:
+        raise ValueError("market_data_fields contains unsupported Betfair stream field")
     best_offer_projection = any(
         field in {"EX_BEST_OFFERS", "EX_BEST_OFFERS_DISP"}
         for field in fields

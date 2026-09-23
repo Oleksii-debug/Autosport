@@ -13,6 +13,10 @@ from autosport.run_transaction import RunTransaction, RunTransactionError
 class RunTransactionBasePaperBookSnapshotTests(unittest.TestCase):
     @staticmethod
     def _prepare_book(root: Path, bankroll: str = "10000") -> tuple[Path, bytes, str]:
+        # Product startup publishes the canonical registry while the workspace is
+        # still pristine. Once paper_book.json exists it is durable economic
+        # history, so a missing registry must correctly fail closed.
+        RunRegistry.initialize_pristine(root / "run_registry.json")
         book_path = root / "paper_book.json"
         PaperBook(bankroll).save(book_path)
         payload = book_path.read_bytes()

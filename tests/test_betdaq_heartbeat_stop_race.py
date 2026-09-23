@@ -90,21 +90,31 @@ class _StopDuringProviderCall:
         *,
         stop: ExecutionStopAuthority,
         stop_on_call: int,
+        rearm_after_stop: bool = False,
     ) -> None:
         self.payloads = list(payloads)
         self.stop = stop
         self.stop_on_call = stop_on_call
+        self.rearm_after_stop = rearm_after_stop
         self.calls = 0
 
     def __call__(self, request, *, timeout: float):
         del request, timeout
         self.calls += 1
         if self.calls == self.stop_on_call:
-            self.stop.stop(
+            stopped = self.stop.stop(
                 operator_id="test",
                 reason="irreversible STOP while heartbeat provider call is in flight",
                 command_id=f"race-stop-{self.calls}",
             )
+            if self.rearm_after_stop:
+                self.stop.arm(
+                    operator_id="test",
+                    reason="explicit re-arm after in-flight STOP",
+                    confirmation_id=f"race-rearm-confirm-{self.calls}",
+                    expected_revision=stopped.revision,
+                    command_id=f"race-rearm-{self.calls}",
+                )
         if not self.payloads:
             raise AssertionError("unexpected provider call")
         return _Response(self.payloads.pop(0))
@@ -191,3 +201,81 @@ def test_pulse_success_cannot_republish_active_after_concurrent_stop(
         assert controller.status().provider_registration_active is False
     finally:
         controller.close()
+
+def test_change_registration_success_cannot_publish_active_after_concurrent_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop = _armed_stop(tmp_path / "stop.jsonl")
+    provider = _StopDuringProviderCall(
+        [
+            _soap("RegisterHeartbeat"),
+            _soap("ChangeHeartbeatRegistration"),
+        ],
+        stop=stop,
+        stop_on_call=2,
+    )
+    controller = _controller(tmp_path, monkeypatch, provider, stop)
+    try:
+        registered = controller.register(
+            threshold_ms=6000,
+            action=HeartbeatAction.CANCEL_ORDERS,
+        )
+        assert registered.state is HeartbeatState.ACTIVE
+
+        event = controller.change_registration(
+            threshold_ms=7000,
+            action=HeartbeatAction.SUSPEND_ORDERS,
+        )
+        assert event.state is HeartbeatState.REVOKED
+        assert (
+            event.operation
+            == "ChangeHeartbeatRegistration:POST_CALL_STOP_FENCE"
+        )
+        assert event.provider_return_code == 0
+        assert event.reconciliation_required is True
+        assert controller.status().provider_registration_active is False
+    finally:
+        controller.close()
+
+
+def test_stop_then_rearm_during_pulse_cannot_restore_positive_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop = _armed_stop(tmp_path / "stop.jsonl")
+    provider = _StopDuringProviderCall(
+        [
+            _soap("RegisterHeartbeat"),
+            _soap(
+                "Pulse",
+                performed_at="2026-09-23T11:41:03Z",
+                action=0,
+            ),
+        ],
+        stop=stop,
+        stop_on_call=2,
+        rearm_after_stop=True,
+    )
+    controller = _controller(tmp_path, monkeypatch, provider, stop)
+    try:
+        registered = controller.register(
+            threshold_ms=6000,
+            action=HeartbeatAction.SUSPEND_ORDERS,
+        )
+        assert registered.state is HeartbeatState.ACTIVE
+        assert stop.current().revision == 2
+
+        event = controller.pulse()
+
+        assert stop.current().mode.value == "ARMED"
+        assert stop.current().revision == 4
+        assert event.state is HeartbeatState.REVOKED
+        assert event.operation == "Pulse:POST_CALL_STOP_FENCE"
+        assert event.provider_return_code == 0
+        assert event.provider_performed_at == "2026-09-23T11:41:03Z"
+        assert event.reconciliation_required is True
+        assert controller.status().provider_registration_active is False
+    finally:
+        controller.close()
+

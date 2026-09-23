@@ -269,6 +269,31 @@ class ProductDecisionActivationTests(unittest.TestCase):
             canonical,
         )
 
+    def test_store_instance_cannot_shadow_authority_derivation(self) -> None:
+        canonical_expected = self.store._derive(
+            scientific_registry=self.registry,
+            strategy_version_id=self.STRATEGY_ID,
+            economic_goal=self.goal,
+            risk_policy=self.risk,
+            execution_config=self.execution,
+            intent_producer=BuiltInIntentProducer.REGISTERED_STRATEGY,
+        )
+        forged_binding = replace(
+            canonical_expected,
+            product_source_id="caller-forged-provider",
+        )
+
+        with self.assertRaises(AttributeError):
+            setattr(
+                self.store,
+                "_derive",
+                lambda **_kwargs: forged_binding,
+            )
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+
     def test_activation_filename_rebind_cannot_create_second_namespace(self) -> None:
         committed = self._initialize()
         canonical_path = self.store.path

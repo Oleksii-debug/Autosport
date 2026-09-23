@@ -342,6 +342,30 @@ def test_self_consistent_history_truncation_fails_closed_against_state_anchor() 
             ResearchScheduler(scheduler.path, _UnusedSink())
 
 
+
+
+def test_interior_cold_history_gap_fails_closed_on_hot_state_validation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        scheduler = _scheduler_with_curriculum_history(
+            Path(directory),
+            _SMALL_HISTORY,
+        )
+        connection = sqlite3.connect(scheduler._cold_history_path)
+        try:
+            connection.execute(
+                "DELETE FROM cold_history WHERE sequence = 2"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        # A missing archived ACCEPTED wake must be detected before any ordinary
+        # hot-state mutation can proceed. Otherwise indexed history lookup could
+        # treat that wake as absent and permit resurrection before restart.
+        with pytest.raises(ResearchSchedulerError, match="cardinality"):
+            scheduler.pause()
+
+
 def test_db_ahead_of_state_recovers_only_matching_completed_hot_suffix() -> None:
     with tempfile.TemporaryDirectory() as directory:
         scheduler = _scheduler_with_history(Path(directory), _SMALL_HISTORY)

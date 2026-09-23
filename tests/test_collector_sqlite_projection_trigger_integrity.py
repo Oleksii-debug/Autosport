@@ -140,6 +140,27 @@ def _install_predecessor_projection_trigger(path) -> None:
         connection.close()
 
 
+def _install_successor_trigger_without_order_marker(path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(f"DROP TRIGGER IF EXISTS {_TRIGGER_NAME}")
+        connection.execute(
+            "DELETE FROM collector_meta WHERE key=? OR key LIKE ?",
+            (_ORDER_MARKER_KEY, f"{_ORDER_UNVERIFIED_PREFIX}%"),
+        )
+        connection.execute(
+            f"CREATE TRIGGER {_TRIGGER_NAME} BEFORE UPDATE OF "
+            "commit_seq, delta_id, source_id, stream_epoch, cursor_position, "
+            "revision_number, desktop_available_at, collector_committed_at "
+            "ON collector_deltas BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'collector delta indexed projections are immutable'); END"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def test_predecessor_canonical_trigger_upgrades_without_bricking_store(tmp_path) -> None:
     path = tmp_path / "collector.db"
     CollectorDeltaStore(path)
@@ -224,6 +245,56 @@ def test_predecessor_commit_order_tamper_fails_before_upgrade(tmp_path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+    with pytest.raises(
+        ValueError,
+        match="commit order conflicts with immutable causal history",
+    ):
+        CollectorDeltaStore(path)
+
+
+def test_successor_without_order_marker_reconstructs_healthy_history(
+    tmp_path,
+) -> None:
+    path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta("d1", 1)) is True
+    assert store.append(_delta("d2", 2)) is True
+    _install_successor_trigger_without_order_marker(path)
+
+    reopened = CollectorDeltaStore(path)
+
+    assert tuple(
+        delta.delta_id
+        for delta in reopened.deltas_after_commit(source_id="source-x")
+    ) == ("d1", "d2")
+
+
+def test_successor_without_order_marker_detects_frozen_predecessor_reorder(
+    tmp_path,
+) -> None:
+    path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta("d1", 1)) is True
+    assert store.append(_delta("d2", 2)) is True
+    _install_predecessor_projection_trigger(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE collector_deltas SET commit_seq=100 WHERE delta_id='d1'"
+        )
+        connection.execute(
+            "UPDATE collector_deltas SET commit_seq=1 WHERE delta_id='d2'"
+        )
+        connection.execute(
+            "UPDATE collector_deltas SET commit_seq=2 WHERE delta_id='d1'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    _install_successor_trigger_without_order_marker(path)
 
     with pytest.raises(
         ValueError,

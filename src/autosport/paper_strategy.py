@@ -63,6 +63,19 @@ class PaperValueAgent:
         self.risk_policy = risk_policy or PaperRiskPolicy()
         self._acted: set[str] = set()
 
+    @staticmethod
+    def _forecast_matches_market_semantics(
+        forecast: ForecastLike,
+        event: MarketEvent,
+    ) -> bool:
+        """Require forecast probability to describe the event's exact rule identity."""
+
+        if isinstance(forecast, ForecastRecord):
+            return forecast.market_semantics_id == event.market_semantics_id
+        # Legacy Forecast has no rule-identity field. It remains valid only for
+        # legacy events that likewise carry no canonical market semantics.
+        return event.market_semantics_id is None
+
     @classmethod
     def _material_action_id(cls, context: AgentContext, event: MarketEvent) -> str:
         """Stable logical commit identity mirroring the agent's quote-level duplicate guard."""
@@ -262,6 +275,12 @@ class PaperValueAgent:
             return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
+            return
+        if not self._forecast_matches_market_semantics(forecast, event):
+            context.notes.append(
+                "paper-value forecast withheld: forecast market semantics do not "
+                "match the canonical market event"
+            )
             return
         if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
             return

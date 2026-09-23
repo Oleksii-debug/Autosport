@@ -49,6 +49,13 @@ AUTHORITY_DOMAIN: Final = "autosport.model-compute-intent-route-authority.v1"
 AUTHORITY_KEY: Final = "model-compute-intent-route-issuance"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 
+# These values define one durable product authority namespace. Public module
+# constants remain import-compatible, but runtime rebinding must not create an
+# alternate state file or independent monotonic journal inside one workspace.
+_CANONICAL_FILE_NAME: Final = FILE_NAME
+_CANONICAL_AUTHORITY_DOMAIN: Final = AUTHORITY_DOMAIN
+_CANONICAL_AUTHORITY_KEY: Final = AUTHORITY_KEY
+
 # The origin boundary must remain anchored to the import-time product classes.
 # Module globals are writable in Python; using them for "exact canonical" checks
 # would let a caller temporarily redefine which classes this authority trusts.
@@ -394,11 +401,11 @@ class ModelComputeIntentRouteAuthorityStore:
     ) -> None:
         self.workspace = Path(workspace).absolute().resolve(strict=False)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / FILE_NAME
+        self.path = self.workspace / _CANONICAL_FILE_NAME
         self._authority = MonotonicWorkspaceAuthority(
             workspace=self.workspace,
-            domain=AUTHORITY_DOMAIN,
-            key=AUTHORITY_KEY,
+            domain=_CANONICAL_AUTHORITY_DOMAIN,
+            key=_CANONICAL_AUTHORITY_KEY,
             authority_root=authority_root,
         )
         with WorkspaceEconomicLock(self.workspace):

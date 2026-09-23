@@ -472,6 +472,15 @@ def _snapshot(
     canonical_source_id = f"parlayapi:{sport_key}"
 
     expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
+    response_sha256 = _text(evidence, "response_sha256", context="snapshot evidence")
+    if (
+        len(response_sha256) != 64
+        or response_sha256 != response_sha256.lower()
+        or any(character not in "0123456789abcdef" for character in response_sha256)
+    ):
+        raise ValueError(
+            "snapshot evidence.response_sha256 must be a canonical lowercase SHA-256 digest"
+        )
     market_bytes = _read_bytes(market_path, context="snapshot market")
     if _sha256_bytes(market_bytes) != expected_sha:
         raise ValueError("snapshot market_sha256 does not match captured market file")
@@ -614,7 +623,7 @@ def assemble_historical_corpus(
             {
                 "evidence_sha256": evidence_sha256,
                 "market_sha256": str(evidence["market_sha256"]),
-                "response_sha256": str(evidence.get("response_sha256", "")),
+                "response_sha256": str(evidence["response_sha256"]),
                 "requested_at": str(evidence["requested_at"]),
                 "snapshot_at": str(evidence["snapshot_at"]),
                 "captured_at": captured_at,
@@ -862,7 +871,7 @@ def assemble_historical_corpus(
                 "terms_reference": proof["terms_reference"],
                 "retention_expires_at": proof["retention_expires_at"],
                 "authorization_valid_through": proof["authorization_valid_through"],
-                "redistribution_policy": effective_redistribution_policy,
+                "redistribution_policy": proof["redistribution_policy"],
             }
         )
         qualified_corpus_identity = _canonical_json_sha256(
@@ -931,7 +940,7 @@ def assemble_historical_corpus(
                     "provider_response_metadata_bound": False,
                     "prospective_authority": False,
                     "raw_redistribution_authority": proof["redistribution_verified"] is True
-                    and effective_redistribution_policy == "permitted",
+                    and proof["redistribution_policy"] == "permitted",
                 },
             },
             "outcome_evidence": outcome_evidence,

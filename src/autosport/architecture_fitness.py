@@ -262,14 +262,31 @@ def analyze_package(
     """Measure one Python package without importing or executing its modules."""
 
     root = Path(package_dir)
+    if root.is_symlink():
+        raise ArchitectureFitnessError("package_dir symlink is not canonical")
     if not root.is_dir():
         raise ArchitectureFitnessError("package_dir must be an existing directory")
     package = package_name or root.name
     if not package or not package.isidentifier() or keyword.iskeyword(package):
         raise ArchitectureFitnessError("package_name must be a canonical Python identifier")
 
+    try:
+        entries = tuple(sorted(root.rglob("*")))
+    except OSError as exc:
+        raise ArchitectureFitnessError(
+            f"cannot enumerate package tree: {type(exc).__name__}"
+        ) from exc
+    for entry in entries:
+        if entry.is_symlink():
+            relative = entry.relative_to(root).as_posix()
+            raise ArchitectureFitnessError(
+                f"symlinked package entry is not canonical: {relative}"
+            )
+
     paths = tuple(
-        sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
+        path
+        for path in entries
+        if path.suffix == ".py" and "__pycache__" not in path.parts
     )
     if not paths:
         raise ArchitectureFitnessError("package contains no Python modules")
@@ -277,8 +294,6 @@ def analyze_package(
     parsed: dict[str, tuple[Path, str, ast.Module, bool]] = {}
     for path in paths:
         module = _module_name(root, path, package)
-        if path.is_symlink():
-            raise ArchitectureFitnessError(f"symlinked source is not canonical: {module}")
         try:
             source = path.read_text(encoding="utf-8", errors="strict")
             tree = ast.parse(source, filename=str(path))

@@ -22,15 +22,29 @@ from autosport.betfair_stream_publish_freshness import (
 def sha(c='a'): return c * 64
 
 
-def context(*, generation=1, conflate_ms=0, subscription_id='sub-1', provider_request_id=None):
+def context(
+    *,
+    generation=1,
+    conflate_ms=0,
+    subscription_id='sub-1',
+    provider_request_id=None,
+    market_filter_sha256=None,
+    market_data_fields=('EX_BEST_OFFERS',),
+    ladder_levels=3,
+):
     if provider_request_id is None:
         provider_request_id = 6 + generation
+    if market_filter_sha256 is None:
+        market_filter_sha256 = sha('c')
     return BetfairStreamSubscriptionContext(
         upstream_context_sha256=sha('b'),
         subscription_id=subscription_id,
         provider_request_id=provider_request_id,
         subscription_generation=generation,
         criteria_sha256=sha(),
+        market_filter_sha256=market_filter_sha256,
+        market_data_fields=market_data_fields,
+        ladder_levels=ladder_levels,
         requested_heartbeat_ms=5000,
         requested_conflate_ms=conflate_ms,
     )
@@ -439,6 +453,9 @@ def test_plaintext_upstream_auth_label_is_rejected_as_persisted_provenance():
             provider_request_id=7,
             subscription_generation=1,
             criteria_sha256=sha(),
+            market_filter_sha256=sha('c'),
+            market_data_fields=('EX_BEST_OFFERS',),
+            ladder_levels=3,
             requested_heartbeat_ms=5000,
             requested_conflate_ms=0,
         )
@@ -472,3 +489,91 @@ def test_persisted_context_uses_secret_free_digest_and_distinguishes_requested_t
     row = payload['records'][0]
     assert row['provider_conflate_ms'] == 4321
     assert row['requested_conflate_ms'] == 1234
+
+
+def test_subscription_projection_axes_are_bound_into_context_and_evidence_identity():
+    base = context()
+    display = context(market_data_fields=('EX_BEST_OFFERS_DISP',))
+    deeper = context(ladder_levels=10)
+    another_filter = context(market_filter_sha256=sha('d'))
+
+    assert len({base.context_id, display.context_id, deeper.context_id, another_filter.context_id}) == 4
+
+    rt = BetfairStreamPublishFreshnessRuntime(base)
+    rec = rt.ingest_raw(image(), received_time_ms=1000, ingested_time_ms=1000)[0]
+    assert rec.market_filter_sha256 == sha('c')
+    assert rec.market_data_fields == ('EX_BEST_OFFERS',)
+    assert rec.ladder_levels == 3
+
+    display_rt = BetfairStreamPublishFreshnessRuntime(display)
+    display_rec = display_rt.ingest_raw(
+        image(),
+        received_time_ms=1000,
+        ingested_time_ms=1000,
+    )[0]
+    assert display_rec.evidence_id != rec.evidence_id
+
+
+@pytest.mark.parametrize(
+    ('fields', 'ladder_levels', 'match'),
+    [
+        (('EX_BEST_OFFERS', 'EX_BEST_OFFERS'), 3, 'sorted and contain no duplicates'),
+        (('EX_LTP', 'EX_BEST_OFFERS'), 3, 'sorted and contain no duplicates'),
+        (('EX_BEST_OFFERS',), None, 'ladder_levels is required'),
+        (('EX_LTP',), 3, 'only authoritative for best-offer'),
+    ],
+)
+def test_subscription_projection_rejects_ambiguous_field_depth_contract(
+    fields,
+    ladder_levels,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        context(market_data_fields=fields, ladder_levels=ladder_levels)
+
+
+@pytest.mark.parametrize('ladder_levels', [0, 11, True, 3.0])
+def test_subscription_projection_rejects_noncanonical_ladder_levels(ladder_levels):
+    with pytest.raises(ValueError, match='ladder_levels'):
+        context(ladder_levels=ladder_levels)
+
+
+def test_subscription_projection_market_filter_requires_canonical_digest():
+    with pytest.raises(ValueError, match='market_filter_sha256'):
+        context(market_filter_sha256='caller-market-filter')
+
+
+def test_restart_payload_projection_tamper_is_rejected():
+    rt = BetfairStreamPublishFreshnessRuntime(context())
+    rt.ingest_raw(image(), received_time_ms=1000, ingested_time_ms=1000)
+    payload = rt.to_dict()
+    payload['context']['ladder_levels'] = 10
+    with pytest.raises(ValueError, match='context_id'):
+        BetfairStreamPublishFreshnessRuntime.from_dict(payload)
+
+
+def test_subscription_replacement_with_new_projection_clears_prior_datum_authority():
+    rt = BetfairStreamPublishFreshnessRuntime(context(generation=1, provider_request_id=7))
+    rt.ingest_raw(image(request_id=7), received_time_ms=1000, ingested_time_ms=1000)
+    assert rt.resolve(ltp_identity()) is not None
+
+    rt.replace_subscription(
+        context(
+            generation=2,
+            subscription_id='sub-2',
+            provider_request_id=8,
+            market_data_fields=('EX_BEST_OFFERS_DISP',),
+        )
+    )
+    assert rt.resolve(ltp_identity()) is None
+    issued = rt.ingest_raw(
+        image(request_id=8, pt=1001, clk='p2', initial='p2i'),
+        received_time_ms=1001,
+        ingested_time_ms=1001,
+    )
+    assert issued[0].market_data_fields == ('EX_BEST_OFFERS_DISP',)
+    assert not rt.evaluate(
+        ltp_identity(),
+        as_of_ms=1001,
+        policy=BetfairStreamFreshnessPolicy(100),
+    ).decision_eligible

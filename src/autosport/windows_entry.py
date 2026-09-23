@@ -160,10 +160,16 @@ def _run_interactive_gui() -> int:
         _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
         return 3
 
-    from autosport.windows_webview_shell import WindowsWebViewUnavailable, main as gui_main
+    from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+    from autosport.windows_webview_shell import (
+        AutosportWebBridge,
+        WindowsWebViewUnavailable,
+        launch_windows_shell,
+    )
 
     try:
-        return gui_main()
+        controller = EmergencyStopWebController(workspace)
+        return launch_windows_shell(AutosportWebBridge(controller))
     except WindowsWebViewUnavailable as exc:
         _show_startup_error(_WEBVIEW2_STARTUP_ERROR + "\n\n" + str(exc))
         return 3

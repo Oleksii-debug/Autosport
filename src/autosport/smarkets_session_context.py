@@ -654,13 +654,18 @@ def open_smarkets_authenticated_session(
     except SmarketsSessionContextError:
         raise
     except HTTPError as exc:
+        # Provider/transport exception detail is not product evidence and may
+        # contain credential-bearing diagnostics. Preserve only the bounded
+        # numeric HTTP status and suppress the lower-level traceback cause.
         raise SmarketsSessionContextError(
             f"Smarkets accounts endpoint is unavailable (HTTP {exc.code})"
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
+        ) from None
+    except (URLError, TimeoutError, OSError):
+        # Do not chain transport diagnostics into operator/log traceback text:
+        # the runtime session token must remain secret even on acquisition failure.
         raise SmarketsSessionContextError(
             "Smarkets accounts HTTPS acquisition failed"
-        ) from exc
+        ) from None
 
     if type(raw) is not bytes:
         raise SmarketsSessionContextError("Smarkets accounts response body is not bytes")

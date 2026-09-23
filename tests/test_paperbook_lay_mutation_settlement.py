@@ -227,6 +227,7 @@ def test_load_rejects_preload_stake_and_balance_rebaseline(tmp_path) -> None:
     ):
         PaperBook.load(path)
 
+
 def test_load_bytes_ticket_snapshot_is_read_only_without_path_authority(
     tmp_path,
     monkeypatch,
@@ -266,7 +267,11 @@ def test_path_load_rejects_whole_snapshot_rollback_behind_external_authority(
     )
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
-    book.open_ticket([_leg("back", selection_id="selection-1", odds="2")], "10", placed_at=_PLACED_AT)
+    book.open_ticket(
+        [_leg("back", selection_id="selection-1", odds="2")],
+        "10",
+        placed_at=_PLACED_AT,
+    )
     book.save(path)
     first_generation = path.read_bytes()
 

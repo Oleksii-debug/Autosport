@@ -444,6 +444,25 @@ def test_reopen_rejects_noncanonical_decimal_storage_even_with_parseable_value(t
         RewardCorrectionLedger.open(path)
 
 
+
+
+def test_reopen_rejects_same_name_noop_immutability_trigger(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    with RewardCorrectionLedger.create(path):
+        pass
+
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TRIGGER corrections_no_update")
+    raw.execute(
+        "CREATE TRIGGER corrections_no_update BEFORE UPDATE ON corrections "
+        "BEGIN SELECT 1; END"
+    )
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RewardCorrectionError, match="immutability triggers mismatch"):
+        RewardCorrectionLedger.open(path)
+
 def test_create_race_cannot_unlink_existing_winner(tmp_path, monkeypatch):
     path = tmp_path / "corrections.sqlite3"
     path_type = type(path)

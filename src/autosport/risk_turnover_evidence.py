@@ -421,8 +421,8 @@ class PaperDayTurnoverResolver:
                     "ticket_id": ticket.ticket_id,
                     "stake": _decimal_text(ticket.stake),
                     "placed_at": ticket.placed_at,
-                    "bankroll_id": ticket.bankroll_id,
-                    "currency": ticket.currency,
+                    "bankroll_id": goal.bankroll_id,
+                    "currency": goal.currency,
                 }
             )
 

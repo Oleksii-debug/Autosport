@@ -139,7 +139,7 @@
 
   async function apiState() {
     if (!globalThis.pywebview || !globalThis.pywebview.api) {
-      throw new Error("Python bridge недоступний.");
+      throw new Error("Внутрішній канал застосунку недоступний.");
     }
     const response = await globalThis.pywebview.api.get_state();
     if (!response || response.ok !== true || !response.state) {
@@ -161,7 +161,7 @@
       await refreshState();
       return result;
     } catch (_error) {
-      announce("Помилка зв’язку з Python bridge. Перевірте стан і повторіть дію.", true);
+      announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
       return null;
     }
   }
@@ -219,7 +219,7 @@
     byId(334).value = state.manual.result || "";
 
     const productRuntime = state.product_runtime || {};
-    byId("product-runtime-status").value = productRuntime.status || "Тривала PAPER-робота не запущена.";
+    byId("product-runtime-status").value = productRuntime.status || "Тривала симуляційна робота не запущена.";
     byId("product-runtime-start").disabled = productRuntime.can_start !== true;
     byId("product-runtime-stop").disabled = productRuntime.can_stop !== true;
 
@@ -248,7 +248,7 @@
         try {
           renderState(await apiState());
         } catch (_error) {
-          announce("Не вдалося оновити стан продукту через Python bridge.", true);
+          announce("Не вдалося оновити стан застосунку.", true);
         }
       } while (refreshPending);
     })();

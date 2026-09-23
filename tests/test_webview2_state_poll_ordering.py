@@ -148,6 +148,8 @@ def test_mutating_dispatch_invalidates_pre_and_mid_action_state_snapshots() -> N
     assert state_read > request_epoch
     assert epoch_check > state_read
     assert render > epoch_check
-    assert "refreshPending = true;" in refresh_body
+    assert refresh_body.count("requestEpoch === stateProjectionEpoch") >= 2
+    assert refresh_body.count("refreshPending = true;") >= 2
+    assert "Do not overwrite a newer action result with an obsolete error." in refresh_body
 
     assert "globalThis.autosportDispatch = dispatch;" in javascript

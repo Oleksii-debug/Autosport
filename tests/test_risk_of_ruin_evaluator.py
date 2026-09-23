@@ -209,6 +209,49 @@ def test_clopper_pearson_returned_endpoint_is_outward_conservative(
     )
 
 
+@pytest.mark.parametrize(
+    "confidence",
+    (
+        Decimal("1E-69"),
+        Decimal("1E-70"),
+        Decimal("1E-71"),
+    ),
+)
+def test_ultra_low_exact_confidence_never_moves_upper_bound_inward(
+    confidence: Decimal,
+) -> None:
+    upper = clopper_pearson_upper_bound(
+        ruin_count=0,
+        independent_units=1,
+        confidence_level=confidence,
+    )
+
+    # Closed-form oracle for X~Binomial(1,p), k=0: the exact one-sided
+    # Clopper-Pearson upper endpoint is confidence itself.
+    assert upper >= confidence
+    assert Fraction(1) - Fraction(upper) <= Fraction(1) - Fraction(confidence)
+
+
+def test_clopper_pearson_confidence_resolution_is_resource_bounded() -> None:
+    pathological = Decimal("1E-1000000")
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="fixed-point representation exceeds supported canonical size",
+    ):
+        clopper_pearson_upper_bound(
+            ruin_count=0,
+            independent_units=1,
+            confidence_level=pathological,
+        )
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="fixed-point representation exceeds supported canonical size",
+    ):
+        replace(_request(planned=1), confidence_level=pathological)
+
+
 def test_clopper_pearson_isolated_from_ambient_decimal_context() -> None:
     baseline = clopper_pearson_upper_bound(
         ruin_count=150,

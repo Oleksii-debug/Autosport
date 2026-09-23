@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 import json
 
@@ -17,6 +17,7 @@ from autosport.nvda_manual_acceptance import (
     NvdaManualAcceptanceIntegrityError,
     NvdaManualAcceptanceStateError,
     PROTOCOL_VERSION,
+    verify_manual_nvda_acceptance_resolution,
 )
 
 
@@ -131,6 +132,71 @@ def test_resolution_cannot_be_directly_constructed_or_replaced(tmp_path):
         ManualNvdaAcceptanceResolution()  # type: ignore[call-arg]
     with pytest.raises(NvdaManualAcceptanceStateError, match="resolver-issued"):
         replace(resolution, accepted_manual_decision=False)
+
+
+def test_resolution_verifier_rejects_copy_and_tamper(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+        is resolution
+    )
+
+    cloned = copy(resolution)
+    assert cloned == resolution
+    assert cloned is not resolution
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="not a live resolver-issued authority",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            cloned,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+    tampered = _resolve(ledger, transcript)
+    assert tampered is not None
+    object.__setattr__(tampered, "human_tested", True)
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="cannot promote protected truth",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            tampered,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=tampered.record.transcript_sha256,
+        )
+
+
+def test_resolution_verifier_rejects_wrong_candidate_identity(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="does not match the expected candidate",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256="c" * 64,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
 
 
 def test_exact_retry_is_idempotent(tmp_path):

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import autosport.local_compute_allocation_basis as subject
-from autosport.economic_goal_store import EconomicGoalStore
+from autosport.economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthorityError
 from autosport.owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
@@ -132,6 +132,55 @@ def test_goal_change_between_review_and_confirmation_fails_closed(
     fresh = _review(store)
     assert fresh.owner_goal_revision == current.revision + 1
     assert fresh.review_sha256 != old_review_sha256
+
+
+def test_goal_store_module_rebind_cannot_redefine_durable_owner_goal(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 17,
+    )
+    fake_store_calls: list[str] = []
+
+    class ReboundEconomicGoalStore:
+        def __init__(self, _workspace) -> None:
+            fake_store_calls.append("init")
+
+        def load(self):
+            fake_store_calls.append("load")
+            return forged_goal
+
+    monkeypatch.setattr(
+        subject,
+        "EconomicGoalStore",
+        ReboundEconomicGoalStore,
+    )
+    monkeypatch.setattr(
+        subject,
+        "economic_goal_to_payload",
+        lambda _goal: {"forged": "module-global-serializer"},
+    )
+
+    review = _review(store)
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+
+    assert fake_store_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert fake_store_calls == []
+    assert record.owner_goal_revision == durable_goal.revision
+    assert record.owner_goal_sha256 == expected_goal_sha256
+    assert goal_store.load() == durable_goal
 
 
 def test_bare_digest_or_historical_timestamp_is_not_publish_authority(

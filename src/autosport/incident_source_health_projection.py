@@ -415,6 +415,139 @@ def project_source_health_incidents(
     return tuple(revisions)
 
 
+def validate_source_health_incident_evidence(
+    store: SourceHealthStore,
+    *,
+    source_id: str,
+    entry: IncidentRiskEntry,
+) -> None:
+    """Re-resolve one register entry against canonical provider-health history.
+
+    This validator is intentionally narrower than the generic incident lifecycle:
+    it proves only provider/source-health evidence. Acknowledgement or mitigation
+    may change presentation/lifecycle metadata elsewhere, but neither can replace
+    canonical health evidence or manufacture a recovery.
+    """
+
+    if not isinstance(entry, IncidentRiskEntry):
+        raise TypeError("entry must be an IncidentRiskEntry")
+    if entry.kind is not RegisterEntryKind.INCIDENT:
+        raise SourceHealthIncidentProjectionError(
+            "source-health evidence can validate only incident entries"
+        )
+
+    stream = _evidence_stream(store, source_id)
+    by_ref = {evidence.evidence_ref: evidence for evidence in stream}
+    if len(entry.occurrence_evidence_refs) != 1:
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident requires exactly one occurrence evidence reference"
+        )
+    occurrence_ref = entry.occurrence_evidence_refs[0]
+    occurrence = by_ref.get(occurrence_ref)
+    if occurrence is None:
+        raise SourceHealthIncidentProjectionError(
+            "source-health occurrence evidence is absent from canonical history"
+        )
+    if occurrence.status not in _IMPAIRED_STATUSES:
+        raise SourceHealthIncidentProjectionError(
+            "source-health occurrence must begin with an impaired transition"
+        )
+
+    expected_components = ("provider_health", occurrence.source_scope_ref)
+    if entry.affected_components != expected_components:
+        raise SourceHealthIncidentProjectionError(
+            "incident affected_components do not match canonical source scope"
+        )
+    if entry.opened_at != occurrence.recorded_at:
+        raise SourceHealthIncidentProjectionError(
+            "incident opened_at does not match occurrence evidence time"
+        )
+    if entry.evidence_state is not RiskEvidenceState.VERIFIED:
+        raise SourceHealthIncidentProjectionError(
+            "canonical source-health projection requires verified evidence state"
+        )
+
+    resolved_evidence: list[SourceHealthEvidence] = []
+    for evidence_ref in entry.evidence_refs:
+        evidence = by_ref.get(evidence_ref)
+        if evidence is None:
+            raise SourceHealthIncidentProjectionError(
+                "incident evidence is absent from canonical source-health history"
+            )
+        resolved_evidence.append(evidence)
+
+    if not resolved_evidence:
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident requires canonical evidence"
+        )
+    resolved_evidence.sort(key=lambda evidence: evidence.transition_order)
+    if resolved_evidence[0].transition_order != occurrence.transition_order:
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident evidence must begin at occurrence transition"
+        )
+
+    last = resolved_evidence[-1]
+    expected_segment = tuple(
+        evidence
+        for evidence in stream
+        if occurrence.transition_order
+        <= evidence.transition_order
+        <= last.transition_order
+    )
+    if tuple(item.evidence_ref for item in expected_segment) != tuple(
+        item.evidence_ref for item in resolved_evidence
+    ):
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident evidence must be a contiguous canonical transition segment"
+        )
+
+    healthy_positions = [
+        index
+        for index, evidence in enumerate(expected_segment)
+        if evidence.status == "healthy"
+    ]
+    if healthy_positions and healthy_positions != [len(expected_segment) - 1]:
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident evidence cannot continue past its healthy closure"
+        )
+    if any(
+        evidence.status not in _IMPAIRED_STATUSES and evidence.status != "healthy"
+        for evidence in expected_segment
+    ):
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident evidence contains unsupported health state"
+        )
+
+    impaired = tuple(
+        evidence for evidence in expected_segment if evidence.status in _IMPAIRED_STATUSES
+    )
+    if not impaired:
+        raise SourceHealthIncidentProjectionError(
+            "source-health incident lacks impaired evidence"
+        )
+    expected_severity = _severity(impaired[-1].status)
+    if entry.severity is not expected_severity:
+        raise SourceHealthIncidentProjectionError(
+            "incident severity does not match canonical source-health evidence"
+        )
+
+    closed = last.status == "healthy"
+    if closed:
+        if entry.status is not RiskStatus.RESOLVED:
+            raise SourceHealthIncidentProjectionError(
+                "healthy closure evidence requires resolved incident status"
+            )
+    elif entry.status in {RiskStatus.RESOLVED, RiskStatus.SUPERSEDED}:
+        raise SourceHealthIncidentProjectionError(
+            "terminal incident status requires canonical healthy closure evidence"
+        )
+
+    if parse_source_timestamp(entry.updated_at) < parse_source_timestamp(last.recorded_at):
+        raise SourceHealthIncidentProjectionError(
+            "incident updated_at precedes its latest canonical health evidence"
+        )
+
+
 def current_source_health_incident(
     store: SourceHealthStore,
     *,

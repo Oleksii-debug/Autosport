@@ -12,7 +12,7 @@ from typing import Final
 
 from .economic_goal import EconomicGoalContract, EconomicGoalContractError
 from .economic_goal_provenance import provenance_for
-from .economic_goal_store import EconomicGoalStore
+from .economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
@@ -70,6 +70,12 @@ _CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE: Final = getattr(
 )
 _CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME: Final = (
     _CANONICAL_ECONOMIC_GOAL_STORE_CLASS.FILE_NAME
+)
+_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD: Final = economic_goal_to_payload
+_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD_CODE: Final = getattr(
+    _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD,
+    "__code__",
+    None,
 )
 
 
@@ -636,6 +642,10 @@ class ProductDecisionActivationStore:
             is not _CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE
             or _CANONICAL_ECONOMIC_GOAL_STORE_CLASS.FILE_NAME
             != _CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME
+            or economic_goal_to_payload is not _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD
+            or _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD_CODE is None
+            or getattr(_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD, "__code__", None)
+            is not _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD_CODE
         ):
             raise ProductDecisionActivationError(
                 "canonical EconomicGoalStore dispatch changed"
@@ -661,21 +671,28 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "canonical EconomicGoalStore instance dispatch changed"
             )
+        # Do not let EconomicGoalStore.load() or its mutable decoder graph grant
+        # positive START authority. The canonical owner writer uses atomic_write_json,
+        # whose exact deterministic encoding is mirrored by _durable_json_bytes().
+        # Bind the exact on-disk bytes to the exact caller-supplied canonical contract
+        # before that contract can participate in risk/provenance activation.
         try:
-            durable_economic_goal = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(
-                durable_goal_store
+            expected_goal_bytes = _durable_json_bytes(
+                _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD(economic_goal)
             )
         except EconomicGoalContractError as exc:
             raise ProductDecisionActivationError(
-                "cannot resolve durable owner EconomicGoalContract"
+                "cannot serialize canonical owner EconomicGoalContract"
             ) from exc
-        if (
-            type(durable_economic_goal) is not EconomicGoalContract
-            or durable_economic_goal != economic_goal
-        ):
+        durable_goal_bytes = _read_regular_file(
+            durable_goal_store.path,
+            "durable owner EconomicGoalContract",
+        )
+        if durable_goal_bytes != expected_goal_bytes:
             raise ProductDecisionActivationError(
-                "economic_goal no longer matches durable authority owner EconomicGoalContract"
+                "economic_goal no longer matches exact durable authority owner bytes"
             )
+        durable_economic_goal = economic_goal
         if type(risk_policy) is not PaperRiskPolicy:
             raise ProductDecisionActivationError(
                 "risk_policy must be the canonical PaperRiskPolicy"

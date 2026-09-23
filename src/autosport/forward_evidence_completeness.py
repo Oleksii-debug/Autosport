@@ -787,9 +787,9 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     opportunities, identity_conflict, fork = _dedupe_opportunities(
         evidence.opportunities
     )
-    if (
-        opportunities
-        and protocol.precommit_anchor_upper >= opportunities[0].observed_lower
+    if any(
+        protocol.precommit_anchor_upper >= item.observed_lower
+        for item in opportunities
     ):
         codes.append(VerificationCode.PROTOCOL_PRECOMMIT_FAIL)
     if identity_conflict:

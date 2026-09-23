@@ -58,26 +58,76 @@ class OneShotObservationWorker:
             if self._busy:
                 return False
             self._busy = True
+
+        # Live observation may persist market/source-health state. A pathological
+        # Thread.start() implementation can create the helper and still raise to its
+        # caller; do not let durable work cross that ambiguous startup boundary.
         try:
+            start_gate = threading.Event()
+            cancelled = threading.Event()
             thread = threading.Thread(
-                target=self._run,
-                args=(task,),
+                target=self._run_when_committed,
+                args=(task, start_gate, cancelled),
                 name="autosport-live-observation",
                 daemon=False,
             )
-            self._thread = thread
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._publish_setup_failure(exc)
+                return True
+            self._release_unstarted_slot()
+            raise
+
+        self._thread = thread
+        task_committed = False
+        try:
             thread.start()
-        except Exception as exc:
-            # The live-observation caller reserves False for a genuinely busy
-            # worker and schedules terminal polling whenever start() returns True.
-            # Preserve that contract for any ordinary Thread construction/start
-            # failure: publish one terminal error and let poll() restore idle state.
-            self._thread = None
-            self._messages.put(
-                ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
-            )
-            return True
+            # Startup is committed only after Thread.start() returns normally. Open
+            # the gate afterwards so the durable observation cannot run on a helper
+            # whose creation is still reported as failed to the caller.
+            task_committed = True
+            start_gate.set()
+        except BaseException as exc:
+            if task_committed:
+                start_gate.set()
+                if isinstance(exc, Exception):
+                    return True
+                raise
+
+            # Thread.start() may already have launched the helper before raising.
+            # Cancel first, then open the gate so that helper exits without task().
+            cancelled.set()
+            start_gate.set()
+            if isinstance(exc, Exception):
+                self._publish_setup_failure(exc)
+                return True
+            self._release_unstarted_slot()
+            raise
         return True
+
+    def _publish_setup_failure(self, exc: Exception) -> None:
+        # Preserve the established caller contract: False means "already busy";
+        # an ordinary setup failure returns True and publishes one terminal error.
+        self._thread = None
+        self._messages.put(
+            ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+        )
+
+    def _release_unstarted_slot(self) -> None:
+        self._thread = None
+        with self._lock:
+            self._busy = False
+
+    def _run_when_committed(
+        self,
+        task: ObservationTask,
+        start_gate: threading.Event,
+        cancelled: threading.Event,
+    ) -> None:
+        start_gate.wait()
+        if cancelled.is_set():
+            return
+        self._run(task)
 
     def _run(self, task: ObservationTask) -> None:
         try:

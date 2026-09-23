@@ -134,14 +134,48 @@ def _text_atom(value: object) -> str:
     return "".join(safe)
 
 
+def _text_mapping_key_identity(key: object) -> tuple[str, str]:
+    """Return a deterministic identity for JSON-object-compatible mapping keys."""
+
+    if type(key) is str:
+        return ("str", key)
+    if type(key) is bool:
+        return ("bool", "true" if key else "false")
+    if type(key) is int:
+        return ("int", str(key))
+    if type(key) is float:
+        if not math.isfinite(key):
+            raise ValueError("text output mapping float keys must be finite")
+        return (
+            "float",
+            json.dumps(
+                key,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            ),
+        )
+    if key is None:
+        return ("null", "")
+    raise TypeError(
+        "text output mapping keys must be str, bool, int, finite float, or None"
+    )
+
+
 def _text_label_child(prefix: str, key: object) -> str:
-    """Append one mapping-key path component without emitting raw terminal controls."""
+    """Append one collision-free mapping-key path component."""
 
-    component = str(key)
-    if component and all(character.isalnum() or character in "_-" for character in component):
-        return f"{prefix}.{component}" if prefix else component
+    kind, component = _text_mapping_key_identity(key)
+    if kind == "str":
+        if component and all(
+            character.isalnum() or character in "_-" for character in component
+        ):
+            return f"{prefix}.{component}" if prefix else component
 
-    encoded = _text_atom(component)
+        encoded = _text_atom(component)
+        return f"{prefix}[{encoded}]" if prefix else f"[{encoded}]"
+
+    encoded = "null" if kind == "null" else f"{kind}={component}"
     return f"{prefix}[{encoded}]" if prefix else f"[{encoded}]"
 
 
@@ -150,7 +184,7 @@ def _append_text_lines(lines: list[str], prefix: str, value: object) -> None:
         if not value:
             lines.append(f"{prefix}: empty mapping")
             return
-        for key in sorted(value, key=str):
+        for key in sorted(value, key=_text_mapping_key_identity):
             _append_text_lines(lines, _text_label_child(prefix, key), value[key])
         return
     if isinstance(value, (list, tuple)):

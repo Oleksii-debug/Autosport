@@ -552,6 +552,95 @@ def test_rebound_reconciliation_store_class_cannot_replace_790_authority(
 
     assert store.latest_snapshot() is None
 
+def test_reconciliation_monotonic_authority_replacement_cannot_report_success(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    class NoOpAuthority:
+        def read_history(self):
+            return ()
+
+        def recover(self, **_kwargs):
+            return None
+
+        def prepare(self, **_kwargs):
+            return None
+
+    store._authority = NoOpAuthority()
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation monotonic authority was replaced",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert not store_path.exists()
+
+
+@pytest.mark.parametrize("method_name", ("read_history", "prepare", "recover"))
+def test_reconciliation_monotonic_authority_method_shadow_cannot_report_success(
+    monkeypatch,
+    tmp_path,
+    method_name,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+    monkeypatch.setattr(store._authority, method_name, lambda *args, **kwargs: None)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation monotonic authority dispatch changed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert not store_path.exists()
+
+
+def test_reconciliation_monotonic_authority_path_binding_cannot_drift(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    original_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        original_path,
+        authority_root=tmp_path / "authority",
+    )
+    store.path = original_path.with_name("caller-retargeted.json")
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation monotonic authority binding changed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert not original_path.exists()
+    assert not store.path.exists()
+
+
 @pytest.mark.parametrize(
     "helper_name",
     (

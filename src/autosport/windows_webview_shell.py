@@ -764,6 +764,43 @@ class AutosportWebController:
             return self._fail(text("ui.status.replay.already_busy"))
         if self.dataset_path is None:
             return self._fail(text("ui.info.replay.dataset_required"))
+
+        visible_dataset_raw = payload.get("dataset_path")
+        visible_plan_raw = payload.get("research_plan_path")
+        if type(visible_dataset_raw) is not str or type(visible_plan_raw) is not str:
+            return self._fail(
+                "Перед запуском повтору підтвердьте поточні шляхи набору даних "
+                "і плану дослідження."
+            )
+        try:
+            visible_dataset_path = (
+                None
+                if not visible_dataset_raw.strip()
+                else Path(visible_dataset_raw).expanduser().absolute()
+            )
+            visible_plan_path = (
+                None
+                if not visible_plan_raw.strip()
+                else Path(visible_plan_raw).expanduser().absolute()
+            )
+        except (OSError, RuntimeError):
+            return self._fail(
+                "Не вдалося підтвердити видимі шляхи перед запуском повтору."
+            )
+
+        if visible_dataset_path != self.dataset_path:
+            return self._fail(
+                "Видимий шлях набору даних не збігається з останнім "
+                "перевіреним набором. Повторно виберіть і перевірте набір "
+                "даних перед запуском."
+            )
+        bound_plan_path = getattr(self, "research_plan_path", None)
+        if visible_plan_path != bound_plan_path:
+            return self._fail(
+                "Видимий шлях плану дослідження не збігається з прив'язаним "
+                "планом. Повторно виберіть план перед запуском."
+            )
+
         try:
             strategy_id, plan = self._selected_configuration()
             replay_workspace = Path(

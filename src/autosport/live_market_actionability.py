@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -91,15 +92,12 @@ class LiveMarketComponentEvidence:
     age_microseconds: int | None
     wait_reasons: tuple[LiveInputWaitReason, ...]
 
-    @property
-    def current_view_eligible(self) -> bool:
-        return not self.wait_reasons
-
 
 _RESULT_ISSUER = object()
+_ISSUED_RESULTS: dict[int, tuple[weakref.ReferenceType[object], str]] = {}
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class RegisteredLiveInputCurrentView:
     """Product-issued current-view gate for one already-registered live input.
 
@@ -146,7 +144,12 @@ class RegisteredLiveInputCurrentView:
         object.__setattr__(self, "evidence_sha256", evidence_sha256)
 
     @property
+    def is_product_issued(self) -> bool:
+        return _is_product_issued(self)
+
+    @property
     def current_view_eligible(self) -> bool:
+        _require_product_issued(self)
         return self.outcome is LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE
 
     @property
@@ -176,6 +179,69 @@ class RegisteredLiveInputCurrentView:
     @property
     def real_money_authorized(self) -> bool:
         return False
+
+
+def _result_fingerprint(result: RegisteredLiveInputCurrentView) -> str:
+    return _canonical_json_sha256(
+        {
+            "input_id": result.input_id,
+            "as_of": result.as_of,
+            "max_age_microseconds": result.max_age_microseconds,
+            "mirror_revision": result.mirror_revision,
+            "outcome": result.outcome.value,
+            "wait_reasons": [reason.value for reason in result.wait_reasons],
+            "components": [
+                {
+                    "source_id": item.source_id,
+                    "quote_key": item.quote_key,
+                    "event_sha256": item.event_sha256,
+                    "sequence": item.sequence,
+                    "status": item.status,
+                    "freshness_ts": item.freshness_ts,
+                    "age_microseconds": item.age_microseconds,
+                    "wait_reasons": [
+                        reason.value for reason in item.wait_reasons
+                    ],
+                }
+                for item in result.components
+            ],
+            "evidence_sha256": result.evidence_sha256,
+        }
+    )
+
+
+def _is_product_issued(result: RegisteredLiveInputCurrentView) -> bool:
+    entry = _ISSUED_RESULTS.get(id(result))
+    if entry is None:
+        return False
+    reference, fingerprint = entry
+    return reference() is result and fingerprint == _result_fingerprint(result)
+
+
+def _require_product_issued(result: RegisteredLiveInputCurrentView) -> None:
+    if not _is_product_issued(result):
+        raise LiveMarketActionabilityError(
+            "RegisteredLiveInputCurrentView is not current process-issued evidence"
+        )
+
+
+def _register_product_issued(
+    result: RegisteredLiveInputCurrentView,
+) -> RegisteredLiveInputCurrentView:
+    key = id(result)
+
+    def cleanup(
+        dead_reference: weakref.ReferenceType[object],
+        *,
+        issued_key: int = key,
+    ) -> None:
+        current = _ISSUED_RESULTS.get(issued_key)
+        if current is not None and current[0] is dead_reference:
+            _ISSUED_RESULTS.pop(issued_key, None)
+
+    reference = weakref.ref(result, cleanup)
+    _ISSUED_RESULTS[key] = (reference, _result_fingerprint(result))
+    return result
 
 
 def evaluate_registered_input_current_view(
@@ -225,7 +291,7 @@ def evaluate_registered_input_current_view(
 
     for event in raw_snapshot.events:
         reasons: set[LiveInputWaitReason] = set()
-        if event.status != "open":
+        if event.status not in MarketMirror._DECISION_ELIGIBLE_STATUSES:
             reasons.add(LiveInputWaitReason.NON_OPEN_STATUS)
 
         observed = MarketMirror._utc_timestamp(event.observed_ts)
@@ -315,7 +381,7 @@ def evaluate_registered_input_current_view(
         },
     }
     evidence_sha256 = _canonical_json_sha256(payload)
-    return RegisteredLiveInputCurrentView(
+    result = RegisteredLiveInputCurrentView(
         _issuer=_RESULT_ISSUER,
         input_id=normalized_input_id,
         as_of=as_of_text,
@@ -326,3 +392,4 @@ def evaluate_registered_input_current_view(
         components=components,
         evidence_sha256=evidence_sha256,
     )
+    return _register_product_issued(result)

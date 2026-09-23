@@ -155,6 +155,39 @@ def test_opaque_hash_and_invented_historical_time_cannot_mint_tariff(
         )
 
 
+def test_substituted_basis_authority_cannot_mint_tariff(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    authority = tmp_path / "authority"
+    _owner_goal(workspace)
+    monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    store = subject.LocalComputeTariffAuthorityStore(
+        workspace, authority_root=authority
+    )
+
+    class ForgedBasisAuthority:
+        resolve_called = False
+
+        def resolve(self, **_kwargs):
+            self.resolve_called = True
+            raise AssertionError("forged authority callback must not execute")
+
+    forged = ForgedBasisAuthority()
+    store._basis_store = forged  # type: ignore[assignment]
+
+    with pytest.raises(subject.LocalComputeTariffError, match="not canonical"):
+        store.publish_owner_tariff(
+            tariff_id="forged-store",
+            backend_id="local-backend",
+            model_id="model-a",
+            config_sha256="c" * 64,
+            effective_from="2026-09-23T10:00:00Z",
+            effective_until=None,
+            allocation_policy_id="owner-full-cost-per-request-v1",
+            allocation_basis_id="forged-basis",
+        )
+    assert forged.resolve_called is False
+
+
 def test_allocation_basis_derives_amount_and_stamps_causal_availability(
     tmp_path, monkeypatch
 ):

@@ -137,7 +137,10 @@ class MonotonicTimingIntervalEvidence:
 
     @property
     def duration_ms(self) -> Decimal:
-        return Decimal(self.duration_ns) / Decimal(1_000_000)
+        # Decimal arithmetic obeys the ambient process context and can round a
+        # perfectly exact integer-nanosecond interval. Construct the base-10
+        # value directly so nanoseconds -> milliseconds remains exact.
+        return Decimal(f"{self.duration_ns}e-6")
 
     @property
     def evidence_id(self) -> str:

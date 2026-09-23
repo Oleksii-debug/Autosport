@@ -35,7 +35,7 @@ def _require_canonical_class_read_seams() -> None:
         if getattr(CollectorDeltaStore, name, None) is not expected
     )
     if rebound:
-        raise TypeError(
+        raise SourceUniverseCommitmentError(
             "store canonical durable read seam is class-rebound: "
             + ", ".join(rebound)
         )

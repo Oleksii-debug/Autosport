@@ -59,16 +59,16 @@ def _sequence_id(value: object) -> int | str:
 
 
 def _non_negative_duration(value: object, field_name: str) -> timedelta:
-    if not isinstance(value, timedelta):
-        raise TypeError(f"{field_name} must be a timedelta")
+    if type(value) is not timedelta:
+        raise TypeError(f"{field_name} must be an exact timedelta")
     if value < timedelta(0):
         raise ValueError(f"{field_name} must be non-negative")
     return value
 
 
 def _decision_time(value: object) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError("decision_at must be a datetime")
+    if type(value) is not datetime:
+        raise TypeError("decision_at must be an exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("decision_at must be timezone-aware")
     return value.astimezone(timezone.utc)

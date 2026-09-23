@@ -423,6 +423,10 @@ _UK_UA = MappingProxyType(
         "ui.observation.quality_flag.future_clock_skew": "час джерела випереджає локальний годинник",
         "ui.observation.quality_flag.invalid_quote": "некоректне котирування",
         "ui.observation.quality_flag.source_time_regression": "час джерела рухається назад",
+        "ui.observation.market_type.winner": "переможець",
+        "ui.observation.market_type.total": "тотал",
+        "ui.observation.market_type.handicap": "фора",
+        "ui.observation.market_type.other": "інший тип ринку",
         "ui.observation.no_flags": "немає",
         "ui.observation.summary": (
             "Поточний знімок: джерело={source_id}; стан={health}; отримано={received}; прийнято={accepted}; "

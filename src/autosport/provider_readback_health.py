@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import InitVar, dataclass, fields, is_dataclass
+from dataclasses import InitVar, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -89,8 +89,10 @@ class ProviderReadScopeEvidence:
     observed_at: str
     snapshot_sha256: str | None = None
     complete: bool = True
+    _issuer: InitVar[object | None] = None
+    _product_issued: bool = field(init=False, repr=False, compare=False, default=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _issuer: object | None) -> None:
         if not isinstance(self.capability, BookmakerCapability):
             raise ProviderReadbackHealthError('capability must be BookmakerCapability')
         _sha(self.request_scope_sha256, 'request_scope_sha256')
@@ -100,10 +102,22 @@ class ProviderReadScopeEvidence:
             _sha(self.snapshot_sha256, 'snapshot_sha256')
         if type(self.complete) is not bool:
             raise ProviderReadbackHealthError('complete must be bool')
+        if self.complete and _issuer is not _ISSUER:
+            raise ProviderReadbackHealthError('complete provider read scope must be product-issued')
+        object.__setattr__(self, '_product_issued', _issuer is _ISSUER)
 
     @property
     def evidence_id(self) -> str:
         return _digest({'capability': self.capability.value, 'request_scope_sha256': self.request_scope_sha256, 'response_sha256': self.response_sha256, 'observed_at': self.observed_at, 'snapshot_sha256': self.snapshot_sha256, 'complete': self.complete})
+
+def _issue_complete_provider_read_scope_evidence(*, capability: BookmakerCapability, request_scope_sha256: str, response_sha256: str, observed_at: str, snapshot: BookmakerAccountSnapshot) -> ProviderReadScopeEvidence:
+    if not isinstance(snapshot, BookmakerAccountSnapshot):
+        raise ProviderReadbackHealthError('snapshot must be canonical BookmakerAccountSnapshot')
+    if not isinstance(capability, BookmakerCapability):
+        raise ProviderReadbackHealthError('capability must be BookmakerCapability')
+    if capability not in snapshot.observed_capabilities:
+        raise ProviderReadbackHealthError('complete scope capability must be present in canonical snapshot')
+    return ProviderReadScopeEvidence(capability=capability, request_scope_sha256=request_scope_sha256, response_sha256=response_sha256, observed_at=observed_at, snapshot_sha256=canonical_snapshot_sha256(snapshot), complete=True, _issuer=_ISSUER)
 
 @dataclass(frozen=True, slots=True)
 class ProviderReadbackHealth:
@@ -157,6 +171,8 @@ class ProviderReadbackHealth:
                 raise ProviderReadbackHealthError('FRESH_COMPLETE requires every exact required scope')
             if any((not scope.complete for scope in self.successful_scopes)):
                 raise ProviderReadbackHealthError('FRESH_COMPLETE requires complete scopes')
+            if any((not scope._product_issued for scope in self.successful_scopes)):
+                raise ProviderReadbackHealthError('FRESH_COMPLETE requires product-issued complete scopes')
             if any((scope.snapshot_sha256 != self.current_snapshot_sha256 for scope in self.successful_scopes)):
                 raise ProviderReadbackHealthError('FRESH_COMPLETE requires scopes bound to the exact current snapshot')
 
@@ -167,7 +183,7 @@ class ProviderReadbackHealth:
     def scope_is_authoritative(self, capability: BookmakerCapability) -> bool:
         if not self.can_authorize_current_state:
             return False
-        return any((scope.capability is capability and scope.complete and (scope.snapshot_sha256 == self.current_snapshot_sha256) for scope in self.successful_scopes))
+        return any((scope.capability is capability and scope.complete and scope._product_issued and (scope.snapshot_sha256 == self.current_snapshot_sha256) for scope in self.successful_scopes))
 
     @property
     def operator_status_uk(self) -> str:
@@ -241,7 +257,7 @@ def classify_provider_readback_health(*, required_capabilities: Iterable[Bookmak
         snapshot_fresh = (now - snapshot_time).total_seconds() <= freshness_limit_seconds
     required_set = set(required)
     scope_set = {scope.capability for scope in scopes}
-    all_complete = scope_set == required_set and all((scope.complete for scope in scopes))
+    all_complete = scope_set == required_set and all((scope.complete and scope._product_issued for scope in scopes))
     snapshot_covers_required = snapshot is not None and required_set.issubset(observed_capabilities)
     scopes_bind_current_snapshot = current_sha is not None and scope_set == required_set and all((scope.snapshot_sha256 == current_sha for scope in scopes))
     if failure_class in {ProviderReadbackFailureClass.UNAUTHORIZED, ProviderReadbackFailureClass.SESSION_EXPIRED}:

@@ -1,7 +1,8 @@
+from dataclasses import replace
 from decimal import Decimal
 import pytest
 from autosport.bookmaker_capability import BookmakerAccountSnapshot, BookmakerBalanceObservation, BookmakerCapability, BookmakerCapabilityFact, BookmakerCapabilityProfile, BookmakerCapabilityState, BookmakerPositionObservation, BookmakerPositionState
-from autosport.provider_readback_health import ProviderReadbackFailureClass, ProviderReadbackHealth, ProviderReadbackHealthError, ProviderReadbackHealthState, ProviderReadScopeEvidence, canonical_snapshot_sha256, classify_provider_readback_health
+from autosport.provider_readback_health import ProviderReadbackFailureClass, ProviderReadbackHealth, ProviderReadbackHealthError, ProviderReadbackHealthState, ProviderReadScopeEvidence, _issue_complete_provider_read_scope_evidence, canonical_snapshot_sha256, classify_provider_readback_health
 _OBSERVED = '2026-09-21T18:00:00+00:00'
 _HASH = 'a' * 64
 _SCOPE_HASH = 'b' * 64
@@ -22,6 +23,8 @@ def _snapshot(*capabilities: BookmakerCapability, open_positions=(), account_id:
     return BookmakerAccountSnapshot(profile=_profile(*capabilities, account_id=account_id), observed_capabilities=frozenset(capabilities), observed_at=_OBSERVED, balance=_balance() if BookmakerCapability.BALANCE_READ in capabilities else None, open_positions=open_positions)
 
 def _scope(capability: BookmakerCapability, *, snapshot=None, complete: bool=True, observed_at: str=_OBSERVED) -> ProviderReadScopeEvidence:
+    if complete and snapshot is not None:
+        return _issue_complete_provider_read_scope_evidence(capability=capability, request_scope_sha256=_SCOPE_HASH, response_sha256=_RESPONSE_HASH, observed_at=observed_at, snapshot=snapshot)
     return ProviderReadScopeEvidence(capability=capability, request_scope_sha256=_SCOPE_HASH, response_sha256=_RESPONSE_HASH, observed_at=observed_at, snapshot_sha256=None if snapshot is None else canonical_snapshot_sha256(snapshot), complete=complete)
 
 def test_fresh_complete_requires_exact_successful_scope_and_can_authorize_empty() -> None:
@@ -87,8 +90,25 @@ def test_result_identity_is_deterministic_across_required_capability_order() -> 
     assert one.result_id == two.result_id
 
 def test_unbound_complete_scope_cannot_mint_fresh_complete_authority() -> None:
+    with pytest.raises(ProviderReadbackHealthError, match='product-issued'):
+        _scope(BookmakerCapability.BALANCE_READ)
+
+def test_caller_cannot_self_mint_complete_scope_even_with_exact_current_snapshot_hash() -> None:
     snapshot = _snapshot(BookmakerCapability.BALANCE_READ)
-    health = classify_provider_readback_health(required_capabilities=(BookmakerCapability.BALANCE_READ,), evaluated_at='2026-09-21T18:00:05+00:00', freshness_limit_seconds=30, snapshot=snapshot, successful_scopes=(_scope(BookmakerCapability.BALANCE_READ),))
+    with pytest.raises(ProviderReadbackHealthError, match='product-issued'):
+        ProviderReadScopeEvidence(capability=BookmakerCapability.BALANCE_READ, request_scope_sha256=_SCOPE_HASH, response_sha256=_RESPONSE_HASH, observed_at=_OBSERVED, snapshot_sha256=canonical_snapshot_sha256(snapshot), complete=True)
+
+def test_product_issued_scope_cannot_be_rebound_with_dataclass_replace() -> None:
+    snapshot = _snapshot(BookmakerCapability.OPEN_POSITIONS_READ)
+    other = _snapshot(BookmakerCapability.OPEN_POSITIONS_READ, account_id='acct-2')
+    issued = _scope(BookmakerCapability.OPEN_POSITIONS_READ, snapshot=snapshot)
+    with pytest.raises(ProviderReadbackHealthError, match='product-issued'):
+        replace(issued, snapshot_sha256=canonical_snapshot_sha256(other))
+
+def test_public_partial_scope_stays_non_authoritative() -> None:
+    snapshot = _snapshot(BookmakerCapability.BALANCE_READ)
+    partial = ProviderReadScopeEvidence(capability=BookmakerCapability.BALANCE_READ, request_scope_sha256=_SCOPE_HASH, response_sha256=_RESPONSE_HASH, observed_at=_OBSERVED, snapshot_sha256=canonical_snapshot_sha256(snapshot), complete=False)
+    health = classify_provider_readback_health(required_capabilities=(BookmakerCapability.BALANCE_READ,), evaluated_at='2026-09-21T18:00:05+00:00', freshness_limit_seconds=30, snapshot=snapshot, successful_scopes=(partial,))
     assert health.state is ProviderReadbackHealthState.FRESH_PARTIAL
     assert not health.can_authorize_current_state
 

@@ -8,6 +8,7 @@ manual reviewer-identity/trust policy instead of trusting caller booleans or ref
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -34,6 +35,7 @@ EVENT_TYPE = "MANUAL_NVDA_DECISION"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_TEXT_LENGTH = 16_384
+_MAX_LIVE_RESOLUTIONS = 256
 
 _EVENT_KEYS = frozenset(
     {
@@ -140,6 +142,11 @@ class ManualNvdaAcceptanceResolution:
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("ManualNvdaAcceptanceResolution may not be subclassed")
+
+
+_ISSUED_RESOLUTIONS: OrderedDict[
+    int, tuple[ManualNvdaAcceptanceResolution, str]
+] = OrderedDict()
 
 
 def _canonical(value: object) -> str:
@@ -430,6 +437,116 @@ def _record_from_event(event: dict[str, Any]) -> ManualNvdaDecisionRecord:
     )
 
 
+def _resolution_fingerprint(resolution: ManualNvdaAcceptanceResolution) -> str:
+    if type(resolution) is not ManualNvdaAcceptanceResolution:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution must be the exact canonical type"
+        )
+    record = resolution.record
+    if type(record) is not ManualNvdaDecisionRecord:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution record type is invalid"
+        )
+    if (
+        type(resolution.accepted_manual_decision) is not bool
+        or resolution.accepted_manual_decision
+        is not (record.decision is ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA)
+    ):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution decision projection is invalid"
+        )
+    hard_false = {
+        "reviewer_identity_verified": resolution.reviewer_identity_verified,
+        "human_tested": resolution.human_tested,
+        "nvda_verified": resolution.nvda_verified,
+        "real_money_execution": resolution.real_money_execution,
+        "whole_product_complete": resolution.whole_product_complete,
+    }
+    if any(type(value) is not bool or value is not False for value in hard_false.values()):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution cannot promote protected truth"
+        )
+    if (
+        type(resolution.manual_truth_promotion_required) is not bool
+        or resolution.manual_truth_promotion_required is not True
+    ):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution must require separate truth promotion"
+        )
+    return _digest(
+        {
+            "record": {
+                "sequence": record.sequence,
+                "decision_id": record.decision_id,
+                "decision": record.decision.value,
+                "reviewer_ref": record.reviewer_ref,
+                "reviewer_attestation_sha256": record.reviewer_attestation_sha256,
+                "reviewed_at": record.reviewed_at,
+                "protocol_version": record.protocol_version,
+                "transcript_sha256": record.transcript_sha256,
+                "artifact_sha256": record.artifact_sha256,
+                "source_sha": record.source_sha,
+                "structural_status": record.structural_status,
+                "structural_human_tester_attestation_sha256": (
+                    record.structural_human_tester_attestation_sha256
+                ),
+                "windows_version": record.windows_version,
+                "nvda_version": record.nvda_version,
+                "event_sha256": record.event_sha256,
+            },
+            "accepted_manual_decision": resolution.accepted_manual_decision,
+            **hard_false,
+            "manual_truth_promotion_required": (
+                resolution.manual_truth_promotion_required
+            ),
+        }
+    )
+
+
+def verify_manual_nvda_acceptance_resolution(
+    resolution: object,
+    *,
+    expected_artifact_sha256: str,
+    expected_source_sha: str,
+    expected_transcript_sha256: str,
+) -> ManualNvdaAcceptanceResolution:
+    """Verify one live resolver-issued projection for an exact candidate."""
+
+    artifact = _require_sha256(
+        "expected_artifact_sha256", expected_artifact_sha256
+    )
+    source_sha = _require_git_commit_sha(
+        "expected_source_sha", expected_source_sha
+    )
+    transcript_sha = _require_sha256(
+        "expected_transcript_sha256", expected_transcript_sha256
+    )
+    if type(resolution) is not ManualNvdaAcceptanceResolution:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution must be the exact canonical type"
+        )
+    issued = _ISSUED_RESOLUTIONS.get(id(resolution))
+    if issued is None or issued[0] is not resolution:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution is not a live resolver-issued authority"
+        )
+    fingerprint = _resolution_fingerprint(resolution)
+    if fingerprint != issued[1]:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution changed after issuance"
+        )
+    record = resolution.record
+    if (
+        record.artifact_sha256 != artifact
+        or record.source_sha != source_sha
+        or record.transcript_sha256 != transcript_sha
+    ):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution does not match the expected candidate"
+        )
+    return resolution
+
+
 class ManualNvdaAcceptanceLedger:
     """Append-only exact-candidate manual review ledger."""
 
@@ -689,6 +806,10 @@ class ManualNvdaAcceptanceLedger:
         object.__setattr__(resolution, "manual_truth_promotion_required", True)
         object.__setattr__(resolution, "real_money_execution", False)
         object.__setattr__(resolution, "whole_product_complete", False)
+        fingerprint = _resolution_fingerprint(resolution)
+        while len(_ISSUED_RESOLUTIONS) >= _MAX_LIVE_RESOLUTIONS:
+            _ISSUED_RESOLUTIONS.popitem(last=False)
+        _ISSUED_RESOLUTIONS[id(resolution)] = (resolution, fingerprint)
         return resolution
 
 
@@ -704,4 +825,5 @@ __all__ = [
     "NvdaManualAcceptanceStateError",
     "PROTOCOL_VERSION",
     "SCHEMA_VERSION",
+    "verify_manual_nvda_acceptance_resolution",
 ]

@@ -350,6 +350,7 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
                 ) from exc
             raise
 
+
     def bounded_runtime_batch(
         self: Any,
         *args: Any,

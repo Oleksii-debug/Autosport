@@ -573,11 +573,12 @@ class HeadlessCollectorService:
                 "run explicit pin-aware compaction, then retry"
             ) from exc
 
+
     def _append_admitted_deltas(
         self,
         deltas: tuple[CollectorDelta, ...],
     ) -> tuple[bool, ...]:
-        """Commit one already-bounded provider batch as one durable transaction."""
+        """Commit one bounded provider batch without weakening storage budgets."""
 
         if not isinstance(deltas, tuple):
             raise TypeError("deltas must be a tuple")
@@ -602,6 +603,17 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=delta.stream_epoch
             )
+
+        native_max_bytes = self.delta_store.configured_max_bytes
+        if (
+            native_max_bytes is None
+            or native_max_bytes > self.config.max_store_bytes
+        ):
+            changed_results: list[bool] = []
+            for delta in deltas:
+                changed_results.append(self._append_admitted_delta(delta))
+                self._check_storage_budget()
+            return tuple(changed_results)
 
         activated_at = self.clock()
         _CollectorServiceState._instant(activated_at, "activated_at")

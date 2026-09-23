@@ -79,7 +79,7 @@ class _Source:
                 CatalogEvent(
                     source_id=self.source_id,
                     sport="table_tennis",
-                    event_id="source-x:event-1",
+                    event_id="event-1",
                     phase=EventPhase.PRE_MATCH,
                     available_at=_INSTANT,
                 ),
@@ -235,11 +235,76 @@ def test_runtime_batch_storage_full_is_fail_closed_and_recoverable(
     assert reopened.get(oversized.delta_id) is None
 
 
+@pytest.mark.parametrize("native_max_bytes", [None, 2 * 1024 * 1024 * 1024])
+def test_service_uses_per_delta_fence_when_native_budget_is_not_strict_enough(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native_max_bytes: int | None,
+) -> None:
+    store = CollectorDeltaStore(
+        tmp_path / "collector.sqlite",
+        max_bytes=native_max_bytes,
+    )
+    source = _Source((_delta(1), _delta(2)))
+    service = HeadlessCollectorService(
+        delta_store=store,
+        lifecycle=ContinuousEventLifecycle(tmp_path / "catalog.json"),
+        source=source,
+        state_path=tmp_path / "service-state.json",
+        run_id="service-budget-fence-test",
+        config=CollectorServiceConfig(
+            max_items=10,
+            poll_interval_seconds=1.0,
+            max_store_bytes=1024 * 1024 * 1024,
+        ),
+        clock=lambda: _INSTANT,
+        sleep=lambda _seconds: None,
+    )
+
+    atomic_calls = 0
+    single_calls: list[str] = []
+    original_single = store._append_with_runtime_stream_epoch
+
+    def reject_atomic(*args: object, **kwargs: object) -> tuple[bool, ...]:
+        nonlocal atomic_calls
+        atomic_calls += 1
+        raise AssertionError("unsafe atomic batch path crossed service budget fence")
+
+    def tracked_single(
+        delta: CollectorDelta,
+        *,
+        activated_at: str,
+    ) -> bool:
+        single_calls.append(delta.delta_id)
+        return original_single(delta, activated_at=activated_at)
+
+    monkeypatch.setattr(
+        store,
+        "_append_batch_with_runtime_stream_epoch",
+        reject_atomic,
+    )
+    monkeypatch.setattr(
+        store,
+        "_append_with_runtime_stream_epoch",
+        tracked_single,
+    )
+
+    result = service.run_cycle()
+
+    assert atomic_calls == 0
+    assert single_calls == ["delta-1", "delta-2"]
+    assert result.committed_delta_ids == ("delta-1", "delta-2")
+    assert result.duplicate_delta_ids == ()
+
+
 def test_service_submits_provider_tuple_through_one_atomic_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = CollectorDeltaStore(tmp_path / "collector.sqlite")
+    store = CollectorDeltaStore(
+        tmp_path / "collector.sqlite",
+        max_bytes=1024 * 1024 * 1024,
+    )
     source = _Source((_delta(1), _delta(2)))
     service = HeadlessCollectorService(
         delta_store=store,

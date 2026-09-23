@@ -702,6 +702,7 @@ class LocalComputeAllocationBasisAuthorityStore:
         records: list[LocalComputeAllocationBasisRecord] = []
         ids: set[str] = set()
         digests: set[str] = set()
+        previous_available_at: datetime | None = None
         for value in values:
             record = LocalComputeAllocationBasisRecord.from_dict(value)
             if (
@@ -711,6 +712,15 @@ class LocalComputeAllocationBasisAuthorityStore:
                 raise LocalComputeAllocationBasisError(
                     "duplicate allocation basis identity"
                 )
+            available_at = _instant(record.available_at, "available_at")
+            if (
+                previous_available_at is not None
+                and available_at < previous_available_at
+            ):
+                raise LocalComputeAllocationBasisError(
+                    "allocation basis availability history regressed"
+                )
+            previous_available_at = available_at
             ids.add(record.basis_id)
             digests.add(record.basis_sha256)
             records.append(record)
@@ -814,10 +824,19 @@ class LocalComputeAllocationBasisAuthorityStore:
                 )
 
             available_at = _time(_authority_now(), "available_at")
+            available_instant = _instant(available_at, "available_at")
+            if (
+                self._records
+                and available_instant
+                < _instant(self._records[-1].available_at, "available_at")
+            ):
+                raise LocalComputeAllocationBasisError(
+                    "product clock regressed before allocation basis publication"
+                )
             if _instant(
                 review.measurement_period_end,
                 "measurement_period_end",
-            ) > _instant(available_at, "available_at"):
+            ) > available_instant:
                 raise LocalComputeAllocationBasisError(
                     "measurement period has not completed at owner confirmation"
                 )

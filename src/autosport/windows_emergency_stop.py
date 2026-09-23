@@ -98,12 +98,11 @@ class WindowsEmergencyStopBridge:
         )
 
     @staticmethod
-    def _safe_error(exc: Exception) -> str:
-        try:
-            detail = str(exc)
-        except Exception:
-            detail = "message unavailable"
-        return f"{type(exc).__name__}: {detail}"
+    def _safe_error(_exc: Exception) -> str:
+        # Emergency STOP failure detail is projected into operator status/log/UIA
+        # surfaces. Never stringify an arbitrary exception here: provider, path,
+        # transport, or library diagnostics may contain credentials or secrets.
+        return "EMERGENCY_STOP_INTERNAL_ERROR"
 
     def _confirmed_stopped(
         self,

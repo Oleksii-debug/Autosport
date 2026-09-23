@@ -10,6 +10,7 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.product_decision_activation as activation_module
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.paper_execution_reality import (
@@ -477,6 +478,55 @@ class ProductDecisionActivationTests(unittest.TestCase):
         # The exact canonical base-class config remains accepted.
         binding = self._initialize()
         self.assertEqual(binding.execution_model_fingerprint, canonical.fingerprint)
+
+    def test_execution_config_module_class_rebind_cannot_replace_authority(self) -> None:
+        canonical_class = PaperExecutionModelConfig
+        canonical = self.execution
+
+        class ReboundExecutionConfig:
+            fingerprint = canonical_class.fingerprint
+
+            def __init__(self) -> None:
+                self.model_id = canonical.model_id
+                self.model_version = canonical.model_version
+                self.evidence_grade = canonical.evidence_grade
+                self.evidence_source = canonical.evidence_source
+                self.seed = canonical.seed
+                self.max_quote_age_ms = canonical.max_quote_age_ms
+                self.min_delay_ms = canonical.min_delay_ms
+                self.max_delay_ms = canonical.max_delay_ms
+                self.rejected_bps = canonical.rejected_bps
+                self.partial_bps = canonical.partial_bps
+                self.unknown_bps = canonical.unknown_bps
+                self.partial_fill_bps = canonical.partial_fill_bps
+                self.max_slippage_bps = canonical.max_slippage_bps
+
+        forged = ReboundExecutionConfig()
+        self.assertEqual(forged.fingerprint, canonical.fingerprint)
+
+        with mock.patch.object(
+            activation_module,
+            "PaperExecutionModelConfig",
+            ReboundExecutionConfig,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "exact canonical PaperExecutionModelConfig",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=self.goal,
+                    risk_policy=self.risk,
+                    execution_config=forged,  # type: ignore[arg-type]
+                )
+
+        self.assertFalse(self.store.path.exists())
+        binding = self._initialize()
+        self.assertEqual(
+            binding.execution_model_fingerprint,
+            canonical.fingerprint,
+        )
 
     def test_execution_config_base_fingerprint_descriptor_rebind_fails_closed(self) -> None:
         canonical = self.execution

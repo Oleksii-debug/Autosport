@@ -231,7 +231,7 @@ def test_same_provider_bytes_do_not_collapse_distinct_acquisitions() -> None:
     assert first.evidence_sha256 != second.evidence_sha256
 
 
-def test_request_fingerprint_and_record_do_not_persist_credentials() -> None:
+def test_request_fingerprint_binds_context_without_persisting_credentials() -> None:
     payload = _response()
     first = BetdaqOddsLadderAcquirer(
         credentials=_credentials(
@@ -254,7 +254,7 @@ def test_request_fingerprint_and_record_do_not_persist_credentials() -> None:
         acquisition_id_factory=lambda: "6" * 32,
     ).acquire()
 
-    assert first.request_fingerprint_sha256 == second.request_fingerprint_sha256
+    assert first.request_fingerprint_sha256 != second.request_fingerprint_sha256
     serialized = json.dumps(first.to_safe_record(), sort_keys=True)
     for secret in ("user-one", "very-secret-one", "app-secret-one"):
         assert secret not in serialized
@@ -300,6 +300,16 @@ def test_provider_message_time_is_preserved_but_never_relabelled_freshness() -> 
     assert observation.provider_freshness_proven is False
 
 
+def test_monkeypatched_request_constructor_breaks_origin_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = account_readonly.UrllibBetdaqSoapTransport()
+    assert ladder_acq._canonical_transport(transport) is True
+
+    monkeypatch.setattr(account_readonly, "Request", lambda *args, **kwargs: object())
+    assert ladder_acq._canonical_transport(transport) is False
+
+
 def test_monkeypatched_urlopen_cannot_mint_provider_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -333,6 +343,7 @@ def test_narrow_use_evidence_never_claims_provider_freshness_or_write(
     assert use.receipt_clock_verified is True
     assert use.provider_freshness_proven is False
     assert use.write_permission_proven is False
+
 
 def test_off_ladder_price_is_rejected_without_rounding(
     monkeypatch: pytest.MonkeyPatch,

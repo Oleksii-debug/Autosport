@@ -133,6 +133,29 @@ def _trusted_json_parser():
     )
 
 
+def _trusted_client_record(client: BetfairReadOnlyClient):
+    trusted_record = _find_closure_value(
+        BetfairReadOnlyClient._rpc,
+        lambda value: (
+            callable(value)
+            and getattr(value, "__name__", "") == "trusted_record"
+        ),
+    )
+    record = trusted_record(client)
+    assert record is not None
+    return record
+
+
+def _canonical_network_post():
+    return _find_closure_value(
+        BetfairReadOnlyClient._rpc,
+        lambda value: (
+            callable(value)
+            and getattr(value, "__name__", "") == "canonical_network_post"
+        ),
+    )
+
+
 def _current_capture_witnesses(capture):
     current_order = capture.current_pages[0].orders[0]
     current_result = {
@@ -649,3 +672,69 @@ def test_authoritative_read_rejects_in_place_json_dumps_code_mutation_before_net
             )
     finally:
         json.dumps.__code__ = original_code
+
+def test_canonical_network_post_uses_explicit_captured_size_bound() -> None:
+    post = _canonical_network_post()
+
+    assert post(
+        3,
+        "data:text/plain,abc",
+        headers={},
+        body=b"",
+        timeout_seconds=1.0,
+    ) == b"abc"
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="Betfair response exceeded the size limit",
+    ):
+        post(
+            3,
+            "data:text/plain,abcd",
+            headers={},
+            body=b"",
+            timeout_seconds=1.0,
+        )
+
+
+def test_post_init_transport_limit_mutation_cannot_enter_authoritative_size_path() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+    record = _trusted_client_record(client)
+    transport = record[1]
+    captured_limit = record[9]
+
+    assert type(captured_limit) is int
+    assert captured_limit > 0
+
+    class EvilInt(int):
+        dispatched = False
+
+        def _dispatch(self, *_args):
+            type(self).dispatched = True
+            raise AssertionError("mutable transport response limit must not execute")
+
+        __add__ = _dispatch
+        __radd__ = _dispatch
+        __lt__ = _dispatch
+        __le__ = _dispatch
+        __gt__ = _dispatch
+        __ge__ = _dispatch
+
+    original_limit = transport._max_response_bytes
+    transport._max_response_bytes = EvilInt(captured_limit * 2)
+    try:
+        post = _canonical_network_post()
+        assert post(
+            captured_limit,
+            "data:text/plain,ok",
+            headers={},
+            body=b"",
+            timeout_seconds=1.0,
+        ) == b"ok"
+        assert EvilInt.dispatched is False
+        assert _trusted_client_record(client)[9] == captured_limit
+    finally:
+        transport._max_response_bytes = original_limit
+

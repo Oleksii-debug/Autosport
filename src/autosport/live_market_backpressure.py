@@ -30,7 +30,9 @@ class MarketStreamKey:
             ("market_id", self.market_id),
         ):
             if not isinstance(value, str) or not value.strip() or value != value.strip():
-                raise LiveMarketBackpressureError(f"{label} must be canonical non-blank text")
+                raise LiveMarketBackpressureError(
+                    f"{label} must be canonical non-blank text"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +64,9 @@ class CompleteMarketSnapshot:
         if not isinstance(self.market_state, str) or not self.market_state.strip():
             raise LiveMarketBackpressureError("market_state must be non-blank")
         if self.market_state != self.market_state.strip().upper():
-            raise LiveMarketBackpressureError("market_state must be canonical uppercase text")
+            raise LiveMarketBackpressureError(
+                "market_state must be canonical uppercase text"
+            )
 
     @property
     def identity_sha256(self) -> str:
@@ -104,7 +108,9 @@ class CoalescedMarketView:
         """Use source availability time only; queue/consumer timing grants no freshness."""
 
         _utc(now, "now")
-        if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, (int, float)):
+        if isinstance(max_age_seconds, bool) or not isinstance(
+            max_age_seconds, (int, float)
+        ):
             raise LiveMarketBackpressureError("max_age_seconds must be numeric")
         if max_age_seconds < 0:
             raise LiveMarketBackpressureError("max_age_seconds must be non-negative")
@@ -132,6 +138,7 @@ class _KeyState:
     last_payload_sha256: str
     last_market_state: str
     gap: bool = False
+    local_loss: bool = False
     coalesced_since_drain: int = 0
     safety_since_drain: int = 0
 
@@ -143,7 +150,9 @@ class LiveMarketBackpressure:
     latest-win. Deltas, generation ambiguity, or conflicting equal-sequence
     snapshots set a sticky gap that only an explicit complete recovery snapshot
     may clear. Capacity pressure is reported as a local work drop and never as a
-    fabricated provider continuity failure.
+    fabricated provider continuity failure. A capacity drop for an already-known
+    key is nevertheless sticky local causal loss and requires explicit recovery
+    before the current view can be trusted again.
     """
 
     def __init__(self, *, capacity: int) -> None:
@@ -217,7 +226,12 @@ class LiveMarketBackpressure:
                 self._recovery_events += 1
             self._pending[snapshot.key] = snapshot
             return SubmissionResult(
-                True, False, False, False, False, "recovered" if recovery else "accepted"
+                True,
+                False,
+                False,
+                False,
+                False,
+                "recovered" if recovery else "accepted",
             )
 
         if snapshot.generation != state.generation:
@@ -233,12 +247,13 @@ class LiveMarketBackpressure:
                 )
             if snapshot.key not in self._pending and len(self._pending) >= self._capacity:
                 self._local_capacity_drops += 1
+                state.local_loss = True
                 return SubmissionResult(
                     accepted=False,
                     coalesced=False,
                     local_capacity_drop=True,
                     gap=state.gap,
-                    resnapshot_required=state.gap,
+                    resnapshot_required=True,
                     reason="local work capacity exhausted",
                 )
             self._record_safety_transition(state, snapshot.market_state)
@@ -247,10 +262,13 @@ class LiveMarketBackpressure:
             state.last_payload_sha256 = snapshot.payload_sha256
             state.last_market_state = snapshot.market_state
             state.gap = False
+            state.local_loss = False
             state.coalesced_since_drain = 0
             self._recovery_events += 1
             self._pending[snapshot.key] = snapshot
-            return SubmissionResult(True, False, False, False, False, "generation recovered")
+            return SubmissionResult(
+                True, False, False, False, False, "generation recovered"
+            )
 
         if snapshot.sequence < state.last_sequence:
             self._out_of_order_rejections += 1
@@ -259,19 +277,20 @@ class LiveMarketBackpressure:
                 coalesced=False,
                 local_capacity_drop=False,
                 gap=state.gap,
-                resnapshot_required=state.gap,
+                resnapshot_required=state.gap or state.local_loss,
                 reason="out-of-order snapshot rejected",
             )
 
         if snapshot.sequence == state.last_sequence:
-            if state.gap and recovery:
+            if (state.gap or state.local_loss) and recovery:
                 if snapshot.key not in self._pending and len(self._pending) >= self._capacity:
                     self._local_capacity_drops += 1
+                    state.local_loss = True
                     return SubmissionResult(
                         accepted=False,
                         coalesced=False,
                         local_capacity_drop=True,
-                        gap=True,
+                        gap=state.gap,
                         resnapshot_required=True,
                         reason="local work capacity exhausted",
                     )
@@ -279,10 +298,20 @@ class LiveMarketBackpressure:
                 state.last_payload_sha256 = snapshot.payload_sha256
                 state.last_market_state = snapshot.market_state
                 state.gap = False
+                state.local_loss = False
                 state.coalesced_since_drain = 0
                 self._recovery_events += 1
                 self._pending[snapshot.key] = snapshot
                 return SubmissionResult(True, False, False, False, False, "recovered")
+            if state.local_loss:
+                return SubmissionResult(
+                    accepted=False,
+                    coalesced=False,
+                    local_capacity_drop=False,
+                    gap=state.gap,
+                    resnapshot_required=True,
+                    reason="local capacity loss is sticky until explicit complete recovery snapshot",
+                )
             if snapshot.payload_sha256 != state.last_payload_sha256:
                 self._conflicting_sequence_events += 1
                 self._mark_gap(state)
@@ -303,6 +332,16 @@ class LiveMarketBackpressure:
                 reason="duplicate snapshot",
             )
 
+        if state.local_loss and not recovery:
+            return SubmissionResult(
+                accepted=False,
+                coalesced=False,
+                local_capacity_drop=False,
+                gap=state.gap,
+                resnapshot_required=True,
+                reason="local capacity loss is sticky until explicit complete recovery snapshot",
+            )
+
         if state.gap and not recovery:
             state.last_sequence = snapshot.sequence
             state.last_payload_sha256 = snapshot.payload_sha256
@@ -320,12 +359,13 @@ class LiveMarketBackpressure:
         coalesced = snapshot.key in self._pending
         if not coalesced and len(self._pending) >= self._capacity:
             self._local_capacity_drops += 1
+            state.local_loss = True
             return SubmissionResult(
                 accepted=False,
                 coalesced=False,
                 local_capacity_drop=True,
                 gap=state.gap,
-                resnapshot_required=state.gap,
+                resnapshot_required=True,
                 reason="local work capacity exhausted",
             )
 
@@ -335,6 +375,7 @@ class LiveMarketBackpressure:
         state.last_market_state = snapshot.market_state
         if recovery:
             state.gap = False
+            state.local_loss = False
             self._recovery_events += 1
 
         if coalesced:
@@ -346,7 +387,7 @@ class LiveMarketBackpressure:
             coalesced=coalesced,
             local_capacity_drop=False,
             gap=state.gap,
-            resnapshot_required=state.gap,
+            resnapshot_required=state.gap or state.local_loss,
             reason="recovered" if recovery else "accepted",
         )
 
@@ -402,11 +443,12 @@ class LiveMarketBackpressure:
         for key in sorted(self._pending):
             snapshot = self._pending[key]
             state = self._state[key]
+            resnapshot_required = state.gap or state.local_loss
             views.append(
                 CoalescedMarketView(
                     snapshot=snapshot,
-                    trusted_current_view=not state.gap,
-                    resnapshot_required=state.gap,
+                    trusted_current_view=not resnapshot_required,
+                    resnapshot_required=resnapshot_required,
                     causal_replay_safe=False,
                     coalesced_snapshot_count=state.coalesced_since_drain,
                     safety_transition_count=state.safety_since_drain,
@@ -421,7 +463,7 @@ class LiveMarketBackpressure:
         if type(key) is not MarketStreamKey:
             raise TypeError("key must be exact MarketStreamKey")
         state = self._state.get(key)
-        return state is not None and state.gap
+        return state is not None and (state.gap or state.local_loss)
 
     def _reserve_new_key(self, key: MarketStreamKey) -> bool:
         if key in self._pending or len(self._pending) < self._capacity:
@@ -448,5 +490,9 @@ def _sha256(value: str, label: str) -> None:
 
 
 def _utc(value: datetime, label: str) -> None:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() != timezone.utc.utcoffset(value)
+    ):
         raise LiveMarketBackpressureError(f"{label} must be timezone-aware UTC")

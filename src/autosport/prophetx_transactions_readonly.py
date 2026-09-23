@@ -182,6 +182,16 @@ class ProphetXWalletTransaction:
     created_at: str
     currency: str = PROVIDER_CURRENCY
 
+    @property
+    def provider_transaction_id(self) -> str | None:
+        """Provider idempotency identity when ProphetX actually supplies one."""
+        return self.details if self.details else None
+
+    @property
+    def evidence_sha256(self) -> str:
+        """Stable local evidence digest; never a fabricated provider transaction id."""
+        return _transaction_evidence_sha256(self)
+
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class ProphetXTransactionPage:
@@ -287,17 +297,33 @@ class ProphetXTransactionsClient:
         if not isinstance(current, ProphetXTransactionQuery):
             raise TypeError("query must be ProphetXTransactionQuery")
         pages: list[ProphetXTransactionPage] = []
-        seen = {current.next_cursor} if current.next_cursor else set()
+        seen_cursors = {current.next_cursor} if current.next_cursor else set()
+        seen_provider_transactions: dict[str, str] = {}
         for _ in range(max_pages):
             page = self.read_page(current)
+            for transaction in page.transactions:
+                _register_provider_transaction(transaction, seen_provider_transactions)
             pages.append(page)
             if page.next_cursor is None:
                 return tuple(pages)
-            if page.next_cursor in seen:
+            if page.next_cursor in seen_cursors:
                 raise ProphetXReadOnlyError("ProphetX pagination repeated a cursor")
-            seen.add(page.next_cursor)
+            seen_cursors.add(page.next_cursor)
             current = current.with_cursor(page.next_cursor)
         raise ProphetXReadOnlyError("ProphetX pagination exceeded configured page bound")
+
+    def read_history(
+        self, query: ProphetXTransactionQuery | None = None, *, max_pages: int = _MAX_PAGES
+    ) -> tuple[ProphetXWalletTransaction, ...]:
+        """Read one complete first-page cursor chain and collapse proven provider replays."""
+        current = query or ProphetXTransactionQuery()
+        if not isinstance(current, ProphetXTransactionQuery):
+            raise TypeError("query must be ProphetXTransactionQuery")
+        if current.next_cursor is not None:
+            raise ProphetXReadOnlyError(
+                "complete ProphetX transaction history must start without next_cursor"
+            )
+        return _canonical_transactions(self.read_all(current, max_pages=max_pages))
 
     def provider_origin_proven(self, page: ProphetXTransactionPage) -> bool:
         """Compatibility convenience; authority lives in the exact module verifier."""
@@ -401,6 +427,83 @@ def prophetx_transaction_provider_origin_proven(
         return False
 
 
+def _transaction_payload(
+    transaction: ProphetXWalletTransaction, *, include_description: bool
+) -> dict[str, str | None]:
+    payload: dict[str, str | None] = {
+        "amount": str(transaction.amount),
+        "balance": str(transaction.balance),
+        "balance_before": str(transaction.balance_before),
+        "change": str(transaction.change),
+        "created_at": transaction.created_at,
+        "currency": transaction.currency,
+        "details": transaction.details,
+        "event_id": transaction.event_id,
+        "market_id": transaction.market_id,
+        "status": transaction.status,
+        "trade_id": transaction.trade_id,
+        "transaction_sub_type": transaction.transaction_sub_type,
+        "transaction_type": transaction.transaction_type,
+        "user_id": transaction.user_id,
+    }
+    if include_description:
+        payload["description"] = transaction.description
+    return payload
+
+
+def _transaction_digest(
+    transaction: ProphetXWalletTransaction, *, include_description: bool
+) -> str:
+    encoded = json.dumps(
+        _transaction_payload(transaction, include_description=include_description),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _transaction_evidence_sha256(transaction: ProphetXWalletTransaction) -> str:
+    return _transaction_digest(transaction, include_description=True)
+
+
+def _transaction_economics_sha256(transaction: ProphetXWalletTransaction) -> str:
+    # Human-readable description is not economic identity. Every other provider field
+    # changes the transaction's lifecycle, money, causal time, or provider linkage.
+    return _transaction_digest(transaction, include_description=False)
+
+
+def _register_provider_transaction(
+    transaction: ProphetXWalletTransaction, seen: dict[str, str]
+) -> bool:
+    """Register one provider idempotency identity; return True on first observation."""
+    provider_id = transaction.provider_transaction_id
+    if provider_id is None:
+        return True
+    economics_sha256 = _transaction_economics_sha256(transaction)
+    previous = seen.get(provider_id)
+    if previous is None:
+        seen[provider_id] = economics_sha256
+        return True
+    if previous != economics_sha256:
+        raise ProphetXReadOnlyError(
+            "ProphetX transaction id replay has conflicting lifecycle/economics"
+        )
+    return False
+
+
+def _canonical_transactions(
+    pages: tuple[ProphetXTransactionPage, ...],
+) -> tuple[ProphetXWalletTransaction, ...]:
+    seen: dict[str, str] = {}
+    canonical: list[ProphetXWalletTransaction] = []
+    for page in pages:
+        for transaction in page.transactions:
+            if _register_provider_transaction(transaction, seen):
+                canonical.append(transaction)
+    return tuple(canonical)
+
+
 def _fingerprint(page: ProphetXTransactionPage) -> str:
     payload = {
         "next_cursor": page.next_cursor,
@@ -408,23 +511,7 @@ def _fingerprint(page: ProphetXTransactionPage) -> str:
         "query_url": page.query.request_url,
         "source_payload_sha256": page.source_payload_sha256,
         "transactions": [
-            {
-                "amount": str(tx.amount),
-                "balance": str(tx.balance),
-                "balance_before": str(tx.balance_before),
-                "change": str(tx.change),
-                "created_at": tx.created_at,
-                "currency": tx.currency,
-                "description": tx.description,
-                "details": tx.details,
-                "event_id": tx.event_id,
-                "market_id": tx.market_id,
-                "status": tx.status,
-                "trade_id": tx.trade_id,
-                "transaction_sub_type": tx.transaction_sub_type,
-                "transaction_type": tx.transaction_type,
-                "user_id": tx.user_id,
-            }
+            _transaction_payload(tx, include_description=True)
             for tx in page.transactions
         ],
     }

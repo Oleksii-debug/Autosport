@@ -374,6 +374,32 @@ def test_canonical_unknown_evidence_keeps_full_reserve(tmp_path):
     assert batch.all_provider_risk_exact is False
 
 
+def test_batch_as_of_cannot_precede_provider_readback(tmp_path):
+    ledger, bound, provider_ref = _context(tmp_path, "ACCEPTED")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(provider_ref, cleared=_cleared(provider_ref)),
+    )
+    member = _member(
+        instruction_id="i-1",
+        action_id="action-1",
+        attempt_id="attempt-1",
+        reserve=_reserve(BetfairOrderSide.BACK, "2", "5"),
+        evidence=evidence,
+    )
+
+    with pytest.raises(
+        BetfairBatchCapitalReservationError,
+        match="as_of cannot precede provider readback",
+    ):
+        BetfairBatchCapitalReservation(
+            "batch-1",
+            (member,),
+            datetime(2026, 9, 21, 23, 59, 59, tzinfo=timezone.utc),
+        )
+
+
 def test_direct_caller_constructed_live_risk_cannot_reduce_reserve():
     forged = BetfairLiveCapitalAtRiskEvidence(
         truth=BetfairLiveCapitalAtRiskTruth.EXACT,

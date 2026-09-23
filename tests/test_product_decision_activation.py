@@ -378,6 +378,50 @@ class ProductDecisionActivationTests(unittest.TestCase):
         ):
             self._verify(execution_config=changed)
 
+    def test_execution_config_subclass_cannot_forge_canonical_fingerprint(self) -> None:
+        canonical = self.execution
+
+        class ForgedExecutionConfig(PaperExecutionModelConfig):
+            @property
+            def fingerprint(self) -> str:
+                return canonical.fingerprint
+
+        forged = ForgedExecutionConfig(
+            model_id=canonical.model_id,
+            model_version=canonical.model_version,
+            evidence_grade=canonical.evidence_grade,
+            evidence_source=canonical.evidence_source,
+            seed="different-execution-seed",
+            max_quote_age_ms=canonical.max_quote_age_ms,
+            min_delay_ms=canonical.min_delay_ms,
+            max_delay_ms=canonical.max_delay_ms,
+            rejected_bps=canonical.rejected_bps,
+            partial_bps=canonical.partial_bps,
+            unknown_bps=canonical.unknown_bps,
+            partial_fill_bps=canonical.partial_fill_bps,
+            max_slippage_bps=1,
+        )
+
+        self.assertNotEqual(forged.seed, canonical.seed)
+        self.assertNotEqual(forged.max_slippage_bps, canonical.max_slippage_bps)
+        self.assertEqual(forged.fingerprint, canonical.fingerprint)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "exact canonical PaperExecutionModelConfig",
+        ):
+            self.store.initialize_owner(
+                scientific_registry=self.registry,
+                strategy_version_id=self.STRATEGY_ID,
+                economic_goal=self.goal,
+                risk_policy=self.risk,
+                execution_config=forged,
+            )
+
+        # The exact canonical base-class config remains accepted.
+        binding = self._initialize()
+        self.assertEqual(binding.execution_model_fingerprint, canonical.fingerprint)
+
     def test_provider_manifest_change_cannot_relabel_activation(self) -> None:
         self._initialize()
         self._write_composition(source_id="provider-b", bankroll="1000")

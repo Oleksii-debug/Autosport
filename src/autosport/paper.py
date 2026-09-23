@@ -330,6 +330,7 @@ class PaperBook:
         # decoded from arbitrary bytes are read-only until a path-bound external
         # snapshot witness is verified by load().
         self._snapshot_authority_verified = True
+        self._snapshot_schema_version: int | None = _PAPER_SNAPSHOT_SCHEMA_VERSION
 
     def _require_snapshot_authority_for_economic_mutation(self) -> None:
         if not self._snapshot_authority_verified:
@@ -1282,6 +1283,7 @@ class PaperBook:
             "initial_bankroll",
         )
         book = cls(initial_bankroll)
+        book._snapshot_schema_version = None if is_legacy else schema_version
         book.balance = cls._parse_snapshot_decimal(
             cls._required_snapshot_field(raw, "balance", "root"),
             "balance",
@@ -1423,6 +1425,19 @@ class PaperBook:
         payload = source.read_bytes()
         book = cls._decode_snapshot_bytes(payload)
         if book.tickets:
-            _verify_snapshot_witness(source, payload)
+            try:
+                _verify_snapshot_witness(source, payload)
+            except ValueError as exc:
+                # Pre-witness legacy schemas remain available for forensic/read-only
+                # inspection, but cannot be promoted to trusted economics by save(),
+                # open_ticket(), or settle(). Current schema-8 snapshots must have
+                # the independent authority because otherwise caller-edited current
+                # bytes could be silently re-baselined.
+                if (
+                    book._snapshot_schema_version is None
+                    or book._snapshot_schema_version < _PAPER_SNAPSHOT_SCHEMA_VERSION
+                ) and "missing independent durable opening witness" in str(exc):
+                    return book
+                raise
         book._snapshot_authority_verified = True
         return book

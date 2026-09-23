@@ -49,6 +49,15 @@ AUTHORITY_DOMAIN: Final = "autosport.model-compute-intent-route-authority.v1"
 AUTHORITY_KEY: Final = "model-compute-intent-route-issuance"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 
+# The origin boundary must remain anchored to the import-time product classes.
+# Module globals are writable in Python; using them for "exact canonical" checks
+# would let a caller temporarily redefine which classes this authority trusts.
+_CANONICAL_OPPORTUNITY_INTENT_CLASS: Final = OpportunityIntent
+_CANONICAL_ROUTER_STORE_CLASS: Final = ModelComputeRouterStore
+_CANONICAL_ROUTE_REQUEST_CLASS: Final = ComputeRouteRequest
+_CANONICAL_ROUTE_REQUEST_FROM_PAYLOAD: Final = ComputeRouteRequest.from_payload
+_CANONICAL_ROUTER_GET_REQUEST: Final = ModelComputeRouterStore.get_request
+
 
 class ModelComputeIntentRouteAuthorityError(ValueError):
     """The intent-to-request authority is missing, ambiguous, or malformed."""
@@ -170,7 +179,7 @@ def _authority_now() -> str:
 
 
 def _intent_identity(intent: OpportunityIntent) -> dict[str, str]:
-    if type(intent) is not OpportunityIntent:
+    if type(intent) is not _CANONICAL_OPPORTUNITY_INTENT_CLASS:
         raise ModelComputeIntentRouteAuthorityError(
             "intent must be the exact canonical OpportunityIntent type"
         )
@@ -244,7 +253,7 @@ class ModelComputeIntentRouteRecord:
                 "request must be a canonical object"
             )
         try:
-            request = ComputeRouteRequest.from_payload(self.request)
+            request = _CANONICAL_ROUTE_REQUEST_FROM_PAYLOAD(self.request)
         except Exception as exc:
             raise ModelComputeIntentRouteAuthorityError(
                 "persisted router request payload is invalid"
@@ -455,7 +464,7 @@ class ModelComputeIntentRouteAuthorityStore:
         self,
         router_store: ModelComputeRouterStore,
     ) -> str:
-        if type(router_store) is not ModelComputeRouterStore:
+        if type(router_store) is not _CANONICAL_ROUTER_STORE_CLASS:
             raise ModelComputeIntentRouteAuthorityError(
                 "router_store must be the exact canonical ModelComputeRouterStore type"
             )
@@ -586,7 +595,7 @@ class ModelComputeIntentRouteAuthorityStore:
             self._recover()
             self._records = self._load()
             existing = self._record_for_request(canonical_request_id)
-            router_request = ModelComputeRouterStore.get_request(
+            router_request = _CANONICAL_ROUTER_GET_REQUEST(
                 router_store,
                 canonical_request_id,
             )
@@ -599,7 +608,7 @@ class ModelComputeIntentRouteAuthorityStore:
                     raise ModelComputeIntentRouteAuthorityError(
                         "request_id is immutable across intent identity"
                     )
-                request = ComputeRouteRequest.from_payload(existing.request)
+                request = _CANONICAL_ROUTE_REQUEST_FROM_PAYLOAD(existing.request)
                 if not self._request_static_matches(
                     request,
                     required_capability=required_capability,
@@ -646,7 +655,7 @@ class ModelComputeIntentRouteAuthorityStore:
                 issued_at,
                 decision_timeout,
             )
-            request = ComputeRouteRequest(
+            request = _CANONICAL_ROUTE_REQUEST_CLASS(
                 request_id=canonical_request_id,
                 created_at=issued_at,
                 decision_deadline=decision_deadline,
@@ -772,7 +781,7 @@ class ModelComputeIntentRouteAuthorityStore:
                 raise ModelComputeIntentRouteAuthorityError(
                     "intent-route issuance was not causally available by cutoff"
                 )
-            router_request = ModelComputeRouterStore.get_request(
+            router_request = _CANONICAL_ROUTER_GET_REQUEST(
                 router_store,
                 canonical_request_id,
             )
@@ -780,7 +789,7 @@ class ModelComputeIntentRouteAuthorityStore:
                 raise ModelComputeIntentRouteAuthorityError(
                     "issued model-compute request is missing from canonical router"
                 )
-            if type(router_request) is not ComputeRouteRequest:
+            if type(router_request) is not _CANONICAL_ROUTE_REQUEST_CLASS:
                 raise ModelComputeIntentRouteAuthorityError(
                     "canonical router returned a non-canonical request"
                 )

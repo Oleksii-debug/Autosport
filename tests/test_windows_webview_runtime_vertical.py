@@ -140,6 +140,7 @@ def test_webview_runtime_start_stop_delegates_to_canonical_worker(
         {
             "workspace": tmp_path,
             "source_factory": "autosport.product_source:create_parlay_product_source",
+            "expected_source_id": "parlayapi:table_tennis",
             "initial_bankroll": "10000",
             "poll_seconds": 30.0,
         }

@@ -305,6 +305,9 @@ class MarketEvent:
         _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
         if self.source_ts is not None:
             _timezone_aware_iso8601_value(self.source_ts, "source_ts")
+        if type(self.metadata) is not dict:
+            raise ValueError("metadata must be a JSON object")
+        _validate_serialized_json_value(self.metadata, "metadata")
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         for field_name in (

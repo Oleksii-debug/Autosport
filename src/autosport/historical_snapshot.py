@@ -9,8 +9,9 @@ import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from .domain import MarketEvent
 from .integrity import atomic_write_json, durable_path_lock
@@ -23,6 +24,103 @@ from .providers import CanonicalNormalizer, ProviderQuote
 
 
 TERMS_REFERENCE = "https://parlay-api.com/terms"
+_TRACKED_RESPONSE_HEADERS = (
+    "x-api-version",
+    "x-api-release-date",
+    "deprecation",
+    "sunset",
+    "link",
+    "x-historical-window-hours",
+    "x-historical-window-from",
+    "x-markets-served",
+    "x-markets-unservable",
+    "x-markets-served-elsewhere",
+    "cache-control",
+)
+_MAX_PROVENANCE_HEADER_CHARS = 4096
+
+
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _historical_request_scope(
+    provider: ParlayApiTableTennisProvider,
+    *,
+    requested_at: str,
+) -> tuple[str, dict[str, object]]:
+    base_url = provider.base_url
+    if type(base_url) is not str or not base_url or base_url != base_url.strip():
+        raise ValueError("provider base_url must be a canonical non-empty URL")
+    parsed_base = urlsplit(base_url)
+    if (
+        parsed_base.scheme != "https"
+        or not parsed_base.netloc
+        or parsed_base.username is not None
+        or parsed_base.password is not None
+        or parsed_base.query
+        or parsed_base.fragment
+    ):
+        raise ValueError(
+            "historical snapshot provider base_url must be a secret-free HTTPS origin/path"
+        )
+
+    request_query = {
+        "date": requested_at,
+        "regions": ",".join(provider.regions),
+        "markets": ",".join(provider.markets),
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+    query = urlencode(request_query)
+    endpoint_path = f"/v1/historical/sports/{provider.sport_key}/odds"
+    url = f"{base_url}{endpoint_path}?{query}"
+    request_url_sha256 = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    scope: dict[str, object] = {
+        "method": "GET",
+        "origin": origin,
+        "base_url_sha256": hashlib.sha256(base_url.encode("utf-8")).hexdigest(),
+        "endpoint_path": endpoint_path,
+        "query": request_query,
+        "query_string": query,
+        "request_url_sha256": request_url_sha256,
+        "request_url_persisted": False,
+        "request_credentials_persisted": False,
+    }
+    return url, scope
+
+
+def _tracked_response_headers(headers: Mapping[str, str]) -> dict[str, str | None]:
+    observed: dict[str, str] = {}
+    for raw_name, raw_value in headers.items():
+        if type(raw_name) is not str:
+            continue
+        name = raw_name.lower()
+        if name not in _TRACKED_RESPONSE_HEADERS:
+            continue
+        if name in observed:
+            raise ProviderPayloadError(
+                f"provider returned duplicate tracked response header {name}"
+            )
+        if (
+            type(raw_value) is not str
+            or not raw_value
+            or raw_value != raw_value.strip()
+            or len(raw_value) > _MAX_PROVENANCE_HEADER_CHARS
+        ):
+            raise ProviderPayloadError(
+                f"provider tracked response header {name} is not canonical bounded text"
+            )
+        observed[name] = raw_value
+    return {name: observed.get(name) for name in _TRACKED_RESPONSE_HEADERS}
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,17 +188,14 @@ def capture_historical_snapshot(
     publication_lock_paths = _ordered_publication_lock_paths(output, evidence)
 
     requested_dt = _parse_timestamp(requested_at, field="requested_at")
-    query = urlencode(
-        {
-            "date": requested_at,
-            "regions": ",".join(provider.regions),
-            "markets": ",".join(provider.markets),
-            "oddsFormat": "decimal",
-            "dateFormat": "iso",
-        }
+    url, request_scope = _historical_request_scope(
+        provider,
+        requested_at=requested_at,
     )
-    url = f"{provider.base_url}/v1/historical/sports/{provider.sport_key}/odds?{query}"
     response = provider._request(url)  # package-internal transport preserves secret/header policy and retries
+    if type(response.status_code) is not int or response.status_code != 200:
+        raise ProviderPayloadError("historical odds acquisition requires HTTP 200")
+    response_headers = _tracked_response_headers(response.headers)
     captured_at = provider.clock()
     captured_dt = _parse_timestamp(captured_at, field="captured_at")
     if captured_dt < requested_dt:
@@ -150,8 +245,26 @@ def capture_historical_snapshot(
             events.append(event)
 
     events.sort(key=lambda item: (item.observed_ts, item.sequence, item.event_id, item.market_id, item.selection_id))
-    canonical_response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical_response = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     response_sha256 = hashlib.sha256(canonical_response.encode("utf-8")).hexdigest()
+    acquisition_provenance = {
+        "schema_version": 1,
+        "kind": "parlayapi_point_in_time_historical_acquisition",
+        "product_kind": "POINT_IN_TIME_ODDS",
+        "request": request_scope,
+        "http_status": response.status_code,
+        "response_payload_sha256": response_sha256,
+        "response_headers": response_headers,
+        "canonical_response_payload_bound": True,
+        "raw_response_bytes_bound": False,
+    }
+    acquisition_sha256 = _canonical_sha256(acquisition_provenance)
     market_types = tuple(sorted({event.market_type.value for event in events}))
     observed_fixture_ids = {event.event_id for event in events}
     observed_fixture_markets = {(event.event_id, event.market_id) for event in events}
@@ -173,6 +286,8 @@ def capture_historical_snapshot(
         "previous_snapshot_at": previous_snapshot_at,
         "next_snapshot_at": next_snapshot_at,
         "response_sha256": response_sha256,
+        "acquisition_provenance": acquisition_provenance,
+        "acquisition_sha256": acquisition_sha256,
         "quote_count": len(events),
         "has_data": bool(events),
         "market_types": list(market_types),

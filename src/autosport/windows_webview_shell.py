@@ -914,7 +914,16 @@ class AutosportWebController:
     def _action_product_runtime_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():
             return self._fail("Спочатку завершіть поточну операцію.")
-        workspace = Path(self.workspace)
+        try:
+            strategy_id, plan = self._selected_configuration()
+            workspace = Path(
+                workspace_for_strategy(self.workspace, strategy_id, plan)
+            )
+        except Exception:
+            return self._fail(
+                "Тривалий імітаційний режим не запущено: поточна "
+                "конфігурація стратегії неповна або недійсна."
+            )
         if workspace in self._recovery_required_workspaces:
             return self._fail(
                 "Тривалий імітаційний режим заблоковано: спочатку відновіть робочу область."
@@ -941,6 +950,7 @@ class AutosportWebController:
             return self._fail(_safe_exception_text(exc))
         if not started:
             return self._fail("Тривалий імітаційний режим уже запущено.")
+        self._active_workspace = workspace
         self.product_runtime_status = "Запускається канонічний тривалий імітаційний режим…"
         return self._ok(self.product_runtime_status, focus_id="product-runtime-status")
 

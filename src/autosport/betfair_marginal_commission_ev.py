@@ -6,7 +6,7 @@ accepted exposure, issue an effective commission rate, or authorize execution.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Context, Decimal, DecimalException, Inexact, InvalidOperation, Overflow, ROUND_HALF_UP, Underflow, localcontext
 import hashlib
 import json
@@ -62,10 +62,41 @@ class BetfairOutcomeCommissionDelta:
     probability: Decimal
     existing_gross_pnl: Decimal
     candidate_gross_pnl: Decimal
-    combined_gross_pnl: Decimal
-    base_after_commission_pnl: Decimal
-    combined_after_commission_pnl: Decimal
-    marginal_after_commission_pnl: Decimal
+    effective_commission_rate: Decimal = field(repr=False)
+    combined_gross_pnl: Decimal = field(init=False)
+    base_after_commission_pnl: Decimal = field(init=False)
+    combined_after_commission_pnl: Decimal = field(init=False)
+    marginal_after_commission_pnl: Decimal = field(init=False)
+
+    def __post_init__(self) -> None:
+        BetfairMarketOutcomeEconomicInput(
+            self.outcome_id,
+            self.probability,
+            self.existing_gross_pnl,
+            self.candidate_gross_pnl,
+        )
+        rate = _decimal(
+            self.effective_commission_rate,
+            "effective_commission_rate",
+        )
+        if rate < 0 or rate > 1:
+            raise BetfairMarginalCommissionEVError(
+                "effective_commission_rate must be between 0 and 1 inclusive"
+            )
+        try:
+            with localcontext(_CTX):
+                combined = self.existing_gross_pnl + self.candidate_gross_pnl
+                base_after = _net(self.existing_gross_pnl, rate)
+                combined_after = _net(combined, rate)
+                marginal = combined_after - base_after
+        except DecimalException as exc:
+            raise BetfairMarginalCommissionEVError(
+                "commission EV arithmetic exceeded the exact Decimal envelope"
+            ) from exc
+        object.__setattr__(self, "combined_gross_pnl", combined)
+        object.__setattr__(self, "base_after_commission_pnl", base_after)
+        object.__setattr__(self, "combined_after_commission_pnl", combined_after)
+        object.__setattr__(self, "marginal_after_commission_pnl", marginal)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,17 +105,165 @@ class BetfairMarginalCommissionEVProjection:
     market_id: str
     currency: str
     effective_commission_rate: Decimal
-    commission_quantum: Decimal
-    commission_rounding: str
     probability_evidence_sha256: str
     exposure_evidence_sha256: str
     candidate_evidence_sha256: str
     commission_rate_evidence_sha256: str
     outcomes: tuple[BetfairOutcomeCommissionDelta, ...]
-    gross_candidate_ev: Decimal
-    marginal_after_commission_ev: Decimal
-    candidate_standalone_after_commission_ev: Decimal
-    calculation_sha256: str
+    commission_quantum: Decimal = field(init=False)
+    commission_rounding: str = field(init=False)
+    gross_candidate_ev: Decimal = field(init=False)
+    marginal_after_commission_ev: Decimal = field(init=False)
+    candidate_standalone_after_commission_ev: Decimal = field(init=False)
+    calculation_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        account = _text(self.account_id, "account_id")
+        market = _text(self.market_id, "market_id")
+        if type(self.currency) is not str or _CURRENCY_RE.fullmatch(self.currency) is None:
+            raise BetfairMarginalCommissionEVError(
+                "currency must be an uppercase three-letter code"
+            )
+        rate = _decimal(
+            self.effective_commission_rate,
+            "effective_commission_rate",
+        )
+        if rate < 0 or rate > 1:
+            raise BetfairMarginalCommissionEVError(
+                "effective_commission_rate must be between 0 and 1 inclusive"
+            )
+        evidence = {
+            "probability_evidence_sha256": _sha(
+                self.probability_evidence_sha256,
+                "probability_evidence_sha256",
+            ),
+            "exposure_evidence_sha256": _sha(
+                self.exposure_evidence_sha256,
+                "exposure_evidence_sha256",
+            ),
+            "candidate_evidence_sha256": _sha(
+                self.candidate_evidence_sha256,
+                "candidate_evidence_sha256",
+            ),
+            "commission_rate_evidence_sha256": _sha(
+                self.commission_rate_evidence_sha256,
+                "commission_rate_evidence_sha256",
+            ),
+        }
+        if type(self.outcomes) is not tuple or not self.outcomes or len(self.outcomes) > MAX_OUTCOMES:
+            raise BetfairMarginalCommissionEVError(
+                f"outcomes must contain between 1 and {MAX_OUTCOMES} items"
+            )
+        if any(type(row) is not BetfairOutcomeCommissionDelta for row in self.outcomes):
+            raise BetfairMarginalCommissionEVError(
+                "outcomes must contain exact BetfairOutcomeCommissionDelta values"
+            )
+        canonical_rows = tuple(
+            sorted(
+                (
+                    BetfairOutcomeCommissionDelta(
+                        row.outcome_id,
+                        row.probability,
+                        row.existing_gross_pnl,
+                        row.candidate_gross_pnl,
+                        rate,
+                    )
+                    for row in self.outcomes
+                ),
+                key=lambda row: row.outcome_id,
+            )
+        )
+        ids = tuple(row.outcome_id for row in canonical_rows)
+        if len(set(ids)) != len(ids):
+            raise BetfairMarginalCommissionEVError(
+                "outcome_id values must be unique"
+            )
+        try:
+            with localcontext(_CTX) as context:
+                context.clear_flags()
+                if sum(
+                    (row.probability for row in canonical_rows),
+                    Decimal("0"),
+                ) != Decimal("1"):
+                    raise BetfairMarginalCommissionEVError(
+                        "outcome probabilities must sum exactly to 1"
+                    )
+                gross_ev = sum(
+                    (
+                        row.probability * row.candidate_gross_pnl
+                        for row in canonical_rows
+                    ),
+                    Decimal("0"),
+                )
+                marginal_ev = sum(
+                    (
+                        row.probability * row.marginal_after_commission_pnl
+                        for row in canonical_rows
+                    ),
+                    Decimal("0"),
+                )
+                standalone_ev = sum(
+                    (
+                        row.probability
+                        * _net(row.candidate_gross_pnl, rate)
+                        for row in canonical_rows
+                    ),
+                    Decimal("0"),
+                )
+        except DecimalException as exc:
+            raise BetfairMarginalCommissionEVError(
+                "commission EV arithmetic exceeded the exact Decimal envelope"
+            ) from exc
+
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "source_family": SOURCE_FAMILY,
+            "account_id": account,
+            "market_id": market,
+            "currency": self.currency,
+            "effective_commission_rate": _decimal_text(rate),
+            "commission_quantum": _decimal_text(COMMISSION_QUANTUM),
+            "commission_rounding": COMMISSION_ROUNDING,
+            **evidence,
+            "outcomes": [
+                {
+                    "outcome_id": row.outcome_id,
+                    "probability": _decimal_text(row.probability),
+                    "existing_gross_pnl": _decimal_text(row.existing_gross_pnl),
+                    "candidate_gross_pnl": _decimal_text(row.candidate_gross_pnl),
+                }
+                for row in canonical_rows
+            ],
+            "gross_candidate_ev": _decimal_text(gross_ev),
+            "marginal_after_commission_ev": _decimal_text(marginal_ev),
+            "candidate_standalone_after_commission_ev": _decimal_text(
+                standalone_ev
+            ),
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        object.__setattr__(self, "outcomes", canonical_rows)
+        object.__setattr__(self, "commission_quantum", COMMISSION_QUANTUM)
+        object.__setattr__(self, "commission_rounding", COMMISSION_ROUNDING)
+        object.__setattr__(self, "gross_candidate_ev", gross_ev)
+        object.__setattr__(
+            self,
+            "marginal_after_commission_ev",
+            marginal_ev,
+        )
+        object.__setattr__(
+            self,
+            "candidate_standalone_after_commission_ev",
+            standalone_ev,
+        )
+        object.__setattr__(self, "calculation_sha256", digest)
 
     @property
     def decision_authorized(self) -> bool:
@@ -146,84 +325,26 @@ def calculate_betfair_marginal_commission_ev(
     if len(set(ids)) != len(ids):
         raise BetfairMarginalCommissionEVError("outcome_id values must be unique")
 
-    try:
-        with localcontext(_CTX) as context:
-            context.clear_flags()
-            if sum((item.probability for item in ordered), Decimal("0")) != Decimal("1"):
-                raise BetfairMarginalCommissionEVError(
-                    "outcome probabilities must sum exactly to 1"
-                )
-            rows: list[BetfairOutcomeCommissionDelta] = []
-            gross_ev = Decimal("0")
-            marginal_ev = Decimal("0")
-            standalone_ev = Decimal("0")
-            for item in ordered:
-                combined = item.existing_gross_pnl + item.candidate_gross_pnl
-                base_after = _net(item.existing_gross_pnl, rate)
-                combined_after = _net(combined, rate)
-                marginal = combined_after - base_after
-                gross_ev += item.probability * item.candidate_gross_pnl
-                marginal_ev += item.probability * marginal
-                standalone_ev += item.probability * _net(item.candidate_gross_pnl, rate)
-                rows.append(
-                    BetfairOutcomeCommissionDelta(
-                        item.outcome_id,
-                        item.probability,
-                        item.existing_gross_pnl,
-                        item.candidate_gross_pnl,
-                        combined,
-                        base_after,
-                        combined_after,
-                        marginal,
-                    )
-                )
-    except DecimalException as exc:
-        raise BetfairMarginalCommissionEVError(
-            "commission EV arithmetic exceeded the exact Decimal envelope"
-        ) from exc
-
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "source_family": SOURCE_FAMILY,
-        "account_id": account,
-        "market_id": market,
-        "currency": currency,
-        "effective_commission_rate": _decimal_text(rate),
-        "commission_quantum": _decimal_text(COMMISSION_QUANTUM),
-        "commission_rounding": COMMISSION_ROUNDING,
-        **evidence,
-        "outcomes": [
-            {
-                "outcome_id": item.outcome_id,
-                "probability": _decimal_text(item.probability),
-                "existing_gross_pnl": _decimal_text(item.existing_gross_pnl),
-                "candidate_gross_pnl": _decimal_text(item.candidate_gross_pnl),
-            }
-            for item in ordered
-        ],
-        "gross_candidate_ev": _decimal_text(gross_ev),
-        "marginal_after_commission_ev": _decimal_text(marginal_ev),
-        "candidate_standalone_after_commission_ev": _decimal_text(standalone_ev),
-    }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
+    rows = tuple(
+        BetfairOutcomeCommissionDelta(
+            item.outcome_id,
+            item.probability,
+            item.existing_gross_pnl,
+            item.candidate_gross_pnl,
+            rate,
+        )
+        for item in ordered
+    )
     return BetfairMarginalCommissionEVProjection(
         account,
         market,
         currency,
         rate,
-        COMMISSION_QUANTUM,
-        COMMISSION_ROUNDING,
         evidence["probability_evidence_sha256"],
         evidence["exposure_evidence_sha256"],
         evidence["candidate_evidence_sha256"],
         evidence["commission_rate_evidence_sha256"],
-        tuple(rows),
-        gross_ev,
-        marginal_ev,
-        standalone_ev,
-        digest,
+        rows,
     )
 
 

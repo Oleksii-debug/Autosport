@@ -43,6 +43,11 @@ class CancelRejectReason(str, Enum):
     OTHER = "2"
 
 
+class CancelRejectResponseTo(str, Enum):
+    CANCEL = "1"
+    REPLACE = "2"
+
+
 class OrderStatus(str, Enum):
     NEW = "NEW"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
@@ -460,6 +465,7 @@ class CancelReject:
     cancel_cl_ord_id: str
     orig_cl_ord_id: str
     reason: CancelRejectReason
+    response_to: CancelRejectResponseTo
     order_status: OrderStatus
     transact_time: str
     fix_session_id: str
@@ -480,6 +486,8 @@ class CancelReject:
             _text(getattr(self, n), n)
         if not isinstance(self.reason, CancelRejectReason):
             raise ProphetXCancelError("invalid CxlRejReason")
+        if not isinstance(self.response_to, CancelRejectResponseTo):
+            raise ProphetXCancelError("invalid CxlRejResponseTo")
         if not isinstance(self.order_status, OrderStatus):
             raise ProphetXCancelError("invalid order_status")
         _time(self.transact_time, "transact_time")
@@ -501,6 +509,7 @@ class CancelReject:
             "cancel_cl_ord_id": self.cancel_cl_ord_id,
             "orig_cl_ord_id": self.orig_cl_ord_id,
             "reason": self.reason.value,
+            "response_to": self.response_to.value,
             "order_status": self.order_status.value,
             "transact_time": self.transact_time,
             "fix_session_id": self.fix_session_id,
@@ -915,6 +924,10 @@ def reconcile_cancel(
             continue
 
         assert isinstance(item, CancelReject)
+        if item.response_to is not CancelRejectResponseTo.CANCEL:
+            raise ProphetXCancelConflict(
+                "OrderCancelReject CxlRejResponseTo does not identify cancel"
+            )
         if reject_seen:
             raise ProphetXCancelConflict(
                 "multiple distinct CancelReject reports for one cancel request"

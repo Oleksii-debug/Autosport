@@ -399,5 +399,95 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0)
 
 
+    def test_wall_clock_rollback_does_not_shorten_restart_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = _SequenceProvider(
+                [ProviderUnavailableError("provider outage before clock rollback")]
+            )
+
+            with self.assertRaises(SystemExit):
+                run_continuous_observation(
+                    first_provider,
+                    self._config(workspace),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: (_ for _ in ()).throw(
+                        SystemExit("crash during provider backoff")
+                    ),
+                    reporter=None,
+                    run_id="before-clock-rollback",
+                )
+
+            waits: list[float] = []
+            restarted = _SequenceProvider(
+                [ProviderUnavailableError("must not run during rollback wait")]
+            )
+            result = run_continuous_observation(
+                restarted,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: "2026-09-23T19:59:59+00:00",
+                waiter=lambda seconds: waits.append(seconds) or True,
+                reporter=None,
+                run_id="after-clock-rollback",
+            )
+
+            self.assertEqual(waits, [1.0])
+            self.assertEqual(restarted.calls, 0)
+            self.assertEqual(result.stop_reason, "operator_stop")
+
+    def test_max_runtime_expiring_inside_restart_backoff_prevents_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = _SequenceProvider(
+                [ProviderUnavailableError("provider outage before bounded restart")]
+            )
+
+            with self.assertRaises(SystemExit):
+                run_continuous_observation(
+                    first_provider,
+                    self._config(workspace),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: (_ for _ in ()).throw(
+                        SystemExit("crash during provider backoff")
+                    ),
+                    reporter=None,
+                    run_id="before-bounded-runtime-restart",
+                )
+
+            bounded = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=2,
+                max_runtime_seconds=0.5,
+                interval_seconds=1,
+                max_backoff_seconds=8,
+                max_items=10,
+            )
+            waits: list[float] = []
+            restarted = _SequenceProvider(
+                [ProviderUnavailableError("must not run after runtime deadline")]
+            )
+            result = run_continuous_observation(
+                restarted,
+                bounded,
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: waits.append(seconds) or False,
+                reporter=None,
+                run_id="bounded-runtime-restart",
+            )
+
+            self.assertEqual(waits, [0.5])
+            self.assertEqual(restarted.calls, 0)
+            self.assertEqual(result.stop_reason, "max_runtime")
+            self.assertEqual(result.exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -220,8 +220,11 @@ def parse_get_odds_ladder_response(
             raise BetdaqSoapProtocolError(
                 "Ladder decimal odds must be greater than 1"
             )
+        representation_text = _required_attr(child, "representation")
+        if representation_text != representation_text.strip():
+            raise BetdaqSoapProtocolError("Ladder representation must be trimmed")
         representation = _safe_text(
-            _required_attr(child, "representation"),
+            representation_text,
             "Ladder representation",
         )
         if price in seen_prices:

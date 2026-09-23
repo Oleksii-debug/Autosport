@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.bookmaker_receipt_reconciliation as reconciliation_module
 from autosport.bookmaker_receipt_reconciliation import (
     bind_leg_receipt,
     reconcile_equal_split_residual_against_ledger,
@@ -149,27 +150,28 @@ def test_new_reserved_attempt_after_verified_snapshot_cannot_leave_positive_rero
     ledger = _ledger_with_first_leg_accepted(tmp_path, initial)
     receipt = _first_receipt(initial)
     second = initial.legs[1]
-    original_verified_snapshot = ledger.verified_snapshot
+    writer_ledger = RealExecutionLedger(ledger.path)
+    original_verified_events = reconciliation_module._verified_ledger_events
     injected = False
 
-    def snapshot_then_reserve():
+    def read_then_reserve(candidate_ledger):
         nonlocal injected
-        snapshot = original_verified_snapshot()
+        events = original_verified_events(candidate_ledger)
         if not injected:
             injected = True
-            ledger.begin_attempt(
+            writer_ledger.begin_attempt(
                 plan_id=_PLAN_ID,
                 action_id=second.leg_id,
                 attempt_id="attempt-race-reserved",
                 reserved_at=f"{_BASE}05:00+00:00",
             )
-        return snapshot
+        return events
 
     try:
         with patch.object(
-            ledger,
-            "verified_snapshot",
-            side_effect=snapshot_then_reserve,
+            reconciliation_module,
+            "_verified_ledger_events",
+            side_effect=read_then_reserve,
         ):
             proposal = _reconcile(venues, receipt, ledger)
     except RoutingContractError:
@@ -189,25 +191,26 @@ def test_new_accepted_effect_after_verified_snapshot_cannot_be_omitted_from_rero
     ledger = _ledger_with_first_leg_accepted(tmp_path, initial)
     receipt = _first_receipt(initial)
     second = initial.legs[1]
-    original_verified_snapshot = ledger.verified_snapshot
+    writer_ledger = RealExecutionLedger(ledger.path)
+    original_verified_events = reconciliation_module._verified_ledger_events
     injected = False
 
-    def snapshot_then_accept_second_leg():
+    def read_then_accept_second_leg(candidate_ledger):
         nonlocal injected
-        snapshot = original_verified_snapshot()
+        events = original_verified_events(candidate_ledger)
         if not injected:
             injected = True
-            ledger.begin_attempt(
+            writer_ledger.begin_attempt(
                 plan_id=_PLAN_ID,
                 action_id=second.leg_id,
                 attempt_id="attempt-race-accepted",
                 reserved_at=f"{_BASE}05:00+00:00",
             )
-            ledger.mark_submitted(
+            writer_ledger.mark_submitted(
                 "attempt-race-accepted",
                 submitted_at=f"{_BASE}06:00+00:00",
             )
-            ledger.acknowledge(
+            writer_ledger.acknowledge(
                 ExternalAcknowledgement(
                     attempt_id="attempt-race-accepted",
                     external_receipt_id="receipt-race-accepted",
@@ -217,13 +220,13 @@ def test_new_accepted_effect_after_verified_snapshot_cannot_be_omitted_from_rero
                     accepted_stake=second.proposed_stake,
                 )
             )
-        return snapshot
+        return events
 
     try:
         with patch.object(
-            ledger,
-            "verified_snapshot",
-            side_effect=snapshot_then_accept_second_leg,
+            reconciliation_module,
+            "_verified_ledger_events",
+            side_effect=read_then_accept_second_leg,
         ):
             proposal = _reconcile(venues, receipt, ledger)
     except RoutingContractError:

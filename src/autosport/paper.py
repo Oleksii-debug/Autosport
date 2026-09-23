@@ -228,6 +228,7 @@ class PaperBook:
         # payout arithmetic.
         for leg in ticket.legs:
             self._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+        self._validate_ticket_opening_economics(ticket)
 
         winners = self._normalize_resolution_keys(winning_quote_keys, "winning_quote_keys")
         voids = (
@@ -560,6 +561,16 @@ class PaperBook:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
         return leg
 
+    @staticmethod
+    def _validate_ticket_opening_economics(ticket: PaperTicket) -> None:
+        if (
+            ticket.stake != ticket._opening_stake
+            or ticket.legs != ticket._opening_legs
+        ):
+            raise ValueError(
+                "PaperBook ticket opening economic identity changed after admission"
+            )
+
     @classmethod
     def _validate_lifecycle_entry(cls, entry: object) -> _LifecycleEntry:
         if type(entry) is not tuple or len(entry) != 4:
@@ -716,6 +727,7 @@ class PaperBook:
             quote_keys = [leg.quote_key for leg in ticket.legs]
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
+            cls._validate_ticket_opening_economics(ticket)
 
             if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
                 raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")

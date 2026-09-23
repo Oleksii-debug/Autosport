@@ -24,14 +24,72 @@ class _NoRedirect(HTTPRedirectHandler):
         raise ProphetXReadOnlyError("ProphetX transaction redirect refused")
 
 
+def _make_canonical_fetch(max_response_bytes: int):
+    """Create the fixed-origin network primitive without exposing its opener."""
+
+    # Capture the stdlib construction primitives in this closure once.  The
+    # returned callable owns the opener and its bound open() method; callers do
+    # not get a mutable opener attribute that can later be swapped underneath
+    # provider-origin issuance.
+    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    open_response = opener.open
+    request_type = Request
+
+    def fetch(
+        url: str, *, headers: Mapping[str, str], timeout_seconds: float
+    ) -> ProphetXHttpResponse:
+        request = request_type(url, headers=dict(headers), method="GET")
+        try:
+            with open_response(request, timeout=timeout_seconds) as response:
+                body = response.read(max_response_bytes + 1)
+                if len(body) > max_response_bytes:
+                    raise ProphetXReadOnlyError(
+                        "ProphetX transaction response exceeded size limit"
+                    )
+                length = response.headers.get("Content-Length")
+                if length is not None:
+                    value = length.strip()
+                    if (
+                        not value.isascii()
+                        or not value.isdigit()
+                        or int(value) != len(body)
+                    ):
+                        raise ProphetXReadOnlyError(
+                            "ProphetX transaction Content-Length is invalid"
+                        )
+                return ProphetXHttpResponse(
+                    int(response.getcode()),
+                    str(response.geturl()),
+                    response.headers.get("Content-Type"),
+                    response.headers.get("Content-Encoding"),
+                    body,
+                )
+        except ProphetXReadOnlyError:
+            raise
+        except HTTPError as exc:
+            status = exc.code
+            exc.close()
+            raise ProphetXReadOnlyError(
+                f"ProphetX transaction HTTP status {status}"
+            ) from None
+        except (URLError, TimeoutError, OSError, HTTPException):
+            raise ProphetXReadOnlyError(
+                "ProphetX transaction network request failed"
+            ) from None
+
+    return fetch
+
+
 class UrllibProphetXTransactionsTransport:
     """GET-only sandbox transport; redirects/proxies/alternate endpoints are refused."""
+
+    __slots__ = ("_max", "_fetch")
 
     def __init__(self, *, max_response_bytes: int = MAX_RESPONSE_BYTES) -> None:
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max = max_response_bytes
-        self._opener = build_opener(ProxyHandler({}), _NoRedirect())
+        self._fetch = _make_canonical_fetch(max_response_bytes)
 
     @staticmethod
     def _validate_url(url: str) -> None:
@@ -58,37 +116,8 @@ class UrllibProphetXTransactionsTransport:
         self, url: str, *, headers: Mapping[str, str], timeout_seconds: float
     ) -> ProphetXHttpResponse:
         self._validate_url(url)
-        request = Request(url, headers=dict(headers), method="GET")
-        try:
-            with self._opener.open(request, timeout=timeout_seconds) as response:
-                body = response.read(self._max + 1)
-                if len(body) > self._max:
-                    raise ProphetXReadOnlyError(
-                        "ProphetX transaction response exceeded size limit"
-                    )
-                length = response.headers.get("Content-Length")
-                if length is not None:
-                    value = length.strip()
-                    if not value.isascii() or not value.isdigit() or int(value) != len(body):
-                        raise ProphetXReadOnlyError(
-                            "ProphetX transaction Content-Length is invalid"
-                        )
-                return ProphetXHttpResponse(
-                    int(response.getcode()),
-                    str(response.geturl()),
-                    response.headers.get("Content-Type"),
-                    response.headers.get("Content-Encoding"),
-                    body,
-                )
-        except ProphetXReadOnlyError:
-            raise
-        except HTTPError as exc:
-            status = exc.code
-            exc.close()
-            raise ProphetXReadOnlyError(
-                f"ProphetX transaction HTTP status {status}"
-            ) from None
-        except (URLError, TimeoutError, OSError, HTTPException):
-            raise ProphetXReadOnlyError(
-                "ProphetX transaction network request failed"
-            ) from None
+        return self._fetch(
+            url,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+        )

@@ -98,6 +98,7 @@ def test_unsealed_caller_record_cannot_be_assessed():
 def test_structural_exact_boundary_is_numerically_within_but_not_provider_support():
     item = seal(evidence())
     result = assess_provider_maximum_order_limit(
+        as_of=NOW,
         evidence=item, requested_amount=Decimal("50.00")
     )
     assert result.state is ProviderMaximumOrderLimitState.WITHIN_LIMIT
@@ -111,6 +112,7 @@ def test_structural_exact_boundary_is_numerically_within_but_not_provider_suppor
 def test_structural_one_quantum_above_is_numerically_exceeds_but_not_provider_truth():
     item = seal(evidence())
     result = assess_provider_maximum_order_limit(
+        as_of=NOW,
         evidence=item, requested_amount=Decimal("50.01")
     )
     assert result.state is ProviderMaximumOrderLimitState.EXCEEDS_LIMIT
@@ -173,6 +175,37 @@ def test_expired_evidence_fails_closed_at_exact_boundary():
         seal(item)
 
 
+def test_structural_seal_does_not_keep_evidence_active_after_expiry():
+    item = seal(
+        evidence(
+            observed_at=NOW - timedelta(seconds=10),
+            valid_until=NOW + timedelta(seconds=1),
+        )
+    )
+    with pytest.raises(
+        ProviderMaximumOrderLimitError,
+        match="expired at assessment",
+    ):
+        assess_provider_maximum_order_limit(
+            as_of=NOW + timedelta(seconds=1),
+            evidence=item,
+            requested_amount=Decimal("10"),
+        )
+
+
+def test_assessment_cannot_backdate_evidence_before_observation():
+    item = seal(evidence())
+    with pytest.raises(
+        ProviderMaximumOrderLimitError,
+        match="future at assessment",
+    ):
+        assess_provider_maximum_order_limit(
+            as_of=NOW - timedelta(seconds=11),
+            evidence=item,
+            requested_amount=Decimal("10"),
+        )
+
+
 def test_action_quote_requires_exact_action_binding():
     with pytest.raises(ProviderMaximumOrderLimitError, match="requires action_binding_sha256"):
         evidence(action_binding_sha256=None)
@@ -185,6 +218,7 @@ def test_versioned_rule_may_be_structurally_scope_bound_without_action_digest():
     )
     sealed = seal(item, action_binding_sha256=None)
     result = assess_provider_maximum_order_limit(
+        as_of=NOW,
         evidence=sealed, requested_amount=Decimal("10")
     )
     assert result.state is ProviderMaximumOrderLimitState.WITHIN_LIMIT
@@ -240,6 +274,7 @@ def test_public_verifier_cannot_turn_caller_dto_into_provider_origin_truth():
 def test_fabricated_maximum_can_be_structurally_compared_but_never_supports_request():
     item = seal(evidence(maximum_amount=Decimal("999999")))
     result = assess_provider_maximum_order_limit(
+        as_of=NOW,
         evidence=item, requested_amount=Decimal("500000")
     )
     assert result.state is ProviderMaximumOrderLimitState.WITHIN_LIMIT

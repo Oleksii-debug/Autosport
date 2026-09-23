@@ -113,7 +113,12 @@ class _JoinAwareProductWorker(_IdleProductWorker):
 def test_webview_close_waits_for_every_non_daemon_one_shot_slot(
     tmp_path: Path,
 ) -> None:
-    for attribute in ("replay_worker", "live_worker", "recovery_worker"):
+    for attribute in (
+        "replay_worker",
+        "live_worker",
+        "recovery_worker",
+        "evidence_export_worker",
+    ):
         controller = _bare_controller(tmp_path)
         worker = _BlockingTerminalWorker()
         setattr(controller, attribute, worker)

@@ -39,6 +39,17 @@ class EmergencyStopResult:
         return f"{self.message_uk} / {self.message_en}"
 
 
+@dataclass(frozen=True, slots=True)
+class EmergencyStopStatus:
+    available: bool
+    execution_blocked: bool
+    mode: str | None
+    revision: int | None
+    integrity_confirmed: bool
+    initialized: bool
+    message_uk: str
+
+
 class WindowsEmergencyStopBridge:
     """Bind a Windows emergency action to the canonical durable STOP authority.
 
@@ -105,6 +116,83 @@ class WindowsEmergencyStopBridge:
         except Exception:
             detail = "message unavailable"
         return f"{type(exc).__name__}: {detail}"
+
+    @staticmethod
+    def _status_from_state(state: ExecutionAuthorityState) -> EmergencyStopStatus:
+        if state.mode is ExecutionAuthorityMode.STOPPED:
+            return EmergencyStopStatus(
+                available=True,
+                execution_blocked=True,
+                mode=state.mode.value,
+                revision=state.revision,
+                integrity_confirmed=True,
+                initialized=True,
+                message_uk=(
+                    "Аварійний STOP активний: допуск нових виконань заблоковано; "
+                    f"підтверджено стійкий запис ревізії {state.revision}."
+                ),
+            )
+        return EmergencyStopStatus(
+            available=True,
+            execution_blocked=False,
+            mode=state.mode.value,
+            revision=state.revision,
+            integrity_confirmed=True,
+            initialized=True,
+            message_uk=(
+                "Аварійний STOP не активний: канонічний допуск виконання дозволено, "
+                f"ревізія {state.revision}. Кнопка аварійного STOP доступна."
+            ),
+        )
+
+    def status(self) -> EmergencyStopStatus:
+        """Read durable STOP truth without creating, arming, or stopping authority."""
+
+        with self._lock:
+            authority = self._authority
+            if authority is None:
+                return EmergencyStopStatus(
+                    available=False,
+                    execution_blocked=True,
+                    mode=None,
+                    revision=None,
+                    integrity_confirmed=False,
+                    initialized=False,
+                    message_uk=(
+                        "Стан аварійного STOP недоступний; допуск нових виконань "
+                        "має залишатися заблокованим."
+                    ),
+                )
+            try:
+                current = authority.current()
+            except Exception:
+                if not authority.path.exists() and not authority.anchor_path.exists():
+                    return EmergencyStopStatus(
+                        available=True,
+                        execution_blocked=True,
+                        mode=None,
+                        revision=None,
+                        integrity_confirmed=False,
+                        initialized=False,
+                        message_uk=(
+                            "Канонічний журнал аварійного STOP ще не ініціалізовано; "
+                            "дозвіл нових виконань не підтверджено. Активація STOP "
+                            "створить стійкий стан зупинки."
+                        ),
+                    )
+                return EmergencyStopStatus(
+                    available=True,
+                    execution_blocked=True,
+                    mode=None,
+                    revision=None,
+                    integrity_confirmed=False,
+                    initialized=True,
+                    message_uk=(
+                        "Стан аварійного STOP не підтверджено; допуск нових виконань "
+                        "має залишатися заблокованим. Перевірте журнал STOP."
+                    ),
+                )
+            return self._status_from_state(current)
 
     def _confirmed_stopped(
         self,

@@ -8,6 +8,7 @@ from autosport.bookmaker_account_reconciliation import (
     snapshot_fingerprint,
     snapshot_to_canonical_dict,
 )
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.bookmaker_capability import (
     BookmakerAccountSnapshot,
     BookmakerBalanceObservation,
@@ -132,6 +133,69 @@ def test_reconciliation_delta_treats_zero_exponent_as_scale_neutral(
     assert state.unexplained_balance_delta.amount == Decimal("-1")
     assert state.unexplained_balance_delta.previous_observation_id == "balance-1"
     assert state.unexplained_balance_delta.current_observation_id == "balance-2"
+
+
+def test_genuine_authority_root_swap_is_rejected_before_publication(tmp_path) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority-a",
+    )
+    original = store._authority
+
+    store._authority = MonotonicWorkspaceAuthority(
+        workspace=store._workspace,
+        domain="provider.account-snapshot-reconciliation-v1",
+        key=f"account-reconciliation:{path.name}",
+        authority_root=tmp_path / "authority-b",
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority identity or binding changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert store._authority is not original
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("method_name", ("read_history", "prepare", "recover"))
+def test_authority_instance_method_shadow_is_rejected_before_publication(
+    tmp_path,
+    method_name: str,
+) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+    setattr(store._authority, method_name, lambda *args, **kwargs: None)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority dispatch changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert not path.exists()
+
+
+def test_authority_binding_field_drift_is_rejected_before_publication(tmp_path) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+    store._authority.authority_root = tmp_path / "retargeted-authority"
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority identity or binding changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert not path.exists()
 
 
 def test_exact_ordinary_high_precision_decimal_remains_unrounded() -> None:

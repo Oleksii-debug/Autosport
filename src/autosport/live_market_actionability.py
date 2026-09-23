@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import weakref
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -29,6 +28,7 @@ class LiveInputWaitReason(str, Enum):
     INVALID_CAUSAL_TIMESTAMP = "invalid_causal_timestamp"
     FUTURE_CAUSALITY = "future_causality"
     STALE = "stale"
+    PRODUCT_ORIGIN_UNPROVEN = "product_origin_unproven"
 
 
 def _canonical_json_sha256(payload: object) -> str:
@@ -93,17 +93,12 @@ class LiveMarketComponentEvidence:
     wait_reasons: tuple[LiveInputWaitReason, ...]
 
 
-_RESULT_ISSUER = object()
-_ISSUED_RESULTS: dict[int, tuple[weakref.ReferenceType[object], str]] = {}
-
-
-@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
+@dataclass(frozen=True, slots=True)
 class RegisteredLiveInputCurrentView:
-    """Product-issued current-view gate for one already-registered live input.
+    """Diagnostic current-view evidence for one already-registered live input.
 
-    A positive result proves only that the exact currently matching canonical
-    MarketMirror components were OPEN and inside the configured causal freshness
-    window at as_of. It deliberately does not prove stream continuity,
+    Standalone evaluation never proves product/live acquisition origin and therefore
+    never issues positive actionability. It deliberately does not prove stream continuity,
     provider gap recovery, depth/liquidity, account capability, portfolio/risk,
     execution, settlement, profitability, readiness, or real-money permission.
     """
@@ -117,40 +112,18 @@ class RegisteredLiveInputCurrentView:
     components: tuple[LiveMarketComponentEvidence, ...]
     evidence_sha256: str
 
-    def __init__(
-        self,
-        *,
-        _issuer: object,
-        input_id: str,
-        as_of: str,
-        max_age_microseconds: int,
-        mirror_revision: int,
-        outcome: LiveInputCurrentViewOutcome,
-        wait_reasons: tuple[LiveInputWaitReason, ...],
-        components: tuple[LiveMarketComponentEvidence, ...],
-        evidence_sha256: str,
-    ) -> None:
-        if _issuer is not _RESULT_ISSUER:
-            raise LiveMarketActionabilityError(
-                "RegisteredLiveInputCurrentView must be product-issued"
-            )
-        object.__setattr__(self, "input_id", input_id)
-        object.__setattr__(self, "as_of", as_of)
-        object.__setattr__(self, "max_age_microseconds", max_age_microseconds)
-        object.__setattr__(self, "mirror_revision", mirror_revision)
-        object.__setattr__(self, "outcome", outcome)
-        object.__setattr__(self, "wait_reasons", wait_reasons)
-        object.__setattr__(self, "components", components)
-        object.__setattr__(self, "evidence_sha256", evidence_sha256)
-
     @property
     def is_product_issued(self) -> bool:
-        return _is_product_issued(self)
+        # This standalone diagnostic evaluator has no product-owned mirror-origin
+        # composition. Positive issuance remains intentionally unavailable.
+        return False
 
     @property
     def current_view_eligible(self) -> bool:
-        _require_product_issued(self)
-        return self.outcome is LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE
+        # Diagnostic structural freshness is not actionability authority. A future
+        # product composition may consume the same evidence only after binding the
+        # exact builder-owned live mirror provenance.
+        return False
 
     @property
     def continuity_proven(self) -> bool:
@@ -179,69 +152,6 @@ class RegisteredLiveInputCurrentView:
     @property
     def real_money_authorized(self) -> bool:
         return False
-
-
-def _result_fingerprint(result: RegisteredLiveInputCurrentView) -> str:
-    return _canonical_json_sha256(
-        {
-            "input_id": result.input_id,
-            "as_of": result.as_of,
-            "max_age_microseconds": result.max_age_microseconds,
-            "mirror_revision": result.mirror_revision,
-            "outcome": result.outcome.value,
-            "wait_reasons": [reason.value for reason in result.wait_reasons],
-            "components": [
-                {
-                    "source_id": item.source_id,
-                    "quote_key": item.quote_key,
-                    "event_sha256": item.event_sha256,
-                    "sequence": item.sequence,
-                    "status": item.status,
-                    "freshness_ts": item.freshness_ts,
-                    "age_microseconds": item.age_microseconds,
-                    "wait_reasons": [
-                        reason.value for reason in item.wait_reasons
-                    ],
-                }
-                for item in result.components
-            ],
-            "evidence_sha256": result.evidence_sha256,
-        }
-    )
-
-
-def _is_product_issued(result: RegisteredLiveInputCurrentView) -> bool:
-    entry = _ISSUED_RESULTS.get(id(result))
-    if entry is None:
-        return False
-    reference, fingerprint = entry
-    return reference() is result and fingerprint == _result_fingerprint(result)
-
-
-def _require_product_issued(result: RegisteredLiveInputCurrentView) -> None:
-    if not _is_product_issued(result):
-        raise LiveMarketActionabilityError(
-            "RegisteredLiveInputCurrentView is not current process-issued evidence"
-        )
-
-
-def _register_product_issued(
-    result: RegisteredLiveInputCurrentView,
-) -> RegisteredLiveInputCurrentView:
-    key = id(result)
-
-    def cleanup(
-        dead_reference: weakref.ReferenceType[object],
-        *,
-        issued_key: int = key,
-    ) -> None:
-        current = _ISSUED_RESULTS.get(issued_key)
-        if current is not None and current[0] is dead_reference:
-            _ISSUED_RESULTS.pop(issued_key, None)
-
-    reference = weakref.ref(result, cleanup)
-    _ISSUED_RESULTS[key] = (reference, _result_fingerprint(result))
-    return result
 
 
 def evaluate_registered_input_current_view(
@@ -337,12 +247,14 @@ def evaluate_registered_input_current_view(
             key=lambda item: (item.source_id, item.quote_key),
         )
     )
+    # Exact type/coherence only proves a structurally readable mirror, not that
+    # its bytes came from the builder-owned live acquisition path. Until that
+    # composition exists, otherwise-eligible caller mirrors remain explicit WAIT.
+    if components and not aggregate_reasons:
+        aggregate_reasons.add(LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN)
+
     wait_reasons = tuple(sorted(aggregate_reasons, key=lambda item: item.value))
-    outcome = (
-        LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE
-        if components and not wait_reasons
-        else LiveInputCurrentViewOutcome.WAIT
-    )
+    outcome = LiveInputCurrentViewOutcome.WAIT
     as_of_text = boundary.isoformat()
     max_age_microseconds = _timedelta_microseconds(age_limit)
 
@@ -382,7 +294,6 @@ def evaluate_registered_input_current_view(
     }
     evidence_sha256 = _canonical_json_sha256(payload)
     result = RegisteredLiveInputCurrentView(
-        _issuer=_RESULT_ISSUER,
         input_id=normalized_input_id,
         as_of=as_of_text,
         max_age_microseconds=max_age_microseconds,
@@ -392,4 +303,4 @@ def evaluate_registered_input_current_view(
         components=components,
         evidence_sha256=evidence_sha256,
     )
-    return _register_product_issued(result)
+    return result

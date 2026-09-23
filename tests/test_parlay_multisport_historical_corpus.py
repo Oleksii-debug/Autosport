@@ -478,8 +478,14 @@ def test_qualified_corpus_identity_binds_sealed_terminal_outcomes(
     first = first_manifest["governance"]["acquisition_evidence"]["provenance"]
     second = second_manifest["governance"]["acquisition_evidence"]["provenance"]
 
-    assert first["content_identity_scope"] == "market_snapshot_only"
-    assert second["content_identity_scope"] == "market_snapshot_only"
+    assert (
+        first["content_identity_scope"]
+        == "market_snapshot_semantics_excluding_product_ingest_time"
+    )
+    assert (
+        second["content_identity_scope"]
+        == "market_snapshot_semantics_excluding_product_ingest_time"
+    )
     assert first["content_identity"] == second["content_identity"]
     assert first["acquisition_identity"] == second["acquisition_identity"]
     assert first["governance_identity"] == second["governance_identity"]

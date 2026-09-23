@@ -34,6 +34,11 @@ from .learning_environment import (
     RewardEvidence,
     Transition,
 )
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .paper import PaperBook
 from .risk import PaperRiskPolicy
 from .workspace_lock import WorkspaceEconomicLock
@@ -323,6 +328,7 @@ class PaperSettlementLearningBridge:
         agent_loop: AgentLoopRuntime,
         economic_goal: EconomicGoalContract,
         risk_policy: PaperRiskPolicy,
+        monotonic_authority_root: str | Path | None = None,
     ) -> None:
         if not isinstance(decision_ledger, JsonlDecisionLedger):
             raise TypeError("decision_ledger must be JsonlDecisionLedger")
@@ -343,10 +349,34 @@ class PaperSettlementLearningBridge:
         self.economic_goal = economic_goal
         self.risk_policy = risk_policy
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._invalidation_authority = MonotonicWorkspaceAuthority(
+                workspace=self.state_path.parent.resolve(strict=False),
+                domain="learning.paper-settlement-learning.invalidation",
+                key=self.state_path.name,
+                authority_root=monotonic_authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperSettlementLearningBridgeError(
+                "cannot initialize independent reward-invalidation rollback authority"
+            ) from exc
+        self._invalidation_semantic_binding_sha256 = _digest(
+            {
+                "schema": "autosport.paper_acked_reward_invalidation.monotonic",
+                "schema_version": 1,
+                "bridge_schema": SCHEMA,
+                "bridge_schema_version": SCHEMA_VERSION,
+                "state_name": self.state_path.name,
+            }
+        )
         with WorkspaceEconomicLock(self.state_path.parent):
             if self.state_path.exists():
                 self._read()
             else:
+                self._recover_invalidation_authority(
+                    state_sha256=None,
+                    invalidated=False,
+                )
                 self._write({"bindings": {}})
 
     @property
@@ -357,13 +387,109 @@ class PaperSettlementLearningBridge:
     def risk_fingerprint(self) -> str:
         return self.risk_policy.provenance_sha256
 
-    def _write(self, payload: dict[str, object]) -> None:
+    @staticmethod
+    def _fsync_parent_directory(path: Path) -> None:
+        if os.name == "nt":
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _recover_invalidation_authority(
+        self,
+        *,
+        state_sha256: str | None,
+        invalidated: bool,
+    ) -> None:
+        try:
+            history = self._invalidation_authority.read_history()
+            if not history:
+                if invalidated:
+                    raise PaperSettlementLearningBridgeError(
+                        "durable reward invalidation lacks independent rollback authority"
+                    )
+                return
+            latest = history[-1]
+            observed = state_sha256 if invalidated else None
+            if latest.phase is AuthorityPhase.PREPARE:
+                recovery = self._invalidation_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=(
+                        latest.tx_id
+                        if invalidated
+                        and state_sha256 == latest.intended_state_sha256
+                        else None
+                    ),
+                    semantic_binding_sha256=(
+                        latest.semantic_binding_sha256
+                        if invalidated
+                        and state_sha256 == latest.intended_state_sha256
+                        else None
+                    ),
+                )
+            else:
+                recovery = self._invalidation_authority.recover(
+                    observed_state_sha256=observed,
+                )
+            if invalidated:
+                if (
+                    state_sha256 is None
+                    or recovery.committed_state_sha256 != state_sha256
+                ):
+                    raise PaperSettlementLearningBridgeError(
+                        "durable reward invalidation is not the committed rollback-authority tip"
+                    )
+            elif recovery.committed_state_sha256 is not None:
+                raise PaperSettlementLearningBridgeError(
+                    "bridge state rolled back before committed reward invalidation"
+                )
+        except PaperSettlementLearningBridgeError:
+            raise
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperSettlementLearningBridgeError(
+                "bridge state failed independent reward-invalidation rollback authority"
+            ) from exc
+
+    def _write(
+        self,
+        payload: dict[str, object],
+        *,
+        protect_invalidation: bool = False,
+    ) -> None:
         bare = {
             "schema": SCHEMA,
             "schema_version": SCHEMA_VERSION,
             "bindings": payload["bindings"],
         }
         state = {**bare, "state_sha256": _digest(bare)}
+        authority_tx_id: str | None = None
+        if protect_invalidation:
+            if not any(
+                type(binding) is dict and binding.get("status") == INVALIDATED
+                for binding in payload["bindings"].values()
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "invalidation rollback seal requires terminal INVALIDATED state"
+                )
+            try:
+                history = self._invalidation_authority.read_history()
+                authority_tx_id = (
+                    f"reward-invalidation:{len(history) + 1}:"
+                    f"{state['state_sha256'][:24]}"
+                )
+                self._invalidation_authority.prepare(
+                    tx_id=authority_tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=state["state_sha256"],
+                    semantic_binding_sha256=self._invalidation_semantic_binding_sha256,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise PaperSettlementLearningBridgeError(
+                    "cannot prepare independent reward-invalidation rollback fence"
+                ) from exc
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -388,6 +514,21 @@ class PaperSettlementLearningBridge:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.state_path)
+            self._fsync_parent_directory(self.state_path.parent)
+            if protect_invalidation:
+                assert authority_tx_id is not None
+                try:
+                    self._invalidation_authority.commit(
+                        tx_id=authority_tx_id,
+                        observed_state_sha256=state["state_sha256"],
+                        semantic_binding_sha256=(
+                            self._invalidation_semantic_binding_sha256
+                        ),
+                    )
+                except MonotonicWorkspaceAuthorityError as exc:
+                    raise PaperSettlementLearningBridgeError(
+                        "cannot commit independent reward-invalidation rollback fence"
+                    ) from exc
         finally:
             if temporary is not None:
                 try:
@@ -484,6 +625,14 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "non-invalidated binding carries reward invalidation evidence"
                 )
+        invalidated = any(
+            binding["status"] == INVALIDATED
+            for binding in state["bindings"].values()
+        )
+        self._recover_invalidation_authority(
+            state_sha256=state["state_sha256"] if invalidated else None,
+            invalidated=invalidated,
+        )
         return state
 
     def _runtime_matches(
@@ -1921,7 +2070,10 @@ class PaperSettlementLearningBridge:
                         if invalidation is not None:
                             binding["invalidation"] = invalidation
                             binding["status"] = INVALIDATED
-                            self._write(state)
+                            self._write(
+                                state,
+                                protect_invalidation=True,
+                            )
                             raise PaperSettlementLearningBridgeError(
                                 "later settlement evidence conflicts with acknowledged learner reward; "
                                 "successor settlement/reward generation required; "

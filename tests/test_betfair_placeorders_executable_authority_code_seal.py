@@ -418,3 +418,86 @@ def test_private_opener_error_dispatch_map_rewrite_fails_before_durable_attempt(
             assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
         finally:
             by_code[code] = original_handlers
+
+@pytest.mark.parametrize("status_code", (301, 302, 303, 307, 308))
+def test_private_provider_opener_rejects_authenticated_redirect_request(
+    status_code: int,
+) -> None:
+    private_opener = (
+        betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+    )
+    redirect_type = (
+        betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
+    )
+    redirect_handlers = [
+        handler
+        for handler in private_opener.handlers
+        if type(handler) is redirect_type
+    ]
+    assert len(redirect_handlers) == 1
+    redirect_handler = redirect_handlers[0]
+    assert "redirect_request" in getattr(redirect_handler, "__dict__", {})
+
+    request = betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_REQUEST(
+        betfair_supervised_execution.BETTING_JSON_RPC_ENDPOINT,
+        data=b"{}",
+        headers={
+            "X-Application": "app-key",
+            "X-Authentication": "session-token",
+        },
+        method="POST",
+    )
+    redirected = redirect_handler.redirect_request(
+        request,
+        None,
+        status_code,
+        "redirect",
+        {"Location": "https://attacker.invalid/steal"},
+        "https://attacker.invalid/steal",
+    )
+    assert redirected is None
+
+
+def test_private_redirect_policy_shadow_fails_before_durable_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        private_opener = (
+            betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+        )
+        redirect_type = (
+            betfair_supervised_execution._CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
+        )
+        redirect_handler = next(
+            handler
+            for handler in private_opener.handlers
+            if type(handler) is redirect_type
+        )
+        original = redirect_handler.redirect_request
+        forged_calls: list[str] = []
+
+        def allow_redirect(request, response, code, message, headers, new_url):
+            forged_calls.append(new_url)
+            return request
+
+        redirect_handler.redirect_request = allow_redirect
+        try:
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-private-opener-redirect-shadow",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert forged_calls == []
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            redirect_handler.redirect_request = original
+

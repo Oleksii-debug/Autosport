@@ -439,10 +439,17 @@ class BetfairPreTradeReservationStore:
         for attempt in ledger_view.attempts:
             if (
                 attempt.attempt_id == candidate.attempt_id
-                or attempt.ordinal >= candidate.ordinal
                 or attempt.action.bookmaker_id != _VENUE_ID
                 or attempt.action.account_id != self.account_id
                 or attempt.state not in _ACTIVE_STATES
+            ):
+                continue
+            # Later pure RESERVED attempts may be queued behind the candidate and
+            # have not reached local-capital admission yet. Any later attempt
+            # that has already advanced past RESERVED must already own capital.
+            if (
+                attempt.ordinal >= candidate.ordinal
+                and attempt.state is AttemptState.RESERVED
             ):
                 continue
             reservation = reservations.get(attempt.attempt_id)
@@ -809,6 +816,7 @@ def _require_nonrollback(previous: AttemptState, current: AttemptState) -> None:
             AttemptState.ACCEPTED,
             AttemptState.PARTIAL,
             AttemptState.REJECTED,
+            AttemptState.RECONCILED_NOT_FOUND,
         },
         AttemptState.UNKNOWN: {
             AttemptState.UNKNOWN,

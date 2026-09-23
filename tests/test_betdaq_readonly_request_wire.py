@@ -48,8 +48,7 @@ def _request(**overrides) -> BetdaqGetPricesRequest:
 
 def test_serializes_documented_soap11_getprices_shape_and_headers() -> None:
     credentials = _credentials()
-    request = _request()
-    wire = build_get_prices_soap11_request(credentials, request)
+    wire = build_get_prices_soap11_request(credentials, _request())
 
     assert wire.endpoint == BETDAQ_GET_PRICES_ENDPOINT
     assert wire.headers == {
@@ -70,8 +69,8 @@ def test_serializes_documented_soap11_getprices_shape_and_headers() -> None:
         "version": "2.0",
         "languageCode": "en",
         "username": "fixture-user<&",
-        "password": "fixture-pass<&\"'",
-        "applicationIdentifier": "fixture-app<&",
+        "password": "",
+        "applicationIdentifier": "",
     }
 
     method = soap_body.find(_tag(EXTERNAL_API_NS, "GetPrices"))
@@ -90,6 +89,24 @@ def test_serializes_documented_soap11_getprices_shape_and_headers() -> None:
         element.text
         for element in method_request.findall(_tag(EXTERNAL_API_NS, "MarketIds"))
     ] == ["11", "22", "33"]
+
+
+def test_secure_password_and_application_identifier_never_enter_readonly_wire() -> None:
+    credentials = _credentials(
+        password="never-send-secure-password",
+        application_identifier="never-send-secure-app-id",
+    )
+    wire = build_get_prices_soap11_request(credentials, _request())
+    text = wire.body.decode("utf-8")
+    assert "never-send-secure-password" not in text
+    assert "never-send-secure-app-id" not in text
+    root = ET.fromstring(wire.body)
+    external = root.find(
+        f"{_tag(SOAP11_NS, 'Header')}/{_tag(EXTERNAL_API_NS, 'ExternalApiHeader')}"
+    )
+    assert external is not None
+    assert external.attrib["password"] == ""
+    assert external.attrib["applicationIdentifier"] == ""
 
 
 def test_internal_request_id_is_not_laundered_into_provider_wire_contract() -> None:
@@ -121,12 +138,8 @@ def test_canonical_credentials_and_raw_xml_are_redacted_from_repr() -> None:
     assert "GetPrices" not in wire_repr
 
 
-def test_xml_serializer_escapes_opaque_credential_values_without_changing_them() -> None:
-    credentials = _credentials(
-        username="user <&> Ω",
-        password="pass <&> \"quoted\" 'single'",
-        application_identifier="app <&> Ω",
-    )
+def test_xml_serializer_escapes_username_without_changing_it() -> None:
+    credentials = _credentials(username="user <&> Ω")
     wire = build_get_prices_soap11_request(credentials, _request())
     root = ET.fromstring(wire.body)
     external = root.find(
@@ -134,23 +147,21 @@ def test_xml_serializer_escapes_opaque_credential_values_without_changing_them()
     )
     assert external is not None
     assert external.attrib["username"] == credentials.username
-    assert external.attrib["password"] == credentials.password
-    assert external.attrib["applicationIdentifier"] == credentials.application_identifier
 
 
-def test_serializer_validation_fails_without_echoing_secret_value() -> None:
+def test_serializer_validation_fails_without_echoing_username_value() -> None:
     secret = "top-secret\x01should-never-appear"
-    credentials = _credentials(password=secret)
+    credentials = _credentials(username=secret)
     with pytest.raises(ValueError) as raised:
         build_get_prices_soap11_request(credentials, _request())
     assert secret not in str(raised.value)
-    assert "password" in str(raised.value)
+    assert "username" in str(raised.value)
 
 
-def test_serializer_rejects_unbounded_credentials_and_noncanonical_version() -> None:
-    credentials = _credentials(application_identifier="a" * 4097)
-    with pytest.raises(ValueError, match="application_identifier is too long"):
-        build_get_prices_soap11_request(credentials, _request())
+def test_serializer_bounds_only_readonly_materialized_header_values() -> None:
+    huge_username = _credentials(username="u" * 4097)
+    with pytest.raises(ValueError, match="username is too long"):
+        build_get_prices_soap11_request(huge_username, _request())
 
     huge_version = _credentials(version="1E+1000000")
     with pytest.raises(ValueError, match="fixed-point representation exceeds"):
@@ -159,6 +170,15 @@ def test_serializer_rejects_unbounded_credentials_and_noncanonical_version() -> 
     exponent_version = _credentials(version="2E0")
     with pytest.raises(ValueError, match="canonical fixed-point"):
         build_get_prices_soap11_request(exponent_version, _request())
+
+    # Secure-only values are not materialized on ReadOnly GetPrices at all.
+    huge_secure = _credentials(
+        password="p" * 4097,
+        application_identifier="a" * 4097,
+    )
+    wire = build_get_prices_soap11_request(huge_secure, _request())
+    assert b"p" * 4097 not in wire.body
+    assert b"a" * 4097 not in wire.body
 
 
 def test_serializer_requires_product_owned_canonical_credentials() -> None:

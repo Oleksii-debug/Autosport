@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException
+import ssl
 from urllib.error import HTTPError
 from urllib.request import HTTPSHandler, OpenerDirector, ProxyHandler
 
@@ -348,6 +349,40 @@ def test_canonical_wallet_authority_rejects_hidden_opener_handler_graph_mutation
                 return forged_https_open(request)
 
         opener.handle_open["https"] = [ForgedHttpsHandler()]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network authority changed",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", ["replace", "weaken-in-place"])
+def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(
+    monkeypatch,
+    mutation: str,
+):
+    client, calls = canonical_client_for(monkeypatch, http_response())
+    opener = client._transport._opener  # type: ignore[attr-defined]
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is HTTPSHandler
+    )
+
+    if mutation == "replace":
+        insecure_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        insecure_context.check_hostname = False
+        insecure_context.verify_mode = ssl.CERT_NONE
+        https_handler._context = insecure_context
+    else:
+        context = https_handler._context
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
 
     with pytest.raises(
         ProphetXReadOnlyError,

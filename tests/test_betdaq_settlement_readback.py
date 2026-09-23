@@ -169,6 +169,9 @@ def test_order_settlement_preserves_components_without_netting(monkeypatch):
     assert value.order_commission == Decimal("0.50")
     assert value.market_commission == Decimal("0.25")
     assert value.market_settled_at == "2026-09-22T23:58:00Z"
+    assert value.currency is None
+    assert value.denomination_proven is False
+    assert value.scalar_economic_use_proven is False
     assert value.final_settlement_proven is True
     assert value.evidence.authenticated_principal_continuity_proven is False
     assert value.evidence.physical_account_identity_proven is False
@@ -211,6 +214,19 @@ def test_unknown_order_status_is_preserved_raw_but_cannot_prove_final_settlement
     assert value.order_status_code == 99
     assert value.gross_settlement_amount == Decimal("12.34")
     assert value.final_settlement_proven is False
+
+
+def test_order_settlement_without_provider_currency_cannot_qualify_scalar_economics(
+    monkeypatch,
+):
+    client, _ = economic_client(monkeypatch, order_details())
+
+    value = client.read_order_details(123)
+
+    assert value.final_settlement_proven is True
+    assert value.currency is None
+    assert value.denomination_proven is False
+    assert value.scalar_economic_use_proven is False
 
 
 def test_incomplete_postings_window_keeps_exact_rows_but_not_complete_absence(

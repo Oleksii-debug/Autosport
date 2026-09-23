@@ -90,9 +90,13 @@
   }
 
   function syncOwnerConfirmationAvailability(canInitialize) {
-    const disabled = canInitialize !== true || ownerReviewFresh !== true;
-    setDisabledWithFocusFallback(byId("owner-confirm-checkbox"), disabled);
-    setDisabledWithFocusFallback(byId("owner-confirm"), disabled);
+    const reviewDisabled = canInitialize !== true || ownerReviewFresh !== true;
+    const checkbox = byId("owner-confirm-checkbox");
+    setDisabledWithFocusFallback(checkbox, reviewDisabled);
+    setDisabledWithFocusFallback(
+      byId("owner-confirm"),
+      reviewDisabled || checkbox.checked !== true,
+    );
   }
 
   function invalidateOwnerReview() {
@@ -437,6 +441,11 @@
     node.addEventListener("change", invalidateOwnerReview);
   });
   byId(327).addEventListener("change", invalidateOwnerReview);
+  byId("owner-confirm-checkbox").addEventListener("change", () => {
+    syncOwnerConfirmationAvailability(
+      Boolean(latestState && latestState.owner && latestState.owner.can_initialize),
+    );
+  });
   byId(328).addEventListener("click", async () => {
     invalidateOwnerReview();
     const reviewEpoch = ownerReviewEpoch;

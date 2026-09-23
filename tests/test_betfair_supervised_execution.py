@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import autosport.betfair_account_readonly as betfair_account_readonly
+import autosport.betfair_supervised_execution as betfair_supervised_execution
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -77,6 +79,8 @@ READBACK_AT = "2026-09-19T08:00:05+00:00"
 QUOTE_EXPIRES_AT = "2026-09-19T08:01:00+00:00"
 APPROVAL_EXPIRES_AT = "2026-09-19T08:05:00+00:00"
 
+_ACTIVE_WRITE_TRANSPORT = None
+
 
 @pytest.fixture(autouse=True)
 def _fixed_supervised_clock(monkeypatch) -> None:
@@ -84,6 +88,19 @@ def _fixed_supervised_clock(monkeypatch) -> None:
         "autosport.supervised_execution._trusted_now",
         lambda: RESERVED_AT,
     )
+
+
+@pytest.fixture(autouse=True)
+def _canonical_write_network_seam(monkeypatch):
+    global _ACTIVE_WRITE_TRANSPORT
+    _ACTIVE_WRITE_TRANSPORT = None
+    monkeypatch.setattr(
+        betfair_account_readonly,
+        "urlopen",
+        _test_urlopen,
+    )
+    yield
+    _ACTIVE_WRITE_TRANSPORT = None
 
 
 def _profile() -> BookmakerCapabilityProfile:
@@ -272,6 +289,32 @@ class _Transport:
         return self.responder(request)
 
 
+class _UrlopenResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def read(self, max_bytes: int) -> bytes:
+        return self._payload[:max_bytes]
+
+
+def _test_urlopen(request, timeout):
+    if _ACTIVE_WRITE_TRANSPORT is None:
+        raise AssertionError("canonical Betfair network seam has no test responder")
+    payload = _ACTIVE_WRITE_TRANSPORT.post(
+        request.full_url,
+        headers=dict(request.header_items()),
+        body=request.data or b"",
+        timeout_seconds=timeout,
+    )
+    return _UrlopenResponse(payload)
+
+
 class _TimeoutTransport(_Transport):
     def __init__(self):
         super().__init__(lambda _: b"")
@@ -426,6 +469,8 @@ def _enabled_client(
     store: EconomicGoalStore,
     observed_at: str = READBACK_AT,
 ):
+    global _ACTIVE_WRITE_TRANSPORT
+    _ACTIVE_WRITE_TRANSPORT = transport
     gate = BetfairSupervisedExecutionGate.from_economic_goal_store(
         store,
         bookmaker_id="betfair",
@@ -435,7 +480,6 @@ def _enabled_client(
     return BetfairSupervisedPlaceOrdersClient(
         BetfairSessionCredentials("app-key", "session-token"),
         gate=gate,
-        transport=transport,
         clock=lambda: observed_at,
     )
 
@@ -841,6 +885,157 @@ def test_owner_tightening_cannot_commit_before_attempt_or_transport(
 
         goal_store.persist_automatic_successor(stop_contract)
         assert goal_store.load().emergency_stop is True
+
+
+def test_subclassed_write_client_cannot_mint_terminal_provider_truth() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        gate = BetfairSupervisedExecutionGate.from_economic_goal_store(
+            goal_store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            profile_sha256=profile.profile_id,
+        )
+
+        class EvilClient(BetfairSupervisedPlaceOrdersClient):
+            def place_action(self, *args, **kwargs):
+                raise AssertionError("virtual place_action must never be authoritative")
+
+        client = EvilClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            gate=gate,
+            clock=lambda: READBACK_AT,
+        )
+
+        with pytest.raises(TypeError, match="exact BetfairSupervisedPlaceOrdersClient"):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-evil-client",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_injected_write_transport_cannot_mint_terminal_provider_truth() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        gate = BetfairSupervisedExecutionGate.from_economic_goal_store(
+            goal_store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            profile_sha256=profile.profile_id,
+        )
+        client = BetfairSupervisedPlaceOrdersClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            gate=gate,
+            transport=transport,
+            clock=lambda: READBACK_AT,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical client, transport, and parser authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-injected-transport",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_replaced_write_method_cannot_mint_terminal_provider_truth(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        monkeypatch.setattr(
+            BetfairSupervisedPlaceOrdersClient,
+            "place_action",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("replaced place_action must never be authoritative")
+            ),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical client, transport, and parser authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-replaced-method",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_replaced_response_parser_cannot_mint_terminal_provider_truth(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        monkeypatch.setattr(
+            betfair_supervised_execution,
+            "_parse_place_orders_response",
+            lambda *args, **kwargs: object(),
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical client, transport, and parser authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-replaced-parser",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
 def test_full_match_persists_provider_report_and_canonical_ack() -> None:

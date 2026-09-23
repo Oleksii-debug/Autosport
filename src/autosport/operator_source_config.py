@@ -12,7 +12,7 @@ CONFIG_SCHEMA = "autosport.operator-source-config"
 CONFIG_VERSION = 1
 _MAX_PAYLOAD_BYTES = 4096
 _SOURCE_ID_RE = re.compile(
-    r"[a-z][a-z0-9_-]{0,31}(?::[a-z][a-z0-9_-]{0,31}){0,3}\Z",
+    r"[a-z0-9]+(?:-[a-z0-9]+)*\Z",
     re.ASCII,
 )
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -52,7 +52,11 @@ class OperatorSourceResolution:
 
 def validate_source_id(value: object) -> str:
     """Return one strict, language-neutral product source identity."""
-    if type(value) is not str or _SOURCE_ID_RE.fullmatch(value) is None:
+    if (
+        type(value) is not str
+        or len(value) > 64
+        or _SOURCE_ID_RE.fullmatch(value) is None
+    ):
         raise OperatorSourceConfigError("invalid operator source identity")
     return value
 

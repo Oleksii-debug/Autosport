@@ -323,7 +323,7 @@ def test_resolve_rejects_cross_intent_substitution(monkeypatch) -> None:
                 intent=other_intent,
                 router_store=router,
                 request_id=request.request_id,
-                decision_at=_proposal(other_intent),
+                decision_at=issued_at + timedelta(seconds=1),
             )
 
 
@@ -384,7 +384,7 @@ def test_resolve_rejects_same_id_router_request_substitution(
                 intent=intent,
                 router_store=router,
                 request_id=issued.request_id,
-                decision_at=_proposal(intent),
+                decision_at=issued_at + timedelta(seconds=1),
             )
 
 

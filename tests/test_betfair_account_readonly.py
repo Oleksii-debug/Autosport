@@ -443,13 +443,27 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         copied.assert_authoritative()
 
 
-def test_post_init_transport_substitution_cannot_mint_readback_authority():
+def test_transient_post_init_transport_substitution_cannot_mint_readback_authority():
     credentials = BetfairSessionCredentials("app-secret", "session-secret")
     client = BetfairReadOnlyClient(
         credentials,
         clock=lambda: FIXED_NOW,
     )
-    synthetic = FakeTransport(
+    original_transport = client._transport
+
+    class RestoringTransport(FakeTransport):
+        def post(self, url, *, headers, body, timeout_seconds):
+            payload = super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+            if not self.responses:
+                client._transport = original_transport
+            return payload
+
+    synthetic = RestoringTransport(
         [
             response(
                 [{"marketId": "1.234", "event": {"id": "event-1"}}],
@@ -463,9 +477,8 @@ def test_post_init_transport_substitution_cannot_mint_readback_authority():
         ]
     )
 
-    # A trusted no-injection client may not transfer its authority to a later
-    # caller-controlled transport. Parsing may still complete for diagnostics,
-    # but the resulting capture is intentionally outside the issuance registry.
+    # Restore the original transport before issuance to exercise the exact
+    # rebind/restore attack: end-state identity alone must never be enough.
     client._transport = synthetic
     capture = client.read_execution_readback(
         action_id="action-1",
@@ -473,6 +486,7 @@ def test_post_init_transport_substitution_cannot_mint_readback_authority():
     )
 
     assert len(synthetic.calls) == 6
+    assert client._transport is original_transport
     with pytest.raises(BetfairReadOnlyError, match="not issued"):
         capture.assert_authoritative()
 

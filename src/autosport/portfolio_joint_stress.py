@@ -732,6 +732,13 @@ def evaluate_joint_stress(
     if len(ticket_ids) != len(set(ticket_ids)):
         raise ValueError("joint stress ticket identities must be unique")
 
+    cutoff = _parsed_timestamp(protocol.causal_cutoff, "causal_cutoff")
+    for payload in ticket_payloads:
+        if _parsed_timestamp(payload["placed_at"], "ticket placed_at") > cutoff:
+            raise ValueError(
+                "joint stress ticket cannot be placed after protocol causal_cutoff"
+            )
+
     currencies = {payload["currency"] for payload in ticket_payloads}
     if len(currencies) != 1:
         raise ValueError(

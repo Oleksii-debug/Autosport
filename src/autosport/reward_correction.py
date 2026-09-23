@@ -44,6 +44,13 @@ def _dec(name: str, value: object) -> Decimal:
     if not isinstance(value,Decimal) or not value.is_finite(): raise RewardCorrectionError(f"{name} must be a finite exact Decimal")
     return value
 
+def _decimal_text(name: str, value: object) -> str:
+    exact = _dec(name, value)
+    text = format(exact, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in {"-0", ""} else text
+
 def _hash(payload: object) -> str:
     try: raw=json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
     except (TypeError,ValueError,UnicodeEncodeError) as exc: raise RewardCorrectionError("identity payload is not canonical") from exc
@@ -85,7 +92,7 @@ class RewardCorrectionAssertion:
             if self.predecessor_correction_id is not None: raise RewardCorrectionError("first correction cannot have predecessor")
         else: _sha("predecessor_correction_id",self.predecessor_correction_id)
     def payload(self):
-        return {"action_id":self.action_id,"transition_id":self.transition_id,"superseded":self.superseded_reward.payload(),"corrected":self.corrected_reward.payload(),"value":str(self.corrected_reward_value),"available_at":_tid("corrected_available_at",self.corrected_available_at),"source":self.correction_source.payload(),"generation":self.generation,"predecessor":self.predecessor_correction_id}
+        return {"action_id":self.action_id,"transition_id":self.transition_id,"superseded":self.superseded_reward.payload(),"corrected":self.corrected_reward.payload(),"value":_decimal_text("corrected_reward_value",self.corrected_reward_value),"available_at":_tid("corrected_available_at",self.corrected_available_at),"source":self.correction_source.payload(),"generation":self.generation,"predecessor":self.predecessor_correction_id}
     @property
     def correction_id(self): return _hash(self.payload())
 
@@ -181,7 +188,7 @@ class RewardCorrectionLedger:
     def _from_row(self,r:sqlite3.Row):
         try: value=Decimal(r["corrected_reward_value"])
         except (InvalidOperation,TypeError) as exc: raise RewardCorrectionError("stored corrected reward is invalid") from exc
-        if not value.is_finite() or str(value)!=r["corrected_reward_value"]: raise RewardCorrectionError("stored corrected reward is not canonical Decimal text")
+        if not value.is_finite() or _decimal_text("stored corrected reward",value)!=r["corrected_reward_value"]: raise RewardCorrectionError("stored corrected reward is not canonical Decimal text")
         a=RewardCorrectionAssertion(r["action_id"],r["transition_id"],EvidenceRef(r["sup_family"],r["sup_id"],r["sup_sha"]),EvidenceRef(r["new_family"],r["new_id"],r["new_sha"]),value,r["available_at"],EvidenceRef(r["source_family"],r["source_id"],r["source_sha"]),r["generation"],r["predecessor"])
         if a.correction_id!=r["correction_id"] or a.correction_id!=r["record_sha"]: raise RewardCorrectionError("stored reward correction identity mismatch")
         return a
@@ -218,7 +225,7 @@ class RewardCorrectionLedger:
                 if self._from_row(row)!=a: raise RewardCorrectionError("correction identity payload is corrupt")
                 rec=RewardCorrectionReceipt(a.correction_id,a.generation,self._invalidated(a.correction_id)); self._connection.execute("COMMIT"); return rec
             self._lineage_guard(a); self._validate_chain(a)
-            self._connection.execute("INSERT INTO corrections VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(a.correction_id,a.action_id,a.transition_id,a.generation,a.predecessor_correction_id,*a.superseded_reward.payload(),*a.corrected_reward.payload(),str(a.corrected_reward_value),_tid("corrected_available_at",a.corrected_available_at),*a.correction_source.payload(),a.correction_id))
+            self._connection.execute("INSERT INTO corrections VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(a.correction_id,a.action_id,a.transition_id,a.generation,a.predecessor_correction_id,*a.superseded_reward.payload(),*a.corrected_reward.payload(),_decimal_text("corrected_reward_value",a.corrected_reward_value),_tid("corrected_available_at",a.corrected_available_at),*a.correction_source.payload(),a.correction_id))
             invalid=self._closure(a.superseded_reward)
             self._connection.executemany("INSERT INTO invalidations VALUES (?,?,?,?)",((a.correction_id,*x.payload()) for x in invalid))
             self._connection.execute("COMMIT"); return RewardCorrectionReceipt(a.correction_id,a.generation,invalid)

@@ -76,3 +76,16 @@ def test_external_admissibility_can_explicitly_route_unobserved_action():
     )
 
     assert policy.choose(admissible_actions=frozenset({"WAIT"})) == "WAIT"
+
+def test_all_unobserved_bootstrap_remains_deterministic_and_lexical():
+    policy = _policy(
+        paper_observations=0,
+        paper_reward_sum="0",
+        wait_observations=0,
+        wait_reward_sum="0",
+    )
+
+    assert policy.choose(
+        admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"})
+    ) == "PAPER_PROPOSAL"
+

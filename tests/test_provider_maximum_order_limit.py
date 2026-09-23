@@ -92,7 +92,9 @@ def verify(item, **changes):
 def test_unsealed_caller_record_cannot_be_assessed():
     item = evidence()
     with pytest.raises(ProviderMaximumOrderLimitError, match="lacks structural seal"):
-        assess_provider_maximum_order_limit(\n            as_of=NOW, evidence=item, requested_amount=Decimal("1")\n        )
+        assess_provider_maximum_order_limit(
+            as_of=NOW, evidence=item, requested_amount=Decimal("1")
+        )
 
 
 def test_structural_exact_boundary_is_numerically_within_but_not_provider_support():
@@ -233,7 +235,9 @@ def test_float_bool_and_nonpositive_money_are_rejected():
     item = seal(evidence())
     for value in (1.0, True, Decimal("0")):
         with pytest.raises(ProviderMaximumOrderLimitError):
-            assess_provider_maximum_order_limit(\n                as_of=NOW, evidence=item, requested_amount=value\n            )
+            assess_provider_maximum_order_limit(
+                as_of=NOW, evidence=item, requested_amount=value
+            )
 
 
 def test_source_hash_must_be_canonical_sha256():

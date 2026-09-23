@@ -809,15 +809,37 @@ class ForecastRef:
             forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
             forecast_hash=_canonical_hash(raw["forecast_hash"], "forecast_hash"),
             quote_key=_canonical_text(raw["quote_key"], "forecast quote_key"),
-            probability=_decimal_from_serialized(raw["probability"], "forecast probability"),
-            input_cutoff_ts=_canonical_text(raw["input_cutoff_ts"], "forecast input_cutoff_ts"),
-            market_snapshot_hash=_canonical_hash(raw["market_snapshot_hash"], "market_snapshot_hash"),
-            quote_market_event_hash=_canonical_hash(raw["quote_market_event_hash"], "quote_market_event_hash"),
+            probability=_decimal_from_serialized(
+                raw["probability"], "forecast probability"
+            ),
+            input_cutoff_ts=_canonical_text(
+                raw["input_cutoff_ts"], "forecast input_cutoff_ts"
+            ),
+            market_snapshot_hash=_canonical_hash(
+                raw["market_snapshot_hash"], "market_snapshot_hash"
+            ),
+            quote_market_event_hash=_canonical_hash(
+                raw["quote_market_event_hash"], "quote_market_event_hash"
+            ),
             model_id=_optional_text(raw["model_id"], "forecast model_id"),
-            model_version=_optional_text(raw["model_version"], "forecast model_version"),
-            strategy_version=_optional_text(raw["strategy_version"], "forecast strategy_version"),
-            uncertainty=(None if uncertainty_raw is None else _decimal_from_serialized(uncertainty_raw, "forecast uncertainty")),
-            predictive_eligibility=(None if eligibility_raw is None else PredictiveEligibilityEvidence.from_dict(eligibility_raw)),
+            model_version=_optional_text(
+                raw["model_version"], "forecast model_version"
+            ),
+            strategy_version=_optional_text(
+                raw["strategy_version"], "forecast strategy_version"
+            ),
+            uncertainty=(
+                None
+                if uncertainty_raw is None
+                else _decimal_from_serialized(
+                    uncertainty_raw, "forecast uncertainty"
+                )
+            ),
+            predictive_eligibility=(
+                None
+                if eligibility_raw is None
+                else PredictiveEligibilityEvidence.from_dict(eligibility_raw)
+            ),
             market_semantics_id=market_semantics_id,
         )
 

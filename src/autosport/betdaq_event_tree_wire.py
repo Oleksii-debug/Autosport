@@ -136,6 +136,15 @@ def _parse_return_status(
         return False, None, None, None
 
     status = statuses[0]
+    unexpected_attributes = set(status.attrib) - {
+        "Code",
+        "Description",
+        "CallId",
+    }
+    if unexpected_attributes:
+        raise BetdaqSoapProtocolError(
+            "ReturnStatus contains unexpected provider attributes"
+        )
     code = _integer(_required_attr(status, "Code"), "ReturnStatus Code")
     description = _safe_text(
         _required_attr(status, "Description"),
@@ -398,6 +407,10 @@ def _parse_event_tree_response(
     if len(list(response)) != 1:
         raise BetdaqSoapProtocolError(
             f"{operation}Response must contain exactly one result"
+        )
+    if result.attrib:
+        raise BetdaqSoapProtocolError(
+            f"{operation}Result must not carry provider attributes"
         )
 
     (

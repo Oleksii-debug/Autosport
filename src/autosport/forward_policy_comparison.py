@@ -304,13 +304,18 @@ class ForwardComparisonMember:
                 raise ForwardPolicyComparisonError(
                     "resolved_at must not precede reward availability"
                 )
-            if self.state is MemberState.COMPLETE and (
-                self.champion_evaluation_sha256 is None
-                or self.challenger_evaluation_sha256 is None
-            ):
-                raise ForwardPolicyComparisonError(
-                    "complete paired member requires both arm evaluations"
-                )
+            if self.state is MemberState.COMPLETE:
+                if (
+                    self.champion_evaluation_sha256 is None
+                    or self.challenger_evaluation_sha256 is None
+                ):
+                    raise ForwardPolicyComparisonError(
+                        "complete paired member requires both arm evaluations"
+                    )
+                if self.reward_available_at is None:
+                    raise ForwardPolicyComparisonError(
+                        "complete paired member requires causal reward availability"
+                    )
 
     def canonical_payload(self) -> dict[str, object]:
         return {

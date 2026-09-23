@@ -189,6 +189,39 @@ def test_one_sided_pair_remains_pending_and_cannot_terminalize_complete():
     assert inconclusive.terminal_evidence_sha256 == inconclusive.ledger_sha256
 
 
+def test_complete_member_requires_explicit_causal_reward_availability():
+    ledger = ForwardPolicyComparison(_identity()).commit_member(
+        _member("member-1")
+    )
+    ledger = ledger.record_arm_evaluation(
+        "member-1",
+        arm=ComparisonArm.CHAMPION,
+        evaluation_sha256=H3,
+    )
+    ledger = ledger.record_arm_evaluation(
+        "member-1",
+        arm=ComparisonArm.CHALLENGER,
+        evaluation_sha256=H4,
+    )
+
+    with pytest.raises(
+        ForwardPolicyComparisonError,
+        match="causal reward availability",
+    ):
+        ledger.resolve_member(
+            "member-1",
+            state=MemberState.COMPLETE,
+            resolved_at=T3,
+        )
+
+    inconclusive = ledger.resolve_member(
+        "member-1",
+        state=MemberState.INCONCLUSIVE,
+        resolved_at=T3,
+    )
+    assert inconclusive.members[0].state is MemberState.INCONCLUSIVE
+
+
 def test_complete_terminal_evidence_binds_both_arms_and_is_immutable():
     ledger = ForwardPolicyComparison(_identity()).commit_member(
         _member("member-1")

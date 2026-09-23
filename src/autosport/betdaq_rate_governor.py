@@ -518,6 +518,7 @@ class _Window:
 @dataclass(slots=True)
 class _RuntimeState:
     workspace_key: str
+    authority_root_key: str | None
     policy_fingerprint: str
     clock: Clock
     wall_clock: WallClock
@@ -1178,6 +1179,11 @@ def resolve_betdaq_rate_governor(
         else _workspace(authority_root)
     )
     workspace_key = _workspace_registry_key(root)
+    authority_root_key = (
+        None
+        if resolved_authority is None
+        else _workspace_registry_key(resolved_authority)
+    )
     fingerprint = policy.fingerprint()
 
     with _REGISTRY_LOCK:
@@ -1192,6 +1198,10 @@ def resolve_betdaq_rate_governor(
                 raise BetdaqRateGovernorError(
                     "same BETDAQ workspace cannot be rebound to a different rate policy"
                 )
+            if runtime.authority_root_key != authority_root_key:
+                raise BetdaqRateGovernorError(
+                    "same BETDAQ workspace cannot be rebound to a different authority root"
+                )
             if runtime.clock is not clock or runtime.wall_clock is not wall_clock:
                 raise BetdaqRateGovernorError(
                     "same BETDAQ workspace cannot be rebound to a different clock"
@@ -1203,6 +1213,7 @@ def resolve_betdaq_rate_governor(
         cold_until = now + float(policy.cold_start_seconds)
         runtime = _RuntimeState(
             workspace_key=workspace_key,
+            authority_root_key=authority_root_key,
             policy_fingerprint=fingerprint,
             clock=clock,
             wall_clock=wall_clock,

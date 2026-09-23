@@ -39,8 +39,12 @@ class ProviderMaximumOrderLimitSourceKind(str, Enum):
 
 
 class ProviderMaximumOrderLimitState(str, Enum):
-    WITHIN_LIMIT = "WITHIN_LIMIT"
-    EXCEEDS_LIMIT = "EXCEEDS_LIMIT"
+    UNKNOWN_UNPROVEN = "UNKNOWN_UNPROVEN"
+
+
+class ProviderMaximumOrderLimitComparison(str, Enum):
+    AT_OR_BELOW_UNPROVEN_MAXIMUM = "AT_OR_BELOW_UNPROVEN_MAXIMUM"
+    ABOVE_UNPROVEN_MAXIMUM = "ABOVE_UNPROVEN_MAXIMUM"
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,12 +126,13 @@ class ProviderMaximumOrderLimitEvidence:
 class ProviderMaximumOrderLimitAssessment:
     """Numerical comparison over one structurally sealed caller-supplied maximum.
 
-    state is arithmetic only. The hard-false authority properties prevent a
-    caller-selected maximum/source hash from becoming provider-origin admission
-    support.
+    state is always UNKNOWN_UNPROVEN. comparison is arithmetic-only and the
+    hard-false authority properties prevent a caller-selected maximum/source hash
+    from becoming provider-origin admission support.
     """
 
     state: ProviderMaximumOrderLimitState
+    comparison: ProviderMaximumOrderLimitComparison
     requested_amount: Decimal
     maximum_amount: Decimal
     evidence_sha256: str
@@ -138,6 +143,14 @@ class ProviderMaximumOrderLimitAssessment:
         if type(self.state) is not ProviderMaximumOrderLimitState:
             raise ProviderMaximumOrderLimitError(
                 "state must be exact ProviderMaximumOrderLimitState"
+            )
+        if self.state is not ProviderMaximumOrderLimitState.UNKNOWN_UNPROVEN:
+            raise ProviderMaximumOrderLimitError(
+                "structural assessment cannot claim a provider limit state"
+            )
+        if type(self.comparison) is not ProviderMaximumOrderLimitComparison:
+            raise ProviderMaximumOrderLimitError(
+                "comparison must be exact ProviderMaximumOrderLimitComparison"
             )
         _positive_decimal(self.requested_amount, "requested_amount")
         _positive_decimal(self.maximum_amount, "maximum_amount")
@@ -344,10 +357,10 @@ def assess_provider_maximum_order_limit(
 ) -> ProviderMaximumOrderLimitAssessment:
     """Compare a current structurally sealed, non-authoritative maximum.
 
-    The numerical state is useful for deterministic diagnostics/composition, but
-    this isolated generic contract cannot prove the remote provider imposed the
-    supplied maximum. provider_origin_proven and supports_requested_amount
-    therefore remain hard false. Validity is rechecked at this exact use-time so
+    The diagnostic comparison is deterministic, but this isolated generic
+    contract cannot prove the remote provider imposed the supplied maximum.
+    State therefore remains UNKNOWN_UNPROVEN and provider_origin_proven plus
+    supports_requested_amount remain hard false. Validity is rechecked at this exact use-time so
     an earlier structural seal cannot keep stale evidence numerically active.
     """
 
@@ -365,20 +378,23 @@ def assess_provider_maximum_order_limit(
         )
     requested = _positive_decimal(requested_amount, "requested_amount")
     maximum = evidence.maximum_amount
-    if requested > maximum:
-        return ProviderMaximumOrderLimitAssessment(
-            state=ProviderMaximumOrderLimitState.EXCEEDS_LIMIT,
-            requested_amount=requested,
-            maximum_amount=maximum,
-            evidence_sha256=evidence.evidence_sha256,
-            reason="requested_amount_exceeds_structural_maximum_only",
-        )
+    comparison = (
+        ProviderMaximumOrderLimitComparison.ABOVE_UNPROVEN_MAXIMUM
+        if requested > maximum
+        else ProviderMaximumOrderLimitComparison.AT_OR_BELOW_UNPROVEN_MAXIMUM
+    )
+    reason = (
+        "requested_amount_above_unproven_structural_maximum"
+        if requested > maximum
+        else "requested_amount_at_or_below_unproven_structural_maximum"
+    )
     return ProviderMaximumOrderLimitAssessment(
-        state=ProviderMaximumOrderLimitState.WITHIN_LIMIT,
+        state=ProviderMaximumOrderLimitState.UNKNOWN_UNPROVEN,
+        comparison=comparison,
         requested_amount=requested,
         maximum_amount=maximum,
         evidence_sha256=evidence.evidence_sha256,
-        reason="requested_amount_within_structural_maximum_only",
+        reason=reason,
     )
 
 

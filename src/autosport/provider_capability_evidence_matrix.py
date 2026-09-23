@@ -323,7 +323,11 @@ def _is_product_issued(fact: ProviderCapabilityEvidence) -> bool:
         return False
 
 
-@dataclass(frozen=True, slots=True)
+_ISSUED_MATRICES: WeakValueDictionary[int, object] = WeakValueDictionary()
+_ISSUED_MATRIX_SEALS: dict[int, str] = {}
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderCapabilityEvidenceMatrix:
     profile: BookmakerCapabilityProfile
     integration: BookmakerIntegrationEvidence
@@ -436,6 +440,8 @@ class ProviderCapabilityEvidenceMatrix:
         if any(type(grade) is not ProviderCapabilityTruthGrade for grade in accepted_grades):
             raise ProviderCapabilityEvidenceMatrixError("accepted_grades must be exact enums")
         requested_at = _time(at_time, "at_time")
+        if not _is_product_issued_matrix(self):
+            return False
         if requested_at > _time(self.as_of, "as_of"):
             return False
         fact = self.fact_for(capability)
@@ -478,6 +484,34 @@ class ProviderCapabilityEvidenceMatrix:
             "real_money_execution": False,
             "schema_version": self.schema_version,
         }
+
+
+def _register_product_matrix(
+    matrix: ProviderCapabilityEvidenceMatrix,
+) -> ProviderCapabilityEvidenceMatrix:
+    issuance_key = id(matrix)
+    _ISSUED_MATRICES[issuance_key] = matrix
+    _ISSUED_MATRIX_SEALS[issuance_key] = matrix.matrix_id
+    finalize(matrix, _ISSUED_MATRIX_SEALS.pop, issuance_key, None)
+    return matrix
+
+
+def _is_product_issued_matrix(matrix: ProviderCapabilityEvidenceMatrix) -> bool:
+    issuance_key = id(matrix)
+    if _ISSUED_MATRICES.get(issuance_key) is not matrix:
+        return False
+    original_seal = _ISSUED_MATRIX_SEALS.get(issuance_key)
+    if original_seal is None:
+        return False
+    try:
+        return matrix.matrix_id == original_seal
+    except (
+        AttributeError,
+        ProviderCapabilityEvidenceMatrixError,
+        TypeError,
+        ValueError,
+    ):
+        return False
 
 
 def _digest(value: dict[str, object]) -> str:
@@ -528,16 +562,18 @@ def build_provider_capability_evidence_matrix(
                 integration_evidence_id=integration.evidence_id,
             )
         )
-    return ProviderCapabilityEvidenceMatrix(
-        profile=profile,
-        integration=integration,
-        environment=environment,
-        application_mode=application_mode,
-        matrix_version=matrix_version,
-        facts=tuple(facts),
-        as_of=as_of,
-        matrix_ref=matrix_ref,
-        predecessor_matrix_id=predecessor_matrix_id,
+    return _register_product_matrix(
+        ProviderCapabilityEvidenceMatrix(
+            profile=profile,
+            integration=integration,
+            environment=environment,
+            application_mode=application_mode,
+            matrix_version=matrix_version,
+            facts=tuple(facts),
+            as_of=as_of,
+            matrix_ref=matrix_ref,
+            predecessor_matrix_id=predecessor_matrix_id,
+        )
     )
 
 
@@ -569,3 +605,7 @@ def validate_capability_matrix_successor(
         raise ProviderCapabilityEvidenceMatrixError("successor scope changed")
     if _time(current.as_of, "current.as_of") < _time(previous.as_of, "previous.as_of"):
         raise ProviderCapabilityEvidenceMatrixError("successor time moved backwards")
+    if not _is_product_issued_matrix(previous) or not _is_product_issued_matrix(current):
+        raise ProviderCapabilityEvidenceMatrixError(
+            "successor matrices must be product-issued exact objects with unchanged payload"
+        )

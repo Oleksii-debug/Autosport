@@ -332,6 +332,66 @@ def test_same_product_issued_object_payload_edit_revokes_weak_grade():
         matrix(p=p, facts=(issued,))
 
 
+def test_same_product_matrix_as_of_mutation_revokes_qualification():
+    p = profile()
+    configured = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.CONFIGURED,
+    )
+    issued_matrix = matrix(p=p, facts=(configured,), as_of=T3)
+    assert issued_matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T3,
+    )
+
+    object.__setattr__(issued_matrix, "as_of", T4)
+
+    assert not issued_matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T4,
+    )
+
+
+def test_same_product_matrix_fact_substitution_revokes_qualification():
+    p = profile()
+    documented = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED,
+    )
+    configured = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.CONFIGURED,
+    )
+    issued_matrix = matrix(p=p, facts=(documented,))
+    assert not issued_matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T3,
+    )
+
+    object.__setattr__(
+        issued_matrix,
+        "facts",
+        tuple(
+            configured
+            if fact.capability is BookmakerCapability.BALANCE_READ
+            else fact
+            for fact in issued_matrix.facts
+        ),
+    )
+
+    assert not issued_matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T3,
+    )
+
+
 
 def test_pickle_replay_cannot_recreate_positive_qualification_authority():
     p = profile()
@@ -447,6 +507,18 @@ def test_successor_binds_predecessor_exact_version_scope_and_time():
     other_scope = matrix(version=2, predecessor=first.matrix_id, as_of=T4, environment="sandbox")
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="scope changed"):
         validate_capability_matrix_successor(first, other_scope)
+
+
+def test_successor_validation_rejects_post_build_matrix_mutation():
+    first = matrix()
+    second = matrix(version=2, predecessor=first.matrix_id, as_of=T4)
+    object.__setattr__(second, "matrix_ref", "tampered-matrix-ref")
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="product-issued exact objects with unchanged payload",
+    ):
+        validate_capability_matrix_successor(first, second)
 
 
 def test_version_lineage_rules_and_raw_types_fail_closed():

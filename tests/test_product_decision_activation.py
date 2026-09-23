@@ -797,6 +797,36 @@ class ProductDecisionActivationTests(unittest.TestCase):
                 intent_producer="module:function",  # type: ignore[arg-type]
             )
 
+    def test_intent_producer_module_class_rebind_cannot_widen_registry(self) -> None:
+        class ReboundIntentProducer(activation_module.StrEnum):
+            CALLER_DEFINED = "caller-defined-producer"
+
+        forged = ReboundIntentProducer.CALLER_DEFINED
+        with mock.patch.object(
+            activation_module,
+            "BuiltInIntentProducer",
+            ReboundIntentProducer,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "closed product registry",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=self.goal,
+                    risk_policy=self.risk,
+                    execution_config=self.execution,
+                    intent_producer=forged,  # type: ignore[arg-type]
+                )
+
+        self.assertFalse(self.store.path.exists())
+        binding = self._initialize()
+        self.assertEqual(
+            binding.intent_producer_id,
+            BuiltInIntentProducer.REGISTERED_STRATEGY.value,
+        )
+
     def test_binding_digest_tamper_is_rejected(self) -> None:
         self._initialize()
         root = json.loads(self.store.path.read_text(encoding="utf-8"))

@@ -19,6 +19,12 @@ MAX_SIGNIFICANT_DIGITS = 80
 MAX_ADJUSTED_EXPONENT = 1000
 COMMISSION_QUANTUM = Decimal("0.01")
 COMMISSION_ROUNDING = "ROUND_HALF_UP"
+COMMISSION_RATE_BASIS = "DECISION_SNAPSHOT_CONDITIONAL"
+PROVIDER_APPLICABILITY_PROVEN = False
+PROVIDER_POSTED_EXACT = False
+SETTLEMENT_RATE_AUTHORITATIVE = False
+EXECUTION_AUTHORIZED = False
+REAL_MONEY_EXECUTION = False
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _CTX = Context(prec=256, Emin=-999999, Emax=999999)
@@ -222,8 +228,15 @@ class BetfairMarginalCommissionEVProjection:
             "market_id": market,
             "currency": self.currency,
             "effective_commission_rate": _decimal_text(rate),
+            "commission_rate_basis": COMMISSION_RATE_BASIS,
             "commission_quantum": _decimal_text(COMMISSION_QUANTUM),
             "commission_rounding": COMMISSION_ROUNDING,
+            "provider_applicability_proven": PROVIDER_APPLICABILITY_PROVEN,
+            "provider_posted_exact": PROVIDER_POSTED_EXACT,
+            "settlement_rate_authoritative": SETTLEMENT_RATE_AUTHORITATIVE,
+            "execution_authorized": EXECUTION_AUTHORIZED,
+            "real_money_execution": REAL_MONEY_EXECUTION,
+            "decision_authorized": False,
             **evidence,
             "outcomes": [
                 {
@@ -266,6 +279,30 @@ class BetfairMarginalCommissionEVProjection:
         object.__setattr__(self, "calculation_sha256", digest)
 
     @property
+    def commission_rate_basis(self) -> str:
+        return COMMISSION_RATE_BASIS
+
+    @property
+    def provider_applicability_proven(self) -> bool:
+        return PROVIDER_APPLICABILITY_PROVEN
+
+    @property
+    def provider_posted_exact(self) -> bool:
+        return PROVIDER_POSTED_EXACT
+
+    @property
+    def settlement_rate_authoritative(self) -> bool:
+        return SETTLEMENT_RATE_AUTHORITATIVE
+
+    @property
+    def execution_authorized(self) -> bool:
+        return EXECUTION_AUTHORIZED
+
+    @property
+    def real_money_execution(self) -> bool:
+        return REAL_MONEY_EXECUTION
+
+    @property
     def decision_authorized(self) -> bool:
         return False
 
@@ -282,10 +319,13 @@ def calculate_betfair_marginal_commission_ev(
     commission_rate_evidence_sha256: str,
     outcomes: Sequence[BetfairMarketOutcomeEconomicInput],
 ) -> BetfairMarginalCommissionEVProjection:
-    """Return marginal EV after ordinary market-level commission.
+    """Return rate-conditioned marginal EV after ordinary market-level commission.
 
     The effective rate must already be authoritative for the exact account,
-    market and decision snapshot. Gross P&L inputs must already incorporate
+    market and decision snapshot. That does not make the rate authoritative at
+    eventual market settlement: this pure projection therefore exposes
+    settlement_rate_authoritative=false, provider_applicability_proven=false
+    and provider_posted_exact=false. Gross P&L inputs must already incorporate
     Betfair's settlement rounding for constituent bet winnings/losses; this
     function then rounds each positive market commission charge to 2 decimals,
     half-up, before computing the marginal outcome delta. It deliberately does

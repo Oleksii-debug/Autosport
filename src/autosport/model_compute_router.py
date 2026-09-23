@@ -1291,12 +1291,12 @@ def _classify_execution(
             "execution backend/model/config identity differs from "
             "routed decision",
         )
-    if available > _instant(
+    if available >= _instant(
         "decision_deadline", request.decision_deadline
     ):
         return (
             ExecutionDisposition.REJECTED_LATE,
-            "execution became available after decision deadline",
+            "execution became available at or after decision deadline",
         )
     if _seconds(now, completed) > request.response_ttl_seconds:
         return (
@@ -1356,8 +1356,8 @@ def _candidate_feasible(
         now,
     )
     return (
-        remaining >= _ZERO
-        and candidate.estimated_latency_seconds <= remaining
+        remaining > _ZERO
+        and candidate.estimated_latency_seconds < remaining
     )
 
 
@@ -1394,7 +1394,7 @@ def route_compute(
         raise ModelComputeRouterError(
             "as_of precedes request creation"
         )
-    if now > _instant(
+    if now >= _instant(
         "decision_deadline", request.decision_deadline
     ):
         return ComputeRouteDecision.build(
@@ -3098,13 +3098,13 @@ class ModelComputeRouterStore:
                         "persisted ACCEPTED execution predates "
                         "route decision"
                     )
-                if available > _instant(
+                if available >= _instant(
                     "decision_deadline",
                     request.decision_deadline,
                 ):
                     raise ModelComputeRouterError(
                         "persisted ACCEPTED execution became "
-                        "available after decision deadline"
+                        "available at or after decision deadline"
                     )
                 if (
                     _seconds(available, completed)

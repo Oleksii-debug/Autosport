@@ -55,6 +55,9 @@ WRITE_ADAPTER_VERSION = "1"
 # dispatch.  These product-owned implementations are captured once and are used
 # non-virtually by execute_betfair_supervised_action().
 _CANONICAL_URLLIB_BETFAIR_HTTP_POST = UrllibBetfairHttpTransport.post
+_CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
+)
 _CANONICAL_URLLIB_BETFAIR_REQUEST = (
     _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__["Request"]
 )
@@ -700,6 +703,7 @@ class BetfairSupervisedPlaceOrdersClient:
 
 
 _CANONICAL_BETFAIR_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+_CANONICAL_BETFAIR_PLACE_ACTION_CODE = _CANONICAL_BETFAIR_PLACE_ACTION.__code__
 
 
 def _mapping(
@@ -1055,6 +1059,9 @@ def _parse_place_orders_response(
 
 
 _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE = _parse_place_orders_response
+_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE = (
+    _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
+)
 
 
 def _report_outcome(
@@ -1177,17 +1184,23 @@ def execute_betfair_supervised_action(
             type(client._transport) is not UrllibBetfairHttpTransport
             or BetfairSupervisedPlaceOrdersClient.place_action
             is not _CANONICAL_BETFAIR_PLACE_ACTION
+            or _CANONICAL_BETFAIR_PLACE_ACTION.__code__
+            is not _CANONICAL_BETFAIR_PLACE_ACTION_CODE
             or UrllibBetfairHttpTransport.post
             is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE
             or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("Request")
             is not _CANONICAL_URLLIB_BETFAIR_REQUEST
             or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
             is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
             or _parse_place_orders_response
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+            or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
         ):
             raise BetfairSupervisedExecutionError(
-                "terminal Betfair execution requires canonical client, transport, and parser authority"
+                "terminal Betfair execution requires canonical client, transport, parser, and code authority"
             )
         begin_supervised_attempt(
             ledger,
@@ -1251,6 +1264,39 @@ def execute_betfair_supervised_action(
                 attempt_id,
                 reason=(
                     "betfair_placeOrders_ambiguous_effect_"
+                    "requires_readback"
+                ),
+                observed_at=now(),
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                None,
+                None,
+            )
+        if (
+            BetfairSupervisedPlaceOrdersClient.place_action
+            is not _CANONICAL_BETFAIR_PLACE_ACTION
+            or _CANONICAL_BETFAIR_PLACE_ACTION.__code__
+            is not _CANONICAL_BETFAIR_PLACE_ACTION_CODE
+            or UrllibBetfairHttpTransport.post
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("Request")
+            is not _CANONICAL_URLLIB_BETFAIR_REQUEST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
+            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            or _parse_place_orders_response
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+            or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+        ):
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_code_authority_changed_"
                     "requires_readback"
                 ),
                 observed_at=now(),

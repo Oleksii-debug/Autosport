@@ -359,11 +359,41 @@ def _event_from_payload(raw: object) -> HeartbeatEvent:
     return event
 
 
-class _ProcessLease:
-    """Hold one non-blocking process lease for the canonical heartbeat state path."""
+def _account_owner_lease_path(
+    account_client: BetdaqAccountReadOnlyClient,
+    stop_authority: ExecutionStopAuthority,
+) -> Path:
+    """Return a secret-safe lease path for one local BETDAQ Punter authority.
 
-    def __init__(self, state_path: Path) -> None:
-        self.path = state_path.with_name(f".{state_path.name}.owner.lock")
+    BETDAQ heartbeat registration is Punter-scoped, not application-scoped. The
+    caller-selected heartbeat state path therefore cannot define ownership. Anchor
+    the lease next to the canonical STOP journal and key it by a one-way digest of
+    venue + authenticated username. No credential text is persisted in the path.
+    """
+
+    credentials = account_client._credentials
+    venue_id = _text(account_client._venue_id, "venue_id")
+    username = _text(credentials.username, "username")
+    account_scope = _digest(
+        {
+            "schema": "autosport.betdaq-heartbeat-owner-lease",
+            "version": 1,
+            "provider": "BETDAQ",
+            "venue_id": venue_id,
+            "username": username,
+        }
+    )
+    authority_path = Path(stop_authority.path).resolve(strict=False)
+    return authority_path.with_name(
+        f".{authority_path.name}.betdaq-heartbeat.{account_scope}.owner.lock"
+    )
+
+
+class _ProcessLease:
+    """Hold one non-blocking process lease for an exact canonical authority path."""
+
+    def __init__(self, lease_path: Path) -> None:
+        self.path = Path(lease_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.path.open("a+b")
         try:
@@ -721,7 +751,9 @@ class BetdaqHeartbeatSafetyController:
         self._client = account_client
         self._stop = stop_authority
         self._store = BetdaqHeartbeatSafetyStore(state_path)
-        self._lease = _ProcessLease(self._store.path)
+        self._lease = _ProcessLease(
+            _account_owner_lease_path(account_client, stop_authority)
+        )
         self._closed = False
         self._apply_restart_fence()
 

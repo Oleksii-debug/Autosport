@@ -51,3 +51,19 @@ def test_packaged_interactive_entry_uses_emergency_stop_controller():
     assert "EmergencyStopWebController" in source
     assert "AutosportWebBridge(controller)" in source
     assert "launch_windows_shell" in source
+
+
+def test_main_poll_projects_durable_emergency_stop_state_without_stealing_focus():
+    script = _asset("app.js")
+
+    assert "function projectEmergencyStopState(emergency)" in script
+    assert 'byId("emergency-stop-status")' in script
+    assert "projectEmergencyStopState(state.emergency_stop);" in script
+    assert '"Аварійний STOP: стан не підтверджено."' in script
+
+    projection = script.split(
+        "function projectEmergencyStopState(emergency)", 1
+    )[1].split("function syncTextChildren", 1)[0]
+    assert "setTextIfChanged(node, value);" in projection
+    assert ".focus(" not in projection
+    assert "dispatch(" not in projection

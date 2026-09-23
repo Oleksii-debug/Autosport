@@ -13,13 +13,19 @@ from autosport.risk_path_equity_replay import (
 )
 
 
-def _leg(*, selection_id: str = "home", odds: str = "1.5") -> TicketLeg:
+def _leg(
+    *,
+    selection_id: str = "home",
+    odds: str = "1.5",
+    exchange_side: str | None = None,
+) -> TicketLeg:
     return TicketLeg(
         event_id="event-1",
         market_id="market-1",
         selection_id=selection_id,
         locked_odds=Decimal(odds),
         sport="soccer",
+        exchange_side=exchange_side,
     )
 
 
@@ -345,4 +351,67 @@ def test_replay_rejects_huge_scale_zero_before_fixed_point_materialization(
             scaled_zero_snapshot,
             expected_changed_ticket_ids=frozenset(),
         )
+
+def test_replay_rejects_lay_ticket_already_present_in_base(tmp_path) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg(odds="3", exchange_side="lay")],
+        Decimal("10"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    base = _snapshot(book, tmp_path / "base-lay.json")
+
+    with pytest.raises(
+        RiskPathEquityReplayError,
+        match="LAY ticket",
+    ):
+        replay_paper_book_equity_path(
+            base,
+            base,
+            expected_changed_ticket_ids=frozenset(),
+        )
+
+    assert ticket.legs[0].exchange_side == "lay"
+
+
+def test_replay_rejects_lay_ticket_opened_in_suffix(tmp_path) -> None:
+    book = PaperBook("100")
+    base = _snapshot(book, tmp_path / "base-before-lay.json")
+    ticket = book.open_ticket(
+        [_leg(odds="3", exchange_side="lay")],
+        Decimal("10"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    final = _snapshot(book, tmp_path / "final-with-lay.json")
+
+    with pytest.raises(
+        RiskPathEquityReplayError,
+        match="LAY ticket",
+    ):
+        replay_paper_book_equity_path(
+            base,
+            final,
+            expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
+        )
+
+
+def test_replay_preserves_explicit_back_exchange_side(tmp_path) -> None:
+    book = PaperBook("100")
+    base = _snapshot(book, tmp_path / "base-before-back.json")
+    ticket = book.open_ticket(
+        [_leg(odds="3", exchange_side="back")],
+        Decimal("10"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    final = _snapshot(book, tmp_path / "final-with-back.json")
+
+    replay = replay_paper_book_equity_path(
+        base,
+        final,
+        expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
+    )
+
+    assert replay.start_balance == Decimal("100")
+    assert replay.final_balance == Decimal("90")
+    assert replay.minimum_equity == Decimal("90")
 

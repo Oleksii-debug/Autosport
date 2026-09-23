@@ -870,16 +870,46 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             self.voc_store.record(evidence.evaluation)
         return evidence
 
-    def canonical_request(self, value, observation, *, context_overrides=None):
+    def canonical_request(
+        self,
+        value,
+        observation,
+        *,
+        policy_value=None,
+        candidate_values=None,
+        context_overrides=None,
+    ):
+        active_policy = policy() if policy_value is None else policy_value
+        active_candidates = (
+            candidates()
+            if candidate_values is None
+            else tuple(candidate_values)
+        )
+        cloud_backend_id = next(
+            (
+                item.backend_id
+                for item in active_candidates
+                if item.candidate_id == value.cloud_candidate_id
+                and item.tier is ComputeTier.CLOUD
+            ),
+            "NONE",
+        )
         context = {
             "request_id": value.request_id,
             "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
             "regime_id": value.voc_regime_id,
             "urgency_id": value.voc_urgency_id,
             "contradiction_state": value.voc_contradiction_state,
+            "routing_policy_id": active_policy.policy_id,
+            "routing_policy_version": str(active_policy.policy_version),
+            "cloud_permission": (
+                "ALLOW" if active_policy.cloud_enabled else "DENY"
+            ),
+            "cloud_backend_id": cloud_backend_id,
         }
         if context_overrides:
             context.update(context_overrides)
@@ -905,7 +935,19 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 and value.decision_evidence_sha256 is not None
                 and isinstance(observation, SportDomainFitnessObservation)
             ):
-                value = self.canonical_request(value, observation)
+                value = self.canonical_request(
+                    value,
+                    observation,
+                    policy_value=(
+                        args[2]
+                        if len(args) > 2
+                        and isinstance(args[2], ComputeRoutingPolicy)
+                        else None
+                    ),
+                    candidate_values=(
+                        args[1] if len(args) > 1 else None
+                    ),
+                )
                 args = (value, *args[1:])
         return route_compute(*args, **kwargs)
 
@@ -945,6 +987,10 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "regime_id": production_request.voc_regime_id,
             "urgency_id": production_request.voc_urgency_id,
             "contradiction_state": production_request.voc_contradiction_state,
+            "routing_policy_id": "policy-voc",
+            "routing_policy_version": "1",
+            "cloud_permission": "ALLOW",
+            "cloud_backend_id": "permitted-cloud",
         }
         production_context_record = DecisionRecord(
             replay_run_id="replay-current-voc",

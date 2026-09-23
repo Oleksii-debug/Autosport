@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 from autosport.forward_economic_evidence import (
     AlphaAllocation,
     BetSide,
@@ -188,3 +190,60 @@ def test_recorded_step_cannot_rebind_positive_evidence_after_publication() -> No
     assert after.evidence_sha256 == before.evidence_sha256
     assert after.positive_authority_verified is False
     assert after.scientific_promotion_gate_passed is False
+
+
+def _filled_accumulator(event_count: int = 5) -> tuple[ForwardEconomicEvidenceAccumulator, Resolver]:
+    observations = [_observation(sequence) for sequence in range(event_count + 1)]
+    mapping: dict[tuple[int, str], ResolvedPolicyOutcome] = {}
+    for observation in observations:
+        mapping[(observation.sequence, "challenger")] = _challenger(observation)
+        mapping[(observation.sequence, "champion")] = _champion(observation)
+
+    accumulator = ForwardEconomicEvidenceAccumulator(_protocol())
+    resolver = Resolver(mapping)
+    for observation in observations[:event_count]:
+        accumulator.record(observation, resolver)
+    return accumulator, resolver
+
+
+@pytest.mark.parametrize(
+    ("cache_name", "replacement"),
+    (
+        ("_absolute_log_e", Decimal("999")),
+        ("_paired_log_e", Decimal("-999")),
+        ("_challenger_total", Decimal("123456")),
+        ("_champion_total", Decimal("654321")),
+        ("_challenger_peak", Decimal("777")),
+        ("_challenger_max_drawdown", Decimal("888")),
+    ),
+)
+def test_summary_fails_closed_on_mutable_aggregate_cache_drift(
+    cache_name: str,
+    replacement: Decimal,
+) -> None:
+    accumulator, _resolver = _filled_accumulator()
+    committed_steps = accumulator.steps
+    object.__setattr__(accumulator, cache_name, replacement)
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal aggregate state integrity drift",
+    ):
+        accumulator.summary()
+
+    assert accumulator.steps == committed_steps
+
+
+def test_record_revalidates_aggregate_cache_before_appending_next_step() -> None:
+    accumulator, resolver = _filled_accumulator(event_count=1)
+    committed_steps = accumulator.steps
+    object.__setattr__(accumulator, "_paired_log_e", Decimal("123"))
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal aggregate state integrity drift",
+    ):
+        accumulator.record(_observation(1), resolver)
+
+    assert accumulator.steps == committed_steps
+    assert accumulator.next_sequence == 1

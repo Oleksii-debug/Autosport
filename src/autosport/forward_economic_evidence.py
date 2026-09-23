@@ -946,6 +946,99 @@ class ForwardEconomicEvidenceAccumulator:
                 +(high_money / risk),
             )
 
+    def _validated_aggregate_state(
+        self,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]:
+        """Re-derive mutable caches from committed steps and fail closed on drift."""
+        protocol = self._validated_protocol()
+        absolute_log_e = Decimal(0)
+        paired_log_e = Decimal(0)
+        challenger_total = Decimal(0)
+        champion_total = Decimal(0)
+        challenger_peak = Decimal(0)
+        challenger_max_drawdown = Decimal(0)
+        expected_sequence = protocol.start_sequence
+
+        for step in self._steps:
+            if type(step) is not ForwardEconomicStep:
+                raise ForwardEconomicEvidenceError(
+                    "internal recorded step type integrity drift"
+                )
+            if step.sequence != expected_sequence:
+                raise ForwardEconomicEvidenceError(
+                    "internal recorded step sequence integrity drift"
+                )
+            expected_sequence += 1
+
+            with localcontext() as context:
+                context.prec = _DECIMAL_PRECISION
+                absolute_log_e = +(
+                    absolute_log_e
+                    + _log_e_increment(
+                        protocol.absolute_lambda,
+                        step.challenger_normalized_pnl,
+                        step.absolute_low,
+                        step.absolute_high,
+                    )
+                )
+                paired_log_e = +(
+                    paired_log_e
+                    + _log_e_increment(
+                        protocol.paired_lambda,
+                        step.paired_normalized_pnl,
+                        step.paired_low,
+                        step.paired_high,
+                    )
+                )
+
+            if (
+                step.absolute_log_e_after != absolute_log_e
+                or step.paired_log_e_after != paired_log_e
+            ):
+                raise ForwardEconomicEvidenceError(
+                    "recorded step statistical aggregate integrity drift"
+                )
+
+            challenger_total = _exact_decimal_sum(
+                challenger_total,
+                step.challenger_net_pnl_currency,
+            )
+            champion_total = _exact_decimal_sum(
+                champion_total,
+                step.champion_net_pnl_currency,
+            )
+            challenger_peak = max(challenger_peak, challenger_total)
+            challenger_drawdown = _exact_decimal_sum(
+                challenger_peak,
+                challenger_total.copy_negate(),
+            )
+            challenger_max_drawdown = max(
+                challenger_max_drawdown,
+                challenger_drawdown,
+            )
+
+        cached = (
+            self._absolute_log_e,
+            self._paired_log_e,
+            self._challenger_total,
+            self._champion_total,
+            self._challenger_peak,
+            self._challenger_max_drawdown,
+        )
+        derived = (
+            absolute_log_e,
+            paired_log_e,
+            challenger_total,
+            champion_total,
+            challenger_peak,
+            challenger_max_drawdown,
+        )
+        if cached != derived:
+            raise ForwardEconomicEvidenceError(
+                "internal aggregate state integrity drift"
+            )
+        return derived
+
     def record(
         self,
         observation: ForwardDecisionObservation,
@@ -967,6 +1060,14 @@ class ForwardEconomicEvidenceAccumulator:
                 "frozen universe member cannot be counted more than once"
             )
         self._resolver_authority_sha256(resolver)
+        (
+            current_absolute_log_e,
+            current_paired_log_e,
+            current_challenger_total,
+            current_champion_total,
+            current_challenger_peak,
+            current_challenger_max_drawdown,
+        ) = self._validated_aggregate_state()
 
         challenger = self._resolve_exact(
             resolver,
@@ -988,7 +1089,7 @@ class ForwardEconomicEvidenceAccumulator:
             paired_low = +(challenger_low - champion_high)
             paired_high = +(challenger_high - champion_low)
             new_absolute_log_e = +(
-                self._absolute_log_e
+                current_absolute_log_e
                 + _log_e_increment(
                     self.protocol.absolute_lambda,
                     challenger_x,
@@ -997,7 +1098,7 @@ class ForwardEconomicEvidenceAccumulator:
                 )
             )
             new_paired_log_e = +(
-                self._paired_log_e
+                current_paired_log_e
                 + _log_e_increment(
                     self.protocol.paired_lambda,
                     paired_x,
@@ -1010,19 +1111,19 @@ class ForwardEconomicEvidenceAccumulator:
         # statistical approximations.  Never accumulate them under the bounded
         # e-process Decimal context.
         new_challenger_total = _exact_decimal_sum(
-            self._challenger_total,
+            current_challenger_total,
             challenger.net_pnl_currency,
         )
         new_champion_total = _exact_decimal_sum(
-            self._champion_total,
+            current_champion_total,
             champion.net_pnl_currency,
         )
-        new_peak = max(self._challenger_peak, new_challenger_total)
+        new_peak = max(current_challenger_peak, new_challenger_total)
         new_drawdown = _exact_decimal_sum(
             new_peak,
             new_challenger_total.copy_negate(),
         )
-        new_max_drawdown = max(self._challenger_max_drawdown, new_drawdown)
+        new_max_drawdown = max(current_challenger_max_drawdown, new_drawdown)
 
         step = ForwardEconomicStep(
             sequence=observation.sequence,
@@ -1145,10 +1246,18 @@ class ForwardEconomicEvidenceAccumulator:
 
     def summary(self) -> ForwardEconomicEvidenceSummary:
         protocol = self._validated_protocol()
+        (
+            absolute_log_e,
+            paired_log_e,
+            challenger_total,
+            champion_total,
+            _sequence_peak,
+            _sequence_max_drawdown,
+        ) = self._validated_aggregate_state()
         threshold = _log_threshold(protocol.challenger_alpha)
         minimum_events_satisfied = len(self._steps) >= protocol.minimum_events
-        absolute_crossed = self._absolute_log_e >= threshold
-        paired_crossed = self._paired_log_e >= threshold
+        absolute_crossed = absolute_log_e >= threshold
+        paired_crossed = paired_log_e >= threshold
         realized_peak, realized_max_drawdown, chronology_unambiguous = (
             self._realized_challenger_drawdown()
         )
@@ -1198,12 +1307,12 @@ class ForwardEconomicEvidenceAccumulator:
             all_in_economics_complete=all_in_economics_complete,
             observed_events=len(self._steps),
             next_sequence=self.next_sequence,
-            challenger_total_pnl_currency=self._challenger_total,
-            champion_total_pnl_currency=self._champion_total,
+            challenger_total_pnl_currency=challenger_total,
+            champion_total_pnl_currency=champion_total,
             challenger_peak_pnl_currency=realized_peak,
             challenger_max_drawdown_currency=realized_max_drawdown,
-            absolute_log_e=self._absolute_log_e,
-            paired_log_e=self._paired_log_e,
+            absolute_log_e=absolute_log_e,
+            paired_log_e=paired_log_e,
             log_threshold=threshold,
             absolute_threshold_crossed=absolute_crossed,
             paired_threshold_crossed=paired_crossed,

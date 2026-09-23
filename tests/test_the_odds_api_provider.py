@@ -989,6 +989,56 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIsNone(context.exception.__context__)
         self.assertNotIn(secret, str(context.exception))
 
+    def test_product_default_transport_closure_mutation_cannot_mint_origin(self):
+        cells = dict(
+            zip(
+                odds_api_module._default_transport.__code__.co_freevars,
+                odds_api_module._default_transport.__closure__ or (),
+                strict=True,
+            )
+        )
+        opener_cell = cells["opener_factory"]
+        original_opener_factory = opener_cell.cell_contents
+        forged_calls = []
+
+        def forged_opener_factory(*_handlers):
+            forged_calls.append(True)
+            raise AssertionError("forged opener must not run")
+
+        opener_cell.cell_contents = forged_opener_factory
+        try:
+            provider = TheOddsApiProvider(
+                "secret",
+                sport="soccer_epl",
+            )
+            with self.assertRaisesRegex(
+                TheOddsApiTransportError,
+                "product transport authority changed before request",
+            ):
+                provider.read_batch()
+        finally:
+            opener_cell.cell_contents = original_opener_factory
+
+        self.assertEqual(forged_calls, [])
+
+    def test_product_transport_performer_default_mutation_fails_before_network(self):
+        kwdefaults = odds_api_module._perform_http_json_response.__kwdefaults__
+        self.assertIsNotNone(kwdefaults)
+        original_decoder = kwdefaults["json_decoder"]
+        kwdefaults["json_decoder"] = lambda _body: []
+        try:
+            provider = TheOddsApiProvider(
+                "secret",
+                sport="soccer_epl",
+            )
+            with self.assertRaisesRegex(
+                TheOddsApiTransportError,
+                "product transport authority changed before request",
+            ):
+                provider.read_batch()
+        finally:
+            kwdefaults["json_decoder"] = original_decoder
+
     def test_product_default_transport_captures_authority_dependencies(self):
         captured = tuple(
             cell.cell_contents

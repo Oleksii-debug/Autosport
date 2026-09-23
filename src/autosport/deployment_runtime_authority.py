@@ -395,18 +395,28 @@ class DeploymentRuntimeAuthorityStore:
         candidate = Path(path)
         try:
             canonical = candidate.resolve(strict=True)
-            link_count = canonical.stat().st_nlink
         except (OSError, RuntimeError) as exc:
             raise DeploymentRuntimeAuthorityError(
                 "cannot resolve runtime authority store path"
+            ) from exc
+        self.path = canonical
+        self._lock = RLock()
+        self._require_single_link()
+        self._read_validated_records()
+
+    def _require_single_link(self) -> None:
+        """Fail closed if the canonical store inode has another pathname."""
+
+        try:
+            link_count = self.path.stat().st_nlink
+        except (OSError, RuntimeError) as exc:
+            raise DeploymentRuntimeAuthorityError(
+                "cannot stat runtime authority store path"
             ) from exc
         if link_count != 1:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store must not be hard-linked"
             )
-        self.path = canonical
-        self._lock = RLock()
-        self._read_validated_records()
 
     @classmethod
     def initialize_pristine(
@@ -462,10 +472,15 @@ class DeploymentRuntimeAuthorityStore:
                     pass
 
     def _read_payload(self) -> dict[str, object]:
+        # The constructor fence is insufficient: another process can create a hard
+        # link after this Store instance is opened. Revalidate both sides of the
+        # filesystem read so a late alias cannot become silently trusted state.
+        self._require_single_link()
         try:
             raw = self.path.read_text(encoding="utf-8")
         except OSError as exc:
             raise DeploymentRuntimeAuthorityError("cannot read runtime authority store") from exc
+        self._require_single_link()
         if not raw.endswith("\n"):
             raise DeploymentRuntimeAuthorityError("runtime authority store is not canonical text")
         try:
@@ -579,6 +594,10 @@ class DeploymentRuntimeAuthorityStore:
                         record.to_dict() for record in (*records, candidate)
                     ],
                 }
+                # Recheck immediately before publication. A hard link created after
+                # the validated read must not let os.replace split one accepted
+                # authority history into two independently readable pathnames.
+                self._require_single_link()
                 self._write_atomic_path(self.path, payload)
                 verified = self.get(candidate.runtime_authority_id)
                 if verified is None:

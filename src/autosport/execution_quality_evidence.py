@@ -130,7 +130,7 @@ class PaperExecutionQualitySample:
     requested_stake: Decimal
     execution_odds: Decimal | None
     execution_stake: Decimal | None
-    fill_ratio: Decimal
+    fill_ratio: Decimal | None
     signed_odds_delta: Decimal | None
     signed_price_spread_bps: Decimal | None
     price_movement: PriceMovement
@@ -166,7 +166,9 @@ class PaperExecutionQualitySample:
             "execution_stake": (
                 None if self.execution_stake is None else _decimal_text(self.execution_stake)
             ),
-            "fill_ratio": _decimal_text(self.fill_ratio),
+            "fill_ratio": (
+                None if self.fill_ratio is None else _decimal_text(self.fill_ratio)
+            ),
             "signed_odds_delta": (
                 None
                 if self.signed_odds_delta is None
@@ -222,6 +224,8 @@ class PaperExecutionQualityReport:
     outcome_counts: tuple[tuple[str, int], ...]
     price_observation_count: int
     price_observation_missing_count: int
+    fill_observation_count: int
+    fill_observation_missing_count: int
     real_latency_observation_count: int
     clock_status: ClockStatus
     quality_status: EvidenceReadinessStatus
@@ -253,6 +257,8 @@ class PaperExecutionQualityReport:
             "outcome_counts": dict(self.outcome_counts),
             "price_observation_count": self.price_observation_count,
             "price_observation_missing_count": self.price_observation_missing_count,
+            "fill_observation_count": self.fill_observation_count,
+            "fill_observation_missing_count": self.fill_observation_missing_count,
             "real_latency_observation_count": self.real_latency_observation_count,
             "clock_status": self.clock_status.value,
             "quality_status": self.quality_status.value,
@@ -310,9 +316,13 @@ def _sample_for_event(ledger: EvaluationUniverseLedger, row, event) -> PaperExec
         raise EvaluationUniverseIntegrityError(
             "execution-model eligible row lacks market identity"
         )
-    executed_stake = attempt.execution_stake
-    effective_stake = Decimal(0) if executed_stake is None else executed_stake
-    fill_ratio = effective_stake / attempt.requested_stake
+    if attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        fill_ratio = None
+    elif attempt.outcome is PaperAttemptOutcome.REJECTED:
+        fill_ratio = Decimal(0)
+    else:
+        assert attempt.execution_stake is not None
+        fill_ratio = attempt.execution_stake / attempt.requested_stake
     delta, spread_bps, movement = _price_metrics(
         attempt.decision_odds,
         attempt.execution_odds,
@@ -370,7 +380,9 @@ def _slice(samples: tuple[PaperExecutionQualitySample, ...]) -> tuple[PaperExecu
                 sample_count=len(members),
                 outcome_counts=tuple(sorted(counts.items())),
                 fill_ratio=NumericDistribution.from_values(
-                    member.fill_ratio for member in members
+                    member.fill_ratio
+                    for member in members
+                    if member.fill_ratio is not None
                 ),
                 signed_price_spread_bps=NumericDistribution.from_values(
                     member.signed_price_spread_bps
@@ -387,9 +399,9 @@ def project_paper_execution_quality(
 ) -> PaperExecutionQualityReport:
     """Project immutable PAPER execution evidence without claiming live latency/economics.
 
-    ``delay_ms`` and ``quote_age_ms`` are PAPER execution-model fields. They are
+    `delay_ms` and `quote_age_ms` are PAPER execution-model fields.  They are
     intentionally reported under model-specific names and never promoted into
-    real/provider latency. Provider/local clocks are not subtracted here.
+    real/provider latency.  Provider/local clocks are not subtracted here.
     """
     if not isinstance(ledger, EvaluationUniverseLedger):
         raise TypeError("ledger must be EvaluationUniverseLedger")
@@ -431,6 +443,9 @@ def project_paper_execution_quality(
         for sample in ordered
         if sample.signed_price_spread_bps is not None
     )
+    fill_observations = tuple(
+        sample.fill_ratio for sample in ordered if sample.fill_ratio is not None
+    )
     return PaperExecutionQualityReport(
         ledger_sha256=ledger.ledger_sha256,
         universe_sha256=ledger.universe.universe_sha256,
@@ -441,6 +456,8 @@ def project_paper_execution_quality(
         outcome_counts=tuple(sorted(counts.items())),
         price_observation_count=len(price_observations),
         price_observation_missing_count=len(ordered) - len(price_observations),
+        fill_observation_count=len(fill_observations),
+        fill_observation_missing_count=len(ordered) - len(fill_observations),
         real_latency_observation_count=0,
         clock_status=ClockStatus.CLOCK_DOMAIN_UNPROVEN,
         quality_status=(
@@ -457,9 +474,7 @@ def project_paper_execution_quality(
         model_quote_age_ms=NumericDistribution.from_values(
             sample.model_quote_age_ms for sample in ordered
         ),
-        fill_ratio=NumericDistribution.from_values(
-            sample.fill_ratio for sample in ordered
-        ),
+        fill_ratio=NumericDistribution.from_values(fill_observations),
         signed_price_spread_bps=NumericDistribution.from_values(price_observations),
         slices=_slice(ordered),
         samples=ordered,

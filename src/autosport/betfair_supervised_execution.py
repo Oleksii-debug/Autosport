@@ -87,13 +87,34 @@ _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN = (
 _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE = (
     _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN.__code__
 )
+_CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._open
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN.__code__
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._call_chain
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN.__code__
+)
 
 
 def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
     """Build a private urllib opener that ambient process state cannot replace."""
 
     private_opener = _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER()
+    opener_type = _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
     opener_open = _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
+    opener_internal_open = _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN
+    opener_internal_open_code = (
+        _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE
+    )
+    opener_call_chain = _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN
+    opener_call_chain_code = (
+        _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+    )
     request_type = _CANONICAL_URLLIB_BETFAIR_REQUEST
 
     def product_owned_provider_http_post(
@@ -107,6 +128,22 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
         # Terminal provider truth always uses the product-owned private opener.
         # Deterministic tests intercept below this application trust boundary;
         # mutable account-module urlopen state never selects provider bytes.
+        private_dispatch = getattr(private_opener, "__dict__", {})
+        if (
+            type(private_opener) is not opener_type
+            or getattr(opener_type, "_open", None) is not opener_internal_open
+            or getattr(opener_internal_open, "__code__", None)
+            is not opener_internal_open_code
+            or getattr(opener_type, "_call_chain", None)
+            is not opener_call_chain
+            or getattr(opener_call_chain, "__code__", None)
+            is not opener_call_chain_code
+            or "_open" in private_dispatch
+            or "_call_chain" in private_dispatch
+        ):
+            raise BetfairReadOnlyError(
+                "Betfair private opener dispatch authority changed"
+            )
         request = request_type(
             url,
             data=body,
@@ -119,6 +156,22 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
             timeout=timeout_seconds,
         ) as response:
             payload = response.read(transport._max_response_bytes + 1)
+        private_dispatch = getattr(private_opener, "__dict__", {})
+        if (
+            type(private_opener) is not opener_type
+            or getattr(opener_type, "_open", None) is not opener_internal_open
+            or getattr(opener_internal_open, "__code__", None)
+            is not opener_internal_open_code
+            or getattr(opener_type, "_call_chain", None)
+            is not opener_call_chain
+            or getattr(opener_call_chain, "__code__", None)
+            is not opener_call_chain_code
+            or "_open" in private_dispatch
+            or "_call_chain" in private_dispatch
+        ):
+            raise BetfairReadOnlyError(
+                "Betfair private opener dispatch authority changed"
+            )
         if len(payload) > transport._max_response_bytes:
             raise BetfairReadOnlyError(
                 "Betfair response exceeded the size limit"
@@ -137,6 +190,11 @@ _CANONICAL_PROVIDER_HTTP_POST_FREEVARS = (
 _CANONICAL_PROVIDER_HTTP_POST_CLOSURE = tuple(
     cell.cell_contents
     for cell in (_CANONICAL_PROVIDER_HTTP_POST.__closure__ or ())
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+    ]
 )
 
 
@@ -1313,6 +1371,38 @@ def execute_betfair_supervised_action(
                 None,
             )
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._open
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._call_chain
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+            or type(_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER)
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or "_open" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "_call_chain" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+            ]
             or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
             or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
             is not _CANONICAL_PROVIDER_HTTP_POST_CODE
@@ -1483,6 +1573,38 @@ def execute_betfair_supervised_action(
                 None,
             )
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._open
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._call_chain
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+            or type(_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER)
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or "_open" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "_call_chain" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+            ]
             or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
             or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
             is not _CANONICAL_PROVIDER_HTTP_POST_CODE

@@ -9,6 +9,7 @@ from autosport.domain import PaperTicket, TicketLeg
 from autosport.portfolio_joint_stress import (
     JointDependenceGrade,
     JointDependenceRelation,
+    JointScenarioEvaluation,
     JointStressProtocol,
     JointStressResult,
     JointStressScenario,

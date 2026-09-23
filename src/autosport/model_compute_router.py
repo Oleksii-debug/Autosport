@@ -1666,6 +1666,18 @@ def route_compute(
                         canonical_data_classification = current_context.get(
                             "data_classification"
                         )
+                        canonical_policy_id = current_context.get(
+                            "routing_policy_id"
+                        )
+                        canonical_policy_version = current_context.get(
+                            "routing_policy_version"
+                        )
+                        canonical_cloud_permission = current_context.get(
+                            "cloud_permission"
+                        )
+                        canonical_cloud_backend_id = current_context.get(
+                            "cloud_backend_id"
+                        )
                         expected_current_context = {
                             "request_id": request.request_id,
                             "decision_input_sha256": request.decision_input_sha256,
@@ -1678,6 +1690,10 @@ def route_compute(
                             "contradiction_state": (
                                 request.voc_contradiction_state
                             ),
+                            "routing_policy_id": policy.policy_id,
+                            "routing_policy_version": str(policy.policy_version),
+                            "cloud_permission": "ALLOW",
+                            "cloud_backend_id": cloud.backend_id,
                         }
                         if canonical_data_classification is None:
                             baseline_reason = (
@@ -1691,6 +1707,35 @@ def route_compute(
                             baseline_reason = (
                                 "canonical current VOC data classification "
                                 "does not match the current request"
+                            )
+                        elif (
+                            canonical_policy_id is None
+                            or canonical_policy_version is None
+                            or canonical_cloud_permission is None
+                            or canonical_cloud_backend_id is None
+                        ):
+                            baseline_reason = (
+                                "canonical current VOC decision context lacks "
+                                "product cloud permission authority"
+                            )
+                        elif (
+                            canonical_policy_id != policy.policy_id
+                            or canonical_policy_version
+                            != str(policy.policy_version)
+                        ):
+                            baseline_reason = (
+                                "canonical current VOC routing policy "
+                                "does not match the current policy"
+                            )
+                        elif canonical_cloud_permission != "ALLOW":
+                            baseline_reason = (
+                                "canonical current VOC cloud permission "
+                                "does not allow cloud compute"
+                            )
+                        elif canonical_cloud_backend_id != cloud.backend_id:
+                            baseline_reason = (
+                                "canonical current VOC cloud backend "
+                                "does not match the selected cloud candidate"
                             )
                         elif current_context != expected_current_context:
                             baseline_reason = (

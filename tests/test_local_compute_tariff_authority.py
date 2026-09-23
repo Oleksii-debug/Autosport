@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -206,6 +206,36 @@ def test_recurring_decimal_allocation_fails_closed_instead_of_rounding(
             components=(_component(Decimal("1")),),
             denominator_request_count=3,
         )
+
+
+def test_allocation_arithmetic_is_independent_of_decimal_context(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    authority = tmp_path / "authority"
+    _owner_goal(workspace)
+    monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    store = subject.LocalComputeTariffAuthorityStore(
+        workspace, authority_root=authority
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        basis = store.publish_allocation_basis(
+            basis_id="context-independent-basis",
+            backend_id="local-backend",
+            model_id="model-a",
+            config_sha256="c" * 64,
+            allocation_policy_id="owner-full-cost-per-request-v1",
+            components=(
+                _component(Decimal("123456.78"), component_id="hardware"),
+                _component(Decimal("0.22"), component_id="electricity"),
+            ),
+            denominator_request_count=4,
+        )
+
+    assert basis.total_allocable_cost == Decimal("123457.00")
+    assert basis.amount_per_request == Decimal("30864.25")
 
 
 def test_float_and_negative_component_money_are_rejected():

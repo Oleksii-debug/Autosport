@@ -1157,6 +1157,7 @@ class AutosportWebController:
             started = self.product_worker.start(
                 workspace=workspace,
                 source_factory=source_factory,
+                expected_source_id=source_entry.expected_provider_source_id,
                 initial_bankroll="10000",
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )

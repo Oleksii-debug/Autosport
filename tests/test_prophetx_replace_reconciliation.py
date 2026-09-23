@@ -11,6 +11,7 @@ from autosport.prophetx_replace_reconciliation import (
     Replaced,
     ReplaceOutcome,
     ReplaceReject,
+    ReplaceRejectReason,
     ReplaceRejectResponseTo,
     ReplaceRequest,
     Transport,
@@ -109,7 +110,7 @@ def reject(**kw):
         provider_order_id="px-1",
         replace_cl_ord_id="repl-1",
         orig_cl_ord_id="orig-1",
-        reason="too late",
+        reason=ReplaceRejectReason.TOO_LATE,
         response_to=ReplaceRejectResponseTo.REPLACE,
         order_status=OrderStatus.PARTIALLY_FILLED,
         transact_time="2026-09-22T20:00:04Z",
@@ -339,6 +340,11 @@ def test_response_to_participates_in_replay_identity():
 def test_replace_reject_requires_typed_response_to():
     with pytest.raises(ProphetXReplaceError, match="CxlRejResponseTo"):
         reject(response_to="2")
+
+
+def test_replace_reject_requires_typed_reason():
+    with pytest.raises(ProphetXReplaceError, match="CxlRejReason"):
+        reject(reason="0")
 
 
 def test_reject_after_old_fill_preserves_fill():

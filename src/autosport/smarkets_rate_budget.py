@@ -305,6 +305,13 @@ class SmarketsAccountRateBudget:
                             raise SmarketsRateBudgetError('provider limit changed inside the same reset window')
                         if observation.remaining > current['provider_remaining']:
                             raise SmarketsRateBudgetError('remaining budget increased inside the same reset window')
+                        if (
+                            reservation_id is not None
+                            and observation.remaining == current['provider_remaining']
+                        ):
+                            raise SmarketsRateBudgetError(
+                                'reservation completion requires provider remaining to decrease'
+                            )
                 sequence = 0 if current is None else current['reservation_sequence']
                 connection.execute('\n                    INSERT INTO smarkets_rate_budget (\n                        account_id, observation_sha256, provider_limit,\n                        provider_remaining, window_seconds, observed_at, reset_at,\n                        http_status, error_type, reservation_sequence\n                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n                    ON CONFLICT(account_id) DO UPDATE SET\n                        observation_sha256 = excluded.observation_sha256,\n                        provider_limit = excluded.provider_limit,\n                        provider_remaining = excluded.provider_remaining,\n                        window_seconds = excluded.window_seconds,\n                        observed_at = excluded.observed_at,\n                        reset_at = excluded.reset_at,\n                        http_status = excluded.http_status,\n                        error_type = excluded.error_type,\n                        reservation_sequence = excluded.reservation_sequence\n                    ', (self._account_id, digest, observation.limit, observation.remaining, observation.window_seconds, observed_text, reset_text, observation.http_status, observation.error_type, sequence))
                 if reset_changed:

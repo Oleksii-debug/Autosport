@@ -105,6 +105,25 @@ def test_poll_driven_disable_moves_focus_to_status_or_error() -> None:
     assert 'byId("research-plan-path").disabled = true;' not in source
 
 
+def test_programmatic_focus_routes_away_from_unavailable_targets() -> None:
+    source = _source()
+
+    assert "function focusOperatorTarget(target)" in source
+    assert 'target.closest("[hidden]") !== null' in source
+    assert 'target.matches(":disabled")' in source
+    assert "if (document.activeElement === target) return true;" in source
+    assert 'const section = target.closest("section");' in source
+    assert 'const sectionHeading = section ? section.querySelector("h2") : null;' in source
+    assert 'sectionHeading.closest("[hidden]") === null' in source
+    assert "fallback.tabIndex = -1;" in source
+    assert "return document.activeElement === fallback;" in source
+
+    assert "focusOperatorTarget(byId(result.focus_id));" in source
+    assert "focusOperatorTarget(byId(selectedSurfaceTarget()));" in source
+    assert "const target = byId(result.focus_id);" not in source
+    assert "if (target instanceof HTMLElement) target.focus();" not in source
+
+
 def test_poll_and_native_accessibility_contract_remain_intact() -> None:
     source = _source()
 

@@ -41,6 +41,32 @@
     }
   }
 
+  function focusOperatorTarget(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    const unavailable = (
+      target.hidden
+      || target.closest("[hidden]") !== null
+      || target.matches(":disabled")
+    );
+    if (!unavailable) {
+      target.focus();
+      if (document.activeElement === target) return true;
+    }
+    const section = target.closest("section");
+    const sectionHeading = section ? section.querySelector("h2") : null;
+    const usableSectionHeading = (
+      sectionHeading instanceof HTMLElement
+      && !sectionHeading.hidden
+      && sectionHeading.closest("[hidden]") === null
+    );
+    const fallback = usableSectionHeading
+      ? sectionHeading
+      : (errorNode.hidden ? statusNode : errorNode);
+    fallback.tabIndex = -1;
+    fallback.focus();
+    return document.activeElement === fallback;
+  }
+
   function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop) {
     const focused = document.activeElement;
     startButton.disabled = canStart !== true;
@@ -158,8 +184,7 @@
 
   function focusResult(result) {
     if (!result || !result.focus_id) return;
-    const target = byId(result.focus_id);
-    if (target instanceof HTMLElement) target.focus();
+    focusOperatorTarget(byId(result.focus_id));
   }
 
   async function apiState() {
@@ -344,8 +369,7 @@
     dispatch("surface.select", { surface_key: byId(301).value });
   });
   byId(303).addEventListener("click", () => {
-    const target = byId(selectedSurfaceTarget());
-    if (target instanceof HTMLElement) target.focus();
+    focusOperatorTarget(byId(selectedSurfaceTarget()));
   });
 
   byId(305).addEventListener("click", () => {

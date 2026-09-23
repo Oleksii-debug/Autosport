@@ -413,7 +413,8 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         action_id="action-1",
         market_id="1.234",
     )
-    capture.assert_authoritative()
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        capture.assert_authoritative()
 
     assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
     assert not hasattr(betfair_readonly, "_EXECUTION_READBACK_SEAL")
@@ -440,6 +441,40 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
     copied = replace(capture)
     with pytest.raises(BetfairReadOnlyError, match="not issued"):
         copied.assert_authoritative()
+
+
+def test_post_init_transport_substitution_cannot_mint_readback_authority():
+    credentials = BetfairSessionCredentials("app-secret", "session-secret")
+    client = BetfairReadOnlyClient(
+        credentials,
+        clock=lambda: FIXED_NOW,
+    )
+    synthetic = FakeTransport(
+        [
+            response(
+                [{"marketId": "1.234", "event": {"id": "event-1"}}],
+                1,
+            ),
+            response({"currentOrders": [], "moreAvailable": False}, 2),
+            response({"clearedOrders": [], "moreAvailable": False}, 3),
+            response({"clearedOrders": [], "moreAvailable": False}, 4),
+            response({"clearedOrders": [], "moreAvailable": False}, 5),
+            response({"clearedOrders": [], "moreAvailable": False}, 6),
+        ]
+    )
+
+    # A trusted no-injection client may not transfer its authority to a later
+    # caller-controlled transport. Parsing may still complete for diagnostics,
+    # but the resulting capture is intentionally outside the issuance registry.
+    client._transport = synthetic
+    capture = client.read_execution_readback(
+        action_id="action-1",
+        market_id="1.234",
+    )
+
+    assert len(synthetic.calls) == 6
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        capture.assert_authoritative()
 
 
 def test_execution_readback_detects_post_capture_origin_tampering():

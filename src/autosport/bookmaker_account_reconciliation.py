@@ -41,6 +41,8 @@ _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
 _RECONCILIATION_TRANSITION_SCHEMA = (
     "autosport.account-reconciliation-transition-v1"
 )
+_RECONCILIATION_LEGACY_SCHEMA_VERSION = 1
+_RECONCILIATION_SCHEMA_VERSION = 2
 
 
 class AccountReconciliationError(RuntimeError):
@@ -273,7 +275,7 @@ def _balance_to_dict(value: BookmakerBalanceObservation) -> dict[str, object]:
 
 
 def _position_to_dict(value: BookmakerPositionObservation) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "venue_id": value.venue_id,
         "account_id": value.account_id,
         "adapter_id": value.adapter_id,
@@ -290,6 +292,11 @@ def _position_to_dict(value: BookmakerPositionObservation) -> dict[str, object]:
         "gross_return": _optional_decimal_text(value.gross_return),
         "external_receipt_id": value.external_receipt_id,
     }
+    # Preserve schema-v1 snapshot identity for legacy observations: an omitted
+    # provider-native status is not serialized as a new null-bearing field.
+    if value.provider_status is not None:
+        payload["provider_status"] = value.provider_status
+    return payload
 
 
 def snapshot_to_canonical_dict(snapshot: BookmakerAccountSnapshot) -> dict[str, object]:
@@ -450,28 +457,42 @@ def _decode_balance(raw: object) -> BookmakerBalanceObservation | None:
         ) from exc
 
 
-def _decode_position(raw: object) -> BookmakerPositionObservation:
-    payload = _exact_keys(
-        raw,
-        {
-            "venue_id",
-            "account_id",
-            "adapter_id",
-            "observation_id",
-            "external_position_id",
-            "state",
-            "currency",
-            "observed_at",
-            "source_payload_sha256",
-            "provider_amount",
-            "provider_amount_semantics",
-            "provider_side",
-            "decimal_odds",
-            "gross_return",
-            "external_receipt_id",
-        },
-        "position",
-    )
+def _decode_position(
+    raw: object,
+    *,
+    schema_version: int,
+) -> BookmakerPositionObservation:
+    base_keys = {
+        "venue_id",
+        "account_id",
+        "adapter_id",
+        "observation_id",
+        "external_position_id",
+        "state",
+        "currency",
+        "observed_at",
+        "source_payload_sha256",
+        "provider_amount",
+        "provider_amount_semantics",
+        "provider_side",
+        "decimal_odds",
+        "gross_return",
+        "external_receipt_id",
+    }
+    if schema_version == _RECONCILIATION_LEGACY_SCHEMA_VERSION:
+        payload = _exact_keys(raw, base_keys, "position")
+    elif schema_version == _RECONCILIATION_SCHEMA_VERSION:
+        if not isinstance(raw, dict):
+            raise AccountReconciliationIntegrityError("position schema is invalid")
+        keys = set(raw)
+        if keys not in (base_keys, base_keys | {"provider_status"}):
+            raise AccountReconciliationIntegrityError("position schema is invalid")
+        payload = raw
+    else:
+        raise AccountReconciliationIntegrityError(
+            "unsupported account reconciliation schema_version"
+        )
+
     try:
         amount = _optional_decimal(payload["provider_amount"], "provider_amount")
         if amount is None:
@@ -492,6 +513,7 @@ def _decode_position(raw: object) -> BookmakerPositionObservation:
             decimal_odds=_optional_decimal(payload["decimal_odds"], "decimal_odds"),
             gross_return=_optional_decimal(payload["gross_return"], "gross_return"),
             external_receipt_id=payload["external_receipt_id"],
+            provider_status=payload.get("provider_status"),
         )
     except (TypeError, ValueError) as exc:
         raise AccountReconciliationIntegrityError(
@@ -499,7 +521,11 @@ def _decode_position(raw: object) -> BookmakerPositionObservation:
         ) from exc
 
 
-def _decode_snapshot(raw: object) -> BookmakerAccountSnapshot:
+def _decode_snapshot(
+    raw: object,
+    *,
+    schema_version: int,
+) -> BookmakerAccountSnapshot:
     payload = _exact_keys(
         raw,
         {
@@ -529,8 +555,14 @@ def _decode_snapshot(raw: object) -> BookmakerAccountSnapshot:
             ),
             observed_at=payload["observed_at"],
             balance=_decode_balance(payload["balance"]),
-            open_positions=tuple(_decode_position(item) for item in open_raw),
-            settled_positions=tuple(_decode_position(item) for item in settled_raw),
+            open_positions=tuple(
+                _decode_position(item, schema_version=schema_version)
+                for item in open_raw
+            ),
+            settled_positions=tuple(
+                _decode_position(item, schema_version=schema_version)
+                for item in settled_raw
+            ),
         )
     except (TypeError, ValueError) as exc:
         raise AccountReconciliationIntegrityError(
@@ -546,7 +578,8 @@ def _decode_snapshot(raw: object) -> BookmakerAccountSnapshot:
 class BookmakerAccountReconciliationStore:
     """Durable whole-account observation history and conservative derived state."""
 
-    SCHEMA_VERSION = 1
+    LEGACY_SCHEMA_VERSION = _RECONCILIATION_LEGACY_SCHEMA_VERSION
+    SCHEMA_VERSION = _RECONCILIATION_SCHEMA_VERSION
 
     def __init__(
         self,
@@ -883,7 +916,11 @@ class BookmakerAccountReconciliationStore:
             ) from exc
         payload = _exact_keys(document, {"schema_version", "snapshots"}, "store")
         schema_version = payload["schema_version"]
-        if type(schema_version) is not int or schema_version != self.SCHEMA_VERSION:
+        if (
+            type(schema_version) is not int
+            or schema_version
+            not in (self.LEGACY_SCHEMA_VERSION, self.SCHEMA_VERSION)
+        ):
             raise AccountReconciliationIntegrityError(
                 "unsupported account reconciliation schema_version"
             )
@@ -894,7 +931,10 @@ class BookmakerAccountReconciliationStore:
         seen_ids: set[str] = set()
         for entry in entries:
             item = _exact_keys(entry, {"snapshot_id", "snapshot"}, "snapshot entry")
-            snapshot = _decode_snapshot(item["snapshot"])
+            snapshot = _decode_snapshot(
+                item["snapshot"],
+                schema_version=schema_version,
+            )
             expected_id = snapshot_fingerprint(snapshot)
             if item["snapshot_id"] != expected_id:
                 raise AccountReconciliationIntegrityError(

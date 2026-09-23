@@ -597,14 +597,24 @@ def test_scenario_committed_after_causal_cutoff_is_rejected() -> None:
         )
 
 
-def test_result_extrema_cannot_be_rewritten_via_dataclass_replace() -> None:
+def test_product_issued_result_cannot_transfer_issuance_via_dataclass_replace() -> None:
     tickets = (ticket("t-1", "s-1"),)
     result = evaluate_joint_stress(tickets=tickets, protocol=protocol(tickets=tickets))
+    original = result.evaluations[0]
+    forged = JointScenarioEvaluation(
+        scenario_id=original.scenario_id,
+        scenario_sha256=original.scenario_sha256,
+        profit=Decimal("999"),
+    )
 
-    with pytest.raises(ValueError, match="extrema must exactly match"):
+    with pytest.raises(TypeError, match="must be issued"):
         replace(
             result,
-            worst_observed_profit=Decimal("-9"),
-            best_observed_profit=Decimal("-9"),
+            evaluations=(forged,),
+            worst_observed_profit=Decimal("999"),
+            best_observed_profit=Decimal("999"),
         )
+
+    with pytest.raises(TypeError, match="must be issued"):
+        replace(result, protocol_sha256=B)
 

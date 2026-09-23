@@ -21,7 +21,7 @@ from .owner_economic_authority import (
     OwnerEconomicReviewSnapshot,
 )
 from .parlayapi_provider import ParlayApiTableTennisProvider
-from .paths import default_workspace
+from .paths import default_webview_storage_path, default_workspace
 from .product_gui_worker import ProductGuiMessage, ProductGuiWorker
 from .recovery_worker import OneShotRecoveryWorker, recover_workspace_once
 from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once, workspace_for_strategy
@@ -52,6 +52,7 @@ _ALLOWED_LIVE_MODES = {"public_preview", "api_key"}
 _PRODUCT_SOURCE_FACTORY_ENV = "AUTOSPORT_PRODUCT_SOURCE_FACTORY"
 _PRODUCT_POLL_SECONDS = 30.0
 _REQUEST_REPLAY_LIMIT = 256
+_WEBVIEW2_USER_DATA_FOLDER_ENV = "WEBVIEW2_USER_DATA_FOLDER"
 _MANUAL_OPERATION_KEYS = {
     "odds_conversion": "ui.windows.manual_calculation.operation.odds_conversion",
     "implied_probability": "ui.windows.manual_calculation.operation.implied_probability",
@@ -1369,6 +1370,23 @@ def launch_windows_shell(
     *,
     title: str | None = None,
 ) -> int:
+    override = os.environ.get(_WEBVIEW2_USER_DATA_FOLDER_ENV)
+    if override is not None and override.strip():
+        raise WindowsWebViewUnavailable(
+            "Autosport refused an external WebView2 user-data-folder override"
+        )
+
+    try:
+        storage_path = default_webview_storage_path()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WindowsWebViewUnavailable(
+            "Autosport could not resolve its canonical WebView storage path"
+        ) from exc
+    if not storage_path.is_absolute():
+        raise WindowsWebViewUnavailable(
+            "Autosport WebView storage path must be absolute"
+        )
+
     try:
         import webview
     except Exception as exc:
@@ -1432,7 +1450,10 @@ def launch_windows_shell(
             # injects window.pywebview into each document. Re-check every load so
             # a navigated document cannot inherit the privileged Python API.
             window.events.before_load += bind_trusted_document
-        webview.start(gui=required_renderer)
+        webview.start(
+            gui=required_renderer,
+            storage_path=str(storage_path),
+        )
         if not renderer_observed:
             raise WindowsWebViewUnavailable(
                 "The Autosport semantic shell started without an observed "

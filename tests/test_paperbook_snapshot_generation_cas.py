@@ -611,3 +611,74 @@ def test_exact_candidate_rejects_post_validation_settlement_history_rewrite(
 
     assert calls >= 2
     assert path.read_bytes() == durable_winner
+
+
+def test_open_ticket_rejects_caller_inflated_balance_before_product_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    book.save(path)
+    book.balance = Decimal("1000")
+
+    tickets_before = tuple(book.tickets)
+    lifecycle_before = tuple(book._lifecycle)
+
+    with pytest.raises(
+        ValueError,
+        match="balance is inconsistent with lifecycle-replayed ticket economics",
+    ):
+        book.open_ticket(
+            [_leg("forged-bankroll-selection")],
+            "500",
+            placed_at=_BASE_TS,
+        )
+
+    assert tuple(book.tickets) == tickets_before
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert book.balance == Decimal("1000")
+
+
+def test_settle_rejects_caller_reopened_ticket_before_double_payout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+    winning_key = ticket.legs[0].quote_key
+    book.settle(
+        ticket.ticket_id,
+        {winning_key},
+        settled_at="2026-09-23T02:00:00+00:00",
+    )
+    assert book.balance == Decimal("110")
+
+    ticket.status = TicketStatus.OPEN
+    balance_before = book.balance
+    lifecycle_before = tuple(book._lifecycle)
+    payout_before = ticket.payout
+
+    with pytest.raises(
+        ValueError,
+        match="open ticket cannot have settled_at",
+    ):
+        book.settle(
+            ticket.ticket_id,
+            {winning_key},
+            settled_at="2026-09-23T03:00:00+00:00",
+        )
+
+    assert book.balance == balance_before
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert ticket.payout == payout_before

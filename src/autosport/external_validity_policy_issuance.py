@@ -75,14 +75,9 @@ class ProductPolicyEvaluationWorkspace:
             "expected_workspace_instance_id",
         )
         try:
-            authority_root = resolve_monotonic_authority_root(root)
-            binding = WorkspaceIdentityBinding.resolve(
-                workspace=root,
-                authority_root=authority_root,
-                requested_workspace_instance_id=expected,
-            )
-            workspace_bound, path_bound = binding.validate_existing(
-                register_moved_or_copied_path=False
+            binding, workspace_bound, path_bound = _resolve_existing_workspace_binding(
+                root,
+                expected,
             )
         except (WorkspaceBindingConflictError, WorkspaceBindingIntegrityError) as exc:
             raise ProductPolicyEvaluationIssuanceError(
@@ -132,6 +127,110 @@ _STORE_MATERIALIZATION_DIGEST = _STORE_TYPE._materialization_digest
 _STORE_MATERIALIZATION_LEDGER_PATH = _STORE_TYPE._materialization_ledger_path
 _STORE_BASE_TYPE = _STORE_TYPE.__mro__[1]
 _STORE_BASE_WRITE = _STORE_BASE_TYPE.write
+
+# The durable product-workspace identity is itself an authority boundary.  Freeze
+# the exact resolver/binding dispatch used to prove that the configured workspace
+# is the already-bound canonical product root before opening registry/store state.
+_WORKSPACE_ROOT_RESOLVER = resolve_monotonic_authority_root
+_WORKSPACE_ROOT_RESOLVER_CODE = resolve_monotonic_authority_root.__code__
+_WORKSPACE_ROOT_RESOLVER_GLOBALS = resolve_monotonic_authority_root.__globals__
+_WORKSPACE_ROOT_ABSOLUTE_PATH = _WORKSPACE_ROOT_RESOLVER_GLOBALS.get("_absolute_path")
+_WORKSPACE_ROOT_DEFAULT = _WORKSPACE_ROOT_RESOLVER_GLOBALS.get(
+    "default_monotonic_authority_root"
+)
+_WORKSPACE_ROOT_ABSOLUTE_PATH_CODE = getattr(
+    _WORKSPACE_ROOT_ABSOLUTE_PATH, "__code__", None
+)
+_WORKSPACE_ROOT_DEFAULT_CODE = getattr(_WORKSPACE_ROOT_DEFAULT, "__code__", None)
+
+_WORKSPACE_BINDING_TYPE = WorkspaceIdentityBinding
+_WORKSPACE_BINDING_RESOLVE = WorkspaceIdentityBinding.resolve.__func__
+_WORKSPACE_BINDING_RESOLVE_CODE = WorkspaceIdentityBinding.resolve.__func__.__code__
+_WORKSPACE_BINDING_VALIDATE = WorkspaceIdentityBinding.validate_existing
+_WORKSPACE_BINDING_VALIDATE_CODE = WorkspaceIdentityBinding.validate_existing.__code__
+_WORKSPACE_BINDING_READ_MARKER = WorkspaceIdentityBinding._read_workspace_marker_id
+_WORKSPACE_BINDING_READ_MARKER_CODE = (
+    WorkspaceIdentityBinding._read_workspace_marker_id.__code__
+)
+_WORKSPACE_BINDING_READ_PATH = WorkspaceIdentityBinding._read_path_binding_id
+_WORKSPACE_BINDING_READ_PATH_CODE = WorkspaceIdentityBinding._read_path_binding_id.__code__
+
+
+def _require_workspace_binding_dispatch_authority() -> None:
+    if (
+        resolve_monotonic_authority_root is not _WORKSPACE_ROOT_RESOLVER
+        or getattr(resolve_monotonic_authority_root, "__code__", None)
+        is not _WORKSPACE_ROOT_RESOLVER_CODE
+        or _WORKSPACE_ROOT_RESOLVER.__globals__ is not _WORKSPACE_ROOT_RESOLVER_GLOBALS
+        or _WORKSPACE_ROOT_RESOLVER_GLOBALS.get("_absolute_path")
+        is not _WORKSPACE_ROOT_ABSOLUTE_PATH
+        or getattr(_WORKSPACE_ROOT_ABSOLUTE_PATH, "__code__", None)
+        is not _WORKSPACE_ROOT_ABSOLUTE_PATH_CODE
+        or _WORKSPACE_ROOT_RESOLVER_GLOBALS.get("default_monotonic_authority_root")
+        is not _WORKSPACE_ROOT_DEFAULT
+        or getattr(_WORKSPACE_ROOT_DEFAULT, "__code__", None)
+        is not _WORKSPACE_ROOT_DEFAULT_CODE
+    ):
+        raise ProductPolicyEvaluationIssuanceError(
+            "product workspace authority-root resolver was rebound"
+        )
+
+    if WorkspaceIdentityBinding is not _WORKSPACE_BINDING_TYPE:
+        raise ProductPolicyEvaluationIssuanceError(
+            "product workspace identity binding authority was rebound"
+        )
+    bound_resolve = getattr(_WORKSPACE_BINDING_TYPE, "resolve", None)
+    if (
+        getattr(bound_resolve, "__self__", None) is not _WORKSPACE_BINDING_TYPE
+        or getattr(bound_resolve, "__func__", None) is not _WORKSPACE_BINDING_RESOLVE
+        or getattr(_WORKSPACE_BINDING_RESOLVE, "__code__", None)
+        is not _WORKSPACE_BINDING_RESOLVE_CODE
+        or _WORKSPACE_BINDING_TYPE.validate_existing
+        is not _WORKSPACE_BINDING_VALIDATE
+        or getattr(_WORKSPACE_BINDING_VALIDATE, "__code__", None)
+        is not _WORKSPACE_BINDING_VALIDATE_CODE
+        or _WORKSPACE_BINDING_TYPE._read_workspace_marker_id
+        is not _WORKSPACE_BINDING_READ_MARKER
+        or getattr(_WORKSPACE_BINDING_READ_MARKER, "__code__", None)
+        is not _WORKSPACE_BINDING_READ_MARKER_CODE
+        or _WORKSPACE_BINDING_TYPE._read_path_binding_id
+        is not _WORKSPACE_BINDING_READ_PATH
+        or getattr(_WORKSPACE_BINDING_READ_PATH, "__code__", None)
+        is not _WORKSPACE_BINDING_READ_PATH_CODE
+    ):
+        raise ProductPolicyEvaluationIssuanceError(
+            "product workspace identity binding executable authority was rebound"
+        )
+
+
+def _resolve_existing_workspace_binding(
+    root: Path,
+    expected_workspace_instance_id: str,
+) -> tuple[WorkspaceIdentityBinding, bool, bool]:
+    _require_workspace_binding_dispatch_authority()
+    authority_root = _WORKSPACE_ROOT_RESOLVER(root)
+    _require_workspace_binding_dispatch_authority()
+    binding = _WORKSPACE_BINDING_RESOLVE(
+        _WORKSPACE_BINDING_TYPE,
+        workspace=root,
+        authority_root=authority_root,
+        requested_workspace_instance_id=expected_workspace_instance_id,
+    )
+    _require_workspace_binding_dispatch_authority()
+    if type(binding) is not _WORKSPACE_BINDING_TYPE:
+        raise ProductPolicyEvaluationIssuanceError(
+            "product workspace identity resolver returned non-canonical authority"
+        )
+    workspace_bound, path_bound = _WORKSPACE_BINDING_VALIDATE(
+        binding,
+        register_moved_or_copied_path=False,
+    )
+    _require_workspace_binding_dispatch_authority()
+    if type(workspace_bound) is not bool or type(path_bound) is not bool:
+        raise ProductPolicyEvaluationIssuanceError(
+            "product workspace identity validation returned non-canonical truth"
+        )
+    return binding, workspace_bound, path_bound
 
 
 def _text(value: object, field: str) -> str:
@@ -283,14 +382,9 @@ def _open_canonical_authorities(
         )
     try:
         root = authority.workspace.expanduser().resolve(strict=False)
-        authority_root = resolve_monotonic_authority_root(root)
-        binding = WorkspaceIdentityBinding.resolve(
-            workspace=root,
-            authority_root=authority_root,
-            requested_workspace_instance_id=authority.workspace_instance_id,
-        )
-        workspace_bound, path_bound = binding.validate_existing(
-            register_moved_or_copied_path=False
+        binding, workspace_bound, path_bound = _resolve_existing_workspace_binding(
+            root,
+            authority.workspace_instance_id,
         )
     except (OSError, RuntimeError, WorkspaceBindingConflictError, WorkspaceBindingIntegrityError) as exc:
         raise ProductPolicyEvaluationIssuanceError(

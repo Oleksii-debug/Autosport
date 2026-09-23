@@ -5,6 +5,7 @@ import json
 import math
 import signal
 import time
+import unicodedata
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -111,14 +112,26 @@ def _validated_output_format(output_format: str) -> str:
 
 
 def _text_atom(value: object) -> str:
-    """Render one value without allowing control characters to reach the terminal."""
+    """Render one value without allowing terminal-shaping Unicode controls through."""
 
-    return json.dumps(
+    rendered = json.dumps(
         value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
+    safe: list[str] = []
+    for character in rendered:
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in {"Zl", "Zp"}:
+            codepoint = ord(character)
+            if codepoint <= 0xFFFF:
+                safe.append(f"\\u{codepoint:04x}")
+            else:
+                safe.append(f"\\U{codepoint:08x}")
+        else:
+            safe.append(character)
+    return "".join(safe)
 
 
 def _text_label_child(prefix: str, key: object) -> str:

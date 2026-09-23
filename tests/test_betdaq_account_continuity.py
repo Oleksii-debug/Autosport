@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -429,6 +430,40 @@ def test_dataclass_replace_cannot_copy_product_issuance_authority(
         match="product-issued BETDAQ continuity evidence",
     ):
         append_to_reconciliation(store, copied)
+
+    assert store.latest_snapshot() is None
+
+
+def test_same_object_payload_mutation_revokes_product_issuance_authority(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    assert current.snapshot.balance is not None
+    forged_balance = replace(
+        current.snapshot.balance,
+        available_balance=Decimal("999.99"),
+    )
+    forged_snapshot = replace(current.snapshot, balance=forged_balance)
+
+    # Frozen dataclasses remain mutable through object.__setattr__. The issued
+    # outer object keeps the same id, so an identity-only issuer registry would
+    # incorrectly preserve authority for this caller-modified payload.
+    object.__setattr__(current, "snapshot", forged_snapshot)
+
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="product-issued BETDAQ continuity evidence",
+    ):
+        append_to_reconciliation(store, current)
 
     assert store.latest_snapshot() is None
 

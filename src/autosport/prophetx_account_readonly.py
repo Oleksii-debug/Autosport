@@ -13,6 +13,7 @@ from hashlib import sha256
 from http.client import HTTPException
 import json
 import math
+import ssl
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import (
@@ -126,6 +127,48 @@ def _make_provider_fetch(
     canonical_do_open = abstract_http_handler_type.do_open
     canonical_https_response = http_error_processor_type.https_response
 
+    def tls_context_snapshot(context: object):
+        if type(context) is not ssl.SSLContext:
+            return None
+        try:
+            ciphers = tuple(
+                (
+                    cipher.get("id"),
+                    cipher.get("name"),
+                    cipher.get("protocol"),
+                    cipher.get("strength_bits"),
+                    cipher.get("alg_bits"),
+                    cipher.get("aead"),
+                    cipher.get("symmetric"),
+                    cipher.get("digest"),
+                    cipher.get("kea"),
+                    cipher.get("auth"),
+                )
+                for cipher in context.get_ciphers()
+            )
+            trust_anchors = tuple(
+                sorted(
+                    sha256(certificate).hexdigest()
+                    for certificate in context.get_ca_certs(binary_form=True)
+                )
+            )
+            store_stats = tuple(sorted(context.cert_store_stats().items()))
+            return (
+                int(context.verify_mode),
+                context.check_hostname,
+                int(context.verify_flags),
+                int(context.minimum_version),
+                int(context.maximum_version),
+                int(context.options),
+                getattr(context, "hostname_checks_common_name", None),
+                getattr(context, "security_level", None),
+                store_stats,
+                trust_anchors,
+                ciphers,
+            )
+        except (AttributeError, TypeError, ValueError, ssl.SSLError):
+            return None
+
     def dispatch_snapshot(current_opener: object):
         records: list[tuple[str, object, tuple[object, ...]]] = []
         for map_name in ("handle_open", "process_request", "process_response"):
@@ -196,6 +239,16 @@ def _make_provider_fetch(
     expected_redirect_handler = redirect_handlers[0]
     expected_https_handler = https_handlers[0]
     expected_error_processor = response_handlers[0][0]
+    expected_tls_context = getattr(expected_https_handler, "_context", None)
+    expected_tls_context_state = tls_context_snapshot(expected_tls_context)
+    if (
+        expected_tls_context_state is None
+        or expected_tls_context.verify_mode != ssl.CERT_REQUIRED
+        or expected_tls_context.check_hostname is not True
+    ):
+        raise ProphetXReadOnlyError(
+            "canonical ProphetX account TLS verifier is invalid"
+        )
 
     if (
         getattr(open_response, "__self__", None) is not opener
@@ -236,6 +289,14 @@ def _make_provider_fetch(
             or abstract_http_handler_type.do_open is not canonical_do_open
             or http_error_processor_type.https_response
             is not canonical_https_response
+        ):
+            return False
+
+        current_tls_context = getattr(expected_https_handler, "_context", None)
+        if (
+            current_tls_context is not expected_tls_context
+            or tls_context_snapshot(current_tls_context)
+            != expected_tls_context_state
         ):
             return False
 

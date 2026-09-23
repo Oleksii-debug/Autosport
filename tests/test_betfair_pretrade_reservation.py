@@ -350,19 +350,20 @@ def test_unknown_and_accepted_attempts_keep_full_reservation(
     assert store.active_reserved_amount() == Decimal("25")
 
 
-def test_reconciled_not_found_is_the_only_uncertain_release_path_here(
+def test_generic_reconciled_not_found_cannot_release_local_capital(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    _install_provider(monkeypatch, balance=1000)
+    _install_provider(monkeypatch, balance=100)
     client = _client()
-    action = _action("a1", stake="25")
-    ledger = _ledger(tmp_path, action)
+    first = _action("a1", stake="70")
+    second = _action("a2", stake="40")
+    ledger = _ledger(tmp_path, first, second)
     store = _store(tmp_path)
     store.reserve(
         plan_id="plan-1",
         attempt_id="try-1",
-        funds_precheck=_precheck(client, action),
+        funds_precheck=_precheck(client, first),
         execution_ledger=ledger,
     )
 
@@ -371,20 +372,31 @@ def test_reconciled_not_found_is_the_only_uncertain_release_path_here(
     ledger.reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id="try-1",
-            evidence_id="provider-absence",
+            evidence_id="caller-authored-absence",
             observed_at=RECONCILED,
             external_effect_found=False,
             source="provider-readback",
         )
     )
-    released = store.sync_from_ledger(
+    held = store.sync_from_ledger(
         attempt_id="try-1",
         execution_ledger=ledger,
     )
-    assert released.ledger_state is AttemptState.RECONCILED_NOT_FOUND
-    assert released.status is ReservationStatus.RELEASED
-    assert not released.active
-    assert store.active_reserved_amount() == Decimal("0")
+    assert held.ledger_state is AttemptState.RECONCILED_NOT_FOUND
+    assert held.status is ReservationStatus.ACTIVE
+    assert held.active
+    assert store.active_reserved_amount() == Decimal("70")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="minus local reservations",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
 
 
 def test_restart_preserves_active_reservation(
@@ -538,7 +550,7 @@ def test_later_advanced_unreserved_attempt_blocks_earlier_new_exposure(
         )
 
 
-def test_sync_can_skip_intermediate_unknown_observation_when_ledger_is_terminal(
+def test_sync_can_skip_intermediate_unknown_without_releasing_local_capital(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -571,12 +583,14 @@ def test_sync_can_skip_intermediate_unknown_observation_when_ledger_is_terminal(
             source="provider-readback",
         )
     )
-    released = store.sync_from_ledger(
+    held = store.sync_from_ledger(
         attempt_id="try-1",
         execution_ledger=ledger,
     )
-    assert released.status is ReservationStatus.RELEASED
-    assert store.active_reserved_amount() == Decimal("0")
+    assert held.ledger_state is AttemptState.RECONCILED_NOT_FOUND
+    assert held.status is ReservationStatus.ACTIVE
+    assert held.active
+    assert store.active_reserved_amount() == Decimal("25")
 
 
 

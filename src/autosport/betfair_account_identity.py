@@ -186,9 +186,12 @@ def _make_account_identity_authority():
     http_redirect_handler_type = _urllib_request.HTTPRedirectHandler
     https_handler_type = _urllib_request.HTTPSHandler
     abstract_http_handler_type = _urllib_request.AbstractHTTPHandler
+    http_error_processor_type = _urllib_request.HTTPErrorProcessor
     canonical_opener_open = opener_type.open
     canonical_https_open = https_handler_type.https_open
+    canonical_https_request = https_handler_type.https_request
     canonical_do_open = abstract_http_handler_type.do_open
+    canonical_https_response = http_error_processor_type.https_response
     canonical_details_init = details_type.__init__
     canonical_details_post_init = details_type.__post_init__
     canonical_evidence_init = evidence_type.__init__
@@ -475,9 +478,12 @@ def _make_account_identity_authority():
         if (
             type(https_handler_dict) is not dict
             or "https_open" in https_handler_dict
+            or "https_request" in https_handler_dict
             or "do_open" in https_handler_dict
             or https_handler_type.https_open is not canonical_https_open
+            or https_handler_type.https_request is not canonical_https_request
             or abstract_http_handler_type.do_open is not canonical_do_open
+            or http_error_processor_type.https_response is not canonical_https_response
         ):
             return False
 
@@ -494,6 +500,11 @@ def _make_account_identity_authority():
             for map_name, key, handlers in dispatch
             if map_name == "process_request" and key == "https"
         )
+        response_handlers = tuple(
+            handlers
+            for map_name, key, handlers in dispatch
+            if map_name == "process_response" and key == "https"
+        )
         if (
             len(dispatch_handlers) != 1
             or len(dispatch_handlers[0]) != 1
@@ -501,6 +512,10 @@ def _make_account_identity_authority():
             or len(request_handlers) != 1
             or len(request_handlers[0]) != 1
             or request_handlers[0][0] is not https_handler
+            or len(response_handlers) != 1
+            or len(response_handlers[0]) != 1
+            or type(response_handlers[0][0]) is not http_error_processor_type
+            or "https_response" in getattr(response_handlers[0][0], "__dict__", {})
             or any(
                 not any(handler is registered for registered in handler_tuple)
                 for _map_name, _key, handlers in dispatch

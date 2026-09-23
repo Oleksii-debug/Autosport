@@ -395,7 +395,10 @@ def _build_keepalive_authority_runtime():
     canonical_redirect_handler = HTTPRedirectHandler
     canonical_ssl_context_factory = ssl.create_default_context
     canonical_request = Request
+    redirect_handler_type = _NoRedirectHandler
+    canonical_redirect_request = redirect_handler_type.redirect_request
     json_loads = json.loads
+    json_decode_error = json.JSONDecodeError
     sha256_fn = sha256
     hmac_digest = hmac.digest
     hmac_compare_digest = hmac.compare_digest
@@ -414,6 +417,10 @@ def _build_keepalive_authority_runtime():
             and UrllibBetfairKeepAliveTransport is transport_type
             and require_authoritative_betfair_authenticated_jurisdiction
             is jurisdiction_require
+            and _KEEPALIVE_ENDPOINTS is endpoint_table
+            and _NoRedirectHandler is redirect_handler_type
+            and redirect_handler_type.redirect_request
+            is canonical_redirect_request
             and observation_type.__init__ is canonical_observation_init
             and observation_type.__post_init__ is canonical_observation_post_init
         )
@@ -503,7 +510,7 @@ def _build_keepalive_authority_runtime():
                 object_pairs_hook=pairs,
                 parse_constant=reject_constant,
             )
-        except json.JSONDecodeError as exc:
+        except json_decode_error as exc:
             raise error_type("keepAlive response is not valid JSON") from exc
         if type(document) is not dict or frozenset(document) != exact_keys:
             raise error_type(

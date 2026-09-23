@@ -478,6 +478,42 @@ class ProductDecisionActivationTests(unittest.TestCase):
         binding = self._initialize()
         self.assertEqual(binding.execution_model_fingerprint, canonical.fingerprint)
 
+    def test_execution_config_base_fingerprint_descriptor_rebind_fails_closed(self) -> None:
+        canonical = self.execution
+        canonical_fingerprint = canonical.fingerprint
+        forged = replace(
+            canonical,
+            seed="descriptor-forged-execution-seed",
+            max_slippage_bps=1,
+        )
+        original_descriptor = PaperExecutionModelConfig.fingerprint
+
+        try:
+            PaperExecutionModelConfig.fingerprint = property(  # type: ignore[assignment]
+                lambda _self: canonical_fingerprint
+            )
+            self.assertEqual(forged.fingerprint, canonical_fingerprint)
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "fingerprint authority changed",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=self.goal,
+                    risk_policy=self.risk,
+                    execution_config=forged,
+                )
+        finally:
+            PaperExecutionModelConfig.fingerprint = original_descriptor  # type: ignore[assignment]
+
+        self.assertFalse(self.store.path.exists())
+        binding = self._initialize()
+        self.assertEqual(
+            binding.execution_model_fingerprint,
+            canonical_fingerprint,
+        )
+
     def test_provider_manifest_change_cannot_relabel_activation(self) -> None:
         self._initialize()
         self._write_composition(source_id="provider-b", bankroll="1000")

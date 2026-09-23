@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -276,12 +277,7 @@ def test_owner_goal_revision_change_invalidates_old_tariff(tmp_path):
 
     current = goal_store.load()
     goal_store.persist_automatic_successor(
-        current.__class__(
-            **{
-                **current.__dict__,
-                "revision": current.revision + 1,
-            }
-        )
+        replace(current, revision=current.revision + 1)
     )
 
     assert _resolve_current(store) is None

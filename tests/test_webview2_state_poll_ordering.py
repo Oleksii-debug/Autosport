@@ -112,3 +112,42 @@ def test_state_ordering_fence_covers_operator_enablement_and_runtime_truth() -> 
     assert _has_shared_single_flight_refresh(
         javascript
     ) or _has_monotonic_state_revision_fence(javascript, shell_source)
+
+
+def test_mutating_dispatch_invalidates_pre_and_mid_action_state_snapshots() -> None:
+    javascript = _APP_JS.read_text(encoding="utf-8")
+    dispatch_body = _javascript_function_body(javascript, "dispatch")
+    refresh_body = _javascript_function_body(javascript, "refreshState")
+
+    bridge_call = "await globalThis.pywebview.api.dispatch"
+    post_action_refresh = "await refreshState()"
+    first_invalidation = dispatch_body.find("invalidateStateProjection();")
+    bridge_position = dispatch_body.find(bridge_call)
+    second_invalidation = dispatch_body.find(
+        "invalidateStateProjection();",
+        first_invalidation + 1,
+    )
+    refresh_position = dispatch_body.find(post_action_refresh)
+
+    assert first_invalidation >= 0
+    assert bridge_position > first_invalidation
+    assert second_invalidation > bridge_position
+    assert refresh_position > second_invalidation
+    assert dispatch_body.count("invalidateStateProjection();") >= 3
+
+    request_epoch = refresh_body.find(
+        "const requestEpoch = stateProjectionEpoch;"
+    )
+    state_read = refresh_body.find("const state = await apiState();")
+    epoch_check = refresh_body.find(
+        "requestEpoch === stateProjectionEpoch"
+    )
+    render = refresh_body.find("renderState(state);")
+
+    assert request_epoch >= 0
+    assert state_read > request_epoch
+    assert epoch_check > state_read
+    assert render > epoch_check
+    assert "refreshPending = true;" in refresh_body
+
+    assert "globalThis.autosportDispatch = dispatch;" in javascript

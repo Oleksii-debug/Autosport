@@ -246,6 +246,21 @@ class BetfairAmericanFootballOutcomeAuthorityTests(unittest.TestCase):
                         observed_at="2026-09-23T18:00:01Z",
                     )
 
+        for invalid_integer_id in (0, -1, 2**63):
+            malformed = self._definition()
+            malformed["runners"] = [{"id": 101}, {"id": invalid_integer_id}]
+            with self.subTest(invalid_integer_id=invalid_integer_id):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "positive signed-64-bit value",
+                ):
+                    assess_betfair_american_football_historical_market_definition_authority(
+                        market_id="m-runner-int-bound",
+                        market_definition=malformed,
+                        provider_publish_at="2026-09-23T18:00:00Z",
+                        observed_at="2026-09-23T18:00:01Z",
+                    )
+
     def test_provider_publish_time_cannot_be_after_observation(self):
         with self.assertRaisesRegex(
             ValueError,

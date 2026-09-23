@@ -938,3 +938,54 @@ def test_public_protocol_exposes_narrow_origin_authority_only() -> None:
     assert stream.PUBLIC_PROTOCOL["authenticated_transport_origin_authority"] is True
     assert stream.PUBLIC_PROTOCOL["connect_cancellation_supported"] is True
 
+
+
+def test_concurrent_connect_fails_closed_before_second_network_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_open_entered = Event()
+    connect_done = Event()
+    open_calls: list[int] = []
+    outcome: dict[str, object] = {}
+
+    def blocked_open(_timeout: float, cancellation: Event) -> FakeSocket:
+        open_calls.append(1)
+        first_open_entered.set()
+        while not cancellation.wait(timeout=0.01):
+            pass
+        raise OSError("connect cancelled")
+
+    monkeypatch.setattr(stream, "_open_verified_tls_socket", blocked_open)
+    transport = stream.BetfairStreamTlsTransport(
+        identity=identity(),
+        secret_provider=Secrets(),
+        timeout_seconds=0.1,
+    )
+
+    def run_first_connect() -> None:
+        try:
+            outcome["connection_id"] = transport.connect()
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            connect_done.set()
+
+    worker = Thread(target=run_first_connect, name="betfair-connect-first", daemon=True)
+    worker.start()
+    assert first_open_entered.wait(timeout=1.0)
+
+    with pytest.raises(
+        stream.BetfairStreamTransportError,
+        match="already has a live connection attempt",
+    ):
+        transport.connect()
+    assert len(open_calls) == 1
+
+    transport.close()
+    assert connect_done.wait(timeout=1.0)
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert len(open_calls) == 1
+    assert "connection_id" not in outcome
+    assert isinstance(outcome.get("error"), stream.BetfairStreamTransportError)
+    assert transport.is_authenticated is False

@@ -99,6 +99,12 @@ _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN = (
 _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE = (
     _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN.__code__
 )
+_CANONICAL_URLLIB_BETFAIR_OPENER_ERROR = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.error
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR.__code__
+)
 
 
 def _capture_private_opener_dispatch(
@@ -149,9 +155,14 @@ def _capture_private_opener_method_dispatch(
     }
     for map_name, key, handlers in dispatch:
         suffix = suffixes.get(map_name)
-        if suffix is None or type(key) is not str:
+        if suffix is not None and type(key) is str:
+            method_name = f"{key}{suffix}"
+        elif map_name.startswith("handle_error:") and type(key) in (str, int):
+            protocol = map_name.split(":", 1)[1]
+            method_name = f"{protocol}_error_{key}"
+            suffix = None
+        else:
             continue
-        method_name = f"{key}{suffix}"
         for handler in handlers:
             candidate_names = [method_name]
             if suffix == "_open" and hasattr(type(handler), "do_open"):
@@ -278,6 +289,8 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
     opener_call_chain_code = (
         _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
     )
+    opener_error = _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR
+    opener_error_code = _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE
     request_type = _CANONICAL_URLLIB_BETFAIR_REQUEST
     private_opener_handlers = tuple(private_opener.handlers)
     private_opener_dispatch = _capture_private_opener_dispatch(private_opener)
@@ -310,8 +323,11 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
             is not opener_call_chain
             or getattr(opener_call_chain, "__code__", None)
             is not opener_call_chain_code
+            or getattr(opener_type, "error", None) is not opener_error
+            or getattr(opener_error, "__code__", None) is not opener_error_code
             or "_open" in private_dispatch
             or "_call_chain" in private_dispatch
+            or "error" in private_dispatch
             or getattr(opener_graph_matches, "__code__", None)
             is not opener_graph_matches_code
             or not opener_graph_matches(
@@ -346,8 +362,11 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
             is not opener_call_chain
             or getattr(opener_call_chain, "__code__", None)
             is not opener_call_chain_code
+            or getattr(opener_type, "error", None) is not opener_error
+            or getattr(opener_error, "__code__", None) is not opener_error_code
             or "_open" in private_dispatch
             or "_call_chain" in private_dispatch
+            or "error" in private_dispatch
             or getattr(opener_graph_matches, "__code__", None)
             is not opener_graph_matches_code
             or not opener_graph_matches(
@@ -1600,6 +1619,14 @@ def execute_betfair_supervised_action(
                 None,
             )
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.error
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE
             or type(_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER)
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
             or "_open" in getattr(
@@ -1608,6 +1635,11 @@ def execute_betfair_supervised_action(
                 {},
             )
             or "_call_chain" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "error" in getattr(
                 _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
                 "__dict__",
                 {},
@@ -1844,6 +1876,14 @@ def execute_betfair_supervised_action(
                 None,
             )
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.error
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE
             or type(_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER)
             is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
             or "_open" in getattr(
@@ -1852,6 +1892,11 @@ def execute_betfair_supervised_action(
                 {},
             )
             or "_call_chain" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "error" in getattr(
                 _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
                 "__dict__",
                 {},

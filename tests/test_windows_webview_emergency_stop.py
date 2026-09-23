@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
+
 from autosport.execution_stop_authority import ExecutionAuthorityMode, ExecutionStopAuthority
 from autosport.windows_emergency_stop import execution_stop_path
 from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+from autosport.windows_webview_shell import AutosportWebBridge
 
 
 def _command(request_id: str) -> dict[str, object]:
@@ -199,3 +202,90 @@ def test_webview_emergency_stop_rejects_payload_and_request_id_reuse(tmp_path):
         }
     )
     assert reused["status"] == "rejected"
+
+
+
+class _TrustedWindow:
+    def __init__(self) -> None:
+        self.current_url = "http://127.0.0.1:41000/index.html"
+
+    def get_current_url(self) -> str:
+        return self.current_url
+
+
+def test_webview_emergency_stop_bypasses_blocked_ordinary_bridge_dispatch(tmp_path):
+    authority = ExecutionStopAuthority(execution_stop_path(tmp_path))
+    stopped = authority.initialize_stopped(operator_id="test", reason="initial-safe")
+    authority.arm(
+        operator_id="test",
+        reason="explicit-test-arm",
+        confirmation_id="blocked-dispatch-confirmation",
+        expected_revision=stopped.revision,
+    )
+
+    controller = EmergencyStopWebController(tmp_path)
+    ordinary_entered = threading.Event()
+    release_ordinary = threading.Event()
+    emergency_done = threading.Event()
+    ordinary_results: list[dict[str, object]] = []
+    emergency_results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def blocked_manual_clear(_payload):
+        ordinary_entered.set()
+        if not release_ordinary.wait(5):
+            raise RuntimeError("test did not release blocked ordinary dispatch")
+        return {"status": "completed", "message": "ordinary released"}
+
+    controller._action_manual_clear = blocked_manual_clear  # type: ignore[method-assign]
+    bridge = AutosportWebBridge(controller)
+    bridge._bind_trusted_window(_TrustedWindow())
+
+    def run_ordinary() -> None:
+        try:
+            ordinary_results.append(
+                bridge.dispatch(
+                    {
+                        "request_id": "ordinary-blocked",
+                        "action_id": "manual.clear",
+                        "payload": {},
+                    }
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_emergency() -> None:
+        try:
+            emergency_results.append(bridge.dispatch(_command("urgent-stop")))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            emergency_done.set()
+
+    ordinary_thread = threading.Thread(target=run_ordinary)
+    emergency_thread = threading.Thread(target=run_emergency)
+    ordinary_thread.start()
+    emergency_started = False
+    try:
+        assert ordinary_entered.wait(5)
+        emergency_thread.start()
+        emergency_started = True
+
+        # The safety command must finish while the ordinary handler still owns
+        # the normal controller lane; releasing that handler happens only below.
+        assert emergency_done.wait(5)
+        assert errors == []
+        assert emergency_results[0]["status"] == "completed"
+        assert authority.current().mode is ExecutionAuthorityMode.STOPPED
+        assert ordinary_thread.is_alive()
+    finally:
+        release_ordinary.set()
+        ordinary_thread.join(5)
+        if emergency_started:
+            emergency_thread.join(5)
+
+    assert not ordinary_thread.is_alive()
+    assert not emergency_thread.is_alive()
+    assert errors == []
+    assert ordinary_results[0]["status"] == "completed"

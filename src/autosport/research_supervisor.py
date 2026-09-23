@@ -333,6 +333,10 @@ class ResearchSupervisor:
         seen_triggers: dict[str, str] = {}
         for run in state["runs"]:
             self._validate_run(run)
+            self._validate_scientific_lineage(
+                run_question_id=run["question_id"],
+                bindings=run["bindings"],
+            )
             if run["run_id"] in seen_runs:
                 raise ValueError("research supervisor contains duplicate run identity")
             seen_runs.add(run["run_id"])
@@ -542,6 +546,89 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(f"unsupported supervisor binding: {key}")
         return tuple(normalized)
 
+    def _validate_scientific_lineage(
+        self,
+        *,
+        run_question_id: str,
+        bindings: dict[str, str],
+    ) -> None:
+        """Fail closed when individually valid scientific IDs cross causal lineages."""
+
+        question_id = _text(run_question_id, "run_question_id")
+        question = self.scientific_registry.get("ResearchQuestion", question_id)
+        if question is None:
+            raise ResearchSupervisorError(
+                f"run references missing ResearchQuestion:{question_id}"
+            )
+        question_payload_sha256 = _digest(question.payload)
+
+        hypothesis_id = bindings.get("hypothesis_id")
+        hypothesis = None
+        if hypothesis_id is not None:
+            hypothesis = self.scientific_registry.get("Hypothesis", hypothesis_id)
+            if hypothesis is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing Hypothesis:{hypothesis_id}"
+                )
+            if hypothesis.payload.get("research_question_id") != question_id:
+                raise ResearchSupervisorError(
+                    "hypothesis research question does not match supervisor run"
+                )
+
+        protocol_id = bindings.get("research_protocol_id")
+        if protocol_id is None:
+            return
+        if hypothesis is None:
+            raise ResearchSupervisorError(
+                "research protocol requires explicit supervisor hypothesis binding"
+            )
+
+        protocol = self.scientific_registry.get("ResearchProtocol", protocol_id)
+        if protocol is None:
+            raise ResearchSupervisorError(
+                f"binding references missing ResearchProtocol:{protocol_id}"
+            )
+        protocol_binding = protocol.payload.get("binding")
+        if type(protocol_binding) is not dict:
+            raise ResearchSupervisorError(
+                "research protocol lacks canonical scientific binding"
+            )
+        if protocol_binding.get("research_question_id") != question_id:
+            raise ResearchSupervisorError(
+                "research protocol question does not match supervisor run"
+            )
+        if protocol_binding.get("research_question_sha256") != question_payload_sha256:
+            raise ResearchSupervisorError(
+                "research protocol question digest does not match canonical question"
+            )
+
+        protocol_hypothesis_id = protocol_binding.get("hypothesis_id")
+        if type(protocol_hypothesis_id) is not str or not protocol_hypothesis_id:
+            raise ResearchSupervisorError(
+                "research protocol lacks canonical hypothesis identity"
+            )
+        protocol_hypothesis = self.scientific_registry.get(
+            "Hypothesis", protocol_hypothesis_id
+        )
+        if protocol_hypothesis is None:
+            raise ResearchSupervisorError(
+                "research protocol references missing canonical hypothesis"
+            )
+        if protocol_hypothesis.payload.get("research_question_id") != question_id:
+            raise ResearchSupervisorError(
+                "research protocol hypothesis belongs to another research question"
+            )
+        if protocol_binding.get("hypothesis_sha256") != _digest(
+            protocol_hypothesis.payload
+        ):
+            raise ResearchSupervisorError(
+                "research protocol hypothesis digest does not match canonical hypothesis"
+            )
+        if protocol_hypothesis_id != hypothesis.record_id:
+            raise ResearchSupervisorError(
+                "research protocol hypothesis does not match supervisor binding"
+            )
+
     def _validate_drift_context(
         self,
         existing_bindings: dict[str, str],
@@ -689,6 +776,10 @@ class ResearchSupervisor:
                             f"immutable binding conflict for {key}"
                         )
                     merged[key] = value
+                self._validate_scientific_lineage(
+                    run_question_id=run["question_id"],
+                    bindings=merged,
+                )
                 run["bindings"] = dict(sorted(merged.items()))
                 run["consumed_budget_units"] += budget_cost
                 run["phase"] = _NEXT_PHASE[expected_phase].value

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.execution_stop_authority as stop_module
 from autosport.execution_stop_authority import (
     ExecutionAuthorityMode,
     ExecutionStopAuthority,
@@ -99,3 +100,81 @@ def test_deleting_local_pair_cannot_rebootstrap_after_committed_history(
             reason="must not rebootstrap lost history",
             command_id="replacement-stop-r1",
         )
+
+
+def test_process_environment_root_retarget_cannot_reauthorize_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    caller_root_a = tmp_path / "caller-root-a"
+    caller_root_b = tmp_path / "caller-root-b"
+
+    product_root = ExecutionStopAuthority._product_monotonic_authority_root()
+    if stop_module.os.name == "nt":
+        assert product_root.parts[-3:] == (
+            "Autosport",
+            "application-state",
+            "monotonic-authority-v1",
+        )
+    else:
+        assert product_root.parts[-3:] == (
+            "state",
+            "autosport",
+            "monotonic-authority-v1",
+        )
+
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(caller_root_a),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "caller-local-app-data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "caller-xdg-state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home"))
+
+    authority = _initialized(path)
+    assert authority._monotonic_authority().authority_root == product_root
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-root-retarget",
+        expected_revision=1,
+        command_id="arm-r2-root-retarget",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-root-retarget",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    # Restore a mutually-consistent but superseded ARMED local pair, then
+    # simulate a fresh process whose caller-controlled generic authority root
+    # points somewhere empty.
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(caller_root_b),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "caller-local-app-data-b"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "caller-xdg-state-b"))
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home-b"))
+
+    restarted = ExecutionStopAuthority(path)
+    assert restarted._monotonic_authority().authority_root == product_root
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+    # The supported STOP path must not create either caller-selected authority
+    # root while resolving the already-committed monotonic high-water mark.
+    assert not caller_root_a.exists()
+    assert not caller_root_b.exists()
+

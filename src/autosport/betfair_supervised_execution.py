@@ -165,6 +165,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _provider_observation_now() -> str:
+    """Capture product-owned UTC time for terminal provider response evidence."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+_CANONICAL_PROVIDER_OBSERVATION_CLOCK = _provider_observation_now
+_CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE = (
+    _CANONICAL_PROVIDER_OBSERVATION_CLOCK.__code__
+)
+_CANONICAL_PROVIDER_OBSERVATION_DATETIME = datetime
+_CANONICAL_PROVIDER_OBSERVATION_TIMEZONE = timezone
+
+
 def _decode_provider_json(payload: bytes) -> object:
     """Decode provider JSON without silently accepting ambiguous object keys."""
 
@@ -613,6 +627,7 @@ class BetfairSupervisedPlaceOrdersClient:
         execution_workspace: Path,
         _transport_post: Callable[..., bytes] | None = None,
         _response_parser: Callable[..., BetfairPlaceExecutionReport] | None = None,
+        _observation_clock: Callable[[], str] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -692,13 +707,18 @@ class BetfairSupervisedPlaceOrdersClient:
                 "placeOrders transport returned non-bytes response"
             )
         parser = _parse_place_orders_response if _response_parser is None else _response_parser
+        observation_clock = (
+            self._clock
+            if _observation_clock is None
+            else _observation_clock
+        )
         return parser(
             payload,
             request_id=request_id,
             request_sha256=request_sha256,
             action=action,
             provider_order_ref=provider_ref,
-            observed_at=self._clock(),
+            observed_at=observation_clock(),
         )
 
 
@@ -1198,6 +1218,26 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
             or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+            or _provider_observation_now
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("datetime")
+            is not _CANONICAL_PROVIDER_OBSERVATION_DATETIME
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("timezone")
+            is not _CANONICAL_PROVIDER_OBSERVATION_TIMEZONE
         ):
             raise BetfairSupervisedExecutionError(
                 "terminal Betfair execution requires canonical client, transport, and parser authority; executable code authority changed"
@@ -1255,6 +1295,7 @@ def execute_betfair_supervised_action(
                 execution_workspace=execution_workspace,
                 _transport_post=_CANONICAL_URLLIB_BETFAIR_HTTP_POST,
                 _response_parser=_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE,
+                _observation_clock=_CANONICAL_PROVIDER_OBSERVATION_CLOCK,
             )
         except (
             BetfairPlaceOrdersAmbiguous,
@@ -1292,6 +1333,26 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
             or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+            or _provider_observation_now
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("datetime")
+            is not _CANONICAL_PROVIDER_OBSERVATION_DATETIME
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("timezone")
+            is not _CANONICAL_PROVIDER_OBSERVATION_TIMEZONE
         ):
             ledger.mark_unknown(
                 attempt_id,

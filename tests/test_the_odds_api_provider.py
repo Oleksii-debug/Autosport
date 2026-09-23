@@ -901,6 +901,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 opener_factory=fake_build_opener,
                 proxy_handler_factory=odds_api_module.ProxyHandler,
                 request_factory=odds_api_module.Request,
+                redirect_handler_factory=odds_api_module._RejectRedirects,
             )
 
         proxy_handlers = [
@@ -943,24 +944,53 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIsNone(context.exception.__context__)
         self.assertNotIn(secret, str(context.exception))
 
-    def test_product_default_transport_captures_network_constructors(self):
+    def test_product_default_transport_captures_authority_dependencies(self):
         captured = tuple(
             cell.cell_contents
             for cell in (odds_api_module._default_transport.__closure__ or ())
         )
         original_build_opener = odds_api_module.build_opener
+        original_validator = odds_api_module._canonical_provider_url
+        original_decoder = odds_api_module._decode_provider_json
+        helper_defaults = dict(
+            odds_api_module._perform_http_json_response.__kwdefaults__ or {}
+        )
+
         self.assertIn(original_build_opener, captured)
         self.assertIn(odds_api_module.ProxyHandler, captured)
         self.assertIn(odds_api_module.Request, captured)
+        self.assertIs(
+            helper_defaults["canonical_url_validator"],
+            original_validator,
+        )
+        self.assertIs(helper_defaults["json_decoder"], original_decoder)
 
         fake_build_opener = lambda *_: None
-        with patch.object(odds_api_module, "build_opener", fake_build_opener):
+        fake_validator = lambda *_: None
+        fake_decoder = lambda *_: {}
+        with (
+            patch.object(odds_api_module, "build_opener", fake_build_opener),
+            patch.object(
+                odds_api_module,
+                "_canonical_provider_url",
+                fake_validator,
+            ),
+            patch.object(odds_api_module, "_decode_provider_json", fake_decoder),
+        ):
             captured_after_patch = tuple(
                 cell.cell_contents
                 for cell in (odds_api_module._default_transport.__closure__ or ())
             )
+            defaults_after_patch = dict(
+                odds_api_module._perform_http_json_response.__kwdefaults__ or {}
+            )
             self.assertIn(original_build_opener, captured_after_patch)
             self.assertNotIn(fake_build_opener, captured_after_patch)
+            self.assertIs(
+                defaults_after_patch["canonical_url_validator"],
+                original_validator,
+            )
+            self.assertIs(defaults_after_patch["json_decoder"], original_decoder)
 
     def test_adapter_exposes_no_provider_write_or_real_money_surface(self):
         provider = TheOddsApiProvider(

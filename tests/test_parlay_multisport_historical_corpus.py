@@ -308,6 +308,7 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
     assert provenance["upstream_bookmaker_keys"] == ["book-a"]
     for key in (
         "content_identity",
+        "outcome_identity",
         "acquisition_identity",
         "governance_identity",
         "qualified_corpus_identity",
@@ -389,17 +390,20 @@ def test_acquisition_drift_changes_only_acquisition_and_qualified_identity(tmp_p
         first,
         output_name="identity-corpus-a",
         governance_suffix="identity-shared-a",
+        result_suffix="identity-shared-results",
     )
     second_manifest = _assemble(
         tmp_path,
         second,
         output_name="identity-corpus-b",
         governance_suffix="identity-shared-a",
+        result_suffix="identity-shared-results",
     )
     first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
     second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
 
     assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["outcome_identity"] == second_provenance["outcome_identity"]
     assert first_provenance["governance_identity"] == second_provenance["governance_identity"]
     assert first_provenance["acquisition_identity"] != second_provenance["acquisition_identity"]
     assert (
@@ -422,17 +426,20 @@ def test_governance_drift_changes_only_governance_and_qualified_identity(tmp_pat
         snapshot,
         output_name="governance-corpus-a",
         governance_suffix="governance-a",
+        result_suffix="governance-shared-results",
     )
     second_manifest = _assemble(
         tmp_path,
         snapshot,
         output_name="governance-corpus-b",
         governance_suffix="governance-b",
+        result_suffix="governance-shared-results",
     )
     first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
     second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
 
     assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["outcome_identity"] == second_provenance["outcome_identity"]
     assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
     assert first_provenance["governance_identity"] != second_provenance["governance_identity"]
     assert (

@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import keyword
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -29,6 +30,7 @@ class ModuleMetric:
     line_count: int
     internal_imports: tuple[str, ...]
     authority_families: tuple[str, ...]
+    unresolved_authority_declarations: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -36,6 +38,9 @@ class ModuleMetric:
             "line_count": self.line_count,
             "internal_imports": list(self.internal_imports),
             "authority_families": list(self.authority_families),
+            "unresolved_authority_declarations": list(
+                self.unresolved_authority_declarations
+            ),
         }
 
 
@@ -120,8 +125,11 @@ def _line_count(source: str) -> int:
     return source.count("\n") + (0 if source.endswith("\n") else 1)
 
 
-def _module_level_authorities(tree: ast.Module) -> tuple[str, ...]:
+def _module_level_authorities(
+    tree: ast.Module,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     values: set[str] = set()
+    unresolved: set[str] = set()
     for node in tree.body:
         name: str | None = None
         value: ast.expr | None = None
@@ -141,7 +149,9 @@ def _module_level_authorities(tree: ast.Module) -> tuple[str, ...]:
             authority = value.value
             if authority and authority == authority.strip() and "\x00" not in authority:
                 values.add(authority)
-    return tuple(sorted(values))
+                continue
+        unresolved.add(name)
+    return tuple(sorted(values)), tuple(sorted(unresolved))
 
 
 def _relative_base(module: str, is_package: bool, level: int) -> tuple[str, ...]:
@@ -255,16 +265,20 @@ def analyze_package(
     if not root.is_dir():
         raise ArchitectureFitnessError("package_dir must be an existing directory")
     package = package_name or root.name
-    if not package or not package.isidentifier():
+    if not package or not package.isidentifier() or keyword.iskeyword(package):
         raise ArchitectureFitnessError("package_name must be a canonical Python identifier")
 
-    paths = tuple(sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts))
+    paths = tuple(
+        sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
+    )
     if not paths:
         raise ArchitectureFitnessError("package contains no Python modules")
 
     parsed: dict[str, tuple[Path, str, ast.Module, bool]] = {}
     for path in paths:
         module = _module_name(root, path, package)
+        if path.is_symlink():
+            raise ArchitectureFitnessError(f"symlinked source is not canonical: {module}")
         try:
             source = path.read_text(encoding="utf-8", errors="strict")
             tree = ast.parse(source, filename=str(path))
@@ -293,7 +307,7 @@ def analyze_package(
         }
         imports = tuple(sorted(resolved))
         graph[module] = imports
-        authorities = _module_level_authorities(tree)
+        authorities, unresolved_authorities = _module_level_authorities(tree)
         for authority in authorities:
             authority_owners.setdefault(authority, set()).add(module)
         metrics.append(
@@ -302,6 +316,7 @@ def analyze_package(
                 line_count=_line_count(source),
                 internal_imports=imports,
                 authority_families=authorities,
+                unresolved_authority_declarations=unresolved_authorities,
             )
         )
 

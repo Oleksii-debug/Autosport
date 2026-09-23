@@ -317,3 +317,90 @@ def test_desktop_presentation_text_is_owned_by_localization_resources() -> None:
         "Hard-coded user-facing text bypasses autosport.localization resources:\n"
         + "\n".join(leaks)
     )
+
+def _uia_controls_tuple_resource_violations(
+    source: str,
+    *,
+    filename: str,
+) -> list[str]:
+    """Require tuple-carried UIA names/descriptions to stay catalog-owned."""
+
+    tree = ast.parse(source, filename=filename)
+    violations: list[str] = []
+    controls_assignment_found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != "_configure_accessibility":
+            continue
+        for statement in node.body:
+            if not isinstance(statement, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "controls"
+                for target in statement.targets
+            ):
+                continue
+            controls_assignment_found = True
+            if not isinstance(statement.value, ast.Tuple):
+                violations.append(
+                    f"{filename}:{statement.lineno}: controls must be a tuple"
+                )
+                continue
+            for row_index, row in enumerate(statement.value.elts):
+                if not isinstance(row, ast.Tuple) or len(row.elts) != 4:
+                    violations.append(
+                        f"{filename}:{statement.lineno}: "
+                        f"controls[{row_index}] must contain 4 fields"
+                    )
+                    continue
+                for field_index, field_name in ((1, "name"), (2, "description")):
+                    value = row.elts[field_index]
+                    if not (
+                        isinstance(value, ast.Call)
+                        and _call_name(value.func) == "text"
+                    ):
+                        violations.append(
+                            f"{filename}:{getattr(value, 'lineno', statement.lineno)}: "
+                            f"controls[{row_index}].{field_name} must use text(...)"
+                        )
+    if not controls_assignment_found:
+        violations.append(
+            f"{filename}: _configure_accessibility controls tuple is missing"
+        )
+    return violations
+
+
+def test_uia_controls_tuple_gate_rejects_non_catalog_name_or_description() -> None:
+    synthetic_bad = """
+def _configure_accessibility(self):
+    controls = (
+        (self.run_button, "Run replay", text("ui.run.description"), 102),
+        (self.log, text("ui.log.name"), hardcoded_description, 202),
+    )
+"""
+    violations = _uia_controls_tuple_resource_violations(
+        synthetic_bad,
+        filename="synthetic_bad.py",
+    )
+
+    assert len(violations) == 2
+    assert any("controls[0].name must use text(...)" in item for item in violations)
+    assert any(
+        "controls[1].description must use text(...)" in item
+        for item in violations
+    )
+
+
+def test_uia_controls_tuple_names_and_descriptions_are_catalog_owned() -> None:
+    path = REPO_ROOT / "src" / "autosport" / "gui.py"
+    violations = _uia_controls_tuple_resource_violations(
+        path.read_text(encoding="utf-8"),
+        filename=str(path.relative_to(REPO_ROOT)),
+    )
+
+    assert not violations, (
+        "UIA controls tuple bypasses autosport.localization resources:\n"
+        + "\n".join(violations)
+    )
+

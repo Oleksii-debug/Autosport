@@ -4,9 +4,15 @@ import pytest
 
 from autosport.bookmaker_receipt_reconciliation import (
     bind_leg_receipt,
+    reconcile_equal_split_residual,
     reconcile_equal_split_residual_against_ledger,
 )
-from autosport.bookmaker_routing import ExternalEffect, RoutingContractError, VenueQuote
+from autosport.bookmaker_routing import (
+    ExternalEffect,
+    RoutingContractError,
+    RoutingState,
+    VenueQuote,
+)
 from autosport.bookmaker_routing_plan import plan_equal_split_residual
 from autosport.opportunity import QuoteRef
 from autosport.real_execution_ledger import (
@@ -140,6 +146,21 @@ def test_caller_selected_arbitrary_ledger_root_cannot_mint_positive_reroute(tmp_
             external_receipt_id="caller-receipt-b",
         ),
     )
+
+    # Non-vacuous control: these routing facts really do ask the product to place
+    # more stake. The trust-root fence below must therefore prevent positive
+    # authority rather than merely observing an already-blocked/no-op proposal.
+    candidate = reconcile_equal_split_residual(
+        Decimal("100.00"),
+        venues,
+        observations,
+        routing_request_id=REQUEST_ID,
+        parent_plan_id=PLAN_ID,
+        stake_quantum=Decimal("0.01"),
+    )
+    assert candidate.state is RoutingState.ROUTE
+    assert candidate.proposed_total == Decimal("50.00")
+    assert candidate.legs
 
     with pytest.raises(
         RoutingContractError,

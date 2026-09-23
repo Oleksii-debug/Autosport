@@ -234,7 +234,7 @@ def test_load_bytes_ticket_snapshot_is_read_only_without_path_authority(
 ) -> None:
     monkeypatch.setenv(
         "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
-        str(tmp_path / "authority"),
+        str(tmp_path.parent / f"{tmp_path.name}-authority"),
     )
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
@@ -263,7 +263,7 @@ def test_path_load_rejects_whole_snapshot_rollback_behind_external_authority(
 ) -> None:
     monkeypatch.setenv(
         "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
-        str(tmp_path / "authority"),
+        str(tmp_path.parent / f"{tmp_path.name}-authority"),
     )
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
@@ -294,7 +294,7 @@ def test_failed_replace_keeps_last_good_snapshot_loadable_and_aborts_prepare(
 ) -> None:
     monkeypatch.setenv(
         "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
-        str(tmp_path / "authority"),
+        str(tmp_path.parent / f"{tmp_path.name}-authority"),
     )
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")

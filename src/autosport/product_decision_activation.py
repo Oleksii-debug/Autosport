@@ -579,10 +579,19 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "risk policy must be bound to the exact EconomicGoalContract"
             )
-        if not isinstance(execution_config, PaperExecutionModelConfig):
+        if type(execution_config) is not PaperExecutionModelConfig:
             raise ProductDecisionActivationError(
-                "execution_config must be PaperExecutionModelConfig"
+                "execution_config must be the exact canonical PaperExecutionModelConfig"
             )
+        # Bind the base-class descriptor directly after exact-type fencing. This
+        # avoids treating an overridden/virtual caller property as START authority.
+        execution_model_fingerprint = _sha256(
+            PaperExecutionModelConfig.fingerprint.__get__(
+                execution_config,
+                PaperExecutionModelConfig,
+            ),
+            "execution_model_fingerprint",
+        )
         if not isinstance(intent_producer, BuiltInIntentProducer):
             raise ProductDecisionActivationError(
                 "intent producer must come from the closed product registry"
@@ -648,10 +657,7 @@ class ProductDecisionActivationStore:
             risk_policy_file_sha256=risk_file_sha,
             intent_producer_id=intent_producer.value,
             execution_mode=PAPER_EXECUTION_MODE,
-            execution_model_fingerprint=_sha256(
-                execution_config.fingerprint,
-                "execution_model_fingerprint",
-            ),
+            execution_model_fingerprint=execution_model_fingerprint,
             product_composition_sha256=composition_sha,
             product_source_id=source_id,
             initial_bankroll=initial_bankroll,

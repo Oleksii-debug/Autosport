@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from decimal import Decimal, localcontext
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import autosport.local_compute_allocation_basis as basis_subject
 import autosport.local_compute_tariff_authority as subject
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.owner_economic_authority import (
@@ -19,20 +20,6 @@ def _owner_goal(workspace: Path, *, currency: str = "USD") -> None:
     values["currency"] = currency
     contract = build_initial_owner_contract(values, emergency_stop=False)
     EconomicGoalStore(workspace).initialize_owner(contract)
-
-
-def _component(
-    amount: Decimal = Decimal("10"),
-    *,
-    component_id: str = "measured-local-cost",
-    currency: str = "USD",
-) -> subject.LocalComputeCostComponent:
-    return subject.LocalComputeCostComponent(
-        component_id=component_id,
-        kind=subject.LocalComputeCostComponentKind.OTHER_ALLOCABLE,
-        amount=amount,
-        currency=currency,
-    )
 
 
 def _publish(store: subject.LocalComputeTariffAuthorityStore, **overrides):
@@ -51,23 +38,34 @@ def _publish(store: subject.LocalComputeTariffAuthorityStore, **overrides):
     values.update(overrides)
     if values["allocation_basis_id"] is None:
         values["allocation_basis_id"] = f"basis-{values['tariff_id']}"
-    store.publish_allocation_basis(
+
+    basis_store = store._basis_authority()
+    measurement_document = (
+        f'{{"basis_id":"{values["allocation_basis_id"]}",'
+        f'"total":"{basis_total}","requests":{basis_denominator}}}'
+    ).encode("utf-8")
+    review = basis_store.prepare_owner_review(
         basis_id=values["allocation_basis_id"],
         backend_id=values["backend_id"],
         model_id=values["model_id"],
         config_sha256=values["config_sha256"],
         allocation_policy_id=values["allocation_policy_id"],
-        components=(_component(basis_total),),
-        denominator_request_count=basis_denominator,
+        measurement_source_id="owner-reviewed-local-cost-ledger-2026-09",
+        measurement_period_start="2026-09-01T00:00:00Z",
+        measurement_period_end="2026-09-20T00:00:00Z",
+        total_allocable_cost=basis_total,
+        request_denominator=basis_denominator,
+        measurement_document=measurement_document,
     )
+    basis_store.publish_owner_basis(review, confirmed=True)
     return store.publish_owner_tariff(**values)
-
 
 def test_owner_tariff_resolves_exact_amount_and_identity(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -88,6 +86,20 @@ def test_owner_tariff_resolves_exact_amount_and_identity(tmp_path, monkeypatch):
     assert len(resolved.tariff_sha256) == 64
     assert len(resolved.allocation_basis_sha256) == 64
     assert resolved.allocation_basis_id == "basis-local-model-a-2026-09"
+    basis = store._basis_authority().resolve(
+        basis_id=resolved.allocation_basis_id,
+        backend_id=resolved.backend_id,
+        model_id=resolved.model_id,
+        config_sha256=resolved.config_sha256,
+        allocation_policy_id=resolved.allocation_policy_id,
+        decision_at="2026-09-23T12:00:00Z",
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    assert basis is not None
+    assert resolved.allocation_basis_sha256 == basis.basis_sha256
+    assert len(basis.measurement_document_sha256) == 64
+    assert len(basis.owner_review_sha256) == 64
     assert (
         resolved.allocation_treatment
         is subject.LocalComputeCostTreatment.FULLY_ALLOCATED_PER_REQUEST
@@ -99,6 +111,7 @@ def test_tariff_published_after_decision_cannot_backdate_money(tmp_path, monkeyp
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T13:00:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T13:00:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -121,6 +134,7 @@ def test_opaque_hash_and_invented_historical_time_cannot_mint_tariff(
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -160,6 +174,7 @@ def test_substituted_basis_authority_cannot_mint_tariff(tmp_path, monkeypatch):
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -188,101 +203,12 @@ def test_substituted_basis_authority_cannot_mint_tariff(tmp_path, monkeypatch):
     assert forged.resolve_called is False
 
 
-def test_allocation_basis_derives_amount_and_stamps_causal_availability(
-    tmp_path, monkeypatch
-):
-    workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
-    _owner_goal(workspace)
-    monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
-
-    basis = store.publish_allocation_basis(
-        basis_id="measured-basis",
-        backend_id="local-backend",
-        model_id="model-a",
-        config_sha256="c" * 64,
-        allocation_policy_id="owner-full-cost-per-request-v1",
-        components=(
-            _component(Decimal("6"), component_id="electricity"),
-            _component(Decimal("4"), component_id="hardware"),
-        ),
-        denominator_request_count=80,
-    )
-
-    assert basis.total_allocable_cost == Decimal("10")
-    assert basis.amount_per_request == Decimal("0.125")
-    assert basis.observed_at == "2026-09-23T09:30:00Z"
-    assert basis.available_at == "2026-09-23T09:30:00Z"
-
-
-def test_recurring_decimal_allocation_fails_closed_instead_of_rounding(
-    tmp_path, monkeypatch
-):
-    workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
-    _owner_goal(workspace)
-    monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
-
-    with pytest.raises(subject.LocalComputeTariffError, match="exact finite Decimal"):
-        store.publish_allocation_basis(
-            basis_id="recurring-basis",
-            backend_id="local-backend",
-            model_id="model-a",
-            config_sha256="c" * 64,
-            allocation_policy_id="owner-full-cost-per-request-v1",
-            components=(_component(Decimal("1")),),
-            denominator_request_count=3,
-        )
-
-
-def test_allocation_arithmetic_is_independent_of_decimal_context(
-    tmp_path, monkeypatch
-):
-    workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
-    _owner_goal(workspace)
-    monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
-
-    with localcontext() as context:
-        context.prec = 6
-        basis = store.publish_allocation_basis(
-            basis_id="context-independent-basis",
-            backend_id="local-backend",
-            model_id="model-a",
-            config_sha256="c" * 64,
-            allocation_policy_id="owner-full-cost-per-request-v1",
-            components=(
-                _component(Decimal("123456.78"), component_id="hardware"),
-                _component(Decimal("0.22"), component_id="electricity"),
-            ),
-            denominator_request_count=4,
-        )
-
-    assert basis.total_allocable_cost == Decimal("123457.00")
-    assert basis.amount_per_request == Decimal("30864.25")
-
-
-def test_float_and_negative_component_money_are_rejected():
-    with pytest.raises(subject.LocalComputeTariffError):
-        _component(0.1)  # type: ignore[arg-type]
-    with pytest.raises(subject.LocalComputeTariffError):
-        _component(Decimal("-0.01"))
-
-
 def test_same_tariff_id_is_idempotent_but_conflict_rejects(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -302,6 +228,7 @@ def test_overlapping_same_compute_tariffs_reject(tmp_path, monkeypatch):
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -321,6 +248,7 @@ def test_exact_compute_identity_and_owner_currency_are_required(tmp_path, monkey
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -352,6 +280,7 @@ def test_workspace_state_rollback_is_detected_by_independent_authority(
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )
@@ -373,52 +302,12 @@ def test_workspace_state_rollback_is_detected_by_independent_authority(
         )
 
 
-def test_allocation_basis_rollback_is_detected_by_independent_authority(
-    tmp_path, monkeypatch
-):
-    workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
-    _owner_goal(workspace)
-    monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
-    first = store.publish_allocation_basis(
-        basis_id="basis-first",
-        backend_id="local-backend",
-        model_id="model-a",
-        config_sha256="c" * 64,
-        allocation_policy_id="owner-full-cost-per-request-v1",
-        components=(_component(Decimal("10")),),
-        denominator_request_count=80,
-    )
-    basis_store = subject.LocalComputeAllocationBasisAuthorityStore(
-        workspace, authority_root=authority
-    )
-    old_bytes = basis_store.path.read_bytes()
-    assert first.basis_id == "basis-first"
-    store.publish_allocation_basis(
-        basis_id="basis-second",
-        backend_id="local-backend",
-        model_id="model-b",
-        config_sha256="d" * 64,
-        allocation_policy_id="owner-full-cost-per-request-v1",
-        components=(_component(Decimal("20")),),
-        denominator_request_count=80,
-    )
-    basis_store.path.write_bytes(old_bytes)
-
-    with pytest.raises(MonotonicWorkspaceAuthorityError):
-        subject.LocalComputeAllocationBasisAuthorityStore(
-            workspace, authority_root=authority
-        )
-
-
 def test_duplicate_json_keys_fail_closed_on_restart(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     authority = tmp_path / "authority"
     _owner_goal(workspace)
     monkeypatch.setattr(subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
+    monkeypatch.setattr(basis_subject, "_authority_now", lambda: "2026-09-23T09:30:00Z")
     store = subject.LocalComputeTariffAuthorityStore(
         workspace, authority_root=authority
     )

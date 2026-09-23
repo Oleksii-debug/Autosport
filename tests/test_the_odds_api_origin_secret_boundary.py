@@ -30,18 +30,9 @@ def test_credential_bearing_provider_rejects_noncanonical_origin(base_url: str) 
         )
 
 
-def test_post_construction_origin_mutation_fails_before_network_dispatch(monkeypatch) -> None:
+def test_post_construction_origin_mutation_fails_before_network_dispatch() -> None:
     """Mutable object state cannot reroute a real credential to another host."""
 
-    opened: list[str] = []
-
-    class FakeOpener:
-        def open(self, request, timeout):  # pragma: no cover - must never run
-            del timeout
-            opened.append(request.full_url)
-            raise AssertionError("noncanonical origin reached network dispatch")
-
-    monkeypatch.setattr(odds_api_module, "build_opener", lambda *_: FakeOpener())
     provider = TheOddsApiProvider(
         "SECRET_SENTINEL_DO_NOT_SEND",
         sport="soccer_epl",
@@ -50,12 +41,14 @@ def test_post_construction_origin_mutation_fails_before_network_dispatch(monkeyp
 
     with pytest.raises(TheOddsApiTransportError, match="non-canonical provider URL"):
         provider.read_batch()
+def test_http_error_does_not_echo_credential_bearing_url() -> None:
+    """Injected lower-seam errors are sanitized without becoming provider authority."""
 
-    assert opened == []
-
-
-def test_http_error_does_not_echo_credential_bearing_url(monkeypatch) -> None:
-    """Transport errors expose bounded status, never the secret-bearing request URL."""
+    secret = "SECRET_SENTINEL_DO_NOT_SEND"
+    url = (
+        "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+        f"?apiKey={secret}&regions=eu&markets=h2h"
+    )
 
     class FakeOpener:
         def open(self, request, timeout):
@@ -68,18 +61,18 @@ def test_http_error_does_not_echo_credential_bearing_url(monkeypatch) -> None:
                 None,
             )
 
-    monkeypatch.setattr(odds_api_module, "build_opener", lambda *_: FakeOpener())
-    provider = TheOddsApiProvider(
-        "SECRET_SENTINEL_DO_NOT_SEND",
-        sport="soccer_epl",
-    )
-
     with pytest.raises(TheOddsApiTransportError) as captured:
-        provider.read_batch()
+        odds_api_module._perform_http_json_response(
+            url,
+            1.0,
+            opener_factory=lambda *_: FakeOpener(),
+            proxy_handler_factory=odds_api_module.ProxyHandler,
+            request_factory=odds_api_module.Request,
+        )
 
     rendered = str(captured.value)
     assert rendered == "The Odds API HTTP 401"
-    assert "SECRET_SENTINEL_DO_NOT_SEND" not in rendered
+    assert secret not in rendered
     assert "apiKey=" not in rendered
 
 

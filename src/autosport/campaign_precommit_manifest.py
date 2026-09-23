@@ -1207,6 +1207,7 @@ class CampaignPrecommitManifest:
             )
         return manifest
 
+
 def load_campaign_precommit_manifest(
     path: str | os.PathLike[str],
 ) -> CampaignPrecommitManifest:
@@ -1605,6 +1606,7 @@ def resolve_campaign_precommit_publication_witness(
     authority_root: str | os.PathLike[str] | None = None,
 ) -> CampaignPrecommitPublicationWitness:
     """Resolve exact manifest + committed monotonic witness without issuing authority."""
+
     absolute_workspace, target, relative = _publication_target_context(
         path,
         workspace=workspace,

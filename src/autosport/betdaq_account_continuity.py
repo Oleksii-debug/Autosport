@@ -8,8 +8,9 @@ identity consumed by account reconciliation across process restart.
 This module composes *after* a successful canonical BETDAQ acquisition.  It keeps the
 source session context intact as evidence and projects only the completed canonical
 BookmakerAccountSnapshot onto a deterministic, pseudonymous authenticated-principal
-identity derived from the exact BETDAQ username + venue.  Password/application
-rotation therefore does not fork account history, while a different username does.
+identity derived from the exact BETDAQ username + product-owned provider namespace.
+Password/application rotation therefore does not fork account history, while a
+different username does.
 
 The provider does not expose an immutable physical/legal account identifier in the
 read contracts used here.  Accordingly this module proves authenticated-principal
@@ -38,6 +39,7 @@ from .bookmaker_account_reconciliation import BookmakerAccountReconciliationStor
 _PRINCIPAL_ID_PREFIX = "betdaq-authenticated-principal:"
 _PRINCIPAL_SCOPE = "AUTHENTICATED_BETDAQ_USERNAME_CONTINUITY"
 _SESSION_ID_PREFIX = "betdaq-auth-context:"
+_CANONICAL_VENUE_ID = "betdaq"
 
 
 class BetdaqAccountContinuityError(RuntimeError):
@@ -60,7 +62,11 @@ class BetdaqAuthenticatedPrincipalContext:
     immutable_physical_account_identity_proven: bool = False
 
     def __post_init__(self) -> None:
-        _required_text(self.venue_id, "venue_id")
+        venue = _required_text(self.venue_id, "venue_id")
+        if venue != _CANONICAL_VENUE_ID:
+            raise BetdaqAccountContinuityError(
+                "BETDAQ continuity venue_id is product-owned and must be canonical"
+            )
         if (
             type(self.principal_context_id) is not str
             or not self.principal_context_id.startswith(_PRINCIPAL_ID_PREFIX)
@@ -164,15 +170,20 @@ class BetdaqAccountContinuityClient:
         self,
         credentials: BetdaqCredentials,
         *,
-        venue_id: str = "betdaq",
+        venue_id: str = _CANONICAL_VENUE_ID,
         account_id: str = "default-account",
         timeout_seconds: float = 10.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if type(credentials) is not BetdaqCredentials:
             raise TypeError("credentials must be BetdaqCredentials")
+        venue = _required_text(venue_id, "venue_id")
+        if venue != _CANONICAL_VENUE_ID:
+            raise BetdaqAccountContinuityError(
+                "BETDAQ continuity venue_id is product-owned and must be canonical"
+            )
         self._credentials = credentials
-        self._venue_id = _required_text(venue_id, "venue_id")
+        self._venue_id = _CANONICAL_VENUE_ID
         self._source = BetdaqAccountReadOnlyClient(
             credentials,
             venue_id=self._venue_id,
@@ -310,11 +321,15 @@ def _principal_context(
             "principal continuity requires canonical authenticated source context"
         )
     venue = _required_text(source_context.venue_id, "venue_id")
+    if venue != _CANONICAL_VENUE_ID:
+        raise BetdaqAccountContinuityError(
+            "BETDAQ continuity venue_id is product-owned and must be canonical"
+        )
     username = _required_text(authenticated_username, "authenticated_username")
     material = json.dumps(
         {
             "schema": "autosport.betdaq-authenticated-principal-id-v1",
-            "venue_id": venue,
+            "venue_id": _CANONICAL_VENUE_ID,
             "adapter_id": ADAPTER_ID,
             "username": username,
         },
@@ -325,7 +340,7 @@ def _principal_context(
     ).encode("utf-8")
     principal_id = _PRINCIPAL_ID_PREFIX + sha256(material).hexdigest()
     return BetdaqAuthenticatedPrincipalContext(
-        venue_id=venue,
+        venue_id=_CANONICAL_VENUE_ID,
         principal_context_id=principal_id,
         source_session_context_id=source_context.session_context_id,
     )

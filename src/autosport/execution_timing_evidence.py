@@ -54,7 +54,7 @@ def _digest(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class MonotonicTimingMarker:
-    """One product-issued marker in one local monotonic clock/session domain."""
+    """One marker in one local monotonic clock/session issuer domain."""
 
     clock_domain_id: str
     session_id: str
@@ -100,7 +100,12 @@ class MonotonicTimingMarker:
 
 @dataclass(frozen=True, slots=True)
 class MonotonicTimingIntervalEvidence:
-    """Exact local elapsed time over markers from the same live issuer epoch."""
+    """Exact local elapsed time over markers from one live issuer epoch.
+
+    This DTO does not, by construction alone, carry positive product authority.
+    Consumers that require positive evidence must re-resolve it through the
+    issuing ``LocalMonotonicTimingSession.require_issued_interval`` method.
+    """
 
     clock_domain_id: str
     session_id: str
@@ -126,8 +131,8 @@ class MonotonicTimingIntervalEvidence:
             )
 
     @property
-    def evidence_class(self) -> str:
-        return "LOCAL_TRANSPORT_OBSERVED"
+    def timing_class(self) -> str:
+        return "LOCAL_MONOTONIC_SAME_SESSION"
 
     @property
     def duration_ms(self) -> Decimal:
@@ -139,7 +144,7 @@ class MonotonicTimingIntervalEvidence:
             {
                 "schema": "autosport.local_monotonic_timing_interval",
                 "schema_version": 1,
-                "evidence_class": self.evidence_class,
+                "timing_class": self.timing_class,
                 "clock_domain_id": self.clock_domain_id,
                 "session_id": self.session_id,
                 "issuer_epoch_id": self.issuer_epoch_id,
@@ -163,6 +168,9 @@ class LocalMonotonicTimingSession:
     ``wall_anchor_at`` is provenance only. It is deliberately excluded from
     elapsed-time arithmetic, so wall-clock jumps cannot create negative or
     favorable local latency. Provider timestamps are outside this authority.
+    The interval is generic local timing; a provider consumer must separately
+    prove that its marker pair brackets the canonical transport interaction
+    before classifying that observation as transport latency.
     """
 
     def __init__(
@@ -197,7 +205,8 @@ class LocalMonotonicTimingSession:
         )
         self._sequence = 0
         self._last_monotonic_ns: int | None = None
-        self._issued: dict[str, MonotonicTimingMarker] = {}
+        self._issued_markers: dict[str, MonotonicTimingMarker] = {}
+        self._issued_intervals: dict[str, MonotonicTimingIntervalEvidence] = {}
 
     def mark(self, label: str) -> MonotonicTimingMarker:
         label = _text(label, "label")
@@ -222,7 +231,7 @@ class LocalMonotonicTimingSession:
             wall_anchor_at=_wall_text(wall),
         )
         self._last_monotonic_ns = monotonic_ns
-        self._issued[marker.marker_id] = marker
+        self._issued_markers[marker.marker_id] = marker
         return marker
 
     def interval(
@@ -245,7 +254,7 @@ class LocalMonotonicTimingSession:
                 raise ExecutionTimingEvidenceError(
                     f"{name} marker is from another clock/session issuer epoch"
                 )
-            issued = self._issued.get(marker.marker_id)
+            issued = self._issued_markers.get(marker.marker_id)
             if issued != marker:
                 raise ExecutionTimingEvidenceError(
                     f"{name} marker is not product-issued by this live session"
@@ -258,7 +267,7 @@ class LocalMonotonicTimingSession:
             raise ExecutionTimingEvidenceError(
                 "negative monotonic duration is invalid evidence"
             )
-        return MonotonicTimingIntervalEvidence(
+        evidence = MonotonicTimingIntervalEvidence(
             clock_domain_id=self.clock_domain_id,
             session_id=self.session_id,
             issuer_epoch_id=self.issuer_epoch_id,
@@ -268,3 +277,20 @@ class LocalMonotonicTimingSession:
             end_sequence=end.sequence,
             duration_ns=end.monotonic_ns - start.monotonic_ns,
         )
+        self._issued_intervals[evidence.evidence_id] = evidence
+        return evidence
+
+    def require_issued_interval(
+        self,
+        evidence: MonotonicTimingIntervalEvidence,
+    ) -> MonotonicTimingIntervalEvidence:
+        if not isinstance(evidence, MonotonicTimingIntervalEvidence):
+            raise ExecutionTimingEvidenceError(
+                "timing evidence must be MonotonicTimingIntervalEvidence"
+            )
+        issued = self._issued_intervals.get(evidence.evidence_id)
+        if issued != evidence:
+            raise ExecutionTimingEvidenceError(
+                "timing interval is not product-issued by this live session"
+            )
+        return issued

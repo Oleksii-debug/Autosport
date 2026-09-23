@@ -66,6 +66,32 @@ def _money(value: object, field: str, *, nonnegative: bool = False) -> Decimal:
     return value
 
 
+def _exact_add(left: Decimal, right: Decimal) -> Decimal:
+    """Add finite Decimals without depending on the process Decimal context."""
+
+    def parts(value: Decimal) -> tuple[int, int]:
+        sign, digits, exponent = value.as_tuple()
+        coefficient = 0
+        for digit in digits:
+            coefficient = coefficient * 10 + digit
+        if sign:
+            coefficient = -coefficient
+        return coefficient, int(exponent)
+
+    left_coefficient, left_exponent = parts(left)
+    right_coefficient, right_exponent = parts(right)
+    exponent = min(left_exponent, right_exponent)
+    total = (
+        left_coefficient * (10 ** (left_exponent - exponent))
+        + right_coefficient * (10 ** (right_exponent - exponent))
+    )
+    if total == 0:
+        return Decimal((0, (0,), exponent))
+    sign = 1 if total < 0 else 0
+    digits = tuple(int(character) for character in str(abs(total)))
+    return Decimal((sign, digits, exponent))
+
+
 @dataclass(frozen=True, slots=True)
 class ProphetXTransactionQuery:
     limit: int = 20
@@ -262,15 +288,23 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
         raise ProphetXReadOnlyError("transaction status/type is outside documented ProphetX vocabulary")
     created_at = _required_text(row.get("created_at"), "created_at")
     _iso_timestamp(created_at, "created_at")
+    amount = _money(row.get("amount"), "amount", nonnegative=True)
+    change = _money(row.get("change"), "change")
+    balance = _money(row.get("balance"), "balance")
+    balance_before = _money(row.get("balance_before"), "balance_before")
+    if _exact_add(balance_before, change) != balance:
+        raise ProphetXReadOnlyError(
+            "transaction balance must equal balance_before plus change"
+        )
     return ProphetXWalletTransaction(
         status=status,
         user_id=_required_text(row.get("user_id"), "user_id"),
         transaction_type=tx_type,
         transaction_sub_type=_provider_text(row.get("transaction_sub_type"), "transaction_sub_type"),
-        amount=_money(row.get("amount"), "amount", nonnegative=True),
-        change=_money(row.get("change"), "change"),
-        balance=_money(row.get("balance"), "balance"),
-        balance_before=_money(row.get("balance_before"), "balance_before"),
+        amount=amount,
+        change=change,
+        balance=balance,
+        balance_before=balance_before,
         details=_provider_text(row.get("details"), "details"),
         market_id=_provider_text(row.get("market_id"), "market_id"),
         event_id=_provider_text(row.get("event_id"), "event_id"),

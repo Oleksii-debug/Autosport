@@ -159,6 +159,8 @@ class ProviderQuoteComparisonTests(unittest.TestCase):
             source="provider-e",
             odds="9.99",
             source_ts="2026-09-21T13:00:01+00:00",
+            observed_ts="2026-09-21T13:00:01+00:00",
+            ingest_ts="2026-09-21T13:00:01+00:00",
         )
 
         comparison = self.compare(valid_a, valid_b, suspended, stale, future)[0]
@@ -175,6 +177,7 @@ class ProviderQuoteComparisonTests(unittest.TestCase):
                 odds="2.00",
                 observed_ts="2026-09-21T12:59:50+00:00",
                 source_ts="2026-09-21T12:40:00+00:00",
+                ingest_ts="2026-09-21T12:59:51+00:00",
             ),
             self.event(source="provider-b", odds="2.10"),
         )
@@ -200,6 +203,7 @@ class ProviderQuoteComparisonTests(unittest.TestCase):
             odds="2.10",
             observed_ts="2026-09-21T13:00:01+00:00",
             source_ts="2026-09-21T12:59:59+00:00",
+            ingest_ts="2026-09-21T13:00:02+00:00",
         )
         future_ingest = self.event(
             source="provider-c",

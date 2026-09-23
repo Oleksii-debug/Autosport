@@ -70,6 +70,53 @@ def _positive_decimal(value: object, name: str) -> Decimal:
     return result
 
 
+def _exact_decimal_sum(*values: Decimal) -> Decimal:
+    """Add finite Decimals without ambient/fixed-context rounding.
+
+    Monetary totals and drawdown are identities over finite-decimal currency
+    values.  Statistical arithmetic deliberately uses the bounded local
+    Decimal context below, but reusing that context for money can erase a
+    small loss after a much larger gain.  Reconstruct the exact base-10
+    coefficient at one common exponent instead.
+    """
+
+    if not values:
+        return Decimal(0)
+
+    parts: list[tuple[int, int]] = []
+    common_exponent: int | None = None
+    for index, value in enumerate(values):
+        decimal_value = _decimal(value, f"exact_decimal_sum[{index}]")
+        decimal_tuple = decimal_value.as_tuple()
+        exponent = decimal_tuple.exponent
+        if type(exponent) is not int:
+            raise ForwardEconomicEvidenceError(
+                "exact decimal sum requires finite integral exponents"
+            )
+        coefficient = 0
+        for digit in decimal_tuple.digits:
+            coefficient = coefficient * 10 + digit
+        if decimal_tuple.sign:
+            coefficient = -coefficient
+        parts.append((coefficient, exponent))
+        common_exponent = (
+            exponent
+            if common_exponent is None
+            else min(common_exponent, exponent)
+        )
+
+    assert common_exponent is not None
+    total_coefficient = sum(
+        coefficient * (10 ** (exponent - common_exponent))
+        for coefficient, exponent in parts
+    )
+    if total_coefficient == 0:
+        return Decimal(0)
+    sign = 1 if total_coefficient < 0 else 0
+    digits = tuple(int(char) for char in str(abs(total_coefficient)))
+    return Decimal((sign, digits, common_exponent))
+
+
 def _decimal_text(value: Decimal) -> str:
     value = _decimal(value, "decimal")
     text = format(value, "f")
@@ -958,13 +1005,24 @@ class ForwardEconomicEvidenceAccumulator:
                     paired_high,
                 )
             )
-            new_challenger_total = +(
-                self._challenger_total + challenger.net_pnl_currency
-            )
-            new_champion_total = +(self._champion_total + champion.net_pnl_currency)
-            new_peak = max(self._challenger_peak, new_challenger_total)
-            new_drawdown = +(new_peak - new_challenger_total)
-            new_max_drawdown = max(self._challenger_max_drawdown, new_drawdown)
+
+        # Currency totals/drawdown are exact finite-decimal identities, not
+        # statistical approximations.  Never accumulate them under the bounded
+        # e-process Decimal context.
+        new_challenger_total = _exact_decimal_sum(
+            self._challenger_total,
+            challenger.net_pnl_currency,
+        )
+        new_champion_total = _exact_decimal_sum(
+            self._champion_total,
+            champion.net_pnl_currency,
+        )
+        new_peak = max(self._challenger_peak, new_challenger_total)
+        new_drawdown = _exact_decimal_sum(
+            new_peak,
+            new_challenger_total.copy_negate(),
+        )
+        new_max_drawdown = max(self._challenger_max_drawdown, new_drawdown)
 
         step = ForwardEconomicStep(
             sequence=observation.sequence,
@@ -1059,27 +1117,25 @@ class ForwardEconomicEvidenceAccumulator:
         peak = Decimal(0)
         maximum_drawdown = Decimal(0)
         chronology_unambiguous = True
-        with localcontext() as context:
-            context.prec = _DECIMAL_PRECISION
-            for available_at in sorted(capital_groups):
-                pnls = capital_groups[available_at]
-                positive = [pnl for pnl in pnls if pnl > 0]
-                zero = [pnl for pnl in pnls if pnl == 0]
-                negative = [pnl for pnl in pnls if pnl < 0]
-                if positive and negative:
-                    chronology_unambiguous = False
+        for available_at in sorted(capital_groups):
+            pnls = capital_groups[available_at]
+            positive = [pnl for pnl in pnls if pnl > 0]
+            zero = [pnl for pnl in pnls if pnl == 0]
+            negative = [pnl for pnl in pnls if pnl < 0]
+            if positive and negative:
+                chronology_unambiguous = False
 
-                # Equal-time mixed-sign capital changes have no authoritative
-                # intra-instant order. Positive-before-negative gives the
-                # conservative drawdown envelope, while the gate remains
-                # fail-closed because the exact chronology is ambiguous.
-                for pnl in (*positive, *zero, *negative):
-                    total = +(total + pnl)
-                    peak = max(peak, total)
-                    maximum_drawdown = max(
-                        maximum_drawdown,
-                        +(peak - total),
-                    )
+            # Equal-time mixed-sign capital changes have no authoritative
+            # intra-instant order. Positive-before-negative gives the
+            # conservative drawdown envelope, while the gate remains
+            # fail-closed because the exact chronology is ambiguous.
+            for pnl in (*positive, *zero, *negative):
+                total = _exact_decimal_sum(total, pnl)
+                peak = max(peak, total)
+                maximum_drawdown = max(
+                    maximum_drawdown,
+                    _exact_decimal_sum(peak, total.copy_negate()),
+                )
 
         if total != self._challenger_total:
             raise ForwardEconomicEvidenceError(

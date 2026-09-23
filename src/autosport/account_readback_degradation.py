@@ -18,6 +18,7 @@ import re
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 _PROVIDER_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ReadbackDegradationError(ValueError):
@@ -89,6 +90,12 @@ def _require_provider_id(value: object) -> str:
     return provider_id
 
 
+def _require_sha256(value: object, *, field: str) -> str:
+    if type(value) is not str or not _SHA256_RE.fullmatch(value):
+        raise ReadbackDegradationError(f"{field} must be a lowercase SHA-256 digest")
+    return value
+
+
 def _require_provider_code(value: object | None) -> str | None:
     if value is None:
         return None
@@ -117,7 +124,9 @@ class ReadbackFailureSignal:
     """
 
     provider_id: str
+    adapter_id: str
     operation: str
+    scope_sha256: str
     kind: ReadbackFailureKind
     provider_code: str | None = None
     http_status: int | None = None
@@ -132,8 +141,18 @@ class ReadbackFailureSignal:
         )
         object.__setattr__(
             self,
+            "adapter_id",
+            _require_token(self.adapter_id, field="adapter_id"),
+        )
+        object.__setattr__(
+            self,
             "operation",
             _require_token(self.operation, field="operation"),
+        )
+        object.__setattr__(
+            self,
+            "scope_sha256",
+            _require_sha256(self.scope_sha256, field="scope_sha256"),
         )
         if type(self.kind) is not ReadbackFailureKind:
             raise ReadbackDegradationError("kind must be an exact ReadbackFailureKind")
@@ -141,6 +160,20 @@ class ReadbackFailureSignal:
         object.__setattr__(self, "http_status", _require_http_status(self.http_status))
         if type(self.pages_completed) is not int or self.pages_completed < 0:
             raise ReadbackDegradationError("pages_completed must be a non-negative integer")
+        if (
+            self.kind is ReadbackFailureKind.INCOMPLETE_PAGINATION
+            and self.pages_completed == 0
+        ):
+            raise ReadbackDegradationError(
+                "incomplete pagination requires at least one completed page"
+            )
+        if (
+            self.kind is ReadbackFailureKind.STALE_CACHE
+            and self.prior_snapshot_id is None
+        ):
+            raise ReadbackDegradationError(
+                "stale cache requires a prior snapshot identity"
+            )
         if self.prior_snapshot_id is not None:
             object.__setattr__(
                 self,
@@ -159,7 +192,9 @@ class AccountReadbackDegradationEvidence:
 
     state: ReadbackDegradationState
     provider_id: str
+    adapter_id: str
     operation: str
+    scope_sha256: str
     provider_code: str | None
     http_status: int | None
     partial_observation_present: bool
@@ -231,8 +266,6 @@ def _classify_state(signal: ReadbackFailureSignal) -> ReadbackDegradationState:
     if signal.kind is ReadbackFailureKind.INCOMPLETE_PAGINATION:
         return ReadbackDegradationState.INCOMPLETE_PARTIAL
     if signal.kind is ReadbackFailureKind.STALE_CACHE:
-        if signal.prior_snapshot_id is None:
-            return ReadbackDegradationState.UNKNOWN
         return ReadbackDegradationState.STALE_LAST_KNOWN
     if signal.kind is ReadbackFailureKind.TRANSPORT:
         return ReadbackDegradationState.UNAVAILABLE_TRANSIENT
@@ -258,7 +291,9 @@ def classify_account_readback_degradation(
         "schema_version": 1,
         "state": state.value,
         "provider_id": signal.provider_id,
+        "adapter_id": signal.adapter_id,
         "operation": signal.operation,
+        "scope_sha256": signal.scope_sha256,
         "provider_code": signal.provider_code,
         "http_status": signal.http_status,
         "pages_completed": signal.pages_completed,
@@ -274,7 +309,9 @@ def classify_account_readback_degradation(
     return AccountReadbackDegradationEvidence(
         state=state,
         provider_id=signal.provider_id,
+        adapter_id=signal.adapter_id,
         operation=signal.operation,
+        scope_sha256=signal.scope_sha256,
         provider_code=signal.provider_code,
         http_status=signal.http_status,
         partial_observation_present=signal.pages_completed > 0,

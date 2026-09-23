@@ -107,6 +107,36 @@ def test_summary_constructor_rejects_inconsistent_rank_order() -> None:
         )
 
 
+def test_summary_constructor_rejects_budget_and_total_contradictions() -> None:
+    budget = LatencyBudget("forged", 10)
+
+    with pytest.raises(LatencyBudgetError, match="max_ns budget breach"):
+        LatencySummary(
+            budget=budget,
+            sample_count=2,
+            total_ns=21,
+            min_ns=10,
+            p50_ns=10,
+            p95_ns=11,
+            p99_ns=11,
+            max_ns=11,
+            breach_count=0,
+        )
+
+    with pytest.raises(LatencyBudgetError, match="total_ns contradicts"):
+        LatencySummary(
+            budget=budget,
+            sample_count=2,
+            total_ns=100,
+            min_ns=1,
+            p50_ns=1,
+            p95_ns=2,
+            p99_ns=2,
+            max_ns=2,
+            breach_count=0,
+        )
+
+
 def test_integer_millisecond_constructor_is_exact() -> None:
     assert LatencyBudget.from_milliseconds("ui", 25).budget_ns == 25_000_000
     with pytest.raises(LatencyBudgetError, match="positive integer"):

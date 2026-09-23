@@ -1,11 +1,14 @@
 """Fail-closed Betfair settlement-rounding economics primitives.
 
 This module deliberately separates a mathematical continuous-money model from a
-provider-posted settlement-money model.  The ordinary Exchange helper encodes
-only the documented two-stage *shape* (nearest-cent gross, then nearest-cent
-commission) and never claims that the shape applies to an arbitrary market.
-BSP, dead-heat, reduction-factor, void/correction and market-specific rule
-semantics remain outside this module.
+candidate structural settlement-money model. The ordinary Exchange helper
+encodes one candidate two-stage *shape* (nearest-cent gross, then nearest-cent
+commission) for bounded uncertainty analysis. Public Betfair rules establish
+cent rounding of market winnings/losses and commission charges, but this module
+does not claim that those rules establish the commission-base ordering or that
+this exact shape applies to an arbitrary market. BSP, dead-heat,
+reduction-factor, void/correction and market-specific rule semantics remain
+outside this module.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ class ThresholdDisposition(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class BetfairOrdinarySettlementProjection:
-    """Structural ordinary non-BSP two-stage rounding projection.
+    """Candidate structural ordinary non-BSP two-stage rounding projection.
 
     ``provider_applicability_proven`` and ``provider_posted_exact`` are hard
     false because a caller invoking this arithmetic helper is not proof that a
@@ -178,9 +181,11 @@ def project_ordinary_two_stage_rounding(
     gross_unrounded: Decimal,
     commission_rate: Decimal,
 ) -> BetfairOrdinarySettlementProjection:
-    """Project the documented ordinary two-stage cent-rounding shape.
+    """Project one candidate ordinary two-stage cent-rounding shape.
 
-    This is intentionally *not* provider applicability or posted-cash evidence.
+    Public rule evidence does not prove that commission is calculated from the
+    already rounded gross amount; this ordering is a bounded structural
+    hypothesis for uncertainty analysis, not provider-applicability evidence.
     A positive consumer must separately establish that the exact market/product
     uses this ordinary non-BSP pipeline and that no more-specific rule overrides
     it.
@@ -201,9 +206,10 @@ def project_ordinary_two_stage_rounding(
     if delta < 0:
         delta = -delta
 
-    # For this exact two-stage model the gross-cent perturbation contributes at
-    # most half a cent and the commission-charge rounding contributes at most
-    # half a cent.  The strict total bound is therefore < 0.01.
+    # For this candidate structural ordering the gross-cent perturbation
+    # contributes at most half a cent and the commission-charge rounding
+    # contributes at most half a cent. The strict total bound is therefore
+    # < 0.01 inside this model; it is not a provider-applicability proof.
     if not delta < Decimal("0.01"):
         raise BetfairSettlementRoundingError("two-stage rounding invariant violated")
 

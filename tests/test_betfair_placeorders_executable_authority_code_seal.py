@@ -287,3 +287,99 @@ def test_private_opener_internal_dispatch_shadow_fails_before_durable_attempt(
         finally:
             delattr(private_opener, attribute)
 
+
+
+@pytest.mark.parametrize(
+    "mapping_name",
+    ("handle_open", "process_request", "process_response"),
+)
+def test_private_opener_https_dispatch_map_rewrite_fails_before_durable_attempt(
+    mapping_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        private_opener = (
+            betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+        )
+        mapping = getattr(private_opener, mapping_name)
+        assert type(mapping) is dict
+        assert "https" in mapping
+        original_handlers = mapping["https"]
+        forged_calls: list[tuple[object, ...]] = []
+
+        class ForgedHttpsHandler:
+            def https_open(self, *args, **kwargs):
+                forged_calls.append(args)
+                raise AssertionError("forged HTTPS handler must not be reached")
+
+            def https_request(self, request):
+                forged_calls.append((request,))
+                return request
+
+            def https_response(self, request, response):
+                forged_calls.append((request, response))
+                return response
+
+        mapping["https"] = [ForgedHttpsHandler()]
+        try:
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id=f"attempt-private-opener-map-{mapping_name}",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert forged_calls == []
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            mapping["https"] = original_handlers
+
+
+def test_private_https_handler_instance_dispatch_shadow_fails_before_durable_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        private_opener = (
+            betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+        )
+        https_handlers = private_opener.handle_open["https"]
+        https_handler = next(
+            handler
+            for handler in https_handlers
+            if hasattr(type(handler), "https_open")
+        )
+        assert "https_open" not in getattr(https_handler, "__dict__", {})
+        forged_calls: list[tuple[object, ...]] = []
+
+        def forged_https_open(*args, **kwargs):
+            forged_calls.append(args)
+            raise AssertionError("forged HTTPS handler dispatch must not be reached")
+
+        https_handler.https_open = forged_https_open
+        try:
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-private-opener-https-shadow",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert forged_calls == []
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            delattr(https_handler, "https_open")

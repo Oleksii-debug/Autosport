@@ -146,7 +146,8 @@ def _acquisition_provenance(
     return provenance, _canonical_sha256(provenance)
 
 
-def _write_snapshot(    root: Path,
+def _write_snapshot(
+    root: Path,
     *,
     sport: str,
     suffix: str,
@@ -204,8 +205,8 @@ def _write_snapshot(    root: Path,
                 "redistribution_verified": False,
                 "real_money_execution": False,
                 "human_tested": False,
-                "nvda_verified": False,
-            },
+        "nvda_verified": False,
+    }
     if acquisition_api_version is not None:
         acquisition, acquisition_sha256 = _acquisition_provenance(
             sport=sport,

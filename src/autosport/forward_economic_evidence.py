@@ -636,7 +636,11 @@ class ResolvedPolicyOutcome:
                 self.economic_cost_available_at,
                 "economic_cost_available_at",
             )
-            if cost_available < committed:
+            if (
+                cost_available < committed
+                and self.economic_cost_causality
+                is not EconomicCostCausality.PREEXISTING_SHARED
+            ):
                 raise ForwardEconomicEvidenceError(
                     "economic cost cannot become available before the committed decision"
                 )

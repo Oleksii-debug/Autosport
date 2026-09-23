@@ -556,9 +556,9 @@ class ResolvedPolicyOutcome:
             _sha256(self.settlement_evidence_sha256, "settlement_evidence_sha256"),
         )
         available = _instant(self.settlement_available_at, "settlement_available_at")
-        if accepted < committed:
+        if accepted <= committed:
             raise ForwardEconomicEvidenceError(
-                "execution acceptance cannot predate the committed decision"
+                "execution acceptance must be strictly after the committed decision"
             )
         if available <= accepted:
             raise ForwardEconomicEvidenceError(

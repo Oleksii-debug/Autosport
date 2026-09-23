@@ -143,6 +143,13 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
 _PROVIDER_HTTP_POST = _make_product_owned_provider_http_post()
 _CANONICAL_PROVIDER_HTTP_POST = _PROVIDER_HTTP_POST
 _CANONICAL_PROVIDER_HTTP_POST_CODE = _CANONICAL_PROVIDER_HTTP_POST.__code__
+_CANONICAL_PROVIDER_HTTP_POST_FREEVARS = (
+    _CANONICAL_PROVIDER_HTTP_POST.__code__.co_freevars
+)
+_CANONICAL_PROVIDER_HTTP_POST_CLOSURE = tuple(
+    cell.cell_contents
+    for cell in (_CANONICAL_PROVIDER_HTTP_POST.__closure__ or ())
+)
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -1319,6 +1326,18 @@ def execute_betfair_supervised_action(
             or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
             or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
             is not _CANONICAL_PROVIDER_HTTP_POST_CODE
+            or _CANONICAL_PROVIDER_HTTP_POST.__code__.co_freevars
+            != _CANONICAL_PROVIDER_HTTP_POST_FREEVARS
+            or _CANONICAL_PROVIDER_HTTP_POST.__closure__ is None
+            or len(_CANONICAL_PROVIDER_HTTP_POST.__closure__)
+            != len(_CANONICAL_PROVIDER_HTTP_POST_CLOSURE)
+            or any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(
+                    _CANONICAL_PROVIDER_HTTP_POST.__closure__,
+                    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE,
+                )
+            )
             or (
                 ambient_urllib_opener is not None
                 and (
@@ -1475,6 +1494,18 @@ def execute_betfair_supervised_action(
             or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
             or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
             is not _CANONICAL_PROVIDER_HTTP_POST_CODE
+            or _CANONICAL_PROVIDER_HTTP_POST.__code__.co_freevars
+            != _CANONICAL_PROVIDER_HTTP_POST_FREEVARS
+            or _CANONICAL_PROVIDER_HTTP_POST.__closure__ is None
+            or len(_CANONICAL_PROVIDER_HTTP_POST.__closure__)
+            != len(_CANONICAL_PROVIDER_HTTP_POST_CLOSURE)
+            or any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(
+                    _CANONICAL_PROVIDER_HTTP_POST.__closure__,
+                    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE,
+                )
+            )
             or (
                 ambient_urllib_opener is not None
                 and (

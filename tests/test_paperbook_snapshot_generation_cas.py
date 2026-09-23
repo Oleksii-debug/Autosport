@@ -139,3 +139,61 @@ def test_snapshot_publication_lock_fails_closed_for_competing_writer_and_reader(
     restored = PaperBook.load(path)
     assert restored.balance == Decimal("100")
     assert restored.tickets == {}
+
+
+def test_load_recovers_replaced_snapshot_after_commit_publication_interruption(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    book.save(path)
+    ticket = book.open_ticket(
+        [_leg("current-selection", "3")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+
+    import autosport.paper as paper_module
+
+    original_append = paper_module._append_snapshot_witness
+    fail_commit_once = True
+
+    def _interrupt_commit(*args, **kwargs):
+        nonlocal fail_commit_once
+        if (
+            fail_commit_once
+            and kwargs.get("event") == paper_module._PAPER_SNAPSHOT_WITNESS_COMMIT
+        ):
+            fail_commit_once = False
+            raise RuntimeError("injected commit publication interruption")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(
+        paper_module,
+        "_append_snapshot_witness",
+        _interrupt_commit,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="injected commit publication interruption",
+    ):
+        book.save(path)
+    monkeypatch.setattr(
+        paper_module,
+        "_append_snapshot_witness",
+        original_append,
+    )
+
+    restored = PaperBook.load(path)
+    assert restored.balance == Decimal("90")
+    assert tuple(restored.tickets) == (ticket.ticket_id,)
+
+    # Recovery must bind the exact completed generation so normal continuation
+    # can advance again without re-baselining the durable authority.
+    restored.save(path)
+    reread = PaperBook.load(path)
+    assert reread.balance == Decimal("90")
+    assert tuple(reread.tickets) == (ticket.ticket_id,)

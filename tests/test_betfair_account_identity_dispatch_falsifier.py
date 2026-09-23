@@ -229,6 +229,31 @@ def test_private_opener_https_dispatch_map_rewrite_revokes_k07_origin(
         resolve_betfair_authenticated_account_identity(client)
 
 
+@pytest.mark.parametrize(
+    ("owner", "attribute"),
+    [
+        (_urllib_request.HTTPSHandler, "https_open"),
+        (_urllib_request.AbstractHTTPHandler, "do_open"),
+    ],
+)
+def test_stdlib_https_class_dispatch_rebinding_revokes_k07_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    owner,
+    attribute: str,
+) -> None:
+    client = _client()
+    monkeypatch.setattr(
+        owner,
+        attribute,
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("forged HTTPS class dispatch must never be accepted")
+        ),
+    )
+
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(client)
+
+
 def test_opener_open_rebinding_revokes_k07_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

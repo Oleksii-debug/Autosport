@@ -31,6 +31,7 @@ from .betdaq_account_readonly import (
     ADAPTER_ID,
     BetdaqAccountEvidence,
     BetdaqAccountReadOnlyClient,
+    BetdaqAccountReadOnlyError,
     BetdaqAuthenticatedAccountContext,
     BetdaqCredentials,
 )
@@ -183,10 +184,21 @@ class BetdaqAccountContinuityClient:
             raise BetdaqAccountContinuityError(
                 "BETDAQ continuity venue_id is product-owned and must be canonical"
             )
+        # Keep the caller-owned credential object only as a mutation sentinel.
+        # The secure reader receives a private frozen value snapshot so an external
+        # A->B->A mutation cannot alter one or more requests and then evade the
+        # before/after context check by restoring the original values.
         self._credentials = credentials
+        self._sealed_credentials = BetdaqCredentials(
+            username=credentials.username,
+            password=credentials.password,
+            application_identifier=credentials.application_identifier,
+            version=credentials.version,
+            language_code=credentials.language_code,
+        )
         self._venue_id = _CANONICAL_VENUE_ID
         self._source = BetdaqAccountReadOnlyClient(
-            credentials,
+            self._sealed_credentials,
             venue_id=self._venue_id,
             account_id=account_id,
             timeout_seconds=timeout_seconds,
@@ -197,15 +209,18 @@ class BetdaqAccountContinuityClient:
         self,
         requested_capabilities: frozenset[BookmakerCapability],
     ) -> BetdaqContinuousAccountEvidence:
-        username_before = self._credentials.username
+        sealed_material = _credential_material(self._sealed_credentials)
+        if _credential_material(self._credentials) != sealed_material:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ authenticated account context changed during acquisition"
+            )
         source = self._source.read_account_evidence(requested_capabilities)
-        username_after = self._credentials.username
-        if username_after != username_before:
-            raise BetdaqAccountContinuityError(
-                "BETDAQ authenticated username changed during continuity acquisition"
+        if _credential_material(self._credentials) != sealed_material:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ authenticated account context changed during acquisition"
             )
         principal_context = _principal_context(
-            username_before,
+            self._sealed_credentials.username,
             source.account_context,
         )
         snapshot = _project_snapshot(
@@ -397,6 +412,17 @@ def _project_snapshot(
         balance=balance,
         open_positions=open_positions,
         settled_positions=settled_positions,
+    )
+
+
+def _credential_material(credentials: BetdaqCredentials) -> tuple[object, ...]:
+    """Snapshot the complete caller-visible authentication material for mutation checks."""
+    return (
+        credentials.username,
+        credentials.password,
+        credentials.application_identifier,
+        credentials.version,
+        credentials.language_code,
     )
 
 

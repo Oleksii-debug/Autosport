@@ -92,7 +92,13 @@ def _observed_attempt(**kwargs):
     decision_time = _impl._timestamp(action.quote_observed_at, "quote_observed_at")
     expires = _impl._timestamp(action.expires_at, "expires_at")
 
-    # Keep the legacy expiry error authoritative when both bounds are violated.
+    # Causality is a state invariant independent of the configured expiry/freshness
+    # bounds. Classify it before the legacy helper can leak a generic ValueError.
+    if decision_time > execution_time:
+        raise _impl.PaperExecutionStateError(_FUTURE_QUOTE_ERROR)
+
+    # Keep the legacy expiry error authoritative when both ordinary age bounds
+    # are violated by a causally ordered quote.
     if execution_time < expires and _age_exceeds_bound(
         execution_time=execution_time,
         decision_time=decision_time,

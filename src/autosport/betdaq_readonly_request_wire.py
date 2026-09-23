@@ -16,7 +16,7 @@ _MAX_HEADER_TEXT_CHARS = 4096
 
 
 def _xml_attribute_text(value: object, field: str) -> str:
-    """Validate opaque credential/header text without echoing it in errors."""
+    """Validate opaque header text without echoing it in errors."""
 
     if type(value) is not str or not value:
         raise ValueError(f"{field} must be non-empty text")
@@ -96,10 +96,12 @@ def build_get_prices_soap11_request(
     credentials: BetdaqCredentials,
     request: BetdaqGetPricesRequest,
 ) -> BetdaqSoap11WireRequest:
-    """Serialize documented BETDAQ GetPrices using the canonical credential bundle.
+    """Serialize BETDAQ GetPrices using the canonical product credential object.
 
-    This is network-free. Credentials are present only in the ephemeral wire body;
-    callers must not persist/log that body. Transport, rate and entitlement authority
+    BETDAQ documents ReadOnly methods as username-only authentication. The live ASMX
+    header schema still exposes password/applicationIdentifier attributes, so they are
+    emitted as empty schema-compatible values here. Secure credential material is never
+    placed on this ReadOnly request wire. Transport, rate and entitlement authority
     remain outside this serializer.
     """
 
@@ -111,11 +113,6 @@ def build_get_prices_soap11_request(
     version = _version_text(credentials.version)
     language_code = _xml_attribute_text(credentials.language_code, "language_code")
     username = _xml_attribute_text(credentials.username, "username")
-    password = _xml_attribute_text(credentials.password, "password")
-    application_identifier = _xml_attribute_text(
-        credentials.application_identifier,
-        "application_identifier",
-    )
 
     envelope = ET.Element(_tag(SOAP11_NS, "Envelope"))
     soap_header = ET.SubElement(envelope, _tag(SOAP11_NS, "Header"))
@@ -126,8 +123,8 @@ def build_get_prices_soap11_request(
             "version": version,
             "languageCode": language_code,
             "username": username,
-            "password": password,
-            "applicationIdentifier": application_identifier,
+            "password": "",
+            "applicationIdentifier": "",
         },
     )
     soap_body = ET.SubElement(envelope, _tag(SOAP11_NS, "Body"))

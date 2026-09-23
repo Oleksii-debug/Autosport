@@ -495,7 +495,7 @@ def test_execution_readback_detects_post_capture_origin_tampering():
     )
 
     object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
-    with pytest.raises(BetfairReadOnlyError, match="changed after canonical adapter capture"):
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
         capture.assert_authoritative()
 
 

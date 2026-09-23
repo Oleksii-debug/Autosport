@@ -363,6 +363,15 @@ class ModelComputeIntentRouteRecord:
         return item
 
 
+# Persisted positive origin authority must not resolve through the writable
+# public module binding after import. Capture the exact canonical record
+# constructor/parser once, just like the canonical request/store surfaces.
+_CANONICAL_INTENT_ROUTE_RECORD_CLASS: Final = ModelComputeIntentRouteRecord
+_CANONICAL_INTENT_ROUTE_RECORD_FROM_DICT: Final = (
+    ModelComputeIntentRouteRecord.from_dict
+)
+
+
 def _state_payload(
     records: tuple[ModelComputeIntentRouteRecord, ...],
 ) -> dict[str, object]:
@@ -440,7 +449,7 @@ class ModelComputeIntentRouteAuthorityStore:
                 raise ModelComputeIntentRouteAuthorityError(
                     "intent-route authority record must be an object"
                 )
-            item = ModelComputeIntentRouteRecord.from_dict(value)
+            item = _CANONICAL_INTENT_ROUTE_RECORD_FROM_DICT(value)
             if item.request_id in request_ids:
                 raise ModelComputeIntentRouteAuthorityError(
                     "duplicate request_id in intent-route authority"
@@ -681,7 +690,7 @@ class ModelComputeIntentRouteAuthorityStore:
                 voc_contradiction_state=voc_contradiction_state,
             )
             request_payload = request.payload()
-            record = ModelComputeIntentRouteRecord(
+            record = _CANONICAL_INTENT_ROUTE_RECORD_CLASS(
                 router_store_relpath=relpath,
                 intent_id=identity["intent_id"],
                 intent_sha256=identity["intent_sha256"],

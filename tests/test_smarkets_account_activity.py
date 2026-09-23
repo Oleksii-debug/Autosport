@@ -76,6 +76,7 @@ def _row(
     money_change: str | None = "107.80",
     market_id: str | None = "128939",
     order_id: str | None = None,
+    label: str | None = "autosport",
 ) -> dict[str, object]:
     return {
         "amount": "110.00",
@@ -83,7 +84,7 @@ def _row(
         "contract_id": "123456",
         "event_id": "565413",
         "exposure": "0.00",
-        "label": "autosport",
+        "label": label,
         "market_id": market_id,
         "money": "1107.80",
         "money_change": money_change,

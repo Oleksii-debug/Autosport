@@ -5,7 +5,10 @@ import pytest
 import autosport.betdaq_account_readonly as betdaq_account_module
 from autosport.betdaq_account_continuity import (
     BetdaqAccountContinuityClient,
+    BetdaqAccountContinuityError,
     BetdaqAccountContinuityMigrationRequiredError,
+    BetdaqContinuousAccountEvidence,
+    append_to_reconciliation,
     require_reconciliation_history_compatible,
 )
 from autosport.betdaq_account_readonly import (
@@ -225,7 +228,7 @@ def test_continuous_identity_composes_with_reconciliation_across_new_clients(
         store_path,
         authority_root=authority,
     )
-    assert first_store.append_snapshot(first.snapshot) is True
+    assert append_to_reconciliation(first_store, first) is True
 
     second, _ = acquire_balance(
         monkeypatch,
@@ -237,7 +240,7 @@ def test_continuous_identity_composes_with_reconciliation_across_new_clients(
         store_path,
         authority_root=authority,
     )
-    assert restarted_store.append_snapshot(second.snapshot) is True
+    assert append_to_reconciliation(restarted_store, second) is True
 
     state = restarted_store.latest_state()
     assert state is not None
@@ -264,7 +267,7 @@ def test_deleting_reconciliation_history_cannot_pristine_rebootstrap_continuity(
         store_path,
         authority_root=authority,
     )
-    assert store.append_snapshot(evidence.snapshot) is True
+    assert append_to_reconciliation(store, evidence) is True
     store_path.unlink()
 
     restarted = BookmakerAccountReconciliationStore(
@@ -302,3 +305,31 @@ def test_compatible_continuous_history_passes_preflight(monkeypatch):
     )
 
     require_reconciliation_history_compatible(current.snapshot, current)
+
+
+def test_caller_reconstructed_continuity_object_cannot_authorize_reconciliation(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    forged = BetdaqContinuousAccountEvidence(
+        snapshot=current.snapshot,
+        source_evidence=current.source_evidence,
+        principal_context=current.principal_context,
+    )
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="product-issued BETDAQ continuity evidence",
+    ):
+        append_to_reconciliation(store, forged)
+
+    assert store.latest_snapshot() is None

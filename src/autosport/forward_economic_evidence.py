@@ -1028,6 +1028,35 @@ class ForwardEconomicEvidenceAccumulator:
         )
         if type(outcome) is not ResolvedPolicyOutcome:
             raise ForwardEconomicEvidenceError("authority resolver must return exact ResolvedPolicyOutcome")
+
+        # Resolver-returned dataclasses are caller-owned.  frozen=True does not
+        # prevent low-level mutation through object.__setattr__, and record()
+        # resolves challenger and champion sequentially.  Snapshot and
+        # reconstruct the exact outcome before validation so a later resolver
+        # call cannot mutate an already-validated row before it is consumed.
+        snapshot = deepcopy(outcome)
+        outcome = ResolvedPolicyOutcome(
+            policy_id=snapshot.policy_id,
+            sequence=snapshot.sequence,
+            universe_event_sha256=snapshot.universe_event_sha256,
+            decision_sha256=snapshot.decision_sha256,
+            decision_committed_at=snapshot.decision_committed_at,
+            side=snapshot.side,
+            accepted_odds=snapshot.accepted_odds,
+            accepted_stake=snapshot.accepted_stake,
+            net_pnl_currency=snapshot.net_pnl_currency,
+            execution_evidence_sha256=snapshot.execution_evidence_sha256,
+            execution_accepted_at=snapshot.execution_accepted_at,
+            settlement_evidence_sha256=snapshot.settlement_evidence_sha256,
+            settlement_available_at=snapshot.settlement_available_at,
+            currency_code=snapshot.currency_code,
+            denomination_authority_sha256=snapshot.denomination_authority_sha256,
+            wager_pnl_currency=snapshot.wager_pnl_currency,
+            economic_cost_currency=snapshot.economic_cost_currency,
+            economic_cost_evidence_sha256=snapshot.economic_cost_evidence_sha256,
+            economic_cost_incurred_at=snapshot.economic_cost_incurred_at,
+            economic_cost_available_at=snapshot.economic_cost_available_at,
+        )
         if outcome.policy_id != policy_id:
             raise ForwardEconomicEvidenceError("resolved policy identity mismatch")
         if outcome.sequence != observation.sequence:
@@ -1216,6 +1245,18 @@ class ForwardEconomicEvidenceAccumulator:
     ) -> ForwardEconomicStep:
         if type(observation) is not ForwardDecisionObservation:
             raise ForwardEconomicEvidenceError("observation must be an exact ForwardDecisionObservation")
+
+        # Snapshot the caller-owned observation before any resolver callback.
+        # Reconstruct through the canonical validator so pre-call low-level
+        # drift also cannot bypass sequence/universe/member identity checks.
+        observation_snapshot = deepcopy(observation)
+        observation = ForwardDecisionObservation(
+            sequence=observation_snapshot.sequence,
+            universe_sha256=observation_snapshot.universe_sha256,
+            universe_event_sha256=observation_snapshot.universe_event_sha256,
+            challenger_decision_sha256=observation_snapshot.challenger_decision_sha256,
+            champion_decision_sha256=observation_snapshot.champion_decision_sha256,
+        )
         if observation.sequence != self.next_sequence:
             raise ForwardEconomicEvidenceError("universe sequence must be contiguous and duplicate-free")
         if observation.universe_sha256 != self.protocol.universe_sha256:

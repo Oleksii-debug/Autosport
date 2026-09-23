@@ -147,6 +147,7 @@ class SmarketsAccountReadbackWitness:
     payload_size: int
     product_available_at: str
     provider_account_id: str
+    provider_currency: str
 
     def __init__(
         self,
@@ -159,6 +160,7 @@ class SmarketsAccountReadbackWitness:
         payload_size: int,
         product_available_at: str,
         provider_account_id: str,
+        provider_currency: str,
         _seal: object | None = None,
     ) -> None:
         if _seal is not _ACCOUNT_SEAL:
@@ -173,6 +175,7 @@ class SmarketsAccountReadbackWitness:
         object.__setattr__(self, "payload_size", payload_size)
         object.__setattr__(self, "product_available_at", product_available_at)
         object.__setattr__(self, "provider_account_id", provider_account_id)
+        object.__setattr__(self, "provider_currency", provider_currency)
 
     def __reduce__(self):
         raise TypeError(
@@ -256,6 +259,7 @@ class SmarketsSessionAuthenticatedRead:
     session_generation_id: str
     account_context_sha256: str
     provider_account_id: str
+    provider_currency: str
     endpoint: str
     http_status: int
     provider_date: str
@@ -272,6 +276,7 @@ class SmarketsSessionAuthenticatedRead:
         session_generation_id: str,
         account_context_sha256: str,
         provider_account_id: str,
+        provider_currency: str,
         endpoint: str,
         http_status: int,
         provider_date: str,
@@ -290,6 +295,7 @@ class SmarketsSessionAuthenticatedRead:
         object.__setattr__(self, "session_generation_id", session_generation_id)
         object.__setattr__(self, "account_context_sha256", account_context_sha256)
         object.__setattr__(self, "provider_account_id", provider_account_id)
+        object.__setattr__(self, "provider_currency", provider_currency)
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "http_status", http_status)
         object.__setattr__(self, "provider_date", provider_date)
@@ -356,6 +362,10 @@ class SmarketsAuthenticatedSession:
     @property
     def provider_account_id(self) -> str:
         return self._account_witness.provider_account_id
+
+    @property
+    def provider_currency(self) -> str:
+        return self._account_witness.provider_currency
 
     @property
     def account_witness(self) -> SmarketsAccountReadbackWitness:
@@ -523,6 +533,7 @@ class SmarketsAuthenticatedSession:
             self._generation_id,
             self._account_context_sha256,
             self._account_witness.provider_account_id,
+            self._account_witness.provider_currency,
             SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
             provider_date,
             content_type,
@@ -534,6 +545,7 @@ class SmarketsAuthenticatedSession:
             session_generation_id=self._generation_id,
             account_context_sha256=self._account_context_sha256,
             provider_account_id=self._account_witness.provider_account_id,
+            provider_currency=self._account_witness.provider_currency,
             endpoint=SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
             http_status=200,
             provider_date=provider_date,
@@ -567,6 +579,7 @@ class SmarketsAuthenticatedSession:
             candidate.session_generation_id != self._generation_id
             or candidate.account_context_sha256 != self._account_context_sha256
             or candidate.provider_account_id != self._account_witness.provider_account_id
+            or candidate.provider_currency != self._account_witness.provider_currency
             or candidate.endpoint != SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
         ):
             raise SmarketsSessionContextError(
@@ -676,7 +689,9 @@ def open_smarkets_authenticated_session(
 
     account = _account_record(raw)
     provider_account_id = account["account_id"]
+    provider_currency = account["currency"]
     assert type(provider_account_id) is str
+    assert type(provider_currency) is str
     available_at = _utc_now_iso()
     payload_sha256 = sha256(raw).hexdigest()
     witness = SmarketsAccountReadbackWitness(
@@ -688,14 +703,16 @@ def open_smarkets_authenticated_session(
         payload_size=len(raw),
         product_available_at=available_at,
         provider_account_id=provider_account_id,
+        provider_currency=provider_currency,
         _seal=_ACCOUNT_SEAL,
     )
     generation_id = _new_generation_id()
     account_context_sha256 = _digest_parts(
-        "autosport.smarkets.session-account-context.v1",
+        "autosport.smarkets.session-account-context.v2",
         generation_id,
         SMARKETS_ACCOUNTS_ENDPOINT,
         provider_account_id,
+        provider_currency,
         payload_sha256,
         available_at,
     )

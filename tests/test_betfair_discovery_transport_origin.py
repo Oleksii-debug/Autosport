@@ -96,7 +96,7 @@ def test_public_receipt_construction_cannot_self_issue_authority():
         )
 
 
-def test_product_receipts_bind_every_exact_request_response_and_observation():
+def test_internal_receipt_marker_cannot_mint_authenticated_origin():
     evidence = _evidence()
     receipts = (
         _receipt(evidence.event_type_exchange),
@@ -108,14 +108,17 @@ def test_product_receipts_bind_every_exact_request_response_and_observation():
         receipts=receipts,
     )
 
-    assert assessment.grants_authenticated_transport_origin_authority is True
-    assert assessment.reason == "BOUND_TO_AUTHENTICATED_TRANSPORT_RECEIPTS"
+    assert assessment.grants_authenticated_transport_origin_authority is False
+    assert assessment.reason == "NO_PRODUCT_OWNED_TRANSPORT_RECEIPT_ISSUER"
     assert assessment.bound_exchange_count == assessment.exchange_count == 2
-    origin.require_betfair_authenticated_transport_origin(
-        evidence,
-        receipts=receipts,
-    )
-
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="authenticated Betfair transport origin is not proven",
+    ):
+        origin.require_betfair_authenticated_transport_origin(
+            evidence,
+            receipts=receipts,
+        )
 
 def test_receipt_for_different_raw_response_cannot_authorize_acquisition():
     evidence = _evidence()

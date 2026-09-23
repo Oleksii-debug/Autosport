@@ -673,6 +673,10 @@ class ResolvedPolicyOutcome:
         if odds <= 1:
             raise ForwardEconomicEvidenceError("accepted_odds must exceed one")
         stake = _positive_decimal(self.accepted_stake, "accepted_stake")
+        # Odds/stake feed exact wager-domain and risk arithmetic below. Bound
+        # their canonical Decimal representations before Fraction materialization.
+        _decimal_text(odds)
+        _decimal_text(stake)
         object.__setattr__(
             self,
             "execution_evidence_sha256",
@@ -693,13 +697,16 @@ class ResolvedPolicyOutcome:
             raise ForwardEconomicEvidenceError(
                 "settlement must become available after accepted execution"
             )
-        with localcontext() as context:
-            context.prec = _DECIMAL_PRECISION
-            if self.side is BetSide.BACK:
-                low, high = -stake, (odds - Decimal(1)) * stake
-            else:
-                low, high = -(odds - Decimal(1)) * stake, stake
-        if wager_pnl < low or wager_pnl > high:
+        odds_fraction = Fraction(odds)
+        stake_fraction = Fraction(stake)
+        wager_pnl_fraction = Fraction(wager_pnl)
+        if self.side is BetSide.BACK:
+            low_fraction = -stake_fraction
+            high_fraction = (odds_fraction - 1) * stake_fraction
+        else:
+            low_fraction = -((odds_fraction - 1) * stake_fraction)
+            high_fraction = stake_fraction
+        if wager_pnl_fraction < low_fraction or wager_pnl_fraction > high_fraction:
             raise ForwardEconomicEvidenceError(
                 "wager P&L is outside accepted side/odds/stake bounds"
             )
@@ -1083,15 +1090,22 @@ class ForwardEconomicEvidenceAccumulator:
                 )
             odds = outcome.accepted_odds
             stake = outcome.accepted_stake
+
+            # Risk admission is money authority, not statistical arithmetic.
+            # Compare exact finite-Decimal liability before rounded support
+            # construction so sub-context LAY exposure cannot cross the cap.
+            odds_fraction = Fraction(odds)
+            stake_fraction = Fraction(stake)
             if outcome.side is BetSide.BACK:
-                exposure = stake
+                exposure_fraction = stake_fraction
                 low_money = -stake
                 high_money = (odds - Decimal(1)) * stake
             else:
+                exposure_fraction = (odds_fraction - 1) * stake_fraction
                 exposure = (odds - Decimal(1)) * stake
                 low_money = -exposure
                 high_money = stake
-            if exposure > risk:
+            if exposure_fraction > Fraction(risk):
                 raise ForwardEconomicEvidenceError(
                     "accepted downside exposure exceeds fixed risk unit"
                 )

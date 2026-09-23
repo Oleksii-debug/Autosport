@@ -34,6 +34,30 @@ _MAX_TREE_ITEMS = 100_000
 _XSD_DECIMAL_LEXICAL_RE = re.compile(
     r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z"
 )
+_EVENT_CLASSIFIER_ATTRIBUTES = frozenset(
+    {"Id", "Name", "DisplayOrder", "IsEnabledForMultiples", "ParentId"}
+)
+_MARKET_ATTRIBUTES = frozenset(
+    {
+        "Id",
+        "Name",
+        "Type",
+        "IsPlayMarket",
+        "Status",
+        "NumberOfWinningSelections",
+        "StartTime",
+        "WithdrawalSequenceNumber",
+        "DisplayOrder",
+        "IsEnabledForMultiples",
+        "IsInRunningAllowed",
+        "IsManagedWhenInRunning",
+        "IsCurrentlyInRunning",
+        "InRunningDelaySeconds",
+        "EventClassifierId",
+        "RaceGrade",
+        "PlacePayout",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +130,18 @@ class _ParseState:
                 "duplicate Market Id in one BETDAQ event tree"
             )
         self.market_ids.add(market_id)
+
+
+def _reject_unknown_attributes(
+    element: ET.Element,
+    allowed: frozenset[str],
+    field: str,
+) -> None:
+    unexpected = sorted(set(element.attrib) - allowed)
+    if unexpected:
+        raise BetdaqSoapProtocolError(
+            f"{field} contains unexpected provider attribute(s): {', '.join(unexpected)}"
+        )
 
 
 def _nil_placeholder(element: ET.Element, *, label: str) -> bool:
@@ -186,6 +222,7 @@ def _parse_market(
 ) -> BetdaqDiscoveryMarket | None:
     if _nil_placeholder(element, label="Markets"):
         return None
+    _reject_unknown_attributes(element, _MARKET_ATTRIBUTES, "Markets")
 
     market_id = _integer(_required_attr(element, "Id"), "market Id", minimum=0)
     state.register_market(market_id)
@@ -297,6 +334,11 @@ def _parse_event(
 ) -> BetdaqEventClassifier | None:
     if _nil_placeholder(element, label="EventClassifiers"):
         return None
+    _reject_unknown_attributes(
+        element,
+        _EVENT_CLASSIFIER_ATTRIBUTES,
+        "EventClassifiers",
+    )
     if depth > _MAX_TREE_DEPTH:
         raise BetdaqSoapProtocolError("BETDAQ event tree exceeds maximum depth")
 

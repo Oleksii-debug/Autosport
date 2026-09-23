@@ -340,16 +340,29 @@ def assess_provider_maximum_order_limit(
     *,
     evidence: ProviderMaximumOrderLimitEvidence,
     requested_amount: Decimal,
+    as_of: datetime,
 ) -> ProviderMaximumOrderLimitAssessment:
-    """Compare a request to a structurally sealed, non-authoritative maximum.
+    """Compare a current structurally sealed, non-authoritative maximum.
 
     The numerical state is useful for deterministic diagnostics/composition, but
     this isolated generic contract cannot prove the remote provider imposed the
     supplied maximum. provider_origin_proven and supports_requested_amount
-    therefore remain hard false.
+    therefore remain hard false. Validity is rechecked at this exact use-time so
+    an earlier structural seal cannot keep stale evidence numerically active.
     """
 
     assert_provider_maximum_order_limit_structure_sealed(evidence)
+    current = _utc(as_of, "as_of")
+    observed = _utc(evidence.observed_at, "observed_at")
+    valid_until = _utc(evidence.valid_until, "valid_until")
+    if observed > current:
+        raise ProviderMaximumOrderLimitError(
+            "provider limit evidence is future at assessment"
+        )
+    if current >= valid_until:
+        raise ProviderMaximumOrderLimitError(
+            "provider limit evidence is expired at assessment"
+        )
     requested = _positive_decimal(requested_amount, "requested_amount")
     maximum = evidence.maximum_amount
     if requested > maximum:

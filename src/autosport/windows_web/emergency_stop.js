@@ -24,11 +24,20 @@
     }
 
     try {
-      const result = await dispatch("emergency_stop.activate", {});
+      const result = await dispatch(
+        "emergency_stop.activate",
+        {},
+        { globalAnnouncement: false },
+      );
       if (result === null) {
         setStatus(
           "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
           + "Нові виконання мають залишатися заблокованими; перевірте журнал STOP.",
+        );
+      } else if (result.status !== "completed") {
+        setStatus(
+          result.message
+          || "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. Перевірте журнал STOP.",
         );
       }
     } catch (_error) {

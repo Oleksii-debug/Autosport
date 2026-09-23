@@ -383,6 +383,23 @@ def test_reopen_rejects_missing_performance_index(tmp_path):
         RewardCorrectionLedger.open(path)
 
 
+def test_reopen_rejects_same_name_wrong_performance_index(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    with RewardCorrectionLedger.create(path):
+        pass
+
+    raw = sqlite3.connect(path)
+    raw.execute("DROP INDEX dependencies_by_dependency")
+    raw.execute(
+        "CREATE INDEX dependencies_by_dependency ON dependencies(artifact_family)"
+    )
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RewardCorrectionError, match="performance indexes mismatch"):
+        RewardCorrectionLedger.open(path)
+
+
 def test_open_refuses_missing_ledger(tmp_path):
     with pytest.raises(RewardCorrectionError, match="does not exist"):
         RewardCorrectionLedger.open(tmp_path / "missing.sqlite3")

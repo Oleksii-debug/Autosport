@@ -36,6 +36,11 @@ def _legacy_members() -> dict[str, bytes]:
     relative: dict[str, bytes] = {
         "Autosport.exe": exe,
         "BUILD_INFO.json": _canonical_json(build_info),
+        "WINDOWS_START_HERE.txt": (
+            "АВТОСПОРТ — V1 WINDOWS PAPER / MARKET LAB\n"
+            "Перевірте <Autosport-V1-windows-x64.zip>.\n"
+            "V1_READY=false\n"
+        ).encode("utf-8"),
     }
     manifest = {
         "schema_version": 1,
@@ -103,7 +108,7 @@ def test_repackage_stage_neutral_release_rewrites_identity_and_evidence(
         "package_prefix": stage_release.STAGE_NEUTRAL_PREFIX,
         "build_version": stage_release.STAGE_NEUTRAL_BUILD_VERSION,
         "package_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-        "file_count": 4,
+        "file_count": 5,
         "real_money_execution": False,
         "human_tested": False,
         "nvda_verified": False,
@@ -132,6 +137,14 @@ def test_repackage_stage_neutral_release_rewrites_identity_and_evidence(
         )
         manifest = json.loads(manifest_payload)
         assert manifest_payload == canonical_release._canonical_json_bytes(manifest)
+
+        guide_payload = archive.read(
+            f"{stage_release.STAGE_NEUTRAL_PREFIX}WINDOWS_START_HERE.txt"
+        )
+        guide = guide_payload.decode("utf-8")
+        assert "V1 WINDOWS" not in guide
+        assert "Autosport-V1-windows-x64.zip" not in guide
+        assert "V1_READY" not in guide
 
         relative = {
             name[len(stage_release.STAGE_NEUTRAL_PREFIX) :]: archive.read(name)

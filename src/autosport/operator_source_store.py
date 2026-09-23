@@ -36,46 +36,56 @@ class OperatorSourceConfigStore:
 
     def read(self) -> OperatorSourceConfig | None:
         """Return the exact valid stored config, or None when never configured."""
-        with durable_path_lock(self.path):
-            if not self.path.exists():
-                return None
-            try:
-                raw = self.path.read_bytes()
-            except OSError as exc:
-                raise OperatorSourceStoreError(
-                    "operator source configuration cannot be read"
-                ) from exc
-            if not raw or len(raw) > _MAX_PERSISTED_BYTES:
-                raise OperatorSourceStoreError(
-                    "operator source configuration has invalid persisted size"
-                )
-            try:
-                text = raw.decode("utf-8", errors="strict")
-                value = strict_json_loads(text)
-            except (UnicodeDecodeError, ValueError, TypeError, RecursionError) as exc:
-                raise OperatorSourceStoreError(
-                    "operator source configuration is corrupt"
-                ) from exc
-            if type(value) is not dict or set(value) != _EXPECTED_KEYS:
-                raise OperatorSourceStoreError(
-                    "operator source configuration schema is invalid"
-                )
-            # Re-encode only to pass the decoded semantic object through the exact
-            # payload validator. The persisted formatting itself is owned by
-            # integrity.atomic_write_json and is not authority-bearing.
-            try:
-                canonical = json.dumps(
-                    value,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                    allow_nan=False,
-                ).encode("utf-8")
-                return parse_operator_source_config(canonical)
-            except (OperatorSourceConfigError, TypeError, ValueError, RecursionError) as exc:
-                raise OperatorSourceStoreError(
-                    "operator source configuration failed integrity validation"
-                ) from exc
+        try:
+            with durable_path_lock(self.path):
+                return self._read_locked()
+        except OperatorSourceStoreError:
+            raise
+        except OSError as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration cannot be read"
+            ) from exc
+
+    def _read_locked(self) -> OperatorSourceConfig | None:
+        if not self.path.exists():
+            return None
+        try:
+            raw = self.path.read_bytes()
+        except OSError as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration cannot be read"
+            ) from exc
+        if not raw or len(raw) > _MAX_PERSISTED_BYTES:
+            raise OperatorSourceStoreError(
+                "operator source configuration has invalid persisted size"
+            )
+        try:
+            text = raw.decode("utf-8", errors="strict")
+            value = strict_json_loads(text)
+        except (UnicodeDecodeError, ValueError, TypeError, RecursionError) as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration is corrupt"
+            ) from exc
+        if type(value) is not dict or set(value) != _EXPECTED_KEYS:
+            raise OperatorSourceStoreError(
+                "operator source configuration schema is invalid"
+            )
+        # Re-encode only to pass the decoded semantic object through the exact
+        # payload validator. The persisted formatting itself is owned by
+        # integrity.atomic_write_json and is not authority-bearing.
+        try:
+            canonical = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            return parse_operator_source_config(canonical)
+        except (OperatorSourceConfigError, TypeError, ValueError, RecursionError) as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration failed integrity validation"
+            ) from exc
 
     def write(self, config: OperatorSourceConfig) -> OperatorSourceConfig:
         """Atomically publish and re-read one validated configuration."""
@@ -84,21 +94,21 @@ class OperatorSourceConfigStore:
         # to_json_bytes is already strict and secret-free; decode our own trusted
         # canonical bytes into the dict shape expected by atomic_write_json.
         payload = json.loads(config.to_json_bytes().decode("utf-8"))
-        with durable_path_lock(self.path):
-            try:
+        try:
+            with durable_path_lock(self.path):
                 atomic_write_json(self.path, payload)
                 persisted = self.read()
-            except OperatorSourceStoreError:
-                raise
-            except (OSError, TypeError, ValueError) as exc:
-                raise OperatorSourceStoreError(
-                    "operator source configuration could not be published"
-                ) from exc
-            if persisted != config:
-                raise OperatorSourceStoreError(
-                    "published operator source configuration readback mismatch"
-                )
-            return persisted
+        except OperatorSourceStoreError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration could not be published"
+            ) from exc
+        if persisted != config:
+            raise OperatorSourceStoreError(
+                "published operator source configuration readback mismatch"
+            )
+        return persisted
 
     def write_source_id(self, source_id: str) -> OperatorSourceConfig:
         return self.write(build_operator_source_config(source_id))

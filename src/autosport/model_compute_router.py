@@ -1672,6 +1672,9 @@ def route_compute(
                         canonical_policy_version = current_context.get(
                             "routing_policy_version"
                         )
+                        canonical_policy_sha256 = current_context.get(
+                            "routing_policy_sha256"
+                        )
                         canonical_cloud_permission = current_context.get(
                             "cloud_permission"
                         )
@@ -1692,6 +1695,9 @@ def route_compute(
                             ),
                             "routing_policy_id": policy.policy_id,
                             "routing_policy_version": str(policy.policy_version),
+                            "routing_policy_sha256": _canonical_digest(
+                                policy.payload()
+                            ),
                             "cloud_permission": "ALLOW",
                             "cloud_backend_id": cloud.backend_id,
                         }
@@ -1711,6 +1717,7 @@ def route_compute(
                         elif (
                             canonical_policy_id is None
                             or canonical_policy_version is None
+                            or canonical_policy_sha256 is None
                             or canonical_cloud_permission is None
                             or canonical_cloud_backend_id is None
                         ):
@@ -1722,6 +1729,8 @@ def route_compute(
                             canonical_policy_id != policy.policy_id
                             or canonical_policy_version
                             != str(policy.policy_version)
+                            or canonical_policy_sha256
+                            != _canonical_digest(policy.payload())
                         ):
                             baseline_reason = (
                                 "canonical current VOC routing policy "

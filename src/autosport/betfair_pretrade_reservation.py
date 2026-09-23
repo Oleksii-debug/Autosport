@@ -15,7 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from enum import Enum
-from fractions import Fraction
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -323,15 +322,10 @@ class BetfairPreTradeReservationStore:
                 raise BetfairPreTradeReservationError(
                     "active capital belongs to a different authenticated account context"
                 )
-            locally_reserved = sum(
-                (Fraction(item.reserved_amount) for item in active),
-                Fraction(0),
+            committed = _exact_decimal_sum(
+                [item.reserved_amount for item in active] + [required]
             )
-            if (
-                Fraction(precheck.available_to_bet_balance)
-                - locally_reserved
-                < Fraction(required)
-            ):
+            if precheck.available_to_bet_balance < committed:
                 raise BetfairPreTradeReservationError(
                     "provider balance minus local reservations is insufficient"
                 )
@@ -967,12 +961,27 @@ def _exact_decimal_sum(values) -> Decimal:
     return Decimal((sign, digits, minimum_exponent))
 
 
+def _bounded_decimal_shape(value: Decimal, field: str) -> Decimal:
+    sign, digits, exponent = value.as_tuple()
+    del sign
+    if (
+        len(digits) > 1000
+        or not isinstance(exponent, int)
+        or abs(exponent) > 1000
+        or abs(value.adjusted()) > 1000
+    ):
+        raise BetfairPreTradeReservationError(
+            f"{field} exceeds bounded exact Decimal shape"
+        )
+    return value
+
+
 def _positive_decimal(value: object, field: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite() or value <= 0:
         raise BetfairPreTradeReservationError(
             f"{field} must be positive finite exact Decimal"
         )
-    return value
+    return _bounded_decimal_shape(value, field)
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -995,7 +1004,7 @@ def _decimal_from_text(value: object, field: str) -> Decimal:
         raise BetfairPreTradeReservationError(
             f"{field} must be canonical finite Decimal text"
         )
-    return parsed
+    return _bounded_decimal_shape(parsed, field)
 
 
 def _nonnegative_int(value: object, field: str) -> int:

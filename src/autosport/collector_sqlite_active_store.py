@@ -22,6 +22,7 @@ from .collector_sqlite_store import (
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _PROJECTION_INTEGRITY_META_KEY = "indexed_projection_integrity_v1"
 _PROJECTION_IMMUTABILITY_TRIGGER = "collector_deltas_projection_immutable_v1"
+_PROJECTION_IMMUTABILITY_ERROR = "collector delta indexed projections are immutable"
 _INDEXED_PROJECTION_FIELDS = (
     "delta_id",
     "source_id",
@@ -31,9 +32,33 @@ _INDEXED_PROJECTION_FIELDS = (
     "desktop_available_at",
     "collector_committed_at",
 )
+_PROJECTION_IMMUTABILITY_TRIGGER_SQL = (
+    f"CREATE TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER} BEFORE UPDATE OF "
+    + ", ".join(_INDEXED_PROJECTION_FIELDS)
+    + " ON collector_deltas BEGIN "
+    + f"SELECT RAISE(ABORT, '{_PROJECTION_IMMUTABILITY_ERROR}'); END"
+)
 _DELTA_SELECT_COLUMNS = ", ".join(
     ("commit_seq", *_INDEXED_PROJECTION_FIELDS, "payload_sha256", "payload_json")
 )
+
+
+def _normalized_trigger_sql(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.strip().rstrip(";").split())
+
+
+def _is_canonical_projection_trigger(value: object) -> bool:
+    normalized = _normalized_trigger_sql(value)
+    expected = _normalized_trigger_sql(_PROJECTION_IMMUTABILITY_TRIGGER_SQL)
+    assert expected is not None
+    legacy_expected = expected.replace(
+        "CREATE TRIGGER ",
+        "CREATE TRIGGER IF NOT EXISTS ",
+        1,
+    )
+    return normalized in {expected, legacy_expected}
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -125,7 +150,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 (_PROJECTION_INTEGRITY_META_KEY,),
             ).fetchone()
             trigger = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
                 (_PROJECTION_IMMUTABILITY_TRIGGER,),
             ).fetchone()
 
@@ -136,20 +161,29 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 ).fetchall()
                 for row in rows:
                     self._row_delta(row)
-                connection.execute(
-                    f"CREATE TRIGGER IF NOT EXISTS {_PROJECTION_IMMUTABILITY_TRIGGER} "
-                    "BEFORE UPDATE OF "
-                    + ", ".join(_INDEXED_PROJECTION_FIELDS)
-                    + " ON collector_deltas BEGIN "
-                    "SELECT RAISE(ABORT, 'collector delta indexed projections are immutable'); "
-                    "END"
-                )
+
+                # The marker is the durable statement that the indexed projection
+                # guard was reconciled and installed. Before that statement exists,
+                # a same-name trigger has no authority: reconcile every retained row,
+                # replace any pre-existing same-name object, then publish exactly the
+                # product-owned trigger and marker in this one writer transaction.
+                if trigger is not None:
+                    connection.execute(
+                        f"DROP TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER}"
+                    )
+                connection.execute(_PROJECTION_IMMUTABILITY_TRIGGER_SQL)
                 connection.execute(
                     "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
                     (_PROJECTION_INTEGRITY_META_KEY,),
                 )
-            elif marker[0] != "1" or trigger is None:
-                raise ValueError("collector indexed projection integrity guard is missing")
+            elif (
+                marker[0] != "1"
+                or trigger is None
+                or not _is_canonical_projection_trigger(trigger[0])
+            ):
+                raise ValueError(
+                    "collector indexed projection integrity guard is missing or noncanonical"
+                )
             connection.commit()
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:

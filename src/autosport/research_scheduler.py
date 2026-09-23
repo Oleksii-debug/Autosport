@@ -811,16 +811,22 @@ class ResearchScheduler:
                 return
             raise ResearchSchedulerError("cold history database is missing")
         try:
-            maximum = connection.execute(
-                "SELECT MAX(sequence) FROM cold_history"
-            ).fetchone()[0]
+            extent = connection.execute(
+                "SELECT COUNT(*), MIN(sequence), MAX(sequence) FROM cold_history"
+            ).fetchone()
+            if extent is None:
+                raise ResearchSchedulerError("cold history extent is unavailable")
+            actual_count, minimum, maximum = extent
             if count == 0:
-                if maximum is not None:
+                if actual_count != 0 or minimum is not None or maximum is not None:
                     raise ResearchSchedulerError(
                         "cold history exists beyond empty state anchor"
                     )
                 return
-            if maximum != count:
+            # sequence is an INTEGER PRIMARY KEY, so count=N with min=1/max=N
+            # proves the anchored prefix has no interior gaps without scanning
+            # lifetime history on each hot scheduler operation.
+            if actual_count != count or minimum != 1 or maximum != count:
                 raise ResearchSchedulerError(
                     "cold history cardinality mismatches state anchor"
                 )

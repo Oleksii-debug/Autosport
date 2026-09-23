@@ -191,9 +191,17 @@ class ProductGuiWorker:
 
     def poll(self) -> ProductGuiMessage | None:
         try:
-            return self._messages.get_nowait()
+            message = self._messages.get_nowait()
         except queue.Empty:
             return None
+        if message.kind in {"STOPPED", "ERROR"}:
+            # A terminal message is part of runtime lifecycle truth, not optional
+            # telemetry. Keep the admission slot owned until presentation consumes
+            # it so a successor start cannot replace the queue and erase terminal
+            # STOP/ERROR evidence before the controller applies recovery/status truth.
+            with self._lock:
+                self._busy = False
+        return message
 
     def join(self, timeout: float | None = None) -> bool:
         thread = self._thread
@@ -285,21 +293,26 @@ class ProductGuiWorker:
                 except BaseException as exc:
                     if terminal_error is None:
                         terminal_error = exc
+            terminal_message: ProductGuiMessage | None = None
             if terminal_error is not None:
-                self._messages.put(
-                    ProductGuiMessage(
-                        kind="ERROR",
-                        error_type=_safe_error_type(terminal_error),
-                    )
+                terminal_message = ProductGuiMessage(
+                    kind="ERROR",
+                    error_type=_safe_error_type(terminal_error),
                 )
             elif stopped_status is not None and stop_reason is not None:
-                self._messages.put(
-                    ProductGuiMessage(
-                        kind="STOPPED",
-                        status=stopped_status,
-                        stop_reason=stop_reason,
-                    )
+                terminal_message = ProductGuiMessage(
+                    kind="STOPPED",
+                    status=stopped_status,
+                    stop_reason=stop_reason,
                 )
+
+            # Revoke the runtime reference before exposing terminal truth. The busy
+            # slot deliberately remains held until poll() consumes STOPPED/ERROR;
+            # otherwise a successor start can replace _messages in the publication
+            # gap and permanently drop the prior run's terminal state.
             with self._lock:
                 self._runtime = None
-                self._busy = False
+                if terminal_message is None:
+                    self._busy = False
+            if terminal_message is not None:
+                self._messages.put(terminal_message)

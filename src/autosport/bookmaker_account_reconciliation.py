@@ -54,7 +54,10 @@ _CANONICAL_AUTHORITY_METHOD_CODES = {
     for name, method in _CANONICAL_AUTHORITY_METHODS.items()
 }
 _MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
-_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
+_WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE = (
+    Path("Autosport") / "application-state" / "monotonic-authority-v1"
+)
+_POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
 
 
 def _product_account_reconciliation_authority_root() -> Path:
@@ -90,6 +93,7 @@ def _product_account_reconciliation_authority_root() -> Path:
                 "cannot resolve product-owned Windows account authority root"
             )
         base = Path(buffer.value)
+        relative = _WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE
     else:
         try:
             import pwd
@@ -100,12 +104,13 @@ def _product_account_reconciliation_authority_root() -> Path:
                 "cannot resolve product-owned POSIX account authority root"
             ) from exc
         base = Path(home) / ".local" / "state"
+        relative = _POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE
 
     if not base.is_absolute():
         raise AccountReconciliationIntegrityError(
             "product-owned account authority root must be absolute"
         )
-    return base / _PRODUCT_AUTHORITY_ROOT_RELATIVE
+    return base / relative
 
 
 def _build_authority_binding_registry():

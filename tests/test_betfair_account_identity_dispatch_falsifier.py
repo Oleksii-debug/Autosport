@@ -154,7 +154,10 @@ def test_private_opener_handler_mutation_revokes_k07_origin() -> None:
         resolve_betfair_authenticated_account_identity(client)
 
 
-def test_private_https_handler_instance_dispatch_rebinding_revokes_k07_origin() -> None:
+@pytest.mark.parametrize("attribute", ["https_open", "https_request"])
+def test_private_https_handler_instance_dispatch_rebinding_revokes_k07_origin(
+    attribute: str,
+) -> None:
     client = _client()
     opener = client._transport._opener
     https_handler = next(
@@ -206,7 +209,21 @@ def test_private_https_handler_instance_dispatch_rebinding_revokes_k07_origin() 
     # This is the exact handler object already registered in the private opener.
     # Rebinding its instance dispatch must revoke K07 before local bytes can be
     # mistaken for provider-origin evidence.
-    https_handler.https_open = lambda request: ForgedResponse()
+    setattr(https_handler, attribute, lambda *args, **kwargs: ForgedResponse())
+
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(client)
+
+
+def test_private_https_response_handler_instance_rebinding_revokes_k07_origin() -> None:
+    client = _client()
+    opener = client._transport._opener
+    response_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is _urllib_request.HTTPErrorProcessor
+    )
+    response_handler.https_response = lambda request, response: response
 
     with pytest.raises(BetfairAccountIdentityError):
         resolve_betfair_authenticated_account_identity(client)
@@ -233,7 +250,9 @@ def test_private_opener_https_dispatch_map_rewrite_revokes_k07_origin(
     ("owner", "attribute"),
     [
         (_urllib_request.HTTPSHandler, "https_open"),
+        (_urllib_request.HTTPSHandler, "https_request"),
         (_urllib_request.AbstractHTTPHandler, "do_open"),
+        (_urllib_request.HTTPErrorProcessor, "https_response"),
     ],
 )
 def test_stdlib_https_class_dispatch_rebinding_revokes_k07_origin(

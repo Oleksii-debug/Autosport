@@ -148,3 +148,8 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # Provider current-order state is authoritative only when status and unmatched size
 # agree with Betfair's native CurrentOrderSummary semantics.
 from . import _betfair_current_order_state_guard as _betfair_current_order_state_guard  # noqa: F401,E402
+
+# Betfair effect evidence must respect the side-aware standard LIMIT bound before the
+# canonical verifier can mint provider authority. LAY matches above requested odds
+# are economically worse and therefore contradictory provider evidence.
+from . import _betfair_lay_price_bound_guard as _betfair_lay_price_bound_guard  # noqa: F401,E402

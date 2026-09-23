@@ -242,6 +242,37 @@ def test_caller_mutable_baseline_fields_cannot_authorize_alternate_root(
     assert not path.exists()
 
 
+
+
+def test_store_reinitialization_cannot_reissue_authority_root(tmp_path) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority-a",
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="authority issuance is already registered",
+    ):
+        BookmakerAccountReconciliationStore.__init__(
+            store,
+            path,
+            authority_root=tmp_path / "authority-b",
+        )
+
+    # __init__ assigned the attempted root-B authority before registration failed.
+    # The original external root-A issuance still governs and rejects that partial
+    # caller-driven reinitialization before any reconciliation state is published.
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority identity or binding changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert not path.exists()
+
+
 def test_exact_ordinary_high_precision_decimal_remains_unrounded() -> None:
     amount = Decimal("1234567890.123456789012345678901234567890")
     canonical = snapshot_to_canonical_dict(_snapshot(amount))

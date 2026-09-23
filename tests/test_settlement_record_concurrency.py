@@ -41,14 +41,14 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
     def test_conflicting_concurrent_records_cannot_both_commit(self) -> None:
         engine = SettlementEngine()
         observed_lock = _ObservedSerializationLock()
-        results: dict[str, BaseException | None] = {}
+        results: dict[str, Exception | None] = {}
         results_lock = threading.Lock()
 
         def record(name: str, outcome: str) -> None:
-            error: BaseException | None = None
+            error: Exception | None = None
             try:
                 engine.record({"event-1|winner|alice": outcome})
-            except BaseException as exc:
+            except Exception as exc:
                 error = exc
             with results_lock:
                 results[name] = error
@@ -83,14 +83,14 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
     def test_same_outcome_concurrent_replay_remains_idempotent(self) -> None:
         engine = SettlementEngine()
         start = threading.Barrier(3)
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
         errors_lock = threading.Lock()
 
         def record() -> None:
             start.wait()
             try:
                 engine.record({"event-1|winner|alice": "void"})
-            except BaseException as exc:
+            except Exception as exc:
                 with errors_lock:
                     errors.append(exc)
 

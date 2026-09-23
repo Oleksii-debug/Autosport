@@ -301,6 +301,10 @@ class MarketEvent:
     exchange_side: str | None = None
 
     def __post_init__(self) -> None:
+        _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
+        _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
+        if self.source_ts is not None:
+            _timezone_aware_iso8601_value(self.source_ts, "source_ts")
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         for field_name in (

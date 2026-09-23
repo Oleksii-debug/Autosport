@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import operator
 
 import pytest
 
@@ -114,14 +115,22 @@ def test_documented_policy_lookup_tables_reject_runtime_item_mutation() -> None:
     )
 
     with pytest.raises(TypeError):
-        rate_governor_module._DEFAULT_RATE_POLICY_PER_MINUTE["GetPrices"] = 10_000
-    with pytest.raises(TypeError):
-        rate_governor_module._OPERATION_TO_RATE_POLICY_KEY["GetPrices"] = (
-            "PlaceOrdersNoReceipt"
+        operator.setitem(
+            rate_governor_module._DEFAULT_RATE_POLICY_PER_MINUTE,
+            "GetPrices",
+            10_000,
         )
     with pytest.raises(TypeError):
-        rate_governor_module._PROVIDER_API_NAME_TO_OPERATION_ID["getprices"] = (
-            "PlaceOrdersNoReceipt"
+        operator.setitem(
+            rate_governor_module._OPERATION_TO_RATE_POLICY_KEY,
+            "GetPrices",
+            "PlaceOrdersNoReceipt",
+        )
+    with pytest.raises(TypeError):
+        operator.setitem(
+            rate_governor_module._PROVIDER_API_NAME_TO_OPERATION_ID,
+            "getprices",
+            "PlaceOrdersNoReceipt",
         )
 
     assert (

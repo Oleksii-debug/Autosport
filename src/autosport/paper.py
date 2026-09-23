@@ -924,7 +924,10 @@ class PaperBook:
         currency: str | None = None,
     ) -> PaperTicket:
         self._require_snapshot_authority_for_economic_mutation()
-        _require_paperbook_causal_history_authority(self)
+        # A product transition must start from one fully coherent live epoch.
+        # Private causal history alone does not cover caller-mutated balance,
+        # ticket status/payout, or other replay-derived fields.
+        self._validate_loaded_state(self)
         amount = Decimal(str(stake))
         new_balance = self._debit_balance(self.balance, amount)
 
@@ -1036,7 +1039,9 @@ class PaperBook:
         settled_at: str | None = None,
     ) -> PaperTicket:
         self._require_snapshot_authority_for_economic_mutation()
-        _require_paperbook_causal_history_authority(self)
+        # Reject any caller-created live-state divergence before calculating or
+        # publishing another official settlement transition.
+        self._validate_loaded_state(self)
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")

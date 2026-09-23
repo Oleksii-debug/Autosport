@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from autosport.incident_risk_register import (
@@ -14,6 +15,7 @@ from autosport.incident_source_health_projection import (
     current_source_health_incident,
     project_source_health_incidents,
     resolve_source_health_evidence,
+    validate_source_health_incident_evidence,
 )
 from autosport.ingestion_health import SourceHealthStore
 
@@ -174,6 +176,94 @@ class SourceHealthIncidentProjectionTests(unittest.TestCase):
                 evidence_ref=closure_ref,
             )
             self.assertEqual(closure.status, "healthy")
+
+    def test_use_time_validation_rejects_caller_severity_and_resolution_spoofs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.store(directory)
+            self.record_degraded(store)
+            entry = project_source_health_incidents(
+                store,
+                source_id="provider-a",
+            )[0]
+
+            validate_source_health_incident_evidence(
+                store,
+                source_id="provider-a",
+                entry=entry,
+            )
+
+            severity_spoof = replace(entry, severity=RiskSeverity.CRITICAL)
+            with self.assertRaisesRegex(
+                SourceHealthIncidentProjectionError,
+                "severity does not match",
+            ):
+                validate_source_health_incident_evidence(
+                    store,
+                    source_id="provider-a",
+                    entry=severity_spoof,
+                )
+
+            resolution_spoof = replace(
+                entry,
+                status=RiskStatus.RESOLVED,
+                mitigation="Caller claims recovery without health evidence.",
+                requires_operator_action=False,
+            )
+            with self.assertRaisesRegex(
+                SourceHealthIncidentProjectionError,
+                "requires canonical healthy closure",
+            ):
+                validate_source_health_incident_evidence(
+                    store,
+                    source_id="provider-a",
+                    entry=resolution_spoof,
+                )
+
+    def test_use_time_validation_rejects_skipped_intermediate_health_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.store(directory)
+            self.record_degraded(store, now="2026-09-23T01:00:00+00:00")
+            store.record_failure(
+                "provider-a",
+                now="2026-09-23T01:01:00+00:00",
+                error=ConnectionError("down"),
+            )
+            self.record_healthy(store, now="2026-09-23T01:02:00+00:00")
+            history = project_source_health_incidents(
+                store,
+                source_id="provider-a",
+            )
+            closed = history[-1]
+            validate_source_health_incident_evidence(
+                store,
+                source_id="provider-a",
+                entry=closed,
+            )
+
+            occurrence_ref = closed.occurrence_evidence_refs[0]
+            closure_ref = next(
+                ref
+                for ref in closed.evidence_refs
+                if resolve_source_health_evidence(
+                    store,
+                    source_id="provider-a",
+                    evidence_ref=ref,
+                ).status
+                == "healthy"
+            )
+            missing_middle = replace(
+                closed,
+                evidence_refs=tuple(sorted((occurrence_ref, closure_ref))),
+            )
+            with self.assertRaisesRegex(
+                SourceHealthIncidentProjectionError,
+                "contiguous canonical transition segment",
+            ):
+                validate_source_health_incident_evidence(
+                    store,
+                    source_id="provider-a",
+                    entry=missing_middle,
+                )
 
     def test_restart_reprojects_identical_history_and_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

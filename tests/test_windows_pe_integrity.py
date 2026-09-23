@@ -194,6 +194,38 @@ def test_core_header_falsifiers():
         assert_rejected(candidate, msg)
 
 
+@pytest.mark.parametrize("flag", [0x0004, 0x0008, 0x0010, 0x0040, 0x0080, 0x8000])
+def test_deprecated_or_reserved_coff_characteristics_rejected(flag):
+    blob = build_valid_pe()
+    _, coff, _, _ = offsets(blob)
+    base_characteristics = struct.unpack_from("<H", blob, coff + 18)[0]
+    assert_rejected(
+        mutate_u16(blob, coff + 18, base_characteristics | flag),
+        "reserved or deprecated flags",
+    )
+
+
+def test_amd64_rejects_32bit_machine_characteristic():
+    blob = build_valid_pe()
+    _, coff, _, _ = offsets(blob)
+    base_characteristics = struct.unpack_from("<H", blob, coff + 18)[0]
+    assert_rejected(
+        mutate_u16(blob, coff + 18, base_characteristics | 0x0100),
+        "AMD64 image cannot set IMAGE_FILE_32BIT_MACHINE",
+    )
+
+
+@pytest.mark.parametrize("flag", [0x0001, 0x0002, 0x0004, 0x0008])
+def test_reserved_dll_characteristics_bits_rejected(flag):
+    blob = build_valid_pe()
+    _, _, opt, _ = offsets(blob)
+    base_characteristics = struct.unpack_from("<H", blob, opt + 70)[0]
+    assert_rejected(
+        mutate_u16(blob, opt + 70, base_characteristics | flag),
+        "DllCharacteristics contains reserved bits",
+    )
+
+
 def test_alignment_and_image_size_falsifiers():
     blob = build_valid_pe()
     _, _, opt, sec = offsets(blob)
@@ -289,7 +321,11 @@ def test_adversarial_mutation_campaign_100k_rejects_guaranteed_invalid_cases():
         lambda b, r: mutate_u16(b, coff + 2, 0),
         lambda b, r: mutate_u16(b, opt + 0, 0x10B),
         lambda b, r: mutate_u16(b, coff + 18, 0x20),
+        lambda b, r: mutate_u16(b, coff + 18, 0x0022 | 0x0040),
+        lambda b, r: mutate_u16(b, coff + 18, 0x0022 | 0x0100),
+        lambda b, r: mutate_u16(b, coff + 18, 0x0022 | 0x8000),
         lambda b, r: mutate_u16(b, opt + 68, 1),
+        lambda b, r: mutate_u16(b, opt + 70, 0x8160 | 0x0001),
         lambda b, r: mutate_u32(b, opt + 104, 1),
         lambda b, r: mutate_u64(b, opt + 24, 0x140000001),
         lambda b, r: mutate_u32(b, opt + 36, 768),

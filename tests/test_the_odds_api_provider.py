@@ -553,20 +553,21 @@ class TheOddsApiProviderTests(unittest.TestCase):
             "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
             "?apiKey=secret&regions=eu&markets=h2h"
         )
-        with patch.object(
-            odds_api_module,
-            "build_opener",
-            lambda *_: FakeOpener(),
-        ):
-            with self.assertRaisesRegex(TheOddsApiPayloadError, "bounded size"):
-                odds_api_module._default_transport(url, 1.0)
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "bounded size"):
+            odds_api_module._perform_http_json_response(
+                url,
+                1.0,
+                opener_factory=lambda *_: FakeOpener(),
+                proxy_handler_factory=odds_api_module.ProxyHandler,
+                request_factory=odds_api_module.Request,
+            )
 
         self.assertEqual(
             seen["read_size"],
             odds_api_module.THE_ODDS_API_MAX_RESPONSE_BYTES + 1,
         )
 
-    def test_default_transport_binds_exact_response_digest_into_evidence(self):
+    def test_injected_lower_network_seam_cannot_mint_provider_origin(self):
         raw_body = (
             b'[{"id":"0123456789abcdef0123456789abcdef",'
             b'"sport_key":"soccer_epl","commence_time":"2026-09-22T15:00:00Z",'
@@ -600,22 +601,28 @@ class TheOddsApiProviderTests(unittest.TestCase):
             def open(self, request, timeout):
                 return FakeResponse(request.full_url)
 
+        def injected_transport(url, timeout):
+            return odds_api_module._perform_http_json_response(
+                url,
+                timeout,
+                opener_factory=lambda *_: FakeOpener(),
+                proxy_handler_factory=odds_api_module.ProxyHandler,
+                request_factory=odds_api_module.Request,
+            )
+
         provider = TheOddsApiProvider(
             "secret",
             sport="soccer_epl",
+            transport=injected_transport,
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
-        with patch.object(
-            odds_api_module,
-            "build_opener",
-            lambda *_: FakeOpener(),
-        ):
-            batch = provider.read_batch()
+        batch = provider.read_batch()
 
         expected = hashlib.sha256(raw_body).hexdigest()
         request = batch.quotes[0].metadata["request"]
-        self.assertTrue(request["provider_origin_verified"])
+        self.assertFalse(request["provider_origin_verified"])
         self.assertFalse(request["receipt_clock_verified"])
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
         self.assertEqual(request["response_sha256"], expected)
         self.assertEqual(batch.cursor, expected)
         self.assertEqual(batch.quotes[0].decimal_odds, Decimal("2.10"))
@@ -654,20 +661,25 @@ class TheOddsApiProviderTests(unittest.TestCase):
             def open(self, request, timeout):
                 return FakeResponse(request.full_url)
 
+        def injected_transport(url, timeout):
+            return odds_api_module._perform_http_json_response(
+                url,
+                timeout,
+                opener_factory=lambda *_: FakeOpener(),
+                proxy_handler_factory=odds_api_module.ProxyHandler,
+                request_factory=odds_api_module.Request,
+            )
+
         provider = TheOddsApiProvider(
             "secret",
             sport="soccer_epl",
             max_market_age_seconds=None,
+            transport=injected_transport,
         )
-        with patch.object(
-            odds_api_module,
-            "build_opener",
-            lambda *_: FakeOpener(),
-        ):
-            first = provider.read_batch(max_items=1)
+        first = provider.read_batch(max_items=1)
 
         self.assertIn("TRUNCATED_BATCH", first.quality_flags)
-        self.assertNotIn("UNVERIFIED_PROVIDER_ORIGIN", first.quality_flags)
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", first.quality_flags)
         self.assertNotIn("UNVERIFIED_RECEIPT_CLOCK", first.quality_flags)
 
         historical_payload = {
@@ -694,7 +706,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
 
         second = provider.read_batch(max_items=1)
         self.assertNotIn("TRUNCATED_BATCH", second.quality_flags)
-        self.assertNotIn("UNVERIFIED_PROVIDER_ORIGIN", second.quality_flags)
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", second.quality_flags)
         self.assertNotIn("UNVERIFIED_RECEIPT_CLOCK", second.quality_flags)
 
     def test_post_construction_seam_swap_cannot_retain_verified_authority(self):
@@ -860,7 +872,7 @@ class TheOddsApiProviderTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, traceback):
                 return False
 
-            def read(self):
+            def read(self, size=-1):
                 return b"[]"
 
             def geturl(self):
@@ -871,22 +883,39 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 seen["request_url"] = request.full_url
                 return FakeResponse()
 
-        def fake_build_opener(handler):
-            seen["handler"] = handler
+        def fake_build_opener(*handlers):
+            seen["handlers"] = handlers
             return FakeOpener()
 
         url = (
             "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
             "?apiKey=secret&regions=eu&markets=h2h"
         )
-        with patch.object(odds_api_module, "build_opener", fake_build_opener):
-            with self.assertRaisesRegex(
-                TheOddsApiTransportError,
-                "final URL",
-            ):
-                odds_api_module._default_transport(url, 1.0)
+        with self.assertRaisesRegex(
+            TheOddsApiTransportError,
+            "final URL",
+        ):
+            odds_api_module._perform_http_json_response(
+                url,
+                1.0,
+                opener_factory=fake_build_opener,
+                proxy_handler_factory=odds_api_module.ProxyHandler,
+                request_factory=odds_api_module.Request,
+            )
 
-        self.assertIsInstance(seen["handler"], odds_api_module._RejectRedirects)
+        proxy_handlers = [
+            handler
+            for handler in seen["handlers"]
+            if isinstance(handler, odds_api_module.ProxyHandler)
+        ]
+        redirect_handlers = [
+            handler
+            for handler in seen["handlers"]
+            if isinstance(handler, odds_api_module._RejectRedirects)
+        ]
+        self.assertEqual(len(proxy_handlers), 1)
+        self.assertEqual(proxy_handlers[0].proxies, {})
+        self.assertEqual(len(redirect_handlers), 1)
         self.assertEqual(seen["request_url"], url)
 
     def test_secret_bearing_http_error_context_is_not_retained(self):
@@ -900,18 +929,38 @@ class TheOddsApiProviderTests(unittest.TestCase):
             def open(self, request, timeout):
                 raise HTTPError(request.full_url, 401, "Unauthorized", {}, None)
 
-        with patch.object(
-            odds_api_module,
-            "build_opener",
-            lambda *_: FailingOpener(),
-        ):
-            with self.assertRaises(TheOddsApiTransportError) as context:
-                odds_api_module._default_transport(url, 1.0)
+        with self.assertRaises(TheOddsApiTransportError) as context:
+            odds_api_module._perform_http_json_response(
+                url,
+                1.0,
+                opener_factory=lambda *_: FailingOpener(),
+                proxy_handler_factory=odds_api_module.ProxyHandler,
+                request_factory=odds_api_module.Request,
+            )
 
         self.assertEqual(context.exception.status_code, 401)
         self.assertIsNone(context.exception.__cause__)
         self.assertIsNone(context.exception.__context__)
         self.assertNotIn(secret, str(context.exception))
+
+    def test_product_default_transport_captures_network_constructors(self):
+        captured = tuple(
+            cell.cell_contents
+            for cell in (odds_api_module._default_transport.__closure__ or ())
+        )
+        original_build_opener = odds_api_module.build_opener
+        self.assertIn(original_build_opener, captured)
+        self.assertIn(odds_api_module.ProxyHandler, captured)
+        self.assertIn(odds_api_module.Request, captured)
+
+        fake_build_opener = lambda *_: None
+        with patch.object(odds_api_module, "build_opener", fake_build_opener):
+            captured_after_patch = tuple(
+                cell.cell_contents
+                for cell in (odds_api_module._default_transport.__closure__ or ())
+            )
+            self.assertIn(original_build_opener, captured_after_patch)
+            self.assertNotIn(fake_build_opener, captured_after_patch)
 
     def test_adapter_exposes_no_provider_write_or_real_money_surface(self):
         provider = TheOddsApiProvider(

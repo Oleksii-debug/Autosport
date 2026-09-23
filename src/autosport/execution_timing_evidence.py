@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -203,6 +204,7 @@ class LocalMonotonicTimingSession:
             issuer_epoch_id or f"issuer-epoch:{uuid.uuid4().hex}",
             "issuer_epoch_id",
         )
+        self._state_lock = threading.RLock()
         self._sequence = 0
         self._last_monotonic_ns: int | None = None
         self._issued_markers: dict[str, MonotonicTimingMarker] = {}
@@ -213,26 +215,31 @@ class LocalMonotonicTimingSession:
         monotonic_ns = _strict_nonnegative_int(
             self._monotonic_ns(), "monotonic_ns result"
         )
-        if (
-            self._last_monotonic_ns is not None
-            and monotonic_ns < self._last_monotonic_ns
-        ):
-            raise ExecutionTimingEvidenceError("monotonic clock regressed")
-
         wall = _wall_time(self._wall_now(), "wall_now result")
-        self._sequence += 1
-        marker = MonotonicTimingMarker(
-            clock_domain_id=self.clock_domain_id,
-            session_id=self.session_id,
-            issuer_epoch_id=self.issuer_epoch_id,
-            sequence=self._sequence,
-            label=label,
-            monotonic_ns=monotonic_ns,
-            wall_anchor_at=_wall_text(wall),
-        )
-        self._last_monotonic_ns = monotonic_ns
-        self._issued_markers[marker.marker_id] = marker
-        return marker
+
+        # Clock/wall sampling may overlap across callers, but issuance is one
+        # linearizable state transition. Recheck the live high-water mark only
+        # while holding the same lock that advances sequence and registry truth.
+        with self._state_lock:
+            if (
+                self._last_monotonic_ns is not None
+                and monotonic_ns < self._last_monotonic_ns
+            ):
+                raise ExecutionTimingEvidenceError("monotonic clock regressed")
+
+            self._sequence += 1
+            marker = MonotonicTimingMarker(
+                clock_domain_id=self.clock_domain_id,
+                session_id=self.session_id,
+                issuer_epoch_id=self.issuer_epoch_id,
+                sequence=self._sequence,
+                label=label,
+                monotonic_ns=monotonic_ns,
+                wall_anchor_at=_wall_text(wall),
+            )
+            self._last_monotonic_ns = monotonic_ns
+            self._issued_markers[marker.marker_id] = marker
+            return marker
 
     def interval(
         self,
@@ -245,40 +252,41 @@ class LocalMonotonicTimingSession:
             raise ExecutionTimingEvidenceError(
                 "interval endpoints must be MonotonicTimingMarker"
             )
-        for marker, name in ((start, "start"), (end, "end")):
-            if (
-                marker.clock_domain_id != self.clock_domain_id
-                or marker.session_id != self.session_id
-                or marker.issuer_epoch_id != self.issuer_epoch_id
-            ):
+        with self._state_lock:
+            for marker, name in ((start, "start"), (end, "end")):
+                if (
+                    marker.clock_domain_id != self.clock_domain_id
+                    or marker.session_id != self.session_id
+                    or marker.issuer_epoch_id != self.issuer_epoch_id
+                ):
+                    raise ExecutionTimingEvidenceError(
+                        f"{name} marker is from another clock/session issuer epoch"
+                    )
+                issued = self._issued_markers.get(marker.marker_id)
+                if issued != marker:
+                    raise ExecutionTimingEvidenceError(
+                        f"{name} marker is not product-issued by this live session"
+                    )
+            if end.sequence <= start.sequence:
                 raise ExecutionTimingEvidenceError(
-                    f"{name} marker is from another clock/session issuer epoch"
+                    "end marker must causally follow start marker"
                 )
-            issued = self._issued_markers.get(marker.marker_id)
-            if issued != marker:
+            if end.monotonic_ns < start.monotonic_ns:
                 raise ExecutionTimingEvidenceError(
-                    f"{name} marker is not product-issued by this live session"
+                    "negative monotonic duration is invalid evidence"
                 )
-        if end.sequence <= start.sequence:
-            raise ExecutionTimingEvidenceError(
-                "end marker must causally follow start marker"
+            evidence = MonotonicTimingIntervalEvidence(
+                clock_domain_id=self.clock_domain_id,
+                session_id=self.session_id,
+                issuer_epoch_id=self.issuer_epoch_id,
+                start_marker_id=start.marker_id,
+                end_marker_id=end.marker_id,
+                start_sequence=start.sequence,
+                end_sequence=end.sequence,
+                duration_ns=end.monotonic_ns - start.monotonic_ns,
             )
-        if end.monotonic_ns < start.monotonic_ns:
-            raise ExecutionTimingEvidenceError(
-                "negative monotonic duration is invalid evidence"
-            )
-        evidence = MonotonicTimingIntervalEvidence(
-            clock_domain_id=self.clock_domain_id,
-            session_id=self.session_id,
-            issuer_epoch_id=self.issuer_epoch_id,
-            start_marker_id=start.marker_id,
-            end_marker_id=end.marker_id,
-            start_sequence=start.sequence,
-            end_sequence=end.sequence,
-            duration_ns=end.monotonic_ns - start.monotonic_ns,
-        )
-        self._issued_intervals[evidence.evidence_id] = evidence
-        return evidence
+            self._issued_intervals[evidence.evidence_id] = evidence
+            return evidence
 
     def require_issued_interval(
         self,
@@ -288,9 +296,10 @@ class LocalMonotonicTimingSession:
             raise ExecutionTimingEvidenceError(
                 "timing evidence must be MonotonicTimingIntervalEvidence"
             )
-        issued = self._issued_intervals.get(evidence.evidence_id)
-        if issued != evidence:
-            raise ExecutionTimingEvidenceError(
-                "timing interval is not product-issued by this live session"
-            )
-        return issued
+        with self._state_lock:
+            issued = self._issued_intervals.get(evidence.evidence_id)
+            if issued != evidence:
+                raise ExecutionTimingEvidenceError(
+                    "timing interval is not product-issued by this live session"
+                )
+            return issued

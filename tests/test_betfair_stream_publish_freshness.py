@@ -577,3 +577,8 @@ def test_subscription_replacement_with_new_projection_clears_prior_datum_authori
         as_of_ms=1001,
         policy=BetfairStreamFreshnessPolicy(100),
     ).decision_eligible
+
+
+def test_subscription_projection_rejects_unknown_market_data_field():
+    with pytest.raises(ValueError, match='unsupported Betfair stream field'):
+        context(market_data_fields=('CALLER_DEFINED_FIELD',), ladder_levels=None)

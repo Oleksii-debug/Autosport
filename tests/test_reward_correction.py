@@ -442,3 +442,29 @@ def test_reopen_rejects_noncanonical_decimal_storage_even_with_parseable_value(t
     raw.commit(); raw.close()
     with pytest.raises(RewardCorrectionError, match="canonical Decimal"):
         RewardCorrectionLedger.open(path)
+
+def test_create_race_cannot_unlink_existing_winner(tmp_path, monkeypatch):
+    path = tmp_path / "corrections.sqlite3"
+    path_type = type(path)
+    real_exists = path_type.exists
+    stale_reads = 0
+
+    def stale_exists(candidate):
+        nonlocal stale_reads
+        if candidate == path and stale_reads < 2:
+            stale_reads += 1
+            return False
+        return real_exists(candidate)
+
+    monkeypatch.setattr(path_type, "exists", stale_exists)
+
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.verify_integrity()
+
+    with pytest.raises(RewardCorrectionError, match="already exists"):
+        RewardCorrectionLedger.create(path)
+
+    assert real_exists(path)
+    with RewardCorrectionLedger.open(path) as reopened:
+        reopened.verify_integrity()
+

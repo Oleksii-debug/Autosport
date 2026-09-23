@@ -54,6 +54,58 @@ _CANONICAL_AUTHORITY_METHOD_CODES = {
     for name, method in _CANONICAL_AUTHORITY_METHODS.items()
 }
 _MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
+_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
+
+
+def _product_account_reconciliation_authority_root() -> Path:
+    """Resolve the supported product machine-state root without env overrides.
+
+    The generic MonotonicWorkspaceAuthority deliberately supports a caller/process
+    override.  The supported account-reconciliation path must not use that override
+    as its default authority selector: otherwise a restart can point at a fresh root
+    after deleting local state and make a previously non-pristine workspace appear
+    PRISTINE.  Resolve the OS-owned user state location directly instead.
+    """
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            # CSIDL_LOCAL_APPDATA.  Query the shell rather than trusting the
+            # caller-editable LOCALAPPDATA environment variable.
+            result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+                None,
+                0x001C,
+                None,
+                0,
+                buffer,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned Windows account authority root"
+            ) from exc
+        if result != 0 or not buffer.value:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned Windows account authority root"
+            )
+        base = Path(buffer.value)
+    else:
+        try:
+            import pwd
+
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned POSIX account authority root"
+            ) from exc
+        base = Path(home) / ".local" / "state"
+
+    if not base.is_absolute():
+        raise AccountReconciliationIntegrityError(
+            "product-owned account authority root must be absolute"
+        )
+    return base / _PRODUCT_AUTHORITY_ROOT_RELATIVE
 
 
 def _build_authority_binding_registry():
@@ -679,11 +731,16 @@ class BookmakerAccountReconciliationStore:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation monotonic authority class identity changed"
             )
+        selected_authority_root = (
+            _product_account_reconciliation_authority_root()
+            if authority_root is None
+            else authority_root
+        )
         authority = _CANONICAL_AUTHORITY_CLASS(
             workspace=self._workspace,
             domain=_RECONCILIATION_AUTHORITY_DOMAIN,
             key=f"account-reconciliation:{self.path.name}",
-            authority_root=authority_root,
+            authority_root=selected_authority_root,
         )
         self._authority = authority
         _register_authority_binding(

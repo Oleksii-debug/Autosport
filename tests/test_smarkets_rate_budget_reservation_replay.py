@@ -99,6 +99,18 @@ def test_timestamp_only_freshness_cannot_complete_reservation(tmp_path: Path) ->
             reservation_id=reserved.reservation_id,
         )
 
+    # Advancing only the observation timestamp without completing the
+    # reservation must not create a two-step completion bypass either.
+    budget.record_observation(timestamp_only)
+    with pytest.raises(
+        SmarketsRateBudgetError,
+        match="provider remaining to decrease",
+    ):
+        budget.record_observation(
+            timestamp_only,
+            reservation_id=reserved.reservation_id,
+        )
+
     second = budget.reserve_request(
         account_id="acct-1",
         session_generation="s2",

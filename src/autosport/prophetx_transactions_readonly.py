@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
+import json
 import math
 from typing import Callable
 from urllib.parse import urlencode
@@ -325,11 +326,33 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
 
 
 def _fingerprint(page: ProphetXTransactionPage) -> str:
-    parts = [
-        page.query.request_url, page.observed_at, page.source_payload_sha256, page.next_cursor or "",
-        *(f"{t.status}|{t.user_id}|{t.transaction_type}|{t.transaction_sub_type}|"
-          f"{t.amount}|{t.change}|{t.balance}|{t.balance_before}|{t.details}|"
-          f"{t.market_id}|{t.event_id}|{t.trade_id}|{t.description}|{t.created_at}|{t.currency}"
-          for t in page.transactions),
-    ]
-    return sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    payload = {
+        "next_cursor": page.next_cursor,
+        "observed_at": page.observed_at,
+        "query_url": page.query.request_url,
+        "source_payload_sha256": page.source_payload_sha256,
+        "transactions": [
+            {
+                "amount": str(tx.amount),
+                "balance": str(tx.balance),
+                "balance_before": str(tx.balance_before),
+                "change": str(tx.change),
+                "created_at": tx.created_at,
+                "currency": tx.currency,
+                "description": tx.description,
+                "details": tx.details,
+                "event_id": tx.event_id,
+                "market_id": tx.market_id,
+                "status": tx.status,
+                "trade_id": tx.trade_id,
+                "transaction_sub_type": tx.transaction_sub_type,
+                "transaction_type": tx.transaction_type,
+                "user_id": tx.user_id,
+            }
+            for tx in page.transactions
+        ],
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from decimal import Decimal
 from typing import Sequence
 
@@ -16,11 +15,13 @@ from .betdaq_readonly_provider import (
 
 
 class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
-    """Product-owned live GetPrices composition over the canonical BETDAQ HTTPS stack.
+    """GetPrices composition over Autosport's existing BETDAQ HTTPS stack.
 
-    Provider-origin authority is promoted only after the inherited provider has
-    successfully parsed and validated the complete snapshot and only when the bridge
-    is backed by the product-owned canonical HTTPS transport.
+    This class makes the live network path usable without creating another credential
+    or HTTP architecture. It deliberately does *not* promote provider-origin truth:
+    current-main transport hardening for redirect/proxy/response-bound semantics is a
+    separate live lineage, so the inherited provider keeps UNVERIFIED_PROVIDER_ORIGIN
+    until that authority is integrated and explicitly composed.
     """
 
     def __init__(
@@ -55,19 +56,3 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
     @property
     def live_transport(self) -> BetdaqReadOnlyLiveTransport:
         return self._live_transport
-
-    def _load(self) -> None:
-        super()._load()
-        if not self._live_transport.provider_origin_verified:
-            return
-        # super()._load() publishes state only after every chunk parsed successfully.
-        # Upgrade only the single origin dimension; timestamp freshness, entitlement,
-        # write permission and every other truth boundary remain unchanged.
-        self._flags = tuple(
-            flag for flag in self._flags if flag != "UNVERIFIED_PROVIDER_ORIGIN"
-        )
-        if self._evidence is not None:
-            self._evidence = replace(
-                self._evidence,
-                provider_origin_verified=True,
-            )

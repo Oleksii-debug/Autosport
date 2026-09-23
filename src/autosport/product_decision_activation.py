@@ -35,7 +35,10 @@ _PRODUCT_AUTHORITY_ROOT_NAME: Final = "product-decision-activation-authority-v1"
 # Freeze the exact product-import-time fingerprint authority. Exact instance type alone
 # is insufficient because Python permits replacing a class property at runtime. START
 # evidence must never dispatch through a caller-rebound live class descriptor.
-_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY: Final = PaperExecutionModelConfig.fingerprint
+_CANONICAL_EXECUTION_CONFIG_CLASS: Final = PaperExecutionModelConfig
+_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY: Final = (
+    _CANONICAL_EXECUTION_CONFIG_CLASS.fingerprint
+)
 _CANONICAL_EXECUTION_FINGERPRINT_GETTER: Final = (
     _CANONICAL_EXECUTION_FINGERPRINT_PROPERTY.fget
     if isinstance(_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY, property)
@@ -594,7 +597,10 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "risk policy must be bound to the exact EconomicGoalContract"
             )
-        if type(execution_config) is not PaperExecutionModelConfig:
+        if (
+            PaperExecutionModelConfig is not _CANONICAL_EXECUTION_CONFIG_CLASS
+            or type(execution_config) is not _CANONICAL_EXECUTION_CONFIG_CLASS
+        ):
             raise ProductDecisionActivationError(
                 "execution_config must be the exact canonical PaperExecutionModelConfig"
             )
@@ -603,7 +609,7 @@ class ProductDecisionActivationStore:
         # replaces PaperExecutionModelConfig.fingerprint. Require the original
         # import-time property/getter/code identity and invoke that captured getter
         # directly, so transient class-descriptor substitution fails closed.
-        live_fingerprint_property = PaperExecutionModelConfig.fingerprint
+        live_fingerprint_property = _CANONICAL_EXECUTION_CONFIG_CLASS.fingerprint
         if (
             not isinstance(_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY, property)
             or _CANONICAL_EXECUTION_FINGERPRINT_GETTER is None

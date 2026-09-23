@@ -51,6 +51,14 @@ class MarketTypeSubclass(BetfairMarketType):
     pass
 
 
+class DateTimeSubclass(datetime):
+    pass
+
+
+class TupleSubclass(tuple):
+    pass
+
+
 def _scope() -> BetfairDiscoveryVisibilityScope:
     return BetfairDiscoveryVisibilityScope(
         account_scope_ref="account-A",
@@ -207,3 +215,52 @@ def test_acquisition_rejects_provider_identity_subclasses(
 ) -> None:
     with pytest.raises(BetfairDiscoveryProvenanceError, match=message):
         _build_evidence(event_type=event_type, market_type=market_type)
+
+def test_exchange_rejects_datetime_subclass() -> None:
+    observed_at = DateTimeSubclass(
+        2026,
+        9,
+        23,
+        1,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="observed_at must be an exact datetime",
+    ):
+        BetfairDiscoveryExchange(
+            build_list_event_types_request(),
+            b"event-types",
+            observed_at,
+        )
+
+
+def test_acquisition_rejects_tuple_subclass() -> None:
+    event_exchange = BetfairDiscoveryExchange(
+        build_list_event_types_request(),
+        b"event-types",
+        T0,
+    )
+    market_exchange = BetfairDiscoveryExchange(
+        build_list_market_types_request(event_type_ids=("1",)),
+        b"market-types",
+        T1,
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="event_types must be an exact tuple",
+    ):
+        BetfairDiscoveryAcquisitionEvidence(
+            discovery_run_id="run-runtime-type",
+            visibility_scope=_scope(),
+            event_type_exchange=event_exchange,
+            event_types=TupleSubclass((BetfairEventType("1", "Soccer", 1),)),
+            selected_event_type_id="1",
+            market_type_exchange=market_exchange,
+            market_types=(BetfairMarketType("MATCH_ODDS", 1),),
+            max_age_seconds=60,
+        )
+

@@ -20,7 +20,7 @@ from autosport.bookmaker_capability import (
 from autosport.real_execution_ledger import ExecutionAction
 from autosport.supervised_provider_evidence import (
     VerifiedProviderEffectEvidence,
-    verify_betfair_provider_state,
+    _evaluate_betfair_provider_state_semantics,
 )
 
 
@@ -134,7 +134,7 @@ def _capture(action: ExecutionAction, *, status: str):
 def _verify(action: ExecutionAction, *, status: str):
     profile = _profile()
     capture = _capture(action, status=status)
-    return verify_betfair_provider_state(
+    return _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,

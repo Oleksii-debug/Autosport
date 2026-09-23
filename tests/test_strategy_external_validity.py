@@ -47,6 +47,7 @@ def _row(
     slot: SlotState = SlotState.CANDIDATE,
     strategy: str = "strategy-1",
     terminal: bool = True,
+    portfolio_before_id: str = "portfolio-1",
 ) -> EvaluationRow:
     candidate = slot is SlotState.CANDIDATE
     reason = None if candidate else {
@@ -82,7 +83,7 @@ def _row(
         strategy_version_id=strategy,
         model_version_id="model-1" if candidate else None,
         config_sha256=H4,
-        portfolio_before_id="portfolio-1",
+        portfolio_before_id=portfolio_before_id,
         economic_goal_id="goal-1",
         risk_policy_id="risk-1",
         terminal_space_proof_id="terminal-proof-1" if candidate and terminal else None,
@@ -266,6 +267,109 @@ def test_attempted_execution_without_outcome_is_materially_unresolved():
 
     assert report.evidence_grade is StrategyEvidenceGrade.INSUFFICIENT
     assert "material_funnel_state_unresolved" in report.external_evidence_gaps
+
+
+def test_generic_paper_outcome_stage_cannot_mint_paper_model(monkeypatch):
+    ledger = _ledger(_row("candidate"))
+    monkeypatch.setattr(
+        EvaluationUniverseLedger,
+        "current_stage",
+        lambda self, row_id: FunnelStage.ACCEPTED,
+    )
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
+
+    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+    assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
+    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
+
+
+def test_live_paper_stage_does_not_replace_later_quote_proof(monkeypatch):
+    ledger = _ledger(_row("candidate"))
+    monkeypatch.setattr(
+        EvaluationUniverseLedger,
+        "current_stage",
+        lambda self, row_id: FunnelStage.ACCEPTED,
+    )
+    protocol = _protocol(
+        ledger,
+        strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
+        family=EvaluationContractFamily.LIVE_PRICE_EXECUTION,
+    )
+    candidate, baselines = _results(protocol)
+
+    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+    assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
+    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
+    assert (
+        "external_later_quote_execution_evidence_not_verified"
+        in report.external_evidence_gaps
+    )
+
+
+def test_hedge_paper_stage_does_not_replace_same_trajectory_comparator(monkeypatch):
+    ledger = _ledger(
+        _row("candidate-a", portfolio_before_id="portfolio-a"),
+        _row("candidate-b", portfolio_before_id="portfolio-b"),
+    )
+    monkeypatch.setattr(
+        EvaluationUniverseLedger,
+        "current_stage",
+        lambda self, row_id: FunnelStage.ACCEPTED,
+    )
+    protocol = _protocol(
+        ledger,
+        strategy_class=StrategyClass.HEDGE_REBALANCE,
+        family=EvaluationContractFamily.HEDGE_PORTFOLIO_RISK,
+    )
+    candidate, baselines = _results(protocol)
+
+    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+    assert report.portfolio_before_ids == ("portfolio-a", "portfolio-b")
+    assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
+    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
+    assert (
+        "external_same_trajectory_counterfactual_execution_not_verified"
+        in report.external_evidence_gaps
+    )
+
+
+@pytest.mark.parametrize(
+    ("strategy_class", "family"),
+    (
+        (StrategyClass.ARBITRAGE, EvaluationContractFamily.ARBITRAGE_EXECUTION),
+        (StrategyClass.DUTCHING, EvaluationContractFamily.DUTCHING_EXECUTION),
+    ),
+)
+def test_multileg_paper_stage_does_not_replace_complete_economic_proof(
+    monkeypatch,
+    strategy_class,
+    family,
+):
+    ledger = _ledger(_row("candidate", terminal=True))
+    monkeypatch.setattr(
+        EvaluationUniverseLedger,
+        "current_stage",
+        lambda self, row_id: FunnelStage.ACCEPTED,
+    )
+    protocol = _protocol(
+        ledger,
+        strategy_class=strategy_class,
+        family=family,
+    )
+    candidate, baselines = _results(protocol)
+
+    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+    assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
+    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
+    assert (
+        "external_multi_leg_acceptance_and_settlement_not_verified"
+        in report.external_evidence_gaps
+    )
 
 
 def test_arbitrage_without_terminal_space_authority_is_insufficient():

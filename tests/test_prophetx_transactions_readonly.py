@@ -106,7 +106,7 @@ def test_bad_query_fails_closed(kwargs):
 
 @pytest.mark.parametrize("overrides", [
     {"status": "Unknown"}, {"transaction_type": "MYSTERY"}, {"amount": -1},
-    {"amount": Decimal("-0")}, {"amount": "1.0"}, {"change": "1.0"},
+    {"amount": "1.0"}, {"change": "1.0"},
     {"created_at": "2026-08-10T14:00:00"},
 ])
 def test_bad_row_fails_closed(overrides):
@@ -159,6 +159,17 @@ def test_nonstandard_json_numbers_fail_closed(literal):
     )
     c, _ = client(body)
     with pytest.raises(ProphetXReadOnlyError):
+        c.read_page()
+
+
+def test_negative_zero_amount_is_not_unsigned_canonical_money():
+    body = (
+        b'{"data":{"transactions":[{"status":"Completed","user_id":"u",'
+        b'"transaction_type":"PAY","amount":-0,"change":0,"balance":1,'
+        b'"balance_before":1,"created_at":"2026-08-10T14:00:00Z"}]}}'
+    )
+    c, _ = client(body)
+    with pytest.raises(ProphetXReadOnlyError, match="unsigned"):
         c.read_page()
 
 

@@ -22,7 +22,12 @@ _OBSERVED_AT = "2026-09-23T00:00:00+00:00"
 _HASH = "a" * 64
 
 
-def _snapshot(amount: Decimal) -> BookmakerAccountSnapshot:
+def _snapshot(
+    amount: Decimal,
+    *,
+    observation_id: str = "balance-1",
+    observed_at: str = _OBSERVED_AT,
+) -> BookmakerAccountSnapshot:
     profile = BookmakerCapabilityProfile(
         venue_id="book-a",
         account_id="acct-a",
@@ -35,7 +40,7 @@ def _snapshot(amount: Decimal) -> BookmakerAccountSnapshot:
                 state=BookmakerCapabilityState.SUPPORTED,
             ),
         ),
-        observed_at=_OBSERVED_AT,
+        observed_at=observed_at,
         source_ref="bounded-decimal-regression",
         source_payload_sha256=_HASH,
     )
@@ -43,16 +48,16 @@ def _snapshot(amount: Decimal) -> BookmakerAccountSnapshot:
         venue_id="book-a",
         account_id="acct-a",
         adapter_id="adapter-a",
-        observation_id="balance-1",
+        observation_id=observation_id,
         currency="EUR",
         available_balance=amount,
-        observed_at=_OBSERVED_AT,
+        observed_at=observed_at,
         source_payload_sha256=_HASH,
     )
     return BookmakerAccountSnapshot(
         profile=profile,
         observed_capabilities=frozenset({BookmakerCapability.BALANCE_READ}),
-        observed_at=_OBSERVED_AT,
+        observed_at=observed_at,
         balance=balance,
     )
 
@@ -89,6 +94,44 @@ def test_zero_with_extreme_exponent_canonicalizes_without_expansion() -> None:
 
     assert canonical["balance"]["available_balance"] == "0"
     assert len(snapshot_fingerprint(_snapshot(Decimal("0E-1000000")))) == 64
+
+
+@pytest.mark.parametrize(
+    "zero_alias",
+    (
+        Decimal("0E+1000000"),
+        Decimal("0E-1000000"),
+        Decimal("-0E+1000000"),
+        Decimal("-0E-1000000"),
+    ),
+)
+def test_reconciliation_delta_treats_zero_exponent_as_scale_neutral(
+    tmp_path,
+    zero_alias: Decimal,
+) -> None:
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+
+    assert store.append_snapshot(
+        _snapshot(
+            Decimal("1"),
+            observation_id="balance-1",
+            observed_at="2026-09-23T00:00:00+00:00",
+        )
+    )
+    assert store.append_snapshot(
+        _snapshot(
+            zero_alias,
+            observation_id="balance-2",
+            observed_at="2026-09-23T00:00:01+00:00",
+        )
+    )
+
+    state = store.latest_state()
+    assert state is not None
+    assert state.unexplained_balance_delta is not None
+    assert state.unexplained_balance_delta.amount == Decimal("-1")
+    assert state.unexplained_balance_delta.previous_observation_id == "balance-1"
+    assert state.unexplained_balance_delta.current_observation_id == "balance-2"
 
 
 def test_exact_ordinary_high_precision_decimal_remains_unrounded() -> None:

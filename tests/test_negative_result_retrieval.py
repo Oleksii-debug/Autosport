@@ -259,17 +259,9 @@ def test_backfilled_question_hypothesis_protocol_lineage_fails_closed(tmp_path):
     binding = ScientificProtocolBinding(
         research_protocol_id="late-protocol",
         research_question_id=question.question_id,
-        research_question_sha256=(
-            _payload_sha(question)
-            if research_question_sha256 is None
-            else research_question_sha256
-        ),
+        research_question_sha256=_payload_sha(question),
         hypothesis_id=hypothesis.hypothesis_id,
-        hypothesis_sha256=(
-            _payload_sha(hypothesis)
-            if hypothesis_sha256 is None
-            else hypothesis_sha256
-        ),
+        hypothesis_sha256=_payload_sha(hypothesis),
         inclusion_criteria="frozen",
         exclusion_criteria="invalid provenance",
         lawful_source_requirements="lawful fixture",

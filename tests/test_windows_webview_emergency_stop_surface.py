@@ -43,7 +43,11 @@ def test_packaged_machine_audit_rejects_missing_emergency_stop(monkeypatch, tmp_
     html = web_shell_index_path().read_text(encoding="utf-8")
     html = _replace_once(
         html,
-        '      <button id="emergency-stop-action" type="button" aria-describedby="emergency-stop-boundary emergency-stop-status">Активувати аварійний STOP</button>\n',
+        (
+            '      <button id="emergency-stop-action" type="button" '
+            'aria-describedby="emergency-stop-boundary emergency-stop-status">'
+            "Активувати аварійний STOP</button>\\n"
+        ),
         "",
     )
 

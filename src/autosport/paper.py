@@ -1424,7 +1424,10 @@ class PaperBook:
         source = Path(path)
         payload = source.read_bytes()
         book = cls._decode_snapshot_bytes(payload)
-        if book.tickets:
+        if (
+            book.tickets
+            or book._snapshot_schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
+        ):
             try:
                 _verify_snapshot_witness(source, payload)
             except ValueError as exc:

@@ -360,6 +360,12 @@ class ProphetXFixContinuityStore:
                         FOREIGN KEY (economic_event_key) REFERENCES execution_events(economic_event_key),
                         FOREIGN KEY (session_key) REFERENCES sessions(session_key)
                     ) STRICT;
+                    CREATE TABLE IF NOT EXISTS reset_plan_authority (
+                        session_key TEXT PRIMARY KEY,
+                        checkpoint_revision INTEGER,
+                        plan_sha256 TEXT NOT NULL,
+                        observed_at TEXT NOT NULL
+                    ) STRICT;
                 """
             )
             conn.execute("BEGIN IMMEDIATE")
@@ -520,7 +526,7 @@ class ProphetXFixContinuityStore:
             checkpoint = None
 
         if local_sequence_store_lost:
-            return FixReconnectPlan(
+            plan = FixReconnectPlan(
                 identity,
                 checkpoint.revision if checkpoint else None,
                 ReconnectDisposition.RESET_LOCAL_STORE_LOST,
@@ -532,13 +538,20 @@ class ProphetXFixContinuityStore:
                 venue_reset_notice_seen,
                 observed,
             )
+            return self._publish_reconnect_plan(plan)
+
+        if checkpoint is None:
+            raise ProphetXFixCheckpointMissing("FIX session has no durable checkpoint")
 
         if disconnected_since is not None:
             disconnected = _canonical_time(disconnected_since, "disconnected_since")
             if _time(disconnected, "disconnected_since") > _time(observed, "observed_at"):
                 raise ProphetXFixContractError("disconnected_since is in the future")
-            if _time(observed, "observed_at") - _time(disconnected, "disconnected_since") > _PROVIDER_RESEND_WINDOW:
-                return FixReconnectPlan(
+            if (
+                _time(observed, "observed_at") - _time(disconnected, "disconnected_since")
+                > _PROVIDER_RESEND_WINDOW
+            ):
+                plan = FixReconnectPlan(
                     identity,
                     checkpoint.revision,
                     ReconnectDisposition.RESET_RESEND_WINDOW_EXCEEDED,
@@ -550,14 +563,14 @@ class ProphetXFixContinuityStore:
                     venue_reset_notice_seen,
                     observed,
                 )
+                return self._publish_reconnect_plan(plan)
 
         expected = checkpoint.next_expected_inbound
         if provider_logon_msg_seq_num < expected:
-            disposition = ReconnectDisposition.RESET_PROVIDER_SEQUENCE_LOWER
-            return FixReconnectPlan(
+            plan = FixReconnectPlan(
                 identity,
                 checkpoint.revision,
-                disposition,
+                ReconnectDisposition.RESET_PROVIDER_SEQUENCE_LOWER,
                 provider_logon_msg_seq_num,
                 True,
                 None,
@@ -566,8 +579,9 @@ class ProphetXFixContinuityStore:
                 venue_reset_notice_seen,
                 observed,
             )
+            return self._publish_reconnect_plan(plan)
         if provider_logon_msg_seq_num > expected:
-            return FixReconnectPlan(
+            plan = FixReconnectPlan(
                 identity,
                 checkpoint.revision,
                 ReconnectDisposition.RESEND_REQUIRED,
@@ -579,7 +593,8 @@ class ProphetXFixContinuityStore:
                 venue_reset_notice_seen,
                 observed,
             )
-        return FixReconnectPlan(
+            return self._publish_reconnect_plan(plan)
+        plan = FixReconnectPlan(
             identity,
             checkpoint.revision,
             ReconnectDisposition.RESUME,
@@ -591,6 +606,68 @@ class ProphetXFixContinuityStore:
             venue_reset_notice_seen,
             observed,
         )
+        return self._publish_reconnect_plan(plan)
+
+    def _publish_reconnect_plan(self, plan: FixReconnectPlan) -> FixReconnectPlan:
+        if type(plan) is not FixReconnectPlan:
+            raise ProphetXFixContractError(
+                "reconnect plan authority requires canonical plan"
+            )
+        digest = _reconnect_plan_sha256(plan)
+        observed = _canonical_time(plan.observed_at, "plan observed_at")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    """SELECT plan_sha256, observed_at
+                       FROM reset_plan_authority WHERE session_key=?""",
+                    (plan.identity.session_key,),
+                ).fetchone()
+                if existing is not None:
+                    old_time = _time(
+                        existing["observed_at"], "stored reset plan observed_at"
+                    )
+                    new_time = _time(observed, "plan observed_at")
+                    if old_time > new_time:
+                        raise ProphetXFixEvidenceConflict(
+                            "reconnect observation time rolls back reset authority"
+                        )
+                    if old_time == new_time:
+                        if not plan.reset_seq_num_flag_candidate:
+                            raise ProphetXFixEvidenceConflict(
+                                "same-time reconnect facts conflict with reset authority"
+                            )
+                        if existing["plan_sha256"] != digest:
+                            raise ProphetXFixEvidenceConflict(
+                                "same-time reset authority has conflicting reconnect facts"
+                            )
+                if plan.reset_seq_num_flag_candidate:
+                    conn.execute(
+                        """INSERT INTO reset_plan_authority(
+                            session_key, checkpoint_revision, plan_sha256, observed_at
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(session_key) DO UPDATE SET
+                            checkpoint_revision=excluded.checkpoint_revision,
+                            plan_sha256=excluded.plan_sha256,
+                            observed_at=excluded.observed_at""",
+                        (
+                            plan.identity.session_key,
+                            plan.checkpoint_revision,
+                            digest,
+                            observed,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM reset_plan_authority WHERE session_key=?",
+                        (plan.identity.session_key,),
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        return plan
 
     def record_reset(
         self,
@@ -605,6 +682,7 @@ class ProphetXFixContinuityStore:
         observed = _canonical_time(observed_at, "observed_at")
         if _time(observed, "observed_at") < _time(plan.observed_at, "plan observed_at"):
             raise ProphetXFixContractError("reset cannot precede reconnect plan")
+        plan_digest = _reconnect_plan_sha256(plan)
 
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -612,7 +690,35 @@ class ProphetXFixContinuityStore:
                 row = conn.execute(
                     "SELECT * FROM sessions WHERE session_key=?", (plan.identity.session_key,)
                 ).fetchone()
-                if row is None:
+                current: FixSequenceCheckpoint | None = None
+                if row is not None:
+                    current = self._checkpoint_from_row(row)
+                    if current.identity != plan.identity:
+                        raise ProphetXFixEvidenceConflict("reset session identity changed")
+                    if plan.checkpoint_revision != current.revision:
+                        raise ProphetXFixEvidenceConflict("reset plan is stale")
+
+                authority = conn.execute(
+                    """SELECT checkpoint_revision, plan_sha256, observed_at
+                       FROM reset_plan_authority WHERE session_key=?""",
+                    (plan.identity.session_key,),
+                ).fetchone()
+                if authority is None or authority["plan_sha256"] != plan_digest:
+                    raise ProphetXFixEvidenceConflict(
+                        "reset plan was not issued by the continuity store"
+                    )
+                if authority["checkpoint_revision"] != plan.checkpoint_revision:
+                    raise ProphetXFixEvidenceConflict(
+                        "reset plan authority revision does not match plan"
+                    )
+                if _canonical_time(
+                    authority["observed_at"], "stored reset plan observed_at"
+                ) != _canonical_time(plan.observed_at, "plan observed_at"):
+                    raise ProphetXFixEvidenceConflict(
+                        "reset plan authority observation does not match plan"
+                    )
+
+                if current is None:
                     if plan.disposition is not ReconnectDisposition.RESET_LOCAL_STORE_LOST:
                         raise ProphetXFixContractError("reset target session is missing")
                     conn.execute(
@@ -623,26 +729,33 @@ class ProphetXFixContinuityStore:
                         ) VALUES (?, ?, 1, 1, 0, 1, 1, 1, ?)""",
                         (plan.identity.session_key, _identity_json(plan.identity), observed),
                     )
-                    conn.execute("COMMIT")
-                    return self.load_checkpoint(plan.identity)
-                current = self._checkpoint_from_row(row)
-                if current.identity != plan.identity:
-                    raise ProphetXFixEvidenceConflict("reset session identity changed")
-                if plan.checkpoint_revision != current.revision:
-                    raise ProphetXFixEvidenceConflict("reset plan is stale")
+                else:
+                    conn.execute(
+                        """UPDATE sessions
+                           SET next_expected_inbound=1, next_outbound=1,
+                               last_durable_inbound=0, reset_epoch=reset_epoch+1,
+                               revision=revision+1, reconciliation_required=1,
+                               updated_at=? WHERE session_key=? AND revision=?""",
+                        (observed, plan.identity.session_key, current.revision),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                        raise ProphetXFixEvidenceConflict(
+                            "reset checkpoint changed concurrently"
+                        )
+
                 conn.execute(
-                    """UPDATE sessions
-                       SET next_expected_inbound=1, next_outbound=1,
-                           last_durable_inbound=0, reset_epoch=reset_epoch+1,
-                           revision=revision+1, reconciliation_required=1,
-                           updated_at=? WHERE session_key=? AND revision=?""",
-                    (observed, plan.identity.session_key, current.revision),
+                    """DELETE FROM reset_plan_authority
+                       WHERE session_key=? AND plan_sha256=?""",
+                    (plan.identity.session_key, plan_digest),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] != 1:
-                    raise ProphetXFixEvidenceConflict("reset checkpoint changed concurrently")
+                    raise ProphetXFixEvidenceConflict(
+                        "reset plan authority changed concurrently"
+                    )
                 conn.execute("COMMIT")
             except Exception:
-                conn.execute("ROLLBACK")
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
                 raise
         return self.load_checkpoint(plan.identity)
 
@@ -720,16 +833,6 @@ class ProphetXFixContinuityStore:
         session_key = identity.session_key
         semantic = observation.semantic_sha256
         event_key = observation.economic_event_key
-        observation_sha = _hash_json(
-            f"{_PROTOCOL}.report-provenance",
-            {
-                "session_key": session_key,
-                "stream": identity.stream.value,
-                "msg_seq_num": observation.msg_seq_num,
-                "exec_id": observation.exec_id,
-                "semantic_sha256": semantic,
-            },
-        )
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -741,6 +844,17 @@ class ProphetXFixContinuityStore:
                 checkpoint = self._checkpoint_from_row(row)
                 if checkpoint.identity != identity:
                     raise ProphetXFixEvidenceConflict("execution report session identity changed")
+                observation_sha = _hash_json(
+                    f"{_PROTOCOL}.report-provenance",
+                    {
+                        "session_key": session_key,
+                        "reset_epoch": checkpoint.reset_epoch,
+                        "stream": identity.stream.value,
+                        "msg_seq_num": observation.msg_seq_num,
+                        "exec_id": observation.exec_id,
+                        "semantic_sha256": semantic,
+                    },
+                )
 
                 seq_row = conn.execute(
                     """SELECT economic_event_key, observation_sha256
@@ -850,6 +964,9 @@ class ProphetXFixContinuityStore:
             pruned_rows = conn.execute("SELECT * FROM pruned_ranges").fetchall()
             event_rows = conn.execute("SELECT * FROM execution_events").fetchall()
             provenance_rows = conn.execute("SELECT * FROM report_provenance").fetchall()
+            reset_authority_rows = conn.execute(
+                "SELECT * FROM reset_plan_authority"
+            ).fetchall()
 
         checkpoints: dict[str, FixSequenceCheckpoint] = {}
         for row in session_rows:
@@ -901,14 +1018,21 @@ class ProphetXFixContinuityStore:
             events[key] = row
 
         for row in provenance_rows:
-            if row["session_key"] not in checkpoints:
+            checkpoint = checkpoints.get(row["session_key"])
+            if checkpoint is None:
                 raise ProphetXFixEvidenceConflict("orphan report provenance session")
             if row["economic_event_key"] not in events:
                 raise ProphetXFixEvidenceConflict("orphan report provenance event")
             _sequence(row["msg_seq_num"], "stored msg_seq_num")
             _nonnegative_int(row["reset_epoch"], "stored reset_epoch")
-            if row["stream"] not in {item.value for item in ProphetXFixStream}:
-                raise ProphetXFixEvidenceConflict("stored report stream is invalid")
+            if row["reset_epoch"] > checkpoint.reset_epoch:
+                raise ProphetXFixEvidenceConflict(
+                    "report provenance references future reset epoch"
+                )
+            if row["stream"] != checkpoint.identity.stream.value:
+                raise ProphetXFixEvidenceConflict(
+                    "stored report stream does not match session identity"
+                )
             observed = _canonical_time(row["observed_at"], "stored observed_at")
             stored_observation = _digest(
                 row["observation_sha256"], "stored observation_sha256"
@@ -918,6 +1042,7 @@ class ProphetXFixContinuityStore:
                 f"{_PROTOCOL}.report-provenance",
                 {
                     "session_key": row["session_key"],
+                    "reset_epoch": row["reset_epoch"],
                     "stream": row["stream"],
                     "msg_seq_num": row["msg_seq_num"],
                     "exec_id": event["exec_id"],
@@ -929,6 +1054,26 @@ class ProphetXFixContinuityStore:
                     "stored report provenance digest is invalid"
                 )
             del observed
+
+        for row in reset_authority_rows:
+            session_key = _digest(
+                row["session_key"], "stored reset authority session_key"
+            )
+            _digest(row["plan_sha256"], "stored reset authority plan_sha256")
+            _time(row["observed_at"], "stored reset authority observed_at")
+            revision = row["checkpoint_revision"]
+            if revision is not None:
+                _positive_int(revision, "stored reset authority checkpoint_revision")
+            checkpoint = checkpoints.get(session_key)
+            if checkpoint is None and revision is not None:
+                raise ProphetXFixEvidenceConflict(
+                    "missing-session reset authority cannot carry checkpoint revision"
+                )
+            if checkpoint is not None and revision is not None:
+                if revision > checkpoint.revision:
+                    raise ProphetXFixEvidenceConflict(
+                        "reset authority references future checkpoint revision"
+                    )
 
     @staticmethod
     def _checkpoint_from_row(row: sqlite3.Row) -> FixSequenceCheckpoint:
@@ -969,6 +1114,28 @@ def _identity(value: object) -> FixSessionIdentity:
     if type(value) is not FixSessionIdentity:
         raise ProphetXFixContractError("session identity must be canonical FixSessionIdentity")
     return value
+
+
+def _reconnect_plan_sha256(plan: FixReconnectPlan) -> str:
+    if type(plan) is not FixReconnectPlan:
+        raise ProphetXFixContractError("reconnect plan digest requires canonical plan")
+    return _hash_json(
+        f"{_PROTOCOL}.reconnect-plan-authority",
+        {
+            "identity": plan.identity.canonical_payload,
+            "checkpoint_revision": plan.checkpoint_revision,
+            "disposition": plan.disposition.value,
+            "provider_logon_msg_seq_num": plan.provider_logon_msg_seq_num,
+            "reset_seq_num_flag_candidate": plan.reset_seq_num_flag_candidate,
+            "resend_begin_seq": plan.resend_begin_seq,
+            "resend_end_seq": plan.resend_end_seq,
+            "application_reconciliation_required": (
+                plan.application_reconciliation_required
+            ),
+            "venue_reset_notice_seen": plan.venue_reset_notice_seen,
+            "observed_at": _canonical_time(plan.observed_at, "plan observed_at"),
+        },
+    )
 
 
 def _identity_json(identity: FixSessionIdentity) -> str:

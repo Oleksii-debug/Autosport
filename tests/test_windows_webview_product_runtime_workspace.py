@@ -172,3 +172,12 @@ def test_product_runtime_state_projects_canonical_start_actionability() -> None:
     source = inspect.getsource(AutosportWebController.state)
 
     assert '"can_start": self._product_runtime_can_start()' in source
+
+
+def test_product_runtime_terminal_error_quarantines_active_workspace() -> None:
+    source = inspect.getsource(AutosportWebController._poll_workers)
+    error_start = source.index('elif product_message.kind == "ERROR":')
+    error_block = source[error_start:]
+
+    assert "self._recovery_required_workspaces.add(Path(self._active_workspace))" in error_block
+    assert "self._recovery_required_workspaces.add(Path(self.workspace))" not in error_block

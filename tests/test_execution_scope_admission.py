@@ -244,6 +244,29 @@ def test_missing_or_negative_place_bet_capability_is_explicit_blocker(
         GovernancePermissionState.PROHIBITED,
     ],
 )
+def test_other_action_kind_cannot_reuse_place_bet_capability() -> None:
+    profile = _profile(BookmakerCapabilityState.SUPPORTED)
+    governance = _governance()
+    integration = bind_bookmaker_integration(
+        profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-23T17:01:30+00:00",
+        source_ref="integration-evidence",
+        source_payload_sha256=H5,
+    )
+    assessment = assess_execution_scope_pre_admission(
+        _scope(action_kind="CANCEL_BET"),
+        profile=profile,
+        governance=governance,
+        integration=integration,
+        bound_plan=_bound_plan(profile),
+    )
+
+    assert assessment.provider_action_documented is False
+    assert ExecutionAdmissionBlocker.ACTION_NOT_DOCUMENTED in assessment.blocking_reasons
+    assert assessment.execution_admitted is False
+
+
 def test_governance_never_substitutes_for_write_entitlement(
     permission: GovernancePermissionState,
 ) -> None:

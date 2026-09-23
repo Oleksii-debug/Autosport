@@ -31,6 +31,16 @@
     if (document.activeElement !== node && node.value !== text) node.value = text;
   }
 
+  function setDisabledWithFocusFallback(node, disabled) {
+    const wasFocused = document.activeElement === node;
+    node.disabled = Boolean(disabled);
+    if (wasFocused && node.disabled) {
+      const fallback = errorNode.hidden ? statusNode : errorNode;
+      fallback.tabIndex = -1;
+      fallback.focus();
+    }
+  }
+
   function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop) {
     const focused = document.activeElement;
     startButton.disabled = canStart !== true;
@@ -223,7 +233,7 @@
     applyOwnerDefaults(state.owner.defaults);
     document.querySelectorAll("[data-owner-field], #327, #328, #owner-confirm-checkbox, #owner-confirm")
       .forEach((node) => {
-        node.disabled = !state.owner.can_initialize;
+        setDisabledWithFocusFallback(node, !state.owner.can_initialize);
       });
 
     const operations = byId(331);
@@ -245,16 +255,13 @@
       productRuntime.can_stop,
     );
 
-    const busy = state.busy && Object.values(state.busy).some(Boolean);
-    [101, 102, 103, 104, 105, 106, 107, 108, 109].forEach((id) => {
-      byId(id).disabled = Boolean(busy);
+    const busyDisabled = Boolean(state.busy && Object.values(state.busy).some(Boolean));
+    [101, 102, 103, 104, 105, 106, 108, 109].forEach((id) => {
+      setDisabledWithFocusFallback(byId(id), busyDisabled);
     });
-    if (state.strategy_requires_plan === false) {
-      byId(107).disabled = true;
-      byId("research-plan-path").disabled = true;
-    } else {
-      byId("research-plan-path").disabled = Boolean(busy);
-    }
+    const planDisabled = busyDisabled || state.strategy_requires_plan === false;
+    setDisabledWithFocusFallback(byId(107), planDisabled);
+    setDisabledWithFocusFallback(byId("research-plan-path"), planDisabled);
   }
 
   async function refreshState() {

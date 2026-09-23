@@ -82,6 +82,29 @@ def test_runtime_start_stop_transition_keeps_focus_on_an_action() -> None:
     assert "productRuntime.can_stop," in source
 
 
+def test_poll_driven_disable_moves_focus_to_status_or_error() -> None:
+    source = _source()
+
+    assert "function setDisabledWithFocusFallback(node, disabled)" in source
+    assert "const wasFocused = document.activeElement === node;" in source
+    assert "node.disabled = Boolean(disabled);" in source
+    assert "const fallback = errorNode.hidden ? statusNode : errorNode;" in source
+    assert "fallback.tabIndex = -1;" in source
+    assert "fallback.focus();" in source
+
+    assert "setDisabledWithFocusFallback(node, !state.owner.can_initialize);" in source
+    assert "const busyDisabled = Boolean(state.busy && Object.values(state.busy).some(Boolean));" in source
+    assert "setDisabledWithFocusFallback(byId(id), busyDisabled);" in source
+    assert "const planDisabled = busyDisabled || state.strategy_requires_plan === false;" in source
+    assert "setDisabledWithFocusFallback(byId(107), planDisabled);" in source
+    assert 'setDisabledWithFocusFallback(byId("research-plan-path"), planDisabled);' in source
+
+    assert "node.disabled = !state.owner.can_initialize;" not in source
+    assert "byId(id).disabled = Boolean(busy);" not in source
+    assert "byId(107).disabled = true;" not in source
+    assert 'byId("research-plan-path").disabled = true;' not in source
+
+
 def test_poll_and_native_accessibility_contract_remain_intact() -> None:
     source = _source()
 

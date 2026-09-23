@@ -299,6 +299,11 @@ class LocalComputeAllocationBasisReview:
     request_denominator: int
     measurement_document_b64: str
     measurement_document_sha256: str
+    currency: str
+    owner_goal_id: str
+    owner_goal_revision: int
+    owner_bankroll_id: str
+    owner_goal_sha256: str
 
     def __post_init__(self) -> None:
         _text(self.basis_id, "basis_id")
@@ -329,6 +334,18 @@ class LocalComputeAllocationBasisReview:
             raise LocalComputeAllocationBasisError(
                 "measurement document digest mismatch"
             )
+        _currency(self.currency)
+        _text(self.owner_goal_id, "owner_goal_id")
+        if (
+            type(self.owner_goal_revision) is not int
+            or isinstance(self.owner_goal_revision, bool)
+            or self.owner_goal_revision < 1
+        ):
+            raise LocalComputeAllocationBasisError(
+                "owner_goal_revision must be a positive integer"
+            )
+        _text(self.owner_bankroll_id, "owner_bankroll_id")
+        _sha(self.owner_goal_sha256, "owner_goal_sha256")
         _derive_per_request(
             self.total_allocable_cost,
             self.request_denominator,
@@ -369,6 +386,11 @@ class LocalComputeAllocationBasisReview:
             "denominator_unit": "request",
             "measurement_document_b64": self.measurement_document_b64,
             "measurement_document_sha256": self.measurement_document_sha256,
+            "currency": self.currency,
+            "owner_goal_id": self.owner_goal_id,
+            "owner_goal_revision": self.owner_goal_revision,
+            "owner_bankroll_id": self.owner_bankroll_id,
+            "owner_goal_sha256": self.owner_goal_sha256,
         }
 
     @property
@@ -376,7 +398,7 @@ class LocalComputeAllocationBasisReview:
         return _digest(self.payload())
 
 
-def prepare_owner_review(
+def _prepare_owner_review(
     *,
     basis_id: str,
     backend_id: str,
@@ -389,8 +411,13 @@ def prepare_owner_review(
     total_allocable_cost: Decimal,
     request_denominator: int,
     measurement_document: bytes,
+    currency: str,
+    owner_goal_id: str,
+    owner_goal_revision: int,
+    owner_bankroll_id: str,
+    owner_goal_sha256: str,
 ) -> LocalComputeAllocationBasisReview:
-    """Build the exact immutable snapshot an owner must review before publish."""
+    """Build a snapshot whose denomination/owner identity came from the store."""
 
     document = _document_bytes(measurement_document)
     return LocalComputeAllocationBasisReview(
@@ -425,6 +452,11 @@ def prepare_owner_review(
         measurement_document_sha256=hashlib.sha256(
             document
         ).hexdigest(),
+        currency=_currency(currency),
+        owner_goal_id=_text(owner_goal_id, "owner_goal_id"),
+        owner_goal_revision=owner_goal_revision,
+        owner_bankroll_id=_text(owner_bankroll_id, "owner_bankroll_id"),
+        owner_goal_sha256=_sha(owner_goal_sha256, "owner_goal_sha256"),
     )
 
 
@@ -465,6 +497,11 @@ class LocalComputeAllocationBasisRecord:
             request_denominator=self.request_denominator,
             measurement_document_b64=self.measurement_document_b64,
             measurement_document_sha256=self.measurement_document_sha256,
+            currency=self.currency,
+            owner_goal_id=self.owner_goal_id,
+            owner_goal_revision=self.owner_goal_revision,
+            owner_bankroll_id=self.owner_bankroll_id,
+            owner_goal_sha256=self.owner_goal_sha256,
         )
         if self.amount_per_request != review.amount_per_request:
             raise LocalComputeAllocationBasisError(
@@ -474,7 +511,6 @@ class LocalComputeAllocationBasisRecord:
             raise LocalComputeAllocationBasisError(
                 "owner review digest mismatch"
             )
-        _currency(self.currency)
         available = _instant(self.available_at, "available_at")
         if _instant(
             self.measurement_period_end,
@@ -483,13 +519,6 @@ class LocalComputeAllocationBasisRecord:
             raise LocalComputeAllocationBasisError(
                 "allocation basis cannot be available before measurement period end"
             )
-        _text(self.owner_goal_id, "owner_goal_id")
-        if type(self.owner_goal_revision) is not int or self.owner_goal_revision < 1:
-            raise LocalComputeAllocationBasisError(
-                "owner_goal_revision must be a positive integer"
-            )
-        _text(self.owner_bankroll_id, "owner_bankroll_id")
-        _sha(self.owner_goal_sha256, "owner_goal_sha256")
 
     def payload(self) -> dict[str, object]:
         return {
@@ -506,14 +535,14 @@ class LocalComputeAllocationBasisRecord:
                 request_denominator=self.request_denominator,
                 measurement_document_b64=self.measurement_document_b64,
                 measurement_document_sha256=self.measurement_document_sha256,
+                currency=self.currency,
+                owner_goal_id=self.owner_goal_id,
+                owner_goal_revision=self.owner_goal_revision,
+                owner_bankroll_id=self.owner_bankroll_id,
+                owner_goal_sha256=self.owner_goal_sha256,
             ).payload(),
-            "currency": self.currency,
             "owner_review_sha256": self.owner_review_sha256,
             "available_at": _time(self.available_at, "available_at"),
-            "owner_goal_id": self.owner_goal_id,
-            "owner_goal_revision": self.owner_goal_revision,
-            "owner_bankroll_id": self.owner_bankroll_id,
-            "owner_goal_sha256": self.owner_goal_sha256,
         }
 
     @property
@@ -696,6 +725,46 @@ class LocalComputeAllocationBasisAuthorityStore:
             ) from exc
         return goal, _goal_sha256(goal)
 
+    def prepare_owner_review(
+        self,
+        *,
+        basis_id: str,
+        backend_id: str,
+        model_id: str,
+        config_sha256: str,
+        allocation_policy_id: str,
+        measurement_source_id: str,
+        measurement_period_start: str,
+        measurement_period_end: str,
+        total_allocable_cost: Decimal,
+        request_denominator: int,
+        measurement_document: bytes,
+    ) -> LocalComputeAllocationBasisReview:
+        """Build an exact review snapshot bound to the current durable owner goal."""
+
+        with WorkspaceEconomicLock(self.workspace):
+            self._recover()
+            self._records = self._load()
+            goal, goal_sha256 = self._current_goal()
+            return _prepare_owner_review(
+                basis_id=basis_id,
+                backend_id=backend_id,
+                model_id=model_id,
+                config_sha256=config_sha256,
+                allocation_policy_id=allocation_policy_id,
+                measurement_source_id=measurement_source_id,
+                measurement_period_start=measurement_period_start,
+                measurement_period_end=measurement_period_end,
+                total_allocable_cost=total_allocable_cost,
+                request_denominator=request_denominator,
+                measurement_document=measurement_document,
+                currency=goal.currency,
+                owner_goal_id=goal.goal_id,
+                owner_goal_revision=goal.revision,
+                owner_bankroll_id=goal.bankroll_id,
+                owner_goal_sha256=goal_sha256,
+            )
+
     def publish_owner_basis(
         self,
         review: LocalComputeAllocationBasisReview,
@@ -717,6 +786,16 @@ class LocalComputeAllocationBasisAuthorityStore:
             self._recover()
             self._records = self._load()
             goal, goal_sha256 = self._current_goal()
+            if (
+                review.currency != goal.currency
+                or review.owner_goal_id != goal.goal_id
+                or review.owner_goal_revision != goal.revision
+                or review.owner_bankroll_id != goal.bankroll_id
+                or review.owner_goal_sha256 != goal_sha256
+            ):
+                raise LocalComputeAllocationBasisError(
+                    "reviewed EconomicGoal changed before owner confirmation"
+                )
 
             for existing in self._records:
                 if existing.basis_id != review.basis_id:
@@ -755,15 +834,15 @@ class LocalComputeAllocationBasisAuthorityStore:
                 total_allocable_cost=review.total_allocable_cost,
                 request_denominator=review.request_denominator,
                 amount_per_request=review.amount_per_request,
-                currency=goal.currency,
+                currency=review.currency,
                 measurement_document_b64=review.measurement_document_b64,
                 measurement_document_sha256=review.measurement_document_sha256,
                 owner_review_sha256=review.review_sha256,
                 available_at=available_at,
-                owner_goal_id=goal.goal_id,
-                owner_goal_revision=goal.revision,
-                owner_bankroll_id=goal.bankroll_id,
-                owner_goal_sha256=goal_sha256,
+                owner_goal_id=review.owner_goal_id,
+                owner_goal_revision=review.owner_goal_revision,
+                owner_bankroll_id=review.owner_bankroll_id,
+                owner_goal_sha256=review.owner_goal_sha256,
             )
             staged = (*self._records, record)
             payload = _state_payload(staged)
@@ -817,6 +896,7 @@ class LocalComputeAllocationBasisAuthorityStore:
         backend_id: str,
         model_id: str,
         config_sha256: str,
+        allocation_policy_id: str,
         decision_at: str,
         bankroll_id: str,
         currency: str,
@@ -827,6 +907,10 @@ class LocalComputeAllocationBasisAuthorityStore:
         canonical_backend = _text(backend_id, "backend_id")
         canonical_model = _text(model_id, "model_id")
         canonical_config = _sha(config_sha256, "config_sha256")
+        canonical_policy = _text(
+            allocation_policy_id,
+            "allocation_policy_id",
+        )
         cutoff = _instant(decision_at, "decision_at")
         canonical_bankroll = _text(bankroll_id, "bankroll_id")
         canonical_currency = _currency(currency)
@@ -850,6 +934,7 @@ class LocalComputeAllocationBasisAuthorityStore:
                 and record.backend_id == canonical_backend
                 and record.model_id == canonical_model
                 and record.config_sha256 == canonical_config
+                and record.allocation_policy_id == canonical_policy
                 and record.owner_goal_id == goal.goal_id
                 and record.owner_goal_revision == goal.revision
                 and record.owner_bankroll_id == goal.bankroll_id
@@ -873,5 +958,4 @@ __all__ = [
     "LocalComputeAllocationBasisError",
     "LocalComputeAllocationBasisRecord",
     "LocalComputeAllocationBasisReview",
-    "prepare_owner_review",
 ]

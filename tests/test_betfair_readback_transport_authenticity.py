@@ -673,6 +673,7 @@ def test_authoritative_read_rejects_in_place_json_dumps_code_mutation_before_net
     finally:
         json.dumps.__code__ = original_code
 
+
 def test_canonical_network_post_uses_explicit_captured_size_bound() -> None:
     post = _canonical_network_post()
 

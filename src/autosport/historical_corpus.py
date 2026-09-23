@@ -10,13 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.parse import parse_qsl, urlsplit
 
 from .dataset import load_dataset
 from .domain import MarketEvent
 from .historical_governance import verify_governance_authority_binding
 from .integrity import atomic_write_json
 from .outcome_lineage import validate_outcome_source_lineage
-from .parlayapi_provider import ParlayApiTableTennisProvider
+from .parlay_sport_provider import _canonical_sport_key
 
 
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
@@ -27,6 +28,20 @@ _REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
 _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
+_TRACKED_ACQUISITION_RESPONSE_HEADERS = (
+    "x-api-version",
+    "x-api-release-date",
+    "deprecation",
+    "sunset",
+    "link",
+    "x-historical-window-hours",
+    "x-historical-window-from",
+    "x-markets-served",
+    "x-markets-unservable",
+    "x-markets-served-elsewhere",
+    "cache-control",
+)
+_MAX_ACQUISITION_HEADER_CHARS = 4096
 _OUTCOME_LINEAGE_DERIVED_FIELDS = frozenset(
     {
         "source_record_id",
@@ -119,6 +134,32 @@ def _canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _market_semantic_content_sha256(
+    events: Sequence[tuple[MarketEvent, dict[str, Any]]],
+) -> str:
+    """Hash provider market semantics without product-local acquisition time.
+
+    Historical capture deliberately stamps captured_at into ingest_ts on every
+    persisted MarketEvent. That timestamp belongs to acquisition provenance,
+    not to provider market content. Keep the exact market artifact SHA bound
+    elsewhere, while the CONTENT axis removes only this product-local field
+    from the canonical parsed event representation.
+    """
+
+    semantic_rows: list[dict[str, Any]] = []
+    for event, _raw in events:
+        row = event.to_dict()
+        row.pop("ingest_ts", None)
+        semantic_rows.append(row)
+    return _canonical_json_sha256(
+        {
+            "schema_version": 1,
+            "kind": "parlay_historical_market_semantic_content",
+            "rows": semantic_rows,
+        }
+    )
+
+
 def _timestamp(value: Any, *, field: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty ISO-8601 timestamp")
@@ -141,6 +182,185 @@ def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{context}.{key} must be a non-empty string")
     return value.strip()
+
+
+def _digest(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = raw.get(key)
+    if (
+        type(value) is not str
+        or value != value.strip()
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(
+            f"{context}.{key} must be a canonical lowercase SHA-256 digest"
+        )
+    return value
+
+
+def _snapshot_acquisition_provenance(
+    evidence: dict[str, Any],
+    *,
+    sport_key: str,
+    requested_at: str,
+    response_sha256: str,
+) -> dict[str, Any] | None:
+    raw = evidence.get("acquisition_provenance")
+    claimed_sha = evidence.get("acquisition_sha256")
+    if raw is None and claimed_sha is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("snapshot acquisition_provenance must be an object when present")
+    acquisition_sha256 = _digest(
+        evidence,
+        "acquisition_sha256",
+        context="snapshot evidence",
+    )
+    if _canonical_json_sha256(raw) != acquisition_sha256:
+        raise ValueError(
+            "snapshot evidence acquisition_sha256 does not match acquisition_provenance"
+        )
+
+    expected_keys = {
+        "schema_version",
+        "kind",
+        "product_kind",
+        "request",
+        "http_status",
+        "response_payload_sha256",
+        "response_headers",
+        "canonical_response_payload_bound",
+        "raw_response_bytes_bound",
+    }
+    if set(raw) != expected_keys:
+        raise ValueError("snapshot acquisition_provenance fields do not match schema v1")
+    if type(raw.get("schema_version")) is not int or raw["schema_version"] != 1:
+        raise ValueError("snapshot acquisition_provenance schema_version must be exact integer 1")
+    if raw.get("kind") != "parlayapi_point_in_time_historical_acquisition":
+        raise ValueError("snapshot acquisition_provenance kind is not supported")
+    if raw.get("product_kind") != "POINT_IN_TIME_ODDS":
+        raise ValueError("snapshot acquisition_provenance product_kind must be POINT_IN_TIME_ODDS")
+    if type(raw.get("http_status")) is not int or raw["http_status"] != 200:
+        raise ValueError("snapshot acquisition_provenance http_status must be exact HTTP 200")
+    if raw.get("canonical_response_payload_bound") is not True:
+        raise ValueError(
+            "snapshot acquisition_provenance must bind the canonical response payload"
+        )
+    if raw.get("raw_response_bytes_bound") is not False:
+        raise ValueError(
+            "snapshot acquisition_provenance cannot claim raw response bytes are bound"
+        )
+    response_payload_sha256 = _digest(
+        raw,
+        "response_payload_sha256",
+        context="snapshot acquisition_provenance",
+    )
+    if response_payload_sha256 != response_sha256:
+        raise ValueError(
+            "snapshot acquisition_provenance response payload digest contradicts snapshot evidence"
+        )
+
+    request = raw.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("snapshot acquisition_provenance.request must be an object")
+    expected_request_keys = {
+        "method",
+        "origin",
+        "base_url_sha256",
+        "endpoint_path",
+        "query",
+        "query_string",
+        "request_url_sha256",
+        "request_url_persisted",
+        "request_credentials_persisted",
+    }
+    if set(request) != expected_request_keys:
+        raise ValueError("snapshot acquisition request fields do not match schema v1")
+    if request.get("method") != "GET":
+        raise ValueError("snapshot acquisition request method must be GET")
+    origin = request.get("origin")
+    if type(origin) is not str or not origin or origin != origin.strip():
+        raise ValueError("snapshot acquisition request origin must be canonical text")
+    parsed_origin = urlsplit(origin)
+    if (
+        parsed_origin.scheme != "https"
+        or not parsed_origin.netloc
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+    ):
+        raise ValueError("snapshot acquisition request origin must be a secret-free HTTPS origin")
+    _digest(request, "base_url_sha256", context="snapshot acquisition request")
+    _digest(request, "request_url_sha256", context="snapshot acquisition request")
+    if request.get("request_url_persisted") is not False:
+        raise ValueError("snapshot acquisition request_url_persisted must be false")
+    if request.get("request_credentials_persisted") is not False:
+        raise ValueError("snapshot acquisition request_credentials_persisted must be false")
+    expected_endpoint = f"/v1/historical/sports/{sport_key}/odds"
+    if request.get("endpoint_path") != expected_endpoint:
+        raise ValueError("snapshot acquisition endpoint_path contradicts sport_key")
+
+    query = request.get("query")
+    if not isinstance(query, dict):
+        raise ValueError("snapshot acquisition request.query must be an object")
+    required_query_keys = {"date", "regions", "markets", "oddsFormat", "dateFormat"}
+    if set(query) != required_query_keys:
+        raise ValueError("snapshot acquisition request.query fields do not match point-in-time odds")
+    if query.get("date") != requested_at:
+        raise ValueError("snapshot acquisition request date contradicts requested_at")
+    if query.get("oddsFormat") != "decimal" or query.get("dateFormat") != "iso":
+        raise ValueError("snapshot acquisition request format parameters are not canonical")
+    for key in ("regions", "markets"):
+        value = query.get(key)
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError(f"snapshot acquisition request {key} must be canonical text")
+        parts = value.split(",")
+        if any(not part or part != part.strip() for part in parts):
+            raise ValueError(f"snapshot acquisition request {key} contains an empty/aliased token")
+
+    query_string = request.get("query_string")
+    if type(query_string) is not str or not query_string:
+        raise ValueError("snapshot acquisition request.query_string must be non-empty text")
+    try:
+        query_pairs = parse_qsl(
+            query_string,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError as exc:
+        raise ValueError("snapshot acquisition request.query_string is invalid") from exc
+    if len(query_pairs) != len(required_query_keys):
+        raise ValueError("snapshot acquisition request.query_string has duplicate/missing fields")
+    query_from_string = dict(query_pairs)
+    if len(query_from_string) != len(query_pairs) or query_from_string != query:
+        raise ValueError("snapshot acquisition request.query_string contradicts query object")
+
+    response_headers = raw.get("response_headers")
+    if not isinstance(response_headers, dict):
+        raise ValueError("snapshot acquisition response_headers must be an object")
+    if set(response_headers) != set(_TRACKED_ACQUISITION_RESPONSE_HEADERS):
+        raise ValueError("snapshot acquisition response_headers fields do not match schema v1")
+    for name in _TRACKED_ACQUISITION_RESPONSE_HEADERS:
+        value = response_headers[name]
+        if value is None:
+            continue
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or len(value) > _MAX_ACQUISITION_HEADER_CHARS
+        ):
+            raise ValueError(
+                f"snapshot acquisition response header {name} is not canonical bounded text"
+            )
+
+    return {
+        "acquisition_sha256": acquisition_sha256,
+        "provenance": raw,
+    }
 
 
 def _governance_proof(path: Path, *, payload: bytes | None = None) -> dict[str, Any]:
@@ -431,7 +651,11 @@ def _snapshot(
     evidence_path: Path,
     *,
     expected_terms_reference: str,
-) -> tuple[list[tuple[MarketEvent, dict[str, Any]]], dict[str, Any]]:
+) -> tuple[
+    list[tuple[MarketEvent, dict[str, Any]]],
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
     evidence_bytes = _read_bytes(evidence_path, context="snapshot evidence")
     evidence = _json_object_bytes(
         evidence_bytes,
@@ -443,9 +667,13 @@ def _snapshot(
         raise ValueError("snapshot evidence schema_version must be 1")
     if evidence.get("kind") != _SNAPSHOT_KIND:
         raise ValueError(f"snapshot evidence kind must be {_SNAPSHOT_KIND}")
-    sport_key = _text(evidence, "sport_key", context="snapshot evidence")
-    if sport_key != ParlayApiTableTennisProvider.sport_key:
-        raise ValueError("snapshot evidence sport_key must be table_tennis")
+    raw_sport_key = evidence.get("sport_key")
+    try:
+        sport_key = _canonical_sport_key(raw_sport_key)
+    except ValueError as exc:
+        raise ValueError(
+            "snapshot evidence sport_key must be one canonical Parlay sport identity"
+        ) from exc
     if evidence.get("has_data") is not True:
         raise ValueError("snapshot evidence must prove has_data=true")
     if evidence.get("point_in_time_snapshot_contains_odds") is not True:
@@ -465,9 +693,14 @@ def _snapshot(
     provider = _text(evidence, "provider", context="snapshot evidence")
     if provider != "parlayapi":
         raise ValueError("snapshot evidence provider must be parlayapi")
-    canonical_source_id = ParlayApiTableTennisProvider.source_id
+    canonical_source_id = f"parlayapi:{sport_key}"
 
-    expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
+    expected_sha = _digest(evidence, "market_sha256", context="snapshot evidence")
+    response_sha256 = _digest(
+        evidence,
+        "response_sha256",
+        context="snapshot evidence",
+    )
     market_bytes = _read_bytes(market_path, context="snapshot market")
     if _sha256_bytes(market_bytes) != expected_sha:
         raise ValueError("snapshot market_sha256 does not match captured market file")
@@ -521,11 +754,26 @@ def _snapshot(
         rows.append((event, raw))
 
     quote_count = evidence.get("quote_count")
-    if not isinstance(quote_count, int) or quote_count != len(rows):
+    if type(quote_count) is not int or quote_count != len(rows):
         raise ValueError("snapshot evidence quote_count does not match captured market rows")
+    fallback_count = evidence.get("snapshot_timestamp_fallback_count", 0)
+    if (
+        type(fallback_count) is not int
+        or fallback_count < 0
+        or fallback_count > quote_count
+    ):
+        raise ValueError(
+            "snapshot evidence snapshot_timestamp_fallback_count must be an exact bounded integer"
+        )
     if not rows:
         raise ValueError("historical snapshot market file is empty")
-    return rows, evidence
+    acquisition_provenance = _snapshot_acquisition_provenance(
+        evidence,
+        sport_key=sport_key,
+        requested_at=requested_at,
+        response_sha256=response_sha256,
+    )
+    return rows, evidence, acquisition_provenance
 
 
 def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -585,7 +833,7 @@ def assemble_historical_corpus(
     for market_value, evidence_value in snapshot_pairs:
         market_path = Path(market_value)
         evidence_path = Path(evidence_value)
-        rows, evidence = _snapshot(
+        rows, evidence, acquisition_provenance = _snapshot(
             market_path,
             evidence_path,
             expected_terms_reference=proof["terms_reference"],
@@ -610,10 +858,25 @@ def assemble_historical_corpus(
             {
                 "evidence_sha256": evidence_sha256,
                 "market_sha256": str(evidence["market_sha256"]),
-                "response_sha256": str(evidence.get("response_sha256", "")),
+                "response_sha256": str(evidence["response_sha256"]),
                 "requested_at": str(evidence["requested_at"]),
                 "snapshot_at": str(evidence["snapshot_at"]),
                 "captured_at": captured_at,
+                "sport_key": str(evidence["sport_key"]),
+                "source_id": f"parlayapi:{evidence['sport_key']}",
+                "product_kind": "POINT_IN_TIME_ODDS",
+                "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
+                "response_digest_semantics": "canonical_json_payload_not_raw_response_bytes",
+                "acquisition_provenance_sha256": (
+                    acquisition_provenance["acquisition_sha256"]
+                    if acquisition_provenance is not None
+                    else None
+                ),
+                "acquisition_provenance": (
+                    acquisition_provenance["provenance"]
+                    if acquisition_provenance is not None
+                    else None
+                ),
                 "quote_count": int(evidence["quote_count"]),
                 "snapshot_timestamp_fallback_count": int(
                     evidence.get("snapshot_timestamp_fallback_count", 0)
@@ -667,17 +930,44 @@ def assemble_historical_corpus(
     if source_ids != proof["source_ids"]:
         raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
     event_sports = {event.sport for event, _ in events}
-    if event_sports == {ParlayApiTableTennisProvider.sport_key}:
-        corpus_schema_version = 3
-    elif event_sports == {None}:
-        # Preserve old captured evidence as legacy schema-v2 truth. Do not infer
-        # event sport from manifest/evidence after the fact.
+    snapshot_sports = {str(row["sport_key"]) for row in evidence_rows}
+    if event_sports == {None}:
+        # Preserve only the pre-existing table-tennis legacy lineage. Once a
+        # provider sport other than table_tennis is selected, event-level sport
+        # truth is mandatory; otherwise schema-v2 would silently relabel it.
+        if snapshot_sports != {"table_tennis"}:
+            raise ValueError(
+                "non-table-tennis historical snapshots require explicit event sport identity"
+            )
         corpus_schema_version = 2
+        manifest_sport = "table_tennis"
+    elif None not in event_sports and len(event_sports) == 1:
+        explicit_sport = next(iter(event_sports))
+        assert explicit_sport is not None
+        try:
+            manifest_sport = _canonical_sport_key(explicit_sport)
+        except ValueError as exc:
+            raise ValueError(
+                "historical snapshot events must use one canonical explicit Parlay sport identity"
+            ) from exc
+        corpus_schema_version = 3
     else:
         raise ValueError(
-            "historical snapshots mix legacy/unproven and explicit sport identities"
+            "historical snapshots mix legacy/unproven or multiple explicit sport identities"
         )
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
+    market_content_sha256 = _market_semantic_content_sha256(events)
+    upstream_bookmaker_keys = tuple(
+        sorted(
+            {
+                bookmaker
+                for event, _ in events
+                if (
+                    bookmaker := str(event.metadata.get("bookmaker_key") or "").strip()
+                )
+            }
+        )
+    )
 
     results_path_obj = Path(results_path)
     results = _json_object(results_path_obj, context="sealed results")
@@ -813,6 +1103,81 @@ def assemble_historical_corpus(
                 }
             )
 
+        outcome_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_outcome_identity",
+                "results_sha256": results_sha,
+                "outcome_evidence": outcome_evidence,
+            }
+        )
+
+        content_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_content_identity",
+                "product_kind": "POINT_IN_TIME_ODDS",
+                "sport": manifest_sport,
+                "source_ids": list(source_ids),
+                "market_content_sha256": market_content_sha256,
+                "market_types": list(market_types),
+                "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
+                "event_count": len(events),
+            }
+        )
+        fully_bound_acquisition_provenance = all(
+            row["acquisition_provenance"] is not None
+            for row in evidence_rows
+        )
+        validated_acquisition_provenance_count = sum(
+            row["acquisition_provenance"] is not None
+            for row in evidence_rows
+        )
+        canonical_acquisition_rows = sorted(
+            evidence_rows,
+            key=lambda row: json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        acquisition_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_acquisition_identity",
+                "content_identity": content_identity,
+                "scope": "selected_point_in_time_snapshots_only",
+                "snapshots": canonical_acquisition_rows,
+            }
+        )
+        governance_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_governance_identity",
+                "governance_proof_sha256": governance_proof_sha256,
+                "authority_record_sha256": binding.authority_record_sha256,
+                "source_identity": proof["source_identity"],
+                "source_ids": list(proof["source_ids"]),
+                "terms_reference": proof["terms_reference"],
+                "retention_expires_at": proof["retention_expires_at"],
+                "authorization_valid_through": proof["authorization_valid_through"],
+                "redistribution_policy": proof["redistribution_policy"],
+            }
+        )
+        qualified_corpus_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_qualified_corpus_identity",
+                "content_identity": content_identity,
+                "outcome_identity": outcome_identity,
+                "acquisition_identity": acquisition_identity,
+                "governance_identity": governance_identity,
+                "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
+                "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
+            }
+        )
+
         governance = {
             "source_identity": proof["source_identity"],
             "terms_reference": proof["terms_reference"],
@@ -838,6 +1203,7 @@ def assemble_historical_corpus(
             "acquisition_evidence": {
                 "scope": "selected_point_in_time_snapshots_only",
                 "snapshot_count": len(evidence_rows),
+                "validated_acquisition_provenance_count": validated_acquisition_provenance_count,
                 "snapshots": evidence_rows,
                 "point_in_time_snapshot_contains_odds": True,
                 "historical_window_market_coverage_verified": False,
@@ -855,6 +1221,28 @@ def assemble_historical_corpus(
                 ],
                 "verified_at": proof["verified_at"],
                 "redistribution_verified": proof["redistribution_verified"],
+                "provenance": {
+                    "schema_version": 1,
+                    "product_kind": "POINT_IN_TIME_ODDS",
+                    "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
+                    "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
+                    "content_identity": content_identity,
+                    "content_identity_scope": "market_snapshot_semantics_excluding_product_ingest_time",
+                    "market_content_sha256": market_content_sha256,
+                    "outcome_identity": outcome_identity,
+                    "acquisition_identity": acquisition_identity,
+                    "governance_identity": governance_identity,
+                    "qualified_corpus_identity": qualified_corpus_identity,
+                    "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
+                    "canonical_response_payload_digest_bound": True,
+                    "raw_response_bytes_bound": False,
+                    "normalized_request_scope_bound": fully_bound_acquisition_provenance,
+                    "provider_response_metadata_bound": fully_bound_acquisition_provenance,
+                    "validated_acquisition_provenance_count": validated_acquisition_provenance_count,
+                    "prospective_authority": False,
+                    "raw_redistribution_authority": proof["redistribution_verified"] is True
+                    and proof["redistribution_policy"] == "permitted",
+                },
             },
             "outcome_evidence": outcome_evidence,
         }
@@ -862,7 +1250,7 @@ def assemble_historical_corpus(
             "schema_version": corpus_schema_version,
             "dataset_kind": "historical",
             "name": name.strip(),
-            "sport": "table_tennis",
+            "sport": manifest_sport,
             "market_file": market_destination.name,
             "results_file": results_destination.name,
             "market_sha256": market_sha,
@@ -904,8 +1292,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-build-historical-corpus",
         description=(
-            "Assemble selected authenticated table-tennis historical snapshots and separate sealed "
-            "outcomes into a governed replay corpus; new explicit-sport captures use schema-v3 while "
+            "Assemble selected authenticated Parlay historical snapshots for one exact sport and separate sealed "
+            "outcomes into a governed replay corpus; explicit-sport captures use schema-v3 while "
             "legacy captures remain schema-v2 without inventing event-level sport truth."
         ),
     )

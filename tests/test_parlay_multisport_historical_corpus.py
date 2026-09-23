@@ -1,0 +1,1077 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlencode
+
+import pytest
+
+from autosport.dataset import load_dataset
+from autosport.domain import MarketEvent
+from autosport.historical_corpus import assemble_historical_corpus
+from autosport.historical_snapshot import capture_historical_snapshot
+from autosport.parlay_sport_provider import ParlayApiSportProvider
+from autosport.parlayapi_provider import HttpJsonResponse
+
+
+TERMS = "https://parlay-api.com/terms"
+CAPTURED_AT = "2026-01-02T00:00:00+00:00"
+REVEAL_AT = "2026-01-01T11:00:00+00:00"
+IMPORTED_AT = "2026-01-02T00:05:00+00:00"
+
+
+class _HistoricalTransport:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+        self.urls: list[str] = []
+        self.headers: list[dict[str, str]] = []
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> HttpJsonResponse:
+        self.urls.append(url)
+        self.headers.append(dict(headers))
+        return HttpJsonResponse(
+            self.payload,
+            200,
+            {"x-api-version": "test-multisport-history"},
+        )
+
+
+def _basketball_historical_payload() -> dict[str, object]:
+    return {
+        "timestamp": "2026-01-01T10:00:10+00:00",
+        "previous_timestamp": "2026-01-01T09:55:00+00:00",
+        "next_timestamp": "2026-01-01T10:05:00+00:00",
+        "data": [
+            {
+                "id": "basketball-live-provider-1",
+                "sport_key": "basketball",
+                "commence_time": "2026-01-01T12:00:00+00:00",
+                "home_team": "Home",
+                "away_team": "Away",
+                "bookmakers": [
+                    {
+                        "key": "book-a",
+                        "title": "Book A",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "last_update": "2026-01-01T10:00:00+00:00",
+                                "outcomes": [
+                                    {"name": "Home", "price": 1.8},
+                                    {"name": "Away", "price": 2.1},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _acquisition_provenance(
+    *,
+    sport: str,
+    requested_at: str,
+    response_sha256: str,
+    api_version: str,
+) -> tuple[dict[str, object], str]:
+    request_query = {
+        "date": requested_at,
+        "regions": "us",
+        "markets": "h2h,spreads,totals",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+    query_string = urlencode(request_query)
+    endpoint_path = f"/v1/historical/sports/{sport}/odds"
+    base_url = "https://parlay-api.com"
+    request_url = f"{base_url}{endpoint_path}?{query_string}"
+    response_headers = {
+        "x-api-version": api_version,
+        "x-api-release-date": "2026-09-01",
+        "deprecation": None,
+        "sunset": None,
+        "link": None,
+        "x-historical-window-hours": None,
+        "x-historical-window-from": None,
+        "x-markets-served": None,
+        "x-markets-unservable": None,
+        "x-markets-served-elsewhere": None,
+        "cache-control": "private, max-age=60",
+    }
+    provenance: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "parlayapi_point_in_time_historical_acquisition",
+        "product_kind": "POINT_IN_TIME_ODDS",
+        "request": {
+            "method": "GET",
+            "origin": base_url,
+            "base_url_sha256": hashlib.sha256(base_url.encode("utf-8")).hexdigest(),
+            "endpoint_path": endpoint_path,
+            "query": request_query,
+            "query_string": query_string,
+            "request_url_sha256": hashlib.sha256(request_url.encode("utf-8")).hexdigest(),
+            "request_url_persisted": False,
+            "request_credentials_persisted": False,
+        },
+        "http_status": 200,
+        "response_payload_sha256": response_sha256,
+        "response_headers": response_headers,
+        "canonical_response_payload_bound": True,
+        "raw_response_bytes_bound": False,
+    }
+    return provenance, _canonical_sha256(provenance)
+
+
+def _write_snapshot(
+    root: Path,
+    *,
+    sport: str,
+    suffix: str,
+    requested_at: str = "2026-01-01T10:00:20+00:00",
+    source_id: str | None = None,
+    event_id: str | None = None,
+    explicit_event_sport: bool = True,
+    acquisition_api_version: str | None = None,
+) -> tuple[Path, Path, MarketEvent]:
+    source = source_id or f"parlayapi:{sport}"
+    event = MarketEvent(
+        event_id=event_id or f"event-{suffix}",
+        market_id="winner",
+        selection_id="home",
+        decimal_odds=Decimal("1.80"),
+        observed_ts="2026-01-01T10:00:00+00:00",
+        source_id=source,
+        sequence=1,
+        source_ts="2026-01-01T09:59:59+00:00",
+        ingest_ts=CAPTURED_AT,
+        sport=sport if explicit_event_sport else None,
+        metadata={
+            "bookmaker_key": "book-a",
+            "source_time_semantics": "provider_quote_last_update",
+        },
+    )
+    market = root / f"snapshot-{suffix}.jsonl"
+    evidence = root / f"snapshot-{suffix}.evidence.json"
+    market.write_text(
+        json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    evidence_payload = {
+                "schema_version": 1,
+                "kind": "parlayapi_point_in_time_historical_snapshot",
+                "provider": "parlayapi",
+                "sport_key": sport,
+                "requested_at": requested_at,
+                "snapshot_at": "2026-01-01T10:00:10+00:00",
+                "captured_at": CAPTURED_AT,
+                "response_sha256": "1" * 64,
+                "market_sha256": _sha256(market),
+                "quote_count": 1,
+                "has_data": True,
+                "market_types": [event.market_type.value],
+                "bookmaker_keys": ["book-a"],
+                "snapshot_timestamp_fallback_count": 0,
+                "point_in_time_snapshot_contains_odds": True,
+                "point_in_time_odds_market_coverage_verified": False,
+                "historical_window_market_coverage_verified": False,
+                "sealed_outcomes_present": False,
+                "replay_corpus_ready": False,
+                "terms_reference": TERMS,
+                "licensing_or_retention_verified": False,
+                "redistribution_verified": False,
+                "real_money_execution": False,
+                "human_tested": False,
+        "nvda_verified": False,
+    }
+    if acquisition_api_version is not None:
+        acquisition, acquisition_sha256 = _acquisition_provenance(
+            sport=sport,
+            requested_at=requested_at,
+            response_sha256=str(evidence_payload["response_sha256"]),
+            api_version=acquisition_api_version,
+        )
+        evidence_payload["acquisition_provenance"] = acquisition
+        evidence_payload["acquisition_sha256"] = acquisition_sha256
+    evidence.write_text(
+        json.dumps(
+            evidence_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return market, evidence, event
+
+
+def _write_results(
+    root: Path,
+    events: tuple[MarketEvent, ...],
+    *,
+    suffix: str,
+    outcome: str = "win",
+) -> Path:
+    path = root / f"results-{suffix}.json"
+    source_record = root / f"result-source-{suffix}.json"
+    outcomes = {event.quote_key: outcome for event in events}
+    source_record.write_text(
+        json.dumps(
+            {
+                "source": f"official-results:{suffix}",
+                "quote_outcomes": outcomes,
+                "fixture_only": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "quote_outcomes": outcomes,
+                "outcome_provenance": {
+                    "schema_version": 1,
+                    "kind": "historical_outcome_provenance",
+                    "source_identity": f"official-results:{suffix}",
+                    "source_record_file": source_record.name,
+                    "source_record_sha256": _sha256(source_record),
+                    "terms_reference": "https://example.test/result-terms",
+                    "retention_basis": "deterministic test result authority",
+                    "authority_reference": f"result-authority:{suffix}",
+                    "available_at": REVEAL_AT,
+                    "acquired_at": "2026-01-02T00:02:00+00:00",
+                    "verified_at": "2026-01-02T00:03:00+00:00",
+                    "licensing_or_retention_verified": True,
+                    "redistribution_policy": "internal_only",
+                    "redistribution_verified": False,
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_governance(
+    root: Path,
+    source_ids: tuple[str, ...],
+    *,
+    suffix: str,
+    authority_reference: str | None = None,
+) -> Path:
+    claims = {
+        "source_identity": f"parlayapi:account-entitlement:{suffix}",
+        "source_ids": list(source_ids),
+        "terms_reference": TERMS,
+        "retention_basis": "deterministic internal historical research fixture",
+        "retention_expires_at": "2026-12-31T00:00:00+00:00",
+        "authorization_valid_through": "2026-12-31T00:00:00+00:00",
+        "retention_extension_authority_reference": f"retention-extension:{suffix}",
+        "authority_reference": authority_reference or f"entitlement:{suffix}",
+        "verified_at": "2026-01-02T00:01:00+00:00",
+        "redistribution_policy": "internal_only",
+        "redistribution_verified": False,
+        "licensing_or_retention_verified": True,
+    }
+    authority = root / f"governance-authority-{suffix}.json"
+    authority.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "historical_corpus_governance_authority_record",
+                **claims,
+                "evidence_reference": f"test-evidence:{suffix}",
+                "verification_method": "deterministic test fixture",
+                "recorded_by": "test-suite",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    proof = root / f"governance-proof-{suffix}.json"
+    proof.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "historical_corpus_governance_proof",
+                **claims,
+                "authority_record_file": authority.name,
+                "authority_record_sha256": _sha256(authority),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return proof
+
+
+def _assemble(
+    root: Path,
+    snapshot: tuple[Path, Path, MarketEvent],
+    *,
+    output_name: str,
+    governance_suffix: str,
+    result_outcome: str = "win",
+    result_suffix: str | None = None,
+) -> dict:
+    market, evidence, event = snapshot
+    source_id = event.source_id
+    proof = _write_governance(root, (source_id,), suffix=governance_suffix)
+    assemble_historical_corpus(
+        [(market, evidence)],
+        results_path=_write_results(
+            root,
+            (event,),
+            suffix=result_suffix or output_name,
+            outcome=result_outcome,
+        ),
+        governance_proof_path=proof,
+        output_dir=root / output_name,
+        name=f"{event.sport} governed historical fixture",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    return json.loads((root / output_name / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_path: Path) -> None:
+    snapshot = _write_snapshot(tmp_path, sport="basketball", suffix="basketball")
+    manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="basketball-corpus",
+        governance_suffix="basketball",
+    )
+    dataset = load_dataset(tmp_path / "basketball-corpus")
+    provenance = manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert dataset.schema_version == 3
+    assert dataset.sport == "basketball"
+    assert {event.sport for event in dataset.load_market_events()} == {"basketball"}
+    assert manifest["governance"]["coverage"]["source_ids"] == ["parlayapi:basketball"]
+    assert provenance["product_kind"] == "POINT_IN_TIME_ODDS"
+    assert provenance["causal_classification"] == "RETROSPECTIVE_POINT_IN_TIME_PRICE"
+    assert provenance["qualification_scope"] == "selected_point_in_time_snapshot_corpus_v1"
+    assert provenance["prospective_authority"] is False
+    assert provenance["canonical_response_payload_digest_bound"] is True
+    assert provenance["raw_response_bytes_bound"] is False
+    assert provenance["normalized_request_scope_bound"] is False
+    assert provenance["provider_response_metadata_bound"] is False
+    assert provenance["raw_redistribution_authority"] is False
+    assert provenance["upstream_bookmaker_keys"] == ["book-a"]
+    for key in (
+        "content_identity",
+        "outcome_identity",
+        "acquisition_identity",
+        "governance_identity",
+        "qualified_corpus_identity",
+    ):
+        assert len(provenance[key]) == 64
+        int(provenance[key], 16)
+
+
+def test_validated_acquisition_provenance_is_bound_into_corpus_identity(tmp_path: Path) -> None:
+    snapshot = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="bound-acquisition",
+        acquisition_api_version="3.2.0",
+    )
+    manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="bound-acquisition-corpus",
+        governance_suffix="bound-acquisition",
+    )
+    acquisition_evidence = manifest["governance"]["acquisition_evidence"]
+    provenance = acquisition_evidence["provenance"]
+    snapshot_evidence = acquisition_evidence["snapshots"][0]
+
+    assert acquisition_evidence["validated_acquisition_provenance_count"] == 1
+    assert provenance["validated_acquisition_provenance_count"] == 1
+    assert provenance["normalized_request_scope_bound"] is True
+    assert provenance["provider_response_metadata_bound"] is True
+    assert provenance["raw_response_bytes_bound"] is False
+    assert len(snapshot_evidence["acquisition_provenance_sha256"]) == 64
+    assert (
+        snapshot_evidence["acquisition_provenance"]["response_headers"]["x-api-version"]
+        == "3.2.0"
+    )
+    assert (
+        snapshot_evidence["acquisition_provenance"]["request"]["endpoint_path"]
+        == "/v1/historical/sports/basketball/odds"
+    )
+
+
+def test_provider_metadata_drift_changes_acquisition_not_market_content_identity(tmp_path: Path) -> None:
+    first = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="header-drift-a",
+        event_id="event-header-stable",
+        acquisition_api_version="3.2.0",
+    )
+    second = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="header-drift-b",
+        event_id="event-header-stable",
+        acquisition_api_version="3.2.1",
+    )
+    first_manifest = _assemble(
+        tmp_path,
+        first,
+        output_name="header-drift-corpus-a",
+        governance_suffix="header-drift-shared",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        second,
+        output_name="header-drift-corpus-b",
+        governance_suffix="header-drift-shared",
+    )
+    a = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    b = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert a["content_identity"] == b["content_identity"]
+    assert a["acquisition_identity"] != b["acquisition_identity"]
+    assert a["normalized_request_scope_bound"] is True
+    assert b["provider_response_metadata_bound"] is True
+
+
+def test_tampered_acquisition_digest_fails_closed(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="bad-acquisition-digest",
+        acquisition_api_version="3.2.0",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload["acquisition_sha256"] = "2" * 64
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="bad-acquisition-digest",
+    )
+    with pytest.raises(ValueError, match="acquisition_sha256 does not match"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="bad-acquisition-digest",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-bad-acquisition-digest",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("sport", "endpoint_path contradicts sport_key"),
+        ("raw-bytes", "cannot claim raw response bytes"),
+        ("response-digest", "response payload digest contradicts"),
+    ],
+)
+def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+    match: str,
+) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix=f"false-acquisition-{mutation}",
+        acquisition_api_version="3.2.0",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    acquisition = payload["acquisition_provenance"]
+    if mutation == "sport":
+        acquisition["request"]["endpoint_path"] = "/v1/historical/sports/baseball/odds"
+    elif mutation == "raw-bytes":
+        acquisition["raw_response_bytes_bound"] = True
+    else:
+        acquisition["response_payload_sha256"] = "3" * 64
+    payload["acquisition_sha256"] = _canonical_sha256(acquisition)
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix=f"false-acquisition-{mutation}",
+    )
+    with pytest.raises(ValueError, match=match):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix=f"false-acquisition-{mutation}",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / f"blocked-false-acquisition-{mutation}",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_cross_sport_source_substitution_fails_closed(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="substitution",
+        source_id="parlayapi:table_tennis",
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:table_tennis",),
+        suffix="substitution",
+    )
+    with pytest.raises(ValueError, match="provider/sport"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(tmp_path, (event,), suffix="substitution"),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-substitution",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_multiple_explicit_sports_cannot_be_laundered_into_one_corpus(tmp_path: Path) -> None:
+    basketball = _write_snapshot(tmp_path, sport="basketball", suffix="basketball-mixed")
+    football = _write_snapshot(
+        tmp_path,
+        sport="association_football",
+        suffix="football-mixed",
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:association_football", "parlayapi:basketball"),
+        suffix="mixed",
+    )
+    with pytest.raises(ValueError, match="multiple explicit sport"):
+        assemble_historical_corpus(
+            [(basketball[0], basketball[1]), (football[0], football[1])],
+            results_path=_write_results(
+                tmp_path,
+                (basketball[2], football[2]),
+                suffix="mixed",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-mixed",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_acquisition_drift_changes_only_acquisition_and_qualified_identity(tmp_path: Path) -> None:
+    first = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="identity-a",
+        requested_at="2026-01-01T10:00:20+00:00",
+        event_id="event-identity-stable",
+    )
+    second = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="identity-b",
+        requested_at="2026-01-01T10:00:30+00:00",
+        event_id="event-identity-stable",
+    )
+
+    first_manifest = _assemble(
+        tmp_path,
+        first,
+        output_name="identity-corpus-a",
+        governance_suffix="identity-shared-a",
+        result_suffix="identity-shared-results",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        second,
+        output_name="identity-corpus-b",
+        governance_suffix="identity-shared-a",
+        result_suffix="identity-shared-results",
+    )
+    first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["outcome_identity"] == second_provenance["outcome_identity"]
+    assert first_provenance["governance_identity"] == second_provenance["governance_identity"]
+    assert first_provenance["acquisition_identity"] != second_provenance["acquisition_identity"]
+    assert (
+        first_provenance["qualified_corpus_identity"]
+        != second_provenance["qualified_corpus_identity"]
+    )
+
+
+
+def test_governance_drift_changes_only_governance_and_qualified_identity(tmp_path: Path) -> None:
+    snapshot = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="governance-stable",
+        event_id="event-governance-stable",
+    )
+
+    first_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="governance-corpus-a",
+        governance_suffix="governance-a",
+        result_suffix="governance-shared-results",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="governance-corpus-b",
+        governance_suffix="governance-b",
+        result_suffix="governance-shared-results",
+    )
+    first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["outcome_identity"] == second_provenance["outcome_identity"]
+    assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
+    assert first_provenance["governance_identity"] != second_provenance["governance_identity"]
+    assert (
+        first_provenance["qualified_corpus_identity"]
+        != second_provenance["qualified_corpus_identity"]
+    )
+
+
+def test_qualified_corpus_identity_binds_sealed_terminal_outcomes(
+    tmp_path: Path,
+) -> None:
+    snapshot = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="outcome-identity",
+        event_id="event-outcome-identity",
+    )
+
+    first_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="outcome-corpus-win",
+        governance_suffix="outcome-shared",
+        result_outcome="win",
+        result_suffix="outcome-shared",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="outcome-corpus-loss",
+        governance_suffix="outcome-shared",
+        result_outcome="loss",
+        result_suffix="outcome-shared",
+    )
+
+    first = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert (
+        first["content_identity_scope"]
+        == "market_snapshot_semantics_excluding_product_ingest_time"
+    )
+    assert (
+        second["content_identity_scope"]
+        == "market_snapshot_semantics_excluding_product_ingest_time"
+    )
+    assert first["content_identity"] == second["content_identity"]
+    assert first["acquisition_identity"] == second["acquisition_identity"]
+    assert first["governance_identity"] == second["governance_identity"]
+    assert first["outcome_identity"] != second["outcome_identity"]
+    assert first["qualified_corpus_identity"] != second["qualified_corpus_identity"]
+    assert first_manifest["results_sha256"] != second_manifest["results_sha256"]
+    assert first_manifest["import_identity"] != second_manifest["import_identity"]
+
+
+def test_invalid_provider_response_digest_cannot_enter_acquisition_identity(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="bad-response-digest",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload["response_sha256"] = "not-a-canonical-digest"
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="bad-response-digest",
+    )
+
+    with pytest.raises(ValueError, match="response_sha256"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="bad-response-digest",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-response-digest",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_non_table_tennis_legacy_unproven_event_sport_is_rejected(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="basketball-unproven-sport",
+        explicit_event_sport=False,
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="basketball-unproven-sport",
+    )
+
+    with pytest.raises(ValueError, match="require explicit event sport"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="basketball-unproven-sport",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-unproven-basketball",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_boolean_quote_count_cannot_mint_historical_evidence_identity(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="boolean-quote-count",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload["quote_count"] = True
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="boolean-quote-count",
+    )
+
+    with pytest.raises(ValueError, match="quote_count"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="boolean-quote-count",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-boolean-count",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_same_snapshot_set_reversed_is_identity_idempotent(tmp_path: Path) -> None:
+    first = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="order-a",
+        event_id="event-order-a",
+    )
+    second = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="order-b",
+        requested_at="2026-01-01T10:00:30+00:00",
+        event_id="event-order-b",
+    )
+    events = (first[2], second[2])
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="order-stable",
+    )
+    results = _write_results(tmp_path, events, suffix="order-stable")
+
+    assemble_historical_corpus(
+        [(first[0], first[1]), (second[0], second[1])],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "order-corpus-a",
+        name="ordered-a",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    assemble_historical_corpus(
+        [(second[0], second[1]), (first[0], first[1])],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "order-corpus-b",
+        name="ordered-b",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+
+    first_manifest = json.loads(
+        (tmp_path / "order-corpus-a" / "manifest.json").read_text(encoding="utf-8")
+    )
+    second_manifest = json.loads(
+        (tmp_path / "order-corpus-b" / "manifest.json").read_text(encoding="utf-8")
+    )
+    first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
+    assert first_provenance["governance_identity"] == second_provenance["governance_identity"]
+    assert (
+        first_provenance["qualified_corpus_identity"]
+        == second_provenance["qualified_corpus_identity"]
+    )
+
+
+def test_generic_provider_capture_flows_into_governed_second_sport_corpus(tmp_path: Path) -> None:
+    secret = "test-secret-must-not-enter-evidence"
+    transport = _HistoricalTransport(_basketball_historical_payload())
+    provider = ParlayApiSportProvider(
+        "basketball",
+        secret,
+        transport=transport,
+        clock=lambda: CAPTURED_AT,
+        sleeper=lambda _seconds: None,
+    )
+    market = tmp_path / "provider-basketball.jsonl"
+    evidence = tmp_path / "provider-basketball.evidence.json"
+
+    capture = capture_historical_snapshot(
+        provider,
+        requested_at="2026-01-01T10:00:20+00:00",
+        output_path=market,
+        evidence_path=evidence,
+    )
+    events = tuple(
+        MarketEvent.from_dict(json.loads(line))
+        for line in market.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="provider-basketball",
+    )
+
+    assemble_historical_corpus(
+        [(market, evidence)],
+        results_path=_write_results(
+            tmp_path,
+            events,
+            suffix="provider-basketball",
+        ),
+        governance_proof_path=proof,
+        output_dir=tmp_path / "provider-basketball-corpus",
+        name="provider basketball historical corpus",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    dataset = load_dataset(tmp_path / "provider-basketball-corpus")
+    manifest_text = (tmp_path / "provider-basketball-corpus" / "manifest.json").read_text(
+        encoding="utf-8"
+    )
+    evidence_text = evidence.read_text(encoding="utf-8")
+    market_text = market.read_text(encoding="utf-8")
+
+    assert capture.quote_count == 2
+    assert dataset.schema_version == 3
+    assert dataset.sport == "basketball"
+    assert {event.sport for event in dataset.load_market_events()} == {"basketball"}
+    assert transport.urls
+    assert "/v1/historical/sports/basketball/odds?" in transport.urls[0]
+    assert transport.headers[0]["X-API-Key"] == secret
+    assert secret not in evidence_text
+    assert secret not in market_text
+    assert secret not in manifest_text
+
+
+def test_reacquiring_identical_provider_market_content_changes_only_acquisition_axis(
+    tmp_path: Path,
+) -> None:
+    payload = _basketball_historical_payload()
+    first_market = tmp_path / "reacquire-first.jsonl"
+    first_evidence = tmp_path / "reacquire-first.evidence.json"
+    second_market = tmp_path / "reacquire-second.jsonl"
+    second_evidence = tmp_path / "reacquire-second.evidence.json"
+
+    first_provider = ParlayApiSportProvider(
+        "basketball",
+        "test-secret",
+        transport=_HistoricalTransport(payload),
+        clock=lambda: "2026-01-02T00:00:00+00:00",
+        sleeper=lambda _seconds: None,
+    )
+    second_provider = ParlayApiSportProvider(
+        "basketball",
+        "test-secret",
+        transport=_HistoricalTransport(payload),
+        clock=lambda: "2026-01-02T00:01:00+00:00",
+        sleeper=lambda _seconds: None,
+    )
+
+    capture_historical_snapshot(
+        first_provider,
+        requested_at="2026-01-01T10:00:20+00:00",
+        output_path=first_market,
+        evidence_path=first_evidence,
+    )
+    capture_historical_snapshot(
+        second_provider,
+        requested_at="2026-01-01T10:00:20+00:00",
+        output_path=second_market,
+        evidence_path=second_evidence,
+    )
+
+    events = tuple(
+        MarketEvent.from_dict(json.loads(line))
+        for line in first_market.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="reacquire-shared",
+    )
+    results = _write_results(
+        tmp_path,
+        events,
+        suffix="reacquire-shared",
+    )
+
+    assemble_historical_corpus(
+        [(first_market, first_evidence)],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "reacquire-corpus-first",
+        name="reacquired basketball first",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    assemble_historical_corpus(
+        [(second_market, second_evidence)],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "reacquire-corpus-second",
+        name="reacquired basketball second",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+
+    first_manifest = json.loads(
+        (tmp_path / "reacquire-corpus-first" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    second_manifest = json.loads(
+        (tmp_path / "reacquire-corpus-second" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_manifest["market_sha256"] != second_manifest["market_sha256"]
+    assert first["market_content_sha256"] == second["market_content_sha256"]
+    assert first["content_identity"] == second["content_identity"]
+    assert first["outcome_identity"] == second["outcome_identity"]
+    assert first["governance_identity"] == second["governance_identity"]
+    assert first["acquisition_identity"] != second["acquisition_identity"]
+    assert first["qualified_corpus_identity"] != second["qualified_corpus_identity"]
+    assert (
+        first["content_identity_scope"]
+        == "market_snapshot_semantics_excluding_product_ingest_time"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("sport_key", " basketball", "canonical Parlay sport identity"),
+        ("response_sha256", " " + ("1" * 64), "canonical lowercase SHA-256"),
+        ("market_sha256", ("A" * 64), "canonical lowercase SHA-256"),
+    ],
+)
+def test_identity_fields_reject_normalized_aliases(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    match: str,
+) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix=f"alias-{field}",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload[field] = value
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix=f"alias-{field}",
+    )
+
+    with pytest.raises(ValueError, match=match):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix=f"alias-{field}",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / f"blocked-alias-{field}",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )

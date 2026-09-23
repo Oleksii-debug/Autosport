@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import itertools
 import unittest
 from dataclasses import replace
 from decimal import Decimal
+from fractions import Fraction
 
 from autosport.pipeline_ablation import (
     AblationObservation,
@@ -14,6 +16,7 @@ from autosport.pipeline_ablation import (
     MetricSemantics,
     PipelineComponent,
     ResolvedAblationAuthority,
+    _finite_fraction_decimal,
     evaluate_pipeline_ablation as _evaluate_pipeline_ablation,
 )
 
@@ -238,6 +241,59 @@ class PipelineAblationTests(unittest.TestCase):
             IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL,
         )
         self.assertIn("protocol-defined", findings[PipelineComponent.MODEL].reason)
+
+    def test_finite_fraction_decimal_projection_is_exact(self):
+        vectors = (
+            (Fraction(1, 2), Decimal("0.5")),
+            (Fraction(1, 5), Decimal("0.2")),
+            (Fraction(1, 20), Decimal("0.05")),
+            (Fraction(-7, 40), Decimal("-0.175")),
+            (Fraction(0, 1), Decimal("0")),
+        )
+        for value, expected in vectors:
+            with self.subTest(value=value):
+                projected = _finite_fraction_decimal(value)
+                self.assertEqual(projected, expected)
+                self.assertEqual(Fraction(projected), value)
+
+        for denominator in (1, 2, 4, 5, 8, 10, 20, 25, 40, 125):
+            for numerator in range(-17, 18):
+                value = Fraction(numerator, denominator)
+                with self.subTest(round_trip=value):
+                    self.assertEqual(Fraction(_finite_fraction_decimal(value)), value)
+
+    def test_symmetric_three_component_decimal_projection_does_not_assign_residual_to_last_component(self):
+        protocol = self.protocol(
+            PipelineComponent.DATA,
+            PipelineComponent.MODEL,
+            PipelineComponent.THRESHOLD_SELECTION,
+        )
+        components = protocol.components
+        coalitions = tuple(
+            tuple(items)
+            for size in range(len(components) + 1)
+            for items in itertools.combinations(components, size)
+        )
+        observations = tuple(
+            self.obs(
+                coalition,
+                "1" if coalition == components else "0",
+                evidence_char=format(index + 1, "x"),
+            )
+            for index, coalition in enumerate(coalitions)
+        )
+
+        evidence = evaluate_pipeline_ablation(protocol, observations)
+
+        self.assertTrue(evidence.complete_factorial)
+        exact = tuple(item.exact_contribution for item in evidence.findings)
+        self.assertEqual(exact, (Fraction(1, 3),) * 3)
+        self.assertEqual(sum(exact, Fraction(0, 1)), Fraction(1, 1))
+
+        projected = tuple(item.contribution for item in evidence.findings)
+        self.assertTrue(all(value is not None for value in projected))
+        self.assertEqual(len(set(projected)), 1)
+        self.assertTrue(all("presentation projection only" in item.reason for item in evidence.findings))
 
     def test_future_evidence_is_rejected(self):
         protocol = self.protocol(PipelineComponent.MODEL)

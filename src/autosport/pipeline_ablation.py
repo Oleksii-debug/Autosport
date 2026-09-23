@@ -145,11 +145,14 @@ def _dec_text(value: Decimal) -> str:
 
 
 def _project_fraction(value: Fraction) -> Decimal:
-    """Return a deterministic finite Decimal projection of an exact rational."""
+    """Return a deterministic Decimal presentation projection of an exact rational."""
 
-    with localcontext() as context:
-        context.prec = 50
-        return Decimal(value.numerator) / Decimal(value.denominator)
+    try:
+        return _finite_fraction_decimal(value)
+    except ValueError:
+        with localcontext() as context:
+            context.prec = 50
+            return Decimal(value.numerator) / Decimal(value.denominator)
 
 
 def _finite_fraction_decimal(value: Fraction) -> Decimal:
@@ -166,7 +169,7 @@ def _finite_fraction_decimal(value: Fraction) -> Decimal:
     if denominator != 1:
         raise ValueError("rational does not have a finite Decimal representation")
     scale = max(twos, fives)
-    scaled = value.numerator * (5 ** (scale - twos)) * (2 ** (scale - fives))
+    scaled = value.numerator * (2 ** (scale - twos)) * (5 ** (scale - fives))
     sign = "-" if scaled < 0 else ""
     digits = str(abs(scaled))
     if scale == 0:
@@ -635,7 +638,7 @@ def evaluate_pipeline_ablation(
             _project_fraction(exact_low) if identifiable else None,
             _project_fraction(exact_high) if identifiable else None,
             (
-                "Shapley allocation over the complete frozen factorial value function; exact rational allocation is canonical and the Decimal field is a deterministic mass-conserving projection; allocation is not stronger than the weakest supporting evidence tier"
+                "Shapley allocation over the complete frozen factorial value function; exact rational allocation is canonical and the Decimal field is a deterministic presentation projection only; allocation authority comes from the exact rational fields and is not stronger than the weakest supporting evidence tier"
                 if identifiable
                 else "mixed evidence tiers prevent one unambiguous identifiability label"
             ),
@@ -650,22 +653,10 @@ def evaluate_pipeline_ablation(
         exact_allocated = sum((item.exact_contribution for item in identifiable_findings), Fraction(0, 1))
         if exact_allocated != exact_total:
             raise RuntimeError("exact Shapley allocation violated efficiency")
-        projected_allocated = sum((Fraction(item.contribution) for item in identifiable_findings), Fraction(0, 1))
-        residual = exact_total - projected_allocated
-        if residual:
-            last = findings[-1]
-            balanced = Fraction(last.contribution) + residual
-            findings[-1] = ComponentFinding(
-                last.component,
-                last.identifiability_tier,
-                _finite_fraction_decimal(balanced),
-                last.contribution_low,
-                last.contribution_high,
-                last.reason,
-                last.evidence_sha256s,
-                last.exact_contribution_numerator,
-                last.exact_contribution_denominator,
-            )
+        # Decimal contributions are a deterministic presentation projection only.
+        # Do not assign finite-precision residual to an arbitrary component: that
+        # would make symmetric exact Shapley allocations order-dependent. Exact
+        # efficiency is enforced by the canonical Fraction fields above.
     one_at_a_time = sum((utility[full] - utility[tuple(item for item in full if item != component)] for component in full), Decimal(0))
     return AblationEvaluationEvidence(protocol.protocol_sha256, True, ordered, tuple(sorted(findings, key=lambda item: item.component.value)), (), total, total_low, total_high, total - one_at_a_time)
 

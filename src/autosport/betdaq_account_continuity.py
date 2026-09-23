@@ -44,6 +44,17 @@ _PRINCIPAL_SCOPE = "AUTHENTICATED_BETDAQ_USERNAME_CONTINUITY"
 _SESSION_ID_PREFIX = "betdaq-auth-context:"
 _CANONICAL_VENUE_ID = "betdaq"
 
+# Positive durable principal continuity is stronger than a structurally valid
+# BetdaqAccountEvidence object. Freeze the exact #1610 source authority that is
+# allowed to authenticate the principal before this module projects durable identity.
+_CANONICAL_ACCOUNT_CLIENT_CLASS = BetdaqAccountReadOnlyClient
+_CANONICAL_ACCOUNT_CLIENT_INIT = BetdaqAccountReadOnlyClient.__init__
+_CANONICAL_ACCOUNT_CLIENT_INIT_CODE = BetdaqAccountReadOnlyClient.__init__.__code__
+_CANONICAL_ACCOUNT_READ_EVIDENCE = BetdaqAccountReadOnlyClient.read_account_evidence
+_CANONICAL_ACCOUNT_READ_EVIDENCE_CODE = (
+    BetdaqAccountReadOnlyClient.read_account_evidence.__code__
+)
+
 
 class BetdaqAccountContinuityError(RuntimeError):
     """Base error for BETDAQ authenticated-principal continuity composition."""
@@ -160,6 +171,53 @@ class BetdaqContinuousAccountEvidence:
             )
 
 
+def _require_canonical_source_authority() -> None:
+    """Fail closed if the authenticated #1610 source dispatch was rebound."""
+
+    if BetdaqAccountReadOnlyClient is not _CANONICAL_ACCOUNT_CLIENT_CLASS:
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ account source constructor was replaced"
+        )
+    if (
+        _CANONICAL_ACCOUNT_CLIENT_CLASS.__init__ is not _CANONICAL_ACCOUNT_CLIENT_INIT
+        or getattr(_CANONICAL_ACCOUNT_CLIENT_CLASS.__init__, "__code__", None)
+        is not _CANONICAL_ACCOUNT_CLIENT_INIT_CODE
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ account source constructor implementation changed"
+        )
+    if (
+        _CANONICAL_ACCOUNT_CLIENT_CLASS.read_account_evidence
+        is not _CANONICAL_ACCOUNT_READ_EVIDENCE
+        or getattr(
+            _CANONICAL_ACCOUNT_CLIENT_CLASS.read_account_evidence,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_ACCOUNT_READ_EVIDENCE_CODE
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ account source read authority changed"
+        )
+
+
+def _require_canonical_source_instance(source: object) -> None:
+    """Require the exact source type and unshadowed bound read authority."""
+
+    if type(source) is not _CANONICAL_ACCOUNT_CLIENT_CLASS:
+        raise BetdaqAccountContinuityError(
+            "continuity source is not the canonical BETDAQ account client"
+        )
+    bound_read = getattr(source, "read_account_evidence", None)
+    if (
+        getattr(bound_read, "__self__", None) is not source
+        or getattr(bound_read, "__func__", None) is not _CANONICAL_ACCOUNT_READ_EVIDENCE
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ account source read authority was shadowed"
+        )
+
+
 class BetdaqAccountContinuityClient:
     """Canonical BETDAQ account acquisition with post-auth principal projection.
 
@@ -197,13 +255,16 @@ class BetdaqAccountContinuityClient:
             language_code=credentials.language_code,
         )
         self._venue_id = _CANONICAL_VENUE_ID
-        self._source = BetdaqAccountReadOnlyClient(
+        _require_canonical_source_authority()
+        self._source = _CANONICAL_ACCOUNT_CLIENT_CLASS(
             self._sealed_credentials,
             venue_id=self._venue_id,
             account_id=account_id,
             timeout_seconds=timeout_seconds,
             clock=clock,
         )
+        _require_canonical_source_authority()
+        _require_canonical_source_instance(self._source)
 
     def read_account_evidence(
         self,
@@ -214,7 +275,14 @@ class BetdaqAccountContinuityClient:
             raise BetdaqAccountReadOnlyError(
                 "BETDAQ authenticated account context changed during acquisition"
             )
-        source = self._source.read_account_evidence(requested_capabilities)
+        _require_canonical_source_authority()
+        _require_canonical_source_instance(self._source)
+        source = _CANONICAL_ACCOUNT_READ_EVIDENCE(
+            self._source,
+            requested_capabilities,
+        )
+        _require_canonical_source_authority()
+        _require_canonical_source_instance(self._source)
         if _credential_material(self._credentials) != sealed_material:
             raise BetdaqAccountReadOnlyError(
                 "BETDAQ authenticated account context changed during acquisition"

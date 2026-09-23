@@ -327,6 +327,10 @@ class AutosportWebController:
         validate_strategy_configuration(self.strategy_id, self.research_plan)
         return self.strategy_id, self.research_plan
 
+    def _product_runtime_target_workspace(self) -> Path:
+        strategy_id, plan = self._selected_configuration()
+        return Path(workspace_for_strategy(self.workspace, strategy_id, plan))
+
     def _refresh_economic_projection(self) -> None:
         strategy_id = self.strategy_id
         plan = self.research_plan
@@ -562,6 +566,10 @@ class AutosportWebController:
         with self._lock:
             self._poll_workers()
             spec = strategy_spec(self.strategy_id)
+            try:
+                product_runtime_workspace = self._product_runtime_target_workspace()
+            except Exception:
+                product_runtime_workspace = None
             surfaces = [
                 {
                     "key": item.key,
@@ -636,7 +644,9 @@ class AutosportWebController:
                                 self.evidence_export_worker,
                             )
                         )
-                        and Path(self.workspace) not in self._recovery_required_workspaces
+                        and product_runtime_workspace is not None
+                        and product_runtime_workspace
+                        not in self._recovery_required_workspaces
                     ),
                     "can_stop": self.product_worker.busy,
                 },
@@ -915,10 +925,7 @@ class AutosportWebController:
         if self._busy():
             return self._fail("Спочатку завершіть поточну операцію.")
         try:
-            strategy_id, plan = self._selected_configuration()
-            workspace = Path(
-                workspace_for_strategy(self.workspace, strategy_id, plan)
-            )
+            workspace = self._product_runtime_target_workspace()
         except Exception:
             return self._fail(
                 "Тривалий імітаційний режим не запущено: поточна "

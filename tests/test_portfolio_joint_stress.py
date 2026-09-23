@@ -34,6 +34,7 @@ def ticket(
     odds: str = "2",
     currency: str = "GBP",
     exchange_side: str | None = None,
+    placed_at: str = NOW,
 ) -> PaperTicket:
     return PaperTicket(
         ticket_id=ticket_id,
@@ -48,7 +49,7 @@ def ticket(
                 exchange_side=exchange_side,
             ),
         ),
-        placed_at=NOW,
+        placed_at=placed_at,
         provider_source_ids=(provider,),
         provider_accounts=((provider, f"acct-{provider}"),),
         bankroll_id="bankroll-1",
@@ -137,6 +138,34 @@ def test_explicit_back_ticket_remains_supported() -> None:
         protocol=protocol(tickets=tickets),
     )
 
+    assert result.worst_observed_profit == Decimal("-10")
+
+
+def test_ticket_placed_after_protocol_cutoff_fails_closed() -> None:
+    tickets = (
+        ticket(
+            "future-ticket",
+            "home",
+            placed_at="2026-09-22T12:00:01+00:00",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="after protocol causal_cutoff"):
+        evaluate_joint_stress(
+            tickets=tickets,
+            protocol=protocol(tickets=tickets),
+        )
+
+
+def test_ticket_placed_exactly_at_protocol_cutoff_remains_in_scope() -> None:
+    tickets = (ticket("cutoff-ticket", "home", placed_at=NOW),)
+
+    result = evaluate_joint_stress(
+        tickets=tickets,
+        protocol=protocol(tickets=tickets),
+    )
+
+    assert result.ticket_ids == ("cutoff-ticket",)
     assert result.worst_observed_profit == Decimal("-10")
 
 

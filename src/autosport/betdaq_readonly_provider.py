@@ -19,6 +19,7 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 BETDAQ_GET_PRICES_ENDPOINT = "https://api.betdaq.com/v2.0/ReadOnlyService.asmx"
 BETDAQ_GET_PRICES_SOAP_ACTION = "http://www.GlobalBettingExchange.com/ExternalAPI/GetPrices"
 BETDAQ_GET_PRICES_MAX_MARKETS = 50
+_MAX_FIXED_DECIMAL_CHARS = 512
 
 
 class BetdaqTransientTransportError(RuntimeError):
@@ -29,6 +30,38 @@ class BetdaqReadOnlyTransport(Protocol):
     def get_prices(
         self, request: "BetdaqGetPricesRequest", *, timeout_seconds: float
     ) -> bytes | str: ...
+
+
+def _fixed_decimal_text(
+    value: Decimal,
+    field: str,
+    *,
+    error_type: type[ValueError] = ValueError,
+) -> str:
+    """Render fixed-point Decimal only after proving the output is bounded."""
+
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise error_type(f"{field} must be a finite Decimal")
+    decimal_tuple = value.as_tuple()
+    exponent = decimal_tuple.exponent
+    if not isinstance(exponent, int):
+        raise error_type(f"{field} must have a finite integer exponent")
+    sign_chars = 1 if decimal_tuple.sign else 0
+    digits = decimal_tuple.digits
+    if all(digit == 0 for digit in digits):
+        output_chars = sign_chars + (1 if exponent >= 0 else 2 - exponent)
+    elif exponent >= 0:
+        output_chars = sign_chars + len(digits) + exponent
+    elif len(digits) + exponent > 0:
+        output_chars = sign_chars + len(digits) + 1
+    else:
+        output_chars = sign_chars + 2 - exponent
+    if output_chars > _MAX_FIXED_DECIMAL_CHARS:
+        raise error_type(
+            f"{field} fixed-point representation exceeds "
+            f"{_MAX_FIXED_DECIMAL_CHARS} characters"
+        )
+    return format(value, "f")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +92,7 @@ class BetdaqGetPricesRequest:
             or self.threshold_amount <= 0
         ):
             raise ValueError("threshold_amount must be a positive finite Decimal")
+        _fixed_decimal_text(self.threshold_amount, "threshold_amount")
         if self.number_for_prices_required != 1 or self.number_against_prices_required != 1:
             raise ValueError("canonical adapter requires exactly one price per side")
         if any(
@@ -157,7 +191,9 @@ def _fingerprint(request: BetdaqGetPricesRequest) -> str:
     payload = json.dumps(
         {
             "market_ids": request.market_ids,
-            "threshold_amount": format(request.threshold_amount, "f"),
+            "threshold_amount": _fixed_decimal_text(
+                request.threshold_amount, "threshold_amount"
+            ),
             "for": request.number_for_prices_required,
             "against": request.number_against_prices_required,
             "want_market_matched": request.want_market_matched_amount,
@@ -206,6 +242,7 @@ class BetdaqReadOnlyProvider:
             or threshold_amount <= 0
         ):
             raise ValueError("threshold_amount must be positive finite Decimal")
+        _fixed_decimal_text(threshold_amount, "threshold_amount")
         if (
             isinstance(timeout_seconds, bool)
             or type(timeout_seconds) not in {int, float}
@@ -289,7 +326,9 @@ class BetdaqReadOnlyProvider:
             binding = self._bindings[market.market_id]
             for selection in sorted(market.selections, key=lambda x: x.selection_id):
                 if len(selection.for_side_prices) > 1 or len(selection.against_side_prices) > 1:
-                    raise BetdaqSoapProtocolError("GetPrices returned deeper ladder than the canonical one-level request")
+                    raise BetdaqSoapProtocolError(
+                        "GetPrices returned deeper ladder than the canonical one-level request"
+                    )
                 base = {
                     "betdaq_market_name": market.name,
                     "betdaq_market_type_code": market.market_type_code,
@@ -304,7 +343,11 @@ class BetdaqReadOnlyProvider:
                     "betdaq_message_created_at": response.provider_created_at_text,
                 }
                 if selection.deduction_factor is not None:
-                    base["betdaq_deduction_factor"] = format(selection.deduction_factor, "f")
+                    base["betdaq_deduction_factor"] = _fixed_decimal_text(
+                        selection.deduction_factor,
+                        "BETDAQ deduction factor",
+                        error_type=BetdaqSoapProtocolError,
+                    )
                 for side, levels in (
                     ("back", selection.for_side_prices),
                     ("lay", selection.against_side_prices),
@@ -313,9 +356,20 @@ class BetdaqReadOnlyProvider:
                         continue
                     level = levels[0]
                     if level.price <= 1:
-                        raise BetdaqSoapProtocolError("canonical decimal odds must be greater than 1")
+                        raise BetdaqSoapProtocolError(
+                            "canonical decimal odds must be greater than 1"
+                        )
+                    _fixed_decimal_text(
+                        level.price,
+                        "BETDAQ decimal odds",
+                        error_type=BetdaqSoapProtocolError,
+                    )
                     metadata = dict(base)
-                    metadata["betdaq_available_amount"] = format(level.stake, "f")
+                    metadata["betdaq_available_amount"] = _fixed_decimal_text(
+                        level.stake,
+                        "BETDAQ available amount",
+                        error_type=BetdaqSoapProtocolError,
+                    )
                     metadata["betdaq_provider_side"] = level.provider_side
                     result.append(
                         ProviderQuote(
@@ -340,7 +394,16 @@ class BetdaqReadOnlyProvider:
             self._market_ids[i:i + BETDAQ_GET_PRICES_MAX_MARKETS]
             for i in range(0, len(self._market_ids), BETDAQ_GET_PRICES_MAX_MARKETS)
         )
-        parsed: list[tuple[BetdaqGetPricesRequest, BetdaqGetPricesWireResponse, bytes, int, datetime, str]] = []
+        parsed: list[
+            tuple[
+                BetdaqGetPricesRequest,
+                BetdaqGetPricesWireResponse,
+                bytes,
+                int,
+                datetime,
+                str,
+            ]
+        ] = []
         for market_ids in chunks:
             request = BetdaqGetPricesRequest(self._id(), market_ids, self.threshold_amount)
             payload, attempts = self._fetch(request)
@@ -421,7 +484,12 @@ class BetdaqReadOnlyProvider:
             flags.append("TRUNCATED_BATCH")
         if not self._pending:
             flags.append("EMPTY_RESPONSE")
-        batch = ProviderBatch(self.source_id, quotes, cursor=self._cursor, quality_flags=tuple(flags))
+        batch = ProviderBatch(
+            self.source_id,
+            quotes,
+            cursor=self._cursor,
+            quality_flags=tuple(flags),
+        )
         if self._offset >= len(self._pending):
             self._pending, self._offset, self._cursor, self._flags = (), 0, None, ()
         return batch

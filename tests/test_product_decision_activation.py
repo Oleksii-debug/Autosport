@@ -10,6 +10,7 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.economic_goal_store as economic_goal_store_module
 import autosport.product_decision_activation as activation_module
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
@@ -448,6 +449,44 @@ class ProductDecisionActivationTests(unittest.TestCase):
                 )
 
         self.assertFalse(self.store.path.exists())
+        self.assertEqual(
+            EconomicGoalStore(self.workspace).load(),
+            self.goal,
+        )
+
+    def test_economic_goal_decoder_rebind_cannot_launder_durable_owner_bytes(self) -> None:
+        forged_goal = replace(
+            self.goal,
+            revision=self.goal.revision + 1,
+            max_stake_fraction=Decimal("0.01"),
+        )
+        forged_risk = PaperRiskPolicy(economic_goal=forged_goal)
+        self._write_risk(forged_risk, forged_goal)
+        durable_path = self.workspace / "economic_goal_contract.json"
+        durable_before = durable_path.read_bytes()
+
+        # The exact store/load callable may remain unchanged while its application
+        # decoder global is transiently replaced. START authority must come from
+        # exact durable bytes, not the object returned by that mutable decoder.
+        with mock.patch.object(
+            economic_goal_store_module,
+            "economic_goal_from_json",
+            return_value=forged_goal,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "exact durable authority owner bytes",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=forged_goal,
+                    risk_policy=forged_risk,
+                    execution_config=self.execution,
+                )
+
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(durable_path.read_bytes(), durable_before)
         self.assertEqual(
             EconomicGoalStore(self.workspace).load(),
             self.goal,

@@ -18,7 +18,7 @@ continuity only; stronger account-identity truth remains explicitly false.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -32,6 +32,7 @@ from .betdaq_account_readonly import (
     BetdaqCredentials,
 )
 from .bookmaker_capability import BookmakerAccountSnapshot, BookmakerCapability
+from .bookmaker_account_reconciliation import BookmakerAccountReconciliationStore
 
 
 _PRINCIPAL_ID_PREFIX = "betdaq-authenticated-principal:"
@@ -103,6 +104,7 @@ class BetdaqContinuousAccountEvidence:
     snapshot: BookmakerAccountSnapshot
     source_evidence: BetdaqAccountEvidence
     principal_context: BetdaqAuthenticatedPrincipalContext
+    _issuer_token: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.snapshot) is not BookmakerAccountSnapshot:
@@ -198,7 +200,7 @@ class BetdaqAccountContinuityClient:
             source.snapshot,
             principal_context,
         )
-        return BetdaqContinuousAccountEvidence(
+        return _issue_continuous_evidence(
             snapshot=snapshot,
             source_evidence=source,
             principal_context=principal_context,
@@ -209,6 +211,22 @@ class BetdaqAccountContinuityClient:
         requested_capabilities: frozenset[BookmakerCapability],
     ) -> BookmakerAccountSnapshot:
         return self.read_account_evidence(requested_capabilities).snapshot
+
+
+def append_to_reconciliation(
+    store: BookmakerAccountReconciliationStore,
+    evidence: BetdaqContinuousAccountEvidence,
+) -> bool:
+    """Canonical #1733 -> #790 composition; account-id text alone is insufficient."""
+    if not isinstance(store, BookmakerAccountReconciliationStore):
+        raise TypeError("store must be BookmakerAccountReconciliationStore")
+    if not _is_product_issued_continuity_evidence(evidence):
+        raise BetdaqAccountContinuityError(
+            "reconciliation requires product-issued BETDAQ continuity evidence"
+        )
+    latest = store.latest_snapshot()
+    require_reconciliation_history_compatible(latest, evidence)
+    return store.append_snapshot(evidence.snapshot)
 
 
 def require_reconciliation_history_compatible(
@@ -251,6 +269,36 @@ def require_reconciliation_history_compatible(
     raise BetdaqAccountContinuityError(
         "existing reconciliation history belongs to a different BETDAQ account identity"
     )
+
+
+def _build_evidence_issuer():
+    token = object()
+
+    def issue(
+        *,
+        snapshot: BookmakerAccountSnapshot,
+        source_evidence: BetdaqAccountEvidence,
+        principal_context: BetdaqAuthenticatedPrincipalContext,
+    ) -> BetdaqContinuousAccountEvidence:
+        return BetdaqContinuousAccountEvidence(
+            snapshot=snapshot,
+            source_evidence=source_evidence,
+            principal_context=principal_context,
+            _issuer_token=token,
+        )
+
+    def is_issued(value: object) -> bool:
+        return (
+            type(value) is BetdaqContinuousAccountEvidence
+            and value._issuer_token is token
+        )
+
+    return issue, is_issued
+
+
+_issue_continuous_evidence, _is_product_issued_continuity_evidence = (
+    _build_evidence_issuer()
+)
 
 
 def _principal_context(

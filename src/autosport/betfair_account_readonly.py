@@ -15,7 +15,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, urlopen
 from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
@@ -841,13 +841,30 @@ class BetfairReadOnlyClient:
         return BookmakerPositionObservation(self._venue_id, self._account_id, ADAPTER_ID, f"{state.value}:{order.bet_id}:{order.evidence.source_payload_sha256}", order.bet_id, state, currency, order.evidence.observed_at, order.evidence.source_payload_sha256, provider_amount=amount, provider_amount_semantics=semantics, provider_side=order.side, decimal_odds=odds)
 
     def _rpc(self, method: str, params: Mapping[str, object]) -> _RpcResult:
+        return self._rpc_with_post(
+            method,
+            params,
+            self._transport.post,
+        )
+
+    def _rpc_with_post(
+        self,
+        method: str,
+        params: Mapping[str, object],
+        post: Callable[..., bytes],
+    ) -> _RpcResult:
         endpoint = _READ_METHOD_ENDPOINT.get(method)
         if endpoint is None:
             raise BetfairReadOnlyError("Betfair RPC method is outside the strict read-only allowlist")
         request_id = self._next_request_id()
         body = json.dumps({"jsonrpc": "2.0", "method": method, "params": dict(params), "id": request_id}, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         headers = {"Accept": "application/json", "Content-Type": "application/json", "X-Application": self._credentials.application_key, "X-Authentication": self._credentials.session_token}
-        payload = self._transport.post(endpoint, headers=headers, body=body, timeout_seconds=self._timeout_seconds)
+        payload = post(
+            endpoint,
+            headers=headers,
+            body=body,
+            timeout_seconds=self._timeout_seconds,
+        )
         if not isinstance(payload, bytes):
             raise BetfairReadOnlyError("Betfair transport must return bytes")
         evidence = BetfairEvidence(self._observed_at(), sha256(payload).hexdigest())
@@ -1129,10 +1146,63 @@ def _install_execution_readback_authority() -> None:
     trusted_clients: dict[int, tuple[object, object]] = {}
     raw_init = BetfairReadOnlyClient.__init__
     raw_read = BetfairReadOnlyClient.read_execution_readback
+    raw_rpc = BetfairReadOnlyClient._rpc
+    raw_rpc_with_post = BetfairReadOnlyClient._rpc_with_post
+    raw_rpc_with_post_code = raw_rpc_with_post.__code__
     validate_integrity = BetfairExecutionReadbackEnvelope.assert_authoritative
     sealed_transport_type = UrllibBetfairHttpTransport
     sealed_transport_post = UrllibBetfairHttpTransport.post
     sealed_transport_post_code = sealed_transport_post.__code__
+    sealed_request_type = Request
+    sealed_build_opener = build_opener
+    sealed_http_error = HTTPError
+    sealed_url_error = URLError
+    private_opener = sealed_build_opener()
+    private_opener_type = type(private_opener)
+    private_opener_open = private_opener_type.open
+    private_opener_open_code = private_opener_open.__code__
+
+    def trusted_record(
+        self: BetfairReadOnlyClient,
+    ) -> tuple[object, object] | None:
+        record = trusted_clients.get(id(self))
+        if record is None or record[0]() is not self:
+            return None
+        transport = record[1]
+        if self._transport is not transport or type(transport) is not sealed_transport_type:
+            return None
+        return record
+
+    def canonical_network_post(
+        transport: UrllibBetfairHttpTransport,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        request = sealed_request_type(
+            url,
+            data=body,
+            headers=dict(headers),
+            method="POST",
+        )
+        try:
+            with private_opener_open(
+                private_opener,
+                request,
+                timeout=timeout_seconds,
+            ) as response:
+                payload = response.read(transport._max_response_bytes + 1)
+        except sealed_http_error as exc:
+            raise BetfairReadOnlyError(
+                f"Betfair HTTP request failed with status {exc.code}"
+            ) from None
+        except (sealed_url_error, TimeoutError, OSError):
+            raise BetfairReadOnlyError("Betfair network request failed") from None
+        if len(payload) > transport._max_response_bytes:
+            raise BetfairReadOnlyError("Betfair response exceeded the size limit")
+        return payload
 
     def authoritative_init(
         self: BetfairReadOnlyClient,
@@ -1171,22 +1241,66 @@ def _install_execution_readback_authority() -> None:
         )
 
     def has_trusted_transport(self: BetfairReadOnlyClient) -> bool:
-        record = trusted_clients.get(id(self))
-        if record is None or record[0]() is not self:
+        record = trusted_record(self)
+        if record is None:
             return False
         transport = record[1]
-        if self._transport is not transport or type(transport) is not sealed_transport_type:
-            return False
         current_post = getattr(sealed_transport_type, "post", None)
         if (
             current_post is not sealed_transport_post
             or getattr(current_post, "__code__", None) is not sealed_transport_post_code
         ):
             return False
+        if (
+            getattr(BetfairReadOnlyClient, "_rpc", None) is not authoritative_rpc
+            or getattr(authoritative_rpc, "__code__", None) is not authoritative_rpc_code
+            or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
+            or getattr(private_opener_type, "open", None) is not private_opener_open
+            or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
+        ):
+            return False
         instance_dict = getattr(transport, "__dict__", {})
         if isinstance(instance_dict, dict) and "post" in instance_dict:
             return False
         return True
+
+    def authoritative_rpc(
+        self: BetfairReadOnlyClient,
+        method: str,
+        params: Mapping[str, object],
+    ) -> _RpcResult:
+        record = trusted_record(self)
+        if record is None:
+            return raw_rpc(self, method, params)
+        transport = record[1]
+        if (
+            getattr(BetfairReadOnlyClient, "_rpc", None) is not authoritative_rpc
+            or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
+            or getattr(private_opener_type, "open", None) is not private_opener_open
+            or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
+        ):
+            raise BetfairReadOnlyError(
+                "canonical Betfair network authority changed"
+            )
+
+        def post(
+            url: str,
+            *,
+            headers: Mapping[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            return canonical_network_post(
+                transport,
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+
+        return raw_rpc_with_post(self, method, params, post)
+
+    authoritative_rpc_code = authoritative_rpc.__code__
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -1231,6 +1345,7 @@ def _install_execution_readback_authority() -> None:
             )
 
     BetfairReadOnlyClient.__init__ = authoritative_init
+    BetfairReadOnlyClient._rpc = authoritative_rpc
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     BetfairExecutionReadbackEnvelope.assert_authoritative = assert_authoritative
 

@@ -31,8 +31,8 @@ class EmergencyStopWebController(AutosportWebController):
             self.workspace
         )
         self.emergency_stop_status = (
-            "Аварійний STOP доступний. Активація блокує новий execution admission; "
-            "вона не доводить зупинку вже запущеної роботи."
+            "Аварійний STOP доступний. Активація блокує допуск нових виконань; "
+            "вона не доводить завершення вже запущеної роботи."
         )
 
     def state(self) -> dict[str, Any]:
@@ -64,7 +64,7 @@ class EmergencyStopWebController(AutosportWebController):
             or not isinstance(payload, Mapping)
         ):
             return self._reject_bridge_command(
-                "invalid" if type(request_id) is not str else request_id,
+                "invalid",
                 "Некоректна команда аварійного STOP.",
             )
         if dict(payload):

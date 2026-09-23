@@ -12,6 +12,7 @@ from typing import Protocol
 
 
 _DECIMAL_PRECISION = 80
+_MAX_EXACT_MONEY_COEFFICIENT_DIGITS = 512
 
 
 class ForwardEconomicEvidenceError(ValueError):
@@ -71,19 +72,12 @@ def _positive_decimal(value: object, name: str) -> Decimal:
 
 
 def _exact_decimal_sum(*values: Decimal) -> Decimal:
-    """Add finite Decimals without ambient/fixed-context rounding.
-
-    Monetary totals and drawdown are identities over finite-decimal currency
-    values.  Statistical arithmetic deliberately uses the bounded local
-    Decimal context below, but reusing that context for money can erase a
-    small loss after a much larger gain.  Reconstruct the exact base-10
-    coefficient at one common exponent instead.
-    """
+    """Add finite Decimals exactly with bounded coefficient materialization."""
 
     if not values:
         return Decimal(0)
 
-    parts: list[tuple[int, int]] = []
+    parts: list[tuple[int, tuple[int, ...], int]] = []
     common_exponent: int | None = None
     for index, value in enumerate(values):
         decimal_value = _decimal(value, f"exact_decimal_sum[{index}]")
@@ -93,28 +87,49 @@ def _exact_decimal_sum(*values: Decimal) -> Decimal:
             raise ForwardEconomicEvidenceError(
                 "exact decimal sum requires finite integral exponents"
             )
-        coefficient = 0
-        for digit in decimal_tuple.digits:
-            coefficient = coefficient * 10 + digit
-        if decimal_tuple.sign:
-            coefficient = -coefficient
-        parts.append((coefficient, exponent))
+        digits = decimal_tuple.digits
+        if all(digit == 0 for digit in digits):
+            continue
+        if len(digits) > _MAX_EXACT_MONEY_COEFFICIENT_DIGITS:
+            raise ForwardEconomicEvidenceError(
+                "exact money coefficient exceeds resource bound"
+            )
+        sign = -1 if decimal_tuple.sign else 1
+        parts.append((sign, digits, exponent))
         common_exponent = (
             exponent
             if common_exponent is None
             else min(common_exponent, exponent)
         )
 
-    assert common_exponent is not None
-    total_coefficient = sum(
-        coefficient * (10 ** (exponent - common_exponent))
-        for coefficient, exponent in parts
-    )
+    if common_exponent is None:
+        return Decimal(0)
+
+    aligned_parts: list[tuple[int, tuple[int, ...], int]] = []
+    for sign, digits, exponent in parts:
+        shift = exponent - common_exponent
+        if len(digits) + shift > _MAX_EXACT_MONEY_COEFFICIENT_DIGITS:
+            raise ForwardEconomicEvidenceError(
+                "exact money exponent gap exceeds resource bound"
+            )
+        aligned_parts.append((sign, digits, shift))
+
+    total_coefficient = 0
+    for sign, digits, shift in aligned_parts:
+        coefficient = 0
+        for digit in digits:
+            coefficient = coefficient * 10 + digit
+        total_coefficient += sign * coefficient * (10 ** shift)
+
     if total_coefficient == 0:
         return Decimal(0)
-    sign = 1 if total_coefficient < 0 else 0
-    digits = tuple(int(char) for char in str(abs(total_coefficient)))
-    return Decimal((sign, digits, common_exponent))
+
+    total_tuple = Decimal(total_coefficient).as_tuple()
+    if len(total_tuple.digits) > _MAX_EXACT_MONEY_COEFFICIENT_DIGITS:
+        raise ForwardEconomicEvidenceError(
+            "exact money sum exceeds resource bound"
+        )
+    return Decimal((total_tuple.sign, total_tuple.digits, common_exponent))
 
 
 def _decimal_text(value: Decimal) -> str:

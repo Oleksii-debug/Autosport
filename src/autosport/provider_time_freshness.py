@@ -51,7 +51,10 @@ def _sequence_id(value: object) -> int | str:
     if type(value) is str:
         if not value or value != value.strip():
             raise ValueError("opaque sequence_id must be non-empty trimmed text")
-        encoded = value.encode("utf-8")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("opaque sequence_id must be valid UTF-8 text") from exc
         if len(encoded) > _MAX_OPAQUE_SEQUENCE_UTF8:
             raise ValueError("opaque sequence_id exceeds UTF-8 size bound")
         return value

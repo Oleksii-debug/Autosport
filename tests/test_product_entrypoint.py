@@ -116,6 +116,134 @@ class SupportedProductEntrypointTests(unittest.TestCase):
                 self.assertEqual(second[0]["value"]["session_id"], first_session_id)
                 self.assertEqual(second[1]["value"]["cycle_index"], 2)
 
+    def test_signal_observed_during_final_tick_wins_over_max_cycles(self) -> None:
+        stop_request = types.SimpleNamespace(
+            requested=False,
+            reason="signal:SIGTERM",
+            exit_code=143,
+        )
+        records: list[tuple[str, object]] = []
+
+        class _Runtime:
+            def __init__(self) -> None:
+                self.stop_reason: str | None = None
+                self.closed = False
+
+            def start(self):
+                return object()
+
+            def tick(self):
+                stop_request.requested = True
+                return object()
+
+            def stop(self, reason: str):
+                self.stop_reason = reason
+                return object()
+
+            def close(self) -> None:
+                self.closed = True
+
+        runtime = _Runtime()
+        source_module = _module(_Source)
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"autosport_test_product_source": source_module},
+                ),
+                patch(
+                    "autosport.product_entrypoint._SignalStopRequest",
+                    return_value=stop_request,
+                ),
+                patch(
+                    "autosport.product_entrypoint.build_autonomous_product_runtime",
+                    return_value=runtime,
+                ),
+                patch(
+                    "autosport.product_entrypoint._print_record",
+                    side_effect=lambda kind, **kwargs: records.append(
+                        (kind, kwargs["value"])
+                    ),
+                ),
+            ):
+                code = run_product(
+                    workspace=Path(directory) / "product",
+                    source_factory="autosport_test_product_source:make_source",
+                    max_cycles=1,
+                    poll_seconds=0,
+                    sleep=lambda _: self.fail("final bounded cycle must not sleep"),
+                    install_signal_handlers=False,
+                )
+
+        self.assertEqual(code, 143)
+        self.assertEqual(runtime.stop_reason, "signal:SIGTERM")
+        self.assertEqual(
+            [kind for kind, _ in records],
+            ["product_status", "product_tick", "product_status"],
+        )
+        self.assertTrue(runtime.closed)
+
+    def test_late_signal_cannot_change_selected_max_cycles_exit_code(self) -> None:
+        stop_request = types.SimpleNamespace(
+            requested=False,
+            reason="signal:SIGTERM",
+            exit_code=143,
+        )
+
+        class _Runtime:
+            def __init__(self) -> None:
+                self.stop_reason: str | None = None
+                self.closed = False
+
+            def start(self):
+                return object()
+
+            def tick(self):
+                return object()
+
+            def stop(self, reason: str):
+                self.stop_reason = reason
+                if reason == "max_cycles_reached":
+                    # Simulate a signal arriving after bounded completion already
+                    # selected its public STOP cause but before run_product returns.
+                    stop_request.requested = True
+                return object()
+
+            def close(self) -> None:
+                self.closed = True
+
+        runtime = _Runtime()
+        source_module = _module(_Source)
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"autosport_test_product_source": source_module},
+                ),
+                patch(
+                    "autosport.product_entrypoint._SignalStopRequest",
+                    return_value=stop_request,
+                ),
+                patch(
+                    "autosport.product_entrypoint.build_autonomous_product_runtime",
+                    return_value=runtime,
+                ),
+                patch("autosport.product_entrypoint._print_record"),
+            ):
+                code = run_product(
+                    workspace=Path(directory) / "product",
+                    source_factory="autosport_test_product_source:make_source",
+                    max_cycles=1,
+                    poll_seconds=0,
+                    sleep=lambda _: self.fail("final bounded cycle must not sleep"),
+                    install_signal_handlers=False,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(runtime.stop_reason, "max_cycles_reached")
+        self.assertTrue(stop_request.requested)
+        self.assertTrue(runtime.closed)
+
     def test_missing_event_resolution_fails_before_workspace_creation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "must-not-exist"

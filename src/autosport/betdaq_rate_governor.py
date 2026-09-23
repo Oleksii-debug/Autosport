@@ -6,10 +6,10 @@ This module owns only process-local request budgeting plus durable provider-blac
 fences.  It deliberately does not perform HTTP/SOAP, retry, sleep, place/update an
 order, prove Standard-tier entitlement, or grant execution/write authority.
 
-BETDAQ's public Calls and Fees page documents exact Default per-minute ceilings for
-a bounded set of methods plus a Combined row.  The public meaning of the separate
-"Any" row is not sufficiently specified to use as a positive admission axis, so
-unknown methods fail closed instead of inheriting that capacity.
+BETDAQ's public rate documentation exposes exact Default per-minute ceilings for a
+bounded set of methods plus a Combined row.  The public meaning of the separate
+"Any"/"Any Other" row is not sufficiently specified to use as a positive admission
+axis, so unknown methods fail closed instead of inheriting that capacity.
 """
 
 from collections import deque
@@ -36,14 +36,19 @@ from .providers import ProviderUnavailableError
 
 
 _CALLS_AND_FEES_URL: Final = "https://api.betdaq.com/v2.0/Docs/CallsAndFees.aspx"
+_BETDAQPRO_API_EXPLAINED_URL: Final = "https://betdaqpro.com/api-new/api-explained/"
 _PLACEMENT_METHODS_URL: Final = "https://api.betdaq.com/v2.0/Docs/PlacementMethods.aspx"
 _SECURE_SERVICE_URL: Final = "https://api.betdaq.com/v2.0/Secure/SecureService.asmx"
+_READONLY_SERVICE_URL: Final = "https://api.betdaq.com/v2.0/ReadOnlyService.asmx"
 _POLICY_SCHEMA: Final = "autosport.betdaq.rate-governor.v2"
 _BLACKLIST_SCHEMA: Final = "autosport.betdaq.rate-governor.blacklist.v2"
 _BLACKLIST_AUTHORITY_DOMAIN: Final = "autosport.betdaq-rate-governor.blacklist.v2"
 _BLACKLIST_FILE: Final = "betdaq-rate-governor-blacklist.json"
 _MIN_WINDOW_SECONDS: Final = 60.0
 _DEFAULT_COMBINED_PER_MINUTE: Final = 300
+# BETDAQ ListBlacklistInformation exposes RemainingMS as provider `int` milliseconds.
+# XML/WSDL `int` is the signed 32-bit domain; negative remaining time is invalid here.
+_BETDAQ_PROVIDER_INT_MAX: Final = 2_147_483_647
 _DEFAULT_RATE_POLICY_PER_MINUTE: Final[dict[str, int]] = {
     "PlaceOrdersNoReceipt": 100,
     "PlaceOrdersWithReceipt": 20,
@@ -53,6 +58,7 @@ _DEFAULT_RATE_POLICY_PER_MINUTE: Final[dict[str, int]] = {
     "ListBootstrapOrders": 50,
     "GetPrices": 130,
     "ListOrdersChangedSince": 130,
+    "ListSelectionTrades": 1,
 }
 _OPERATION_TO_RATE_POLICY_KEY: Final[dict[str, str]] = {
     "PlaceOrdersNoReceipt": "PlaceOrdersNoReceipt",
@@ -63,6 +69,7 @@ _OPERATION_TO_RATE_POLICY_KEY: Final[dict[str, str]] = {
     "ListBootstrapOrders": "ListBootstrapOrders",
     "GetPrices": "GetPrices",
     "ListOrdersChangedSince": "ListOrdersChangedSince",
+    "ListSelectionTrades": "ListSelectionTrades",
 }
 _PROVIDER_API_NAME_TO_OPERATION_ID: Final[dict[str, str]] = {
     "placeordersnoreceipt": "PlaceOrdersNoReceipt",
@@ -74,14 +81,19 @@ _PROVIDER_API_NAME_TO_OPERATION_ID: Final[dict[str, str]] = {
     "listbootstraporders": "ListBootstrapOrders",
     "getprices": "GetPrices",
     "listorderschangedsince": "ListOrdersChangedSince",
+    "listselectiontrades": "ListSelectionTrades",
 }
 _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
     json.dumps(
         {
-            "rate_source": _CALLS_AND_FEES_URL,
+            "primary_rate_source": _CALLS_AND_FEES_URL,
+            "supplemental_rate_sources": {
+                "ListSelectionTrades": _BETDAQPRO_API_EXPLAINED_URL,
+            },
             "operation_sources": [
                 _PLACEMENT_METHODS_URL,
                 _SECURE_SERVICE_URL,
+                _READONLY_SERVICE_URL,
             ],
             "tier": "DEFAULT",
             "rate_policy": _DEFAULT_RATE_POLICY_PER_MINUTE,
@@ -365,7 +377,7 @@ class BetdaqRatePolicy:
 
 def default_betdaq_rate_policy(
     *,
-    policy_revision: str = "betdaq-default-documented-v2",
+    policy_revision: str = "betdaq-default-documented-v3",
     safety_reserve_by_method: Mapping[str, int] | None = None,
     combined_safety_reserve: int = 0,
 ) -> BetdaqRatePolicy:
@@ -922,9 +934,11 @@ class BetdaqRateGovernor:
             isinstance(remaining_ms, bool)
             or type(remaining_ms) is not int
             or remaining_ms < 0
+            or remaining_ms > _BETDAQ_PROVIDER_INT_MAX
         ):
             raise BetdaqRateGovernorError(
-                "remaining_ms must be a non-negative integer"
+                "remaining_ms must be within BETDAQ provider int domain "
+                f"0..{_BETDAQ_PROVIDER_INT_MAX}"
             )
         digest = _sha256(
             provider_observation_sha256,

@@ -176,6 +176,32 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
                 )
         self.assertEqual(transport.urls, [])
 
+
+    def test_mutable_provider_class_sport_cannot_redefine_canonical_scope(self) -> None:
+        transport = _Transport([])
+        with patch.object(
+            ParlayApiTableTennisProvider,
+            "sport_key",
+            "football",
+        ):
+            provider = self._provider(transport)
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "matches.json"
+                evidence = Path(temp) / "matches.evidence.json"
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "canonical table-tennis sport scope",
+                ):
+                    capture_historical_matches(
+                        provider,
+                        requested_date="2026-09-10",
+                        output_path=output,
+                        evidence_path=evidence,
+                    )
+                self.assertFalse(output.exists())
+                self.assertFalse(evidence.exists())
+        self.assertEqual(transport.urls, [])
+
     def test_retry_transport_and_clock_mutation_cannot_mint_positive_trust(self) -> None:
         payload = [{"provider_defined_id": "retry-match"}]
         second_transport = _Transport(payload)

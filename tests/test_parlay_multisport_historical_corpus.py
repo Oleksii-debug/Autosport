@@ -10,12 +10,69 @@ import pytest
 from autosport.dataset import load_dataset
 from autosport.domain import MarketEvent
 from autosport.historical_corpus import assemble_historical_corpus
+from autosport.historical_snapshot import capture_historical_snapshot
+from autosport.parlay_sport_provider import ParlayApiSportProvider
+from autosport.parlayapi_provider import HttpJsonResponse
 
 
 TERMS = "https://parlay-api.com/terms"
 CAPTURED_AT = "2026-01-02T00:00:00+00:00"
 REVEAL_AT = "2026-01-01T11:00:00+00:00"
 IMPORTED_AT = "2026-01-02T00:05:00+00:00"
+
+
+class _HistoricalTransport:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+        self.urls: list[str] = []
+        self.headers: list[dict[str, str]] = []
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> HttpJsonResponse:
+        self.urls.append(url)
+        self.headers.append(dict(headers))
+        return HttpJsonResponse(
+            self.payload,
+            200,
+            {"x-api-version": "test-multisport-history"},
+        )
+
+
+def _basketball_historical_payload() -> dict[str, object]:
+    return {
+        "timestamp": "2026-01-01T10:00:10+00:00",
+        "previous_timestamp": "2026-01-01T09:55:00+00:00",
+        "next_timestamp": "2026-01-01T10:05:00+00:00",
+        "data": [
+            {
+                "id": "basketball-live-provider-1",
+                "sport_key": "basketball",
+                "commence_time": "2026-01-01T12:00:00+00:00",
+                "home_team": "Home",
+                "away_team": "Away",
+                "bookmakers": [
+                    {
+                        "key": "book-a",
+                        "title": "Book A",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "last_update": "2026-01-01T10:00:00+00:00",
+                                "outcomes": [
+                                    {"name": "Home", "price": 1.8},
+                                    {"name": "Away", "price": 2.1},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -516,3 +573,65 @@ def test_same_snapshot_set_reversed_is_identity_idempotent(tmp_path: Path) -> No
         first_provenance["qualified_corpus_identity"]
         == second_provenance["qualified_corpus_identity"]
     )
+
+
+def test_generic_provider_capture_flows_into_governed_second_sport_corpus(tmp_path: Path) -> None:
+    secret = "test-secret-must-not-enter-evidence"
+    transport = _HistoricalTransport(_basketball_historical_payload())
+    provider = ParlayApiSportProvider(
+        "basketball",
+        secret,
+        transport=transport,
+        clock=lambda: CAPTURED_AT,
+        sleeper=lambda _seconds: None,
+    )
+    market = tmp_path / "provider-basketball.jsonl"
+    evidence = tmp_path / "provider-basketball.evidence.json"
+
+    capture = capture_historical_snapshot(
+        provider,
+        requested_at="2026-01-01T10:00:20+00:00",
+        output_path=market,
+        evidence_path=evidence,
+    )
+    events = tuple(
+        MarketEvent.from_dict(json.loads(line))
+        for line in market.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="provider-basketball",
+    )
+
+    assemble_historical_corpus(
+        [(market, evidence)],
+        results_path=_write_results(
+            tmp_path,
+            events,
+            suffix="provider-basketball",
+        ),
+        governance_proof_path=proof,
+        output_dir=tmp_path / "provider-basketball-corpus",
+        name="provider basketball historical corpus",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    dataset = load_dataset(tmp_path / "provider-basketball-corpus")
+    manifest_text = (tmp_path / "provider-basketball-corpus" / "manifest.json").read_text(
+        encoding="utf-8"
+    )
+    evidence_text = evidence.read_text(encoding="utf-8")
+    market_text = market.read_text(encoding="utf-8")
+
+    assert capture.quote_count == 2
+    assert dataset.schema_version == 3
+    assert dataset.sport == "basketball"
+    assert {event.sport for event in dataset.load_market_events()} == {"basketball"}
+    assert transport.urls
+    assert "/v1/historical/sports/basketball/odds?" in transport.urls[0]
+    assert transport.headers[0]["X-API-Key"] == secret
+    assert secret not in evidence_text
+    assert secret not in market_text
+    assert secret not in manifest_text

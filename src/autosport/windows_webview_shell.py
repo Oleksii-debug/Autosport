@@ -860,7 +860,7 @@ class AutosportWebController:
         workspace = Path(self.workspace)
         if workspace in self._recovery_required_workspaces:
             return self._fail(
-                "Тривала PAPER-робота заблокована: спочатку відновіть робочу область."
+                "Тривалий імітаційний режим заблоковано: спочатку відновіть робочу область."
             )
         source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
         if source_factory is None or not source_factory:

@@ -18,16 +18,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Final, Mapping, Sequence
+from typing import Final, Mapping
 
 from .economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from .integrity import atomic_write_json, sha256_file
 from .json_integrity import strict_json_loads
+from .local_compute_allocation_basis import (
+    LocalComputeAllocationBasisAuthorityStore,
+    LocalComputeAllocationBasisRecord,
+)
 from .monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
@@ -40,9 +43,6 @@ SCHEMA_VERSION: Final = 1
 FILE_NAME: Final = "local-compute-tariffs.json"
 AUTHORITY_DOMAIN: Final = "autosport.local-compute-tariff.v1"
 AUTHORITY_KEY: Final = "owner-approved-local-compute-tariffs"
-BASIS_FILE_NAME: Final = "local-compute-allocation-bases.json"
-BASIS_AUTHORITY_DOMAIN: Final = "autosport.local-compute-allocation-basis.v1"
-BASIS_AUTHORITY_KEY: Final = "local-compute-allocation-bases"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE: Final = re.compile(r"^[A-Z]{3}$")
 _MAX_INTEGER_DIGITS: Final = 24
@@ -159,593 +159,6 @@ def _authority_now() -> str:
     """Product clock seam. Tests may patch this private function."""
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-class LocalComputeCostComponentKind(StrEnum):
-    """Typed monetary components in the local compute allocation numerator."""
-
-    ELECTRICITY = "ELECTRICITY"
-    HARDWARE_AMORTIZATION = "HARDWARE_AMORTIZATION"
-    SOFTWARE_SUBSCRIPTION = "SOFTWARE_SUBSCRIPTION"
-    OTHER_ALLOCABLE = "OTHER_ALLOCABLE"
-
-
-class LocalComputeDenominatorUnit(StrEnum):
-    """The exact denominator supported by the local tariff contract."""
-
-    REQUEST = "REQUEST"
-
-
-def _positive_request_count(value: object) -> int:
-    if (
-        type(value) is not int
-        or isinstance(value, bool)
-        or value < 1
-        or value > 10**12
-    ):
-        raise LocalComputeTariffError(
-            "denominator_request_count must be a bounded positive integer"
-        )
-    return value
-
-
-def _decimal_from_fraction_exact(
-    value: Fraction,
-    field: str,
-) -> Decimal:
-    """Create one finite Decimal without consulting the ambient Decimal context."""
-
-    if value < 0:
-        raise LocalComputeTariffError(f"{field} must be non-negative")
-    remaining = value.denominator
-    twos = 0
-    fives = 0
-    while remaining % 2 == 0:
-        twos += 1
-        remaining //= 2
-    while remaining % 5 == 0:
-        fives += 1
-        remaining //= 5
-    if remaining != 1:
-        raise LocalComputeTariffError(
-            f"{field} does not have an exact finite Decimal representation"
-        )
-    scale = max(twos, fives)
-    if scale > _MAX_FRACTIONAL_DIGITS:
-        raise LocalComputeTariffError(
-            f"{field} exceeds supported exact monetary precision"
-        )
-    coefficient = (
-        value.numerator
-        * (2 ** (scale - twos))
-        * (5 ** (scale - fives))
-    )
-    digits_text = str(coefficient)
-    digits = tuple(ord(ch) - ord("0") for ch in digits_text)
-    amount = Decimal((0, digits or (0,), -scale))
-    return _money(amount, field)
-
-
-def _sum_money_exact(values: Sequence[Decimal]) -> Decimal:
-    total = Fraction(0)
-    for value in values:
-        total += Fraction(_money(value, "component amount"))
-    return _decimal_from_fraction_exact(total, "total_allocable_cost")
-
-
-def _exact_per_request_amount(total: Decimal, denominator: int) -> Decimal:
-    """Derive an exact finite Decimal amount; never round recurring money."""
-
-    canonical_total = _money(total, "total_allocable_cost")
-    canonical_denominator = _positive_request_count(denominator)
-    fraction = Fraction(canonical_total) / canonical_denominator
-    amount = _decimal_from_fraction_exact(fraction, "amount_per_request")
-    if Fraction(amount) * canonical_denominator != Fraction(canonical_total):
-        raise LocalComputeTariffError("derived per-request amount is not exact")
-    return amount
-
-
-@dataclass(frozen=True, order=True, slots=True)
-class LocalComputeCostComponent:
-    component_id: str
-    kind: LocalComputeCostComponentKind
-    amount: Decimal
-    currency: str
-
-    def __post_init__(self) -> None:
-        _text(self.component_id, "component_id")
-        if type(self.kind) is not LocalComputeCostComponentKind:
-            raise LocalComputeTariffError(
-                "kind must be LocalComputeCostComponentKind"
-            )
-        _money(self.amount, "component amount")
-        _currency(self.currency)
-
-    def payload(self) -> dict[str, object]:
-        return {
-            "component_id": self.component_id,
-            "kind": self.kind.value,
-            "amount": format(_money(self.amount, "component amount"), "f"),
-            "currency": self.currency,
-        }
-
-    @property
-    def component_sha256(self) -> str:
-        return _digest(self.payload())
-
-    def to_dict(self) -> dict[str, object]:
-        return {**self.payload(), "component_sha256": self.component_sha256}
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, object]) -> "LocalComputeCostComponent":
-        expected = {
-            "component_id",
-            "kind",
-            "amount",
-            "currency",
-            "component_sha256",
-        }
-        if set(raw) != expected:
-            raise LocalComputeTariffError("cost component fields do not match schema")
-        if type(raw["amount"]) is not str:
-            raise LocalComputeTariffError("component amount must be Decimal text")
-        try:
-            amount = Decimal(raw["amount"])
-            kind = LocalComputeCostComponentKind(raw["kind"])  # type: ignore[arg-type]
-        except (InvalidOperation, TypeError, ValueError) as exc:
-            raise LocalComputeTariffError("invalid local compute cost component") from exc
-        item = cls(
-            component_id=raw["component_id"],  # type: ignore[arg-type]
-            kind=kind,
-            amount=amount,
-            currency=raw["currency"],  # type: ignore[arg-type]
-        )
-        if raw["component_sha256"] != item.component_sha256:
-            raise LocalComputeTariffError("cost component digest mismatch")
-        return item
-
-
-@dataclass(frozen=True, slots=True)
-class LocalComputeAllocationBasisRecord:
-    basis_id: str
-    backend_id: str
-    model_id: str
-    config_sha256: str
-    allocation_policy_id: str
-    components: tuple[LocalComputeCostComponent, ...]
-    denominator_request_count: int
-    denominator_unit: LocalComputeDenominatorUnit
-    currency: str
-    observed_at: str
-    available_at: str
-    owner_goal_id: str
-    owner_goal_revision: int
-    owner_bankroll_id: str
-    owner_goal_sha256: str
-
-    def __post_init__(self) -> None:
-        _text(self.basis_id, "basis_id")
-        _text(self.backend_id, "backend_id")
-        _text(self.model_id, "model_id")
-        _sha(self.config_sha256, "config_sha256")
-        _text(self.allocation_policy_id, "allocation_policy_id")
-        if type(self.components) is not tuple or not self.components:
-            raise LocalComputeTariffError("components must be a non-empty tuple")
-        if any(type(item) is not LocalComputeCostComponent for item in self.components):
-            raise LocalComputeTariffError(
-                "components must contain exact LocalComputeCostComponent values"
-            )
-        if tuple(sorted(self.components, key=lambda item: item.component_id)) != self.components:
-            raise LocalComputeTariffError("components must be sorted by component_id")
-        if len({item.component_id for item in self.components}) != len(self.components):
-            raise LocalComputeTariffError("component_id values must be unique")
-        _positive_request_count(self.denominator_request_count)
-        if type(self.denominator_unit) is not LocalComputeDenominatorUnit:
-            raise LocalComputeTariffError(
-                "denominator_unit must be LocalComputeDenominatorUnit"
-            )
-        _currency(self.currency)
-        if any(item.currency != self.currency for item in self.components):
-            raise LocalComputeTariffError(
-                "all cost components must use the basis currency"
-            )
-        observed = _instant(self.observed_at, "observed_at")
-        available = _instant(self.available_at, "available_at")
-        if observed > available:
-            raise LocalComputeTariffError(
-                "observed_at cannot be later than available_at"
-            )
-        _text(self.owner_goal_id, "owner_goal_id")
-        if (
-            type(self.owner_goal_revision) is not int
-            or isinstance(self.owner_goal_revision, bool)
-            or self.owner_goal_revision < 1
-        ):
-            raise LocalComputeTariffError(
-                "owner_goal_revision must be positive integer"
-            )
-        _text(self.owner_bankroll_id, "owner_bankroll_id")
-        _sha(self.owner_goal_sha256, "owner_goal_sha256")
-        _money(self.total_allocable_cost, "total_allocable_cost")
-        _money(self.amount_per_request, "amount_per_request")
-
-    @property
-    def total_allocable_cost(self) -> Decimal:
-        return _sum_money_exact(tuple(item.amount for item in self.components))
-
-    @property
-    def amount_per_request(self) -> Decimal:
-        return _exact_per_request_amount(
-            self.total_allocable_cost,
-            self.denominator_request_count,
-        )
-
-    def payload(self) -> dict[str, object]:
-        return {
-            "basis_id": self.basis_id,
-            "backend_id": self.backend_id,
-            "model_id": self.model_id,
-            "config_sha256": self.config_sha256,
-            "allocation_policy_id": self.allocation_policy_id,
-            "components": [item.to_dict() for item in self.components],
-            "denominator_request_count": self.denominator_request_count,
-            "denominator_unit": self.denominator_unit.value,
-            "currency": self.currency,
-            "total_allocable_cost": format(self.total_allocable_cost, "f"),
-            "amount_per_request": format(self.amount_per_request, "f"),
-            "observed_at": _time(self.observed_at, "observed_at"),
-            "available_at": _time(self.available_at, "available_at"),
-            "owner_goal_id": self.owner_goal_id,
-            "owner_goal_revision": self.owner_goal_revision,
-            "owner_bankroll_id": self.owner_bankroll_id,
-            "owner_goal_sha256": self.owner_goal_sha256,
-        }
-
-    @property
-    def basis_sha256(self) -> str:
-        return _digest(self.payload())
-
-    def to_dict(self) -> dict[str, object]:
-        return {**self.payload(), "basis_sha256": self.basis_sha256}
-
-    @classmethod
-    def from_dict(
-        cls,
-        raw: Mapping[str, object],
-    ) -> "LocalComputeAllocationBasisRecord":
-        expected = {
-            "basis_id",
-            "backend_id",
-            "model_id",
-            "config_sha256",
-            "allocation_policy_id",
-            "components",
-            "denominator_request_count",
-            "denominator_unit",
-            "currency",
-            "total_allocable_cost",
-            "amount_per_request",
-            "observed_at",
-            "available_at",
-            "owner_goal_id",
-            "owner_goal_revision",
-            "owner_bankroll_id",
-            "owner_goal_sha256",
-            "basis_sha256",
-        }
-        if set(raw) != expected:
-            raise LocalComputeTariffError(
-                "allocation basis record fields do not match schema"
-            )
-        raw_components = raw["components"]
-        if type(raw_components) is not list:
-            raise LocalComputeTariffError("allocation basis components must be a list")
-        if any(not isinstance(item, dict) for item in raw_components):
-            raise LocalComputeTariffError("allocation basis component must be an object")
-        if type(raw["total_allocable_cost"]) is not str:
-            raise LocalComputeTariffError(
-                "total_allocable_cost must be canonical Decimal text"
-            )
-        if type(raw["amount_per_request"]) is not str:
-            raise LocalComputeTariffError(
-                "amount_per_request must be canonical Decimal text"
-            )
-        try:
-            components = tuple(
-                LocalComputeCostComponent.from_dict(item)
-                for item in raw_components
-            )
-            denominator_unit = LocalComputeDenominatorUnit(raw["denominator_unit"])  # type: ignore[arg-type]
-            persisted_total = Decimal(raw["total_allocable_cost"])
-            persisted_amount = Decimal(raw["amount_per_request"])
-        except (InvalidOperation, TypeError, ValueError) as exc:
-            raise LocalComputeTariffError("invalid allocation basis record") from exc
-        item = cls(
-            basis_id=raw["basis_id"],  # type: ignore[arg-type]
-            backend_id=raw["backend_id"],  # type: ignore[arg-type]
-            model_id=raw["model_id"],  # type: ignore[arg-type]
-            config_sha256=raw["config_sha256"],  # type: ignore[arg-type]
-            allocation_policy_id=raw["allocation_policy_id"],  # type: ignore[arg-type]
-            components=components,
-            denominator_request_count=raw["denominator_request_count"],  # type: ignore[arg-type]
-            denominator_unit=denominator_unit,
-            currency=raw["currency"],  # type: ignore[arg-type]
-            observed_at=raw["observed_at"],  # type: ignore[arg-type]
-            available_at=raw["available_at"],  # type: ignore[arg-type]
-            owner_goal_id=raw["owner_goal_id"],  # type: ignore[arg-type]
-            owner_goal_revision=raw["owner_goal_revision"],  # type: ignore[arg-type]
-            owner_bankroll_id=raw["owner_bankroll_id"],  # type: ignore[arg-type]
-            owner_goal_sha256=raw["owner_goal_sha256"],  # type: ignore[arg-type]
-        )
-        if persisted_total != item.total_allocable_cost:
-            raise LocalComputeTariffError(
-                "persisted total_allocable_cost does not match components"
-            )
-        if persisted_amount != item.amount_per_request:
-            raise LocalComputeTariffError(
-                "persisted amount_per_request does not match exact allocation"
-            )
-        if raw["basis_sha256"] != item.basis_sha256:
-            raise LocalComputeTariffError("allocation basis digest mismatch")
-        return item
-
-
-def _basis_state_payload(
-    records: tuple[LocalComputeAllocationBasisRecord, ...],
-) -> dict[str, object]:
-    return {
-        "schema": "autosport.local_compute_allocation_basis",
-        "schema_version": 1,
-        "records": [record.to_dict() for record in records],
-    }
-
-
-class LocalComputeAllocationBasisAuthorityStore:
-    """Append-only product-owned allocation-basis authority."""
-
-    def __init__(
-        self,
-        workspace: str | Path,
-        *,
-        authority_root: str | Path | None = None,
-    ) -> None:
-        self.workspace = Path(workspace).absolute()
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / BASIS_FILE_NAME
-        self._authority = MonotonicWorkspaceAuthority(
-            workspace=self.workspace,
-            domain=BASIS_AUTHORITY_DOMAIN,
-            key=BASIS_AUTHORITY_KEY,
-            authority_root=authority_root,
-        )
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            self._records = self._load()
-
-    def _observed_sha256(self) -> str | None:
-        return sha256_file(self.path) if self.path.exists() else None
-
-    def _recover(self) -> None:
-        observed = self._observed_sha256()
-        history = self._authority.read_history()
-        if history and history[-1].phase is AuthorityPhase.PREPARE:
-            pending = history[-1]
-            self._authority.recover(
-                observed_state_sha256=observed,
-                tx_id=pending.tx_id,
-                semantic_binding_sha256=pending.semantic_binding_sha256,
-            )
-            return
-        self._authority.recover(observed_state_sha256=observed)
-
-    def _load(self) -> tuple[LocalComputeAllocationBasisRecord, ...]:
-        if not self.path.exists():
-            return ()
-        try:
-            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise LocalComputeTariffError(
-                "local compute allocation basis state is unreadable"
-            ) from exc
-        if (
-            not isinstance(raw, dict)
-            or set(raw) != {"schema", "schema_version", "records"}
-            or raw["schema"] != "autosport.local_compute_allocation_basis"
-            or raw["schema_version"] != 1
-        ):
-            raise LocalComputeTariffError(
-                "local compute allocation basis state fields are invalid"
-            )
-        values = raw["records"]
-        if type(values) is not list:
-            raise LocalComputeTariffError("allocation basis records must be a list")
-        records: list[LocalComputeAllocationBasisRecord] = []
-        ids: set[str] = set()
-        digests: set[str] = set()
-        for raw_record in values:
-            if not isinstance(raw_record, dict):
-                raise LocalComputeTariffError("allocation basis record must be an object")
-            record = LocalComputeAllocationBasisRecord.from_dict(raw_record)
-            if record.basis_id in ids or record.basis_sha256 in digests:
-                raise LocalComputeTariffError("duplicate allocation basis identity")
-            ids.add(record.basis_id)
-            digests.add(record.basis_sha256)
-            records.append(record)
-        return tuple(records)
-
-    def _current_goal(self):
-        try:
-            goal = EconomicGoalStore(self.workspace).load()
-        except Exception as exc:
-            raise LocalComputeTariffError(
-                "current durable EconomicGoal is required for allocation basis authority"
-            ) from exc
-        return goal, _goal_sha256(goal)
-
-    def publish_basis(
-        self,
-        *,
-        basis_id: str,
-        backend_id: str,
-        model_id: str,
-        config_sha256: str,
-        allocation_policy_id: str,
-        components: Sequence[LocalComputeCostComponent],
-        denominator_request_count: int,
-    ) -> LocalComputeAllocationBasisRecord:
-        canonical_basis_id = _text(basis_id, "basis_id")
-        canonical_backend = _text(backend_id, "backend_id")
-        canonical_model = _text(model_id, "model_id")
-        canonical_config = _sha(config_sha256, "config_sha256")
-        canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
-        if isinstance(components, (str, bytes, bytearray)):
-            raise LocalComputeTariffError(
-                "components must be a sequence of cost components"
-            )
-        try:
-            raw_components = tuple(components)
-        except TypeError as exc:
-            raise LocalComputeTariffError(
-                "components must be a sequence of cost components"
-            ) from exc
-        if (
-            not raw_components
-            or any(type(item) is not LocalComputeCostComponent for item in raw_components)
-        ):
-            raise LocalComputeTariffError(
-                "components must contain exact LocalComputeCostComponent values"
-            )
-        canonical_components = tuple(
-            sorted(raw_components, key=lambda item: item.component_id)
-        )
-        canonical_denominator = _positive_request_count(denominator_request_count)
-        total = _sum_money_exact(tuple(item.amount for item in canonical_components))
-        _exact_per_request_amount(total, canonical_denominator)
-
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            self._records = self._load()
-            goal, goal_sha256 = self._current_goal()
-            if any(item.currency != goal.currency for item in canonical_components):
-                raise LocalComputeTariffError(
-                    "cost components must use the current EconomicGoal currency"
-                )
-            for existing in self._records:
-                if existing.basis_id != canonical_basis_id:
-                    continue
-                same_request = (
-                    existing.backend_id == canonical_backend
-                    and existing.model_id == canonical_model
-                    and existing.config_sha256 == canonical_config
-                    and existing.allocation_policy_id == canonical_policy
-                    and existing.components == canonical_components
-                    and existing.denominator_request_count == canonical_denominator
-                    and existing.owner_goal_sha256 == goal_sha256
-                )
-                if same_request:
-                    return existing
-                raise LocalComputeTariffError("basis_id is immutable")
-
-            stamp = _time(_authority_now(), "available_at")
-            record = LocalComputeAllocationBasisRecord(
-                basis_id=canonical_basis_id,
-                backend_id=canonical_backend,
-                model_id=canonical_model,
-                config_sha256=canonical_config,
-                allocation_policy_id=canonical_policy,
-                components=canonical_components,
-                denominator_request_count=canonical_denominator,
-                denominator_unit=LocalComputeDenominatorUnit.REQUEST,
-                currency=goal.currency,
-                observed_at=stamp,
-                available_at=stamp,
-                owner_goal_id=goal.goal_id,
-                owner_goal_revision=goal.revision,
-                owner_bankroll_id=goal.bankroll_id,
-                owner_goal_sha256=goal_sha256,
-            )
-            staged = (*self._records, record)
-            payload = _basis_state_payload(staged)
-            intended = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
-            observed = self._observed_sha256()
-            binding = _digest(
-                {
-                    "kind": "LOCAL_COMPUTE_ALLOCATION_BASIS_PUBLISH",
-                    "basis_sha256": record.basis_sha256,
-                    "owner_goal_sha256": record.owner_goal_sha256,
-                    "observed_state_sha256": observed,
-                    "intended_state_sha256": intended,
-                }
-            )
-            tx_id = f"local-compute-allocation-basis-{record.basis_sha256}"
-            self._authority.prepare(
-                tx_id=tx_id,
-                observed_state_sha256=observed,
-                intended_state_sha256=intended,
-                semantic_binding_sha256=binding,
-            )
-            try:
-                atomic_write_json(self.path, payload)
-            except Exception:
-                self._authority.abort(
-                    tx_id=tx_id,
-                    observed_state_sha256=observed,
-                    semantic_binding_sha256=binding,
-                )
-                raise
-            published = self._observed_sha256()
-            if published != intended:
-                raise LocalComputeTariffError(
-                    "published allocation basis bytes do not match prepared state"
-                )
-            self._authority.commit(
-                tx_id=tx_id,
-                observed_state_sha256=published,
-                semantic_binding_sha256=binding,
-            )
-            self._records = staged
-            return record
-
-    def resolve(
-        self,
-        *,
-        basis_id: str,
-        backend_id: str,
-        model_id: str,
-        config_sha256: str,
-        allocation_policy_id: str,
-        decision_at: str,
-    ) -> LocalComputeAllocationBasisRecord | None:
-        canonical_basis_id = _text(basis_id, "basis_id")
-        canonical_backend = _text(backend_id, "backend_id")
-        canonical_model = _text(model_id, "model_id")
-        canonical_config = _sha(config_sha256, "config_sha256")
-        canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
-        cutoff = _instant(decision_at, "decision_at")
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            records = self._load()
-            goal, goal_sha256 = self._current_goal()
-            matches = [
-                record
-                for record in records
-                if record.basis_id == canonical_basis_id
-                and record.backend_id == canonical_backend
-                and record.model_id == canonical_model
-                and record.config_sha256 == canonical_config
-                and record.allocation_policy_id == canonical_policy
-                and record.owner_goal_id == goal.goal_id
-                and record.owner_goal_revision == goal.revision
-                and record.owner_bankroll_id == goal.bankroll_id
-                and record.owner_goal_sha256 == goal_sha256
-                and record.currency == goal.currency
-                and _instant(record.available_at, "available_at") <= cutoff
-            ]
-            if len(matches) > 1:
-                raise LocalComputeTariffError(
-                    "ambiguous allocation basis authority"
-                )
-            return None if not matches else matches[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1005,30 +418,6 @@ class LocalComputeTariffAuthorityStore:
             )
         return authority
 
-    def publish_allocation_basis(
-        self,
-        *,
-        basis_id: str,
-        backend_id: str,
-        model_id: str,
-        config_sha256: str,
-        allocation_policy_id: str,
-        components: Sequence[LocalComputeCostComponent],
-        denominator_request_count: int,
-    ) -> LocalComputeAllocationBasisRecord:
-        """Create one re-resolvable product-owned allocation basis."""
-
-        return LocalComputeAllocationBasisAuthorityStore.publish_basis(
-            self._basis_authority(),
-            basis_id=basis_id,
-            backend_id=backend_id,
-            model_id=model_id,
-            config_sha256=config_sha256,
-            allocation_policy_id=allocation_policy_id,
-            components=components,
-            denominator_request_count=denominator_request_count,
-        )
-
     def publish_owner_tariff(
         self,
         *,
@@ -1054,6 +443,7 @@ class LocalComputeTariffAuthorityStore:
         canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
         canonical_basis_id = _text(allocation_basis_id, "allocation_basis_id")
         recorded_at = _time(_authority_now(), "recorded_at")
+        goal_for_basis, _ = self._current_goal()
         basis = LocalComputeAllocationBasisAuthorityStore.resolve(
             self._basis_authority(),
             basis_id=canonical_basis_id,
@@ -1062,6 +452,8 @@ class LocalComputeTariffAuthorityStore:
             config_sha256=canonical_config,
             allocation_policy_id=canonical_policy,
             decision_at=recorded_at,
+            bankroll_id=goal_for_basis.bankroll_id,
+            currency=goal_for_basis.currency,
         )
         if basis is None:
             raise LocalComputeTariffError(
@@ -1272,6 +664,8 @@ class LocalComputeTariffAuthorityStore:
             config_sha256=resolved.config_sha256,
             allocation_policy_id=resolved.allocation_policy_id,
             decision_at=_time(cutoff.isoformat(), "decision_at"),
+            bankroll_id=resolved.owner_bankroll_id,
+            currency=resolved.currency,
         )
         if basis is None:
             return None
@@ -1290,10 +684,7 @@ class LocalComputeTariffAuthorityStore:
 __all__ = [
     "LocalComputeAllocationBasisAuthorityStore",
     "LocalComputeAllocationBasisRecord",
-    "LocalComputeCostComponent",
-    "LocalComputeCostComponentKind",
     "LocalComputeCostTreatment",
-    "LocalComputeDenominatorUnit",
     "LocalComputeTariffAuthorityStore",
     "LocalComputeTariffError",
     "LocalComputeTariffRecord",

@@ -88,12 +88,12 @@ def _exact_decimal_sum(*values: Decimal) -> Decimal:
                 "exact decimal sum requires finite integral exponents"
             )
         digits = decimal_tuple.digits
-        if all(digit == 0 for digit in digits):
-            continue
         if len(digits) > _MAX_EXACT_MONEY_COEFFICIENT_DIGITS:
             raise ForwardEconomicEvidenceError(
                 "exact money coefficient exceeds resource bound"
             )
+        if all(digit == 0 for digit in digits):
+            continue
         sign = -1 if decimal_tuple.sign else 1
         parts.append((sign, digits, exponent))
         common_exponent = (

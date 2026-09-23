@@ -10,7 +10,6 @@ from .windows_webview_shell import AutosportWebController
 
 
 _EMERGENCY_ACTION_ID = "emergency_stop.activate"
-_EMERGENCY_REQUEST_REPLAY_LIMIT = 256
 
 
 class EmergencyStopWebController(AutosportWebController):
@@ -36,9 +35,6 @@ class EmergencyStopWebController(AutosportWebController):
         # Its own lock/cache preserve duplicate safety without waiting for
         # AutosportWebController._lock, which may be held by a slow command.
         self._emergency_dispatch_lock = threading.RLock()
-        self._emergency_request_results: dict[
-            str, tuple[str, dict[str, Any]]
-        ] = {}
 
     def state(self) -> dict[str, Any]:
         state = super().state()
@@ -95,40 +91,46 @@ class EmergencyStopWebController(AutosportWebController):
             allow_nan=False,
         )
         with self._emergency_dispatch_lock:
-            previous = self._emergency_request_results.get(request_id)
-            if previous is not None:
-                previous_identity, previous_result = previous
+            previous_identity, previous_result = self._reserve_request_identity(
+                request_id,
+                command_identity,
+            )
+            if previous_identity is not None:
                 if previous_identity != command_identity:
                     return {
                         "request_id": request_id,
                         "status": "rejected",
                         "message": "Повторний ідентифікатор належить іншій команді.",
                     }
-                return dict(previous_result)
+                if previous_result is not None:
+                    return previous_result
+                return {
+                    "request_id": request_id,
+                    "status": "rejected",
+                    "message": "Команда з цим ідентифікатором уже виконується.",
+                }
 
             # Safety control remains callable while ordinary controller work,
             # polling, economic workers, or close-state presentation are busy.
             # It owns no ordinary UI/domain state and publishes only the canonical
             # durable execution STOP authority.
             try:
-                response = self._activate_emergency_stop()
-            except BaseException as exc:
-                if not isinstance(exc, Exception):
-                    raise
-                response = {
-                    "status": "rejected",
-                    "message": (
-                        "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
-                        "Нові виконання мають залишатися заблокованими; перевірте журнал STOP."
-                    ),
-                }
+                try:
+                    response = self._activate_emergency_stop()
+                except BaseException as exc:
+                    if not isinstance(exc, Exception):
+                        raise
+                    response = {
+                        "status": "rejected",
+                        "message": (
+                            "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
+                            "Нові виконання мають залишатися заблокованими; перевірте журнал STOP."
+                        ),
+                    }
 
-            result = {"request_id": request_id, **response}
-            self._emergency_request_results[request_id] = (
-                command_identity,
-                dict(result),
-            )
-            while len(self._emergency_request_results) > _EMERGENCY_REQUEST_REPLAY_LIMIT:
-                oldest = next(iter(self._emergency_request_results))
-                del self._emergency_request_results[oldest]
-            return result
+                result = {"request_id": request_id, **response}
+                self._store_request_result(request_id, command_identity, result)
+                return result
+            except BaseException:
+                self._release_request_identity(request_id, command_identity)
+                raise

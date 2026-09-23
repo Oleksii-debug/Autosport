@@ -527,6 +527,11 @@ class ResolvedPolicyOutcome:
             raise ForwardEconomicEvidenceError("side must be an exact BetSide")
         pnl = _decimal(self.net_pnl_currency, "net_pnl_currency")
         cost = _decimal(self.economic_cost_currency, "economic_cost_currency")
+        # These externally supplied money values may reach exact Fraction
+        # arithmetic below. Bound their canonical representation before any
+        # rational denominator/coefficient materialization.
+        _decimal_text(pnl)
+        _decimal_text(cost)
         if cost < 0:
             raise ForwardEconomicEvidenceError(
                 "economic_cost_currency must be non-negative"
@@ -604,6 +609,7 @@ class ResolvedPolicyOutcome:
                 self.wager_pnl_currency,
                 "wager_pnl_currency",
             )
+            _decimal_text(wager_pnl)
             if Fraction(pnl) != Fraction(wager_pnl) - Fraction(cost):
                 raise ForwardEconomicEvidenceError(
                     "all-in net P&L must equal wager P&L minus economic cost"

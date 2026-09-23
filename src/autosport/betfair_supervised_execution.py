@@ -160,7 +160,13 @@ def _capture_private_opener_method_dispatch(
                 identity = (id(handler), candidate_name)
                 if identity in seen:
                     continue
-                method = getattr(type(handler), candidate_name, None)
+                handler_dict = getattr(handler, "__dict__", None)
+                if type(handler_dict) is not dict:
+                    continue
+                if candidate_name in handler_dict:
+                    method = handler_dict[candidate_name]
+                else:
+                    method = getattr(type(handler), candidate_name, None)
                 if method is None:
                     continue
                 seen.add(identity)
@@ -236,9 +242,12 @@ def _private_opener_graph_matches(
 
     for handler, method_name, expected_method, expected_code in expected_methods:
         handler_dict = getattr(handler, "__dict__", None)
-        if type(handler_dict) is not dict or method_name in handler_dict:
+        if type(handler_dict) is not dict:
             return False
-        current_method = getattr(type(handler), method_name, None)
+        if method_name in handler_dict:
+            current_method = handler_dict[method_name]
+        else:
+            current_method = getattr(type(handler), method_name, None)
         if current_method is not expected_method:
             return False
         if (

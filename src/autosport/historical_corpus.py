@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.parse import parse_qsl, urlsplit
 
 from .dataset import load_dataset
 from .domain import MarketEvent
@@ -27,6 +28,20 @@ _REDISTRIBUTION_RANK = {"prohibited": 0, "internal_only": 1, "permitted": 2}
 _ALLOWED_OUTCOMES = {"win", "loss", "void"}
 _PARLAY_TERMS_REFERENCE = "https://parlay-api.com/terms"
 _PARLAY_STANDARD_RETENTION_CEILING = timedelta(days=90)
+_TRACKED_ACQUISITION_RESPONSE_HEADERS = (
+    "x-api-version",
+    "x-api-release-date",
+    "deprecation",
+    "sunset",
+    "link",
+    "x-historical-window-hours",
+    "x-historical-window-from",
+    "x-markets-served",
+    "x-markets-unservable",
+    "x-markets-served-elsewhere",
+    "cache-control",
+)
+_MAX_ACQUISITION_HEADER_CHARS = 4096
 _OUTCOME_LINEAGE_DERIVED_FIELDS = frozenset(
     {
         "source_record_id",
@@ -182,6 +197,170 @@ def _digest(raw: dict[str, Any], key: str, *, context: str) -> str:
             f"{context}.{key} must be a canonical lowercase SHA-256 digest"
         )
     return value
+
+
+def _snapshot_acquisition_provenance(
+    evidence: dict[str, Any],
+    *,
+    sport_key: str,
+    requested_at: str,
+    response_sha256: str,
+) -> dict[str, Any] | None:
+    raw = evidence.get("acquisition_provenance")
+    claimed_sha = evidence.get("acquisition_sha256")
+    if raw is None and claimed_sha is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("snapshot acquisition_provenance must be an object when present")
+    acquisition_sha256 = _digest(
+        evidence,
+        "acquisition_sha256",
+        context="snapshot evidence",
+    )
+    if _canonical_json_sha256(raw) != acquisition_sha256:
+        raise ValueError(
+            "snapshot evidence acquisition_sha256 does not match acquisition_provenance"
+        )
+
+    expected_keys = {
+        "schema_version",
+        "kind",
+        "product_kind",
+        "request",
+        "http_status",
+        "response_payload_sha256",
+        "response_headers",
+        "canonical_response_payload_bound",
+        "raw_response_bytes_bound",
+    }
+    if set(raw) != expected_keys:
+        raise ValueError("snapshot acquisition_provenance fields do not match schema v1")
+    if type(raw.get("schema_version")) is not int or raw["schema_version"] != 1:
+        raise ValueError("snapshot acquisition_provenance schema_version must be exact integer 1")
+    if raw.get("kind") != "parlayapi_point_in_time_historical_acquisition":
+        raise ValueError("snapshot acquisition_provenance kind is not supported")
+    if raw.get("product_kind") != "POINT_IN_TIME_ODDS":
+        raise ValueError("snapshot acquisition_provenance product_kind must be POINT_IN_TIME_ODDS")
+    if type(raw.get("http_status")) is not int or raw["http_status"] != 200:
+        raise ValueError("snapshot acquisition_provenance http_status must be exact HTTP 200")
+    if raw.get("canonical_response_payload_bound") is not True:
+        raise ValueError(
+            "snapshot acquisition_provenance must bind the canonical response payload"
+        )
+    if raw.get("raw_response_bytes_bound") is not False:
+        raise ValueError(
+            "snapshot acquisition_provenance cannot claim raw response bytes are bound"
+        )
+    response_payload_sha256 = _digest(
+        raw,
+        "response_payload_sha256",
+        context="snapshot acquisition_provenance",
+    )
+    if response_payload_sha256 != response_sha256:
+        raise ValueError(
+            "snapshot acquisition_provenance response payload digest contradicts snapshot evidence"
+        )
+
+    request = raw.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("snapshot acquisition_provenance.request must be an object")
+    expected_request_keys = {
+        "method",
+        "origin",
+        "base_url_sha256",
+        "endpoint_path",
+        "query",
+        "query_string",
+        "request_url_sha256",
+        "request_url_persisted",
+        "request_credentials_persisted",
+    }
+    if set(request) != expected_request_keys:
+        raise ValueError("snapshot acquisition request fields do not match schema v1")
+    if request.get("method") != "GET":
+        raise ValueError("snapshot acquisition request method must be GET")
+    origin = request.get("origin")
+    if type(origin) is not str or not origin or origin != origin.strip():
+        raise ValueError("snapshot acquisition request origin must be canonical text")
+    parsed_origin = urlsplit(origin)
+    if (
+        parsed_origin.scheme != "https"
+        or not parsed_origin.netloc
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+    ):
+        raise ValueError("snapshot acquisition request origin must be a secret-free HTTPS origin")
+    _digest(request, "base_url_sha256", context="snapshot acquisition request")
+    _digest(request, "request_url_sha256", context="snapshot acquisition request")
+    if request.get("request_url_persisted") is not False:
+        raise ValueError("snapshot acquisition request_url_persisted must be false")
+    if request.get("request_credentials_persisted") is not False:
+        raise ValueError("snapshot acquisition request_credentials_persisted must be false")
+    expected_endpoint = f"/v1/historical/sports/{sport_key}/odds"
+    if request.get("endpoint_path") != expected_endpoint:
+        raise ValueError("snapshot acquisition endpoint_path contradicts sport_key")
+
+    query = request.get("query")
+    if not isinstance(query, dict):
+        raise ValueError("snapshot acquisition request.query must be an object")
+    required_query_keys = {"date", "regions", "markets", "oddsFormat", "dateFormat"}
+    if set(query) != required_query_keys:
+        raise ValueError("snapshot acquisition request.query fields do not match point-in-time odds")
+    if query.get("date") != requested_at:
+        raise ValueError("snapshot acquisition request date contradicts requested_at")
+    if query.get("oddsFormat") != "decimal" or query.get("dateFormat") != "iso":
+        raise ValueError("snapshot acquisition request format parameters are not canonical")
+    for key in ("regions", "markets"):
+        value = query.get(key)
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError(f"snapshot acquisition request {key} must be canonical text")
+        parts = value.split(",")
+        if any(not part or part != part.strip() for part in parts):
+            raise ValueError(f"snapshot acquisition request {key} contains an empty/aliased token")
+
+    query_string = request.get("query_string")
+    if type(query_string) is not str or not query_string:
+        raise ValueError("snapshot acquisition request.query_string must be non-empty text")
+    try:
+        query_pairs = parse_qsl(
+            query_string,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError as exc:
+        raise ValueError("snapshot acquisition request.query_string is invalid") from exc
+    if len(query_pairs) != len(required_query_keys):
+        raise ValueError("snapshot acquisition request.query_string has duplicate/missing fields")
+    query_from_string = dict(query_pairs)
+    if len(query_from_string) != len(query_pairs) or query_from_string != query:
+        raise ValueError("snapshot acquisition request.query_string contradicts query object")
+
+    response_headers = raw.get("response_headers")
+    if not isinstance(response_headers, dict):
+        raise ValueError("snapshot acquisition response_headers must be an object")
+    if set(response_headers) != set(_TRACKED_ACQUISITION_RESPONSE_HEADERS):
+        raise ValueError("snapshot acquisition response_headers fields do not match schema v1")
+    for name in _TRACKED_ACQUISITION_RESPONSE_HEADERS:
+        value = response_headers[name]
+        if value is None:
+            continue
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or len(value) > _MAX_ACQUISITION_HEADER_CHARS
+        ):
+            raise ValueError(
+                f"snapshot acquisition response header {name} is not canonical bounded text"
+            )
+
+    return {
+        "acquisition_sha256": acquisition_sha256,
+        "provenance": raw,
+    }
 
 
 def _governance_proof(path: Path, *, payload: bytes | None = None) -> dict[str, Any]:
@@ -472,7 +651,11 @@ def _snapshot(
     evidence_path: Path,
     *,
     expected_terms_reference: str,
-) -> tuple[list[tuple[MarketEvent, dict[str, Any]]], dict[str, Any]]:
+) -> tuple[
+    list[tuple[MarketEvent, dict[str, Any]]],
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
     evidence_bytes = _read_bytes(evidence_path, context="snapshot evidence")
     evidence = _json_object_bytes(
         evidence_bytes,
@@ -584,7 +767,13 @@ def _snapshot(
         )
     if not rows:
         raise ValueError("historical snapshot market file is empty")
-    return rows, evidence
+    acquisition_provenance = _snapshot_acquisition_provenance(
+        evidence,
+        sport_key=sport_key,
+        requested_at=requested_at,
+        response_sha256=response_sha256,
+    )
+    return rows, evidence, acquisition_provenance
 
 
 def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -644,7 +833,7 @@ def assemble_historical_corpus(
     for market_value, evidence_value in snapshot_pairs:
         market_path = Path(market_value)
         evidence_path = Path(evidence_value)
-        rows, evidence = _snapshot(
+        rows, evidence, acquisition_provenance = _snapshot(
             market_path,
             evidence_path,
             expected_terms_reference=proof["terms_reference"],
@@ -678,6 +867,16 @@ def assemble_historical_corpus(
                 "product_kind": "POINT_IN_TIME_ODDS",
                 "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
                 "response_digest_semantics": "canonical_json_payload_not_raw_response_bytes",
+                "acquisition_provenance_sha256": (
+                    acquisition_provenance["acquisition_sha256"]
+                    if acquisition_provenance is not None
+                    else None
+                ),
+                "acquisition_provenance": (
+                    acquisition_provenance["provenance"]
+                    if acquisition_provenance is not None
+                    else None
+                ),
                 "quote_count": int(evidence["quote_count"]),
                 "snapshot_timestamp_fallback_count": int(
                     evidence.get("snapshot_timestamp_fallback_count", 0)
@@ -926,6 +1125,14 @@ def assemble_historical_corpus(
                 "event_count": len(events),
             }
         )
+        fully_bound_acquisition_provenance = all(
+            row["acquisition_provenance"] is not None
+            for row in evidence_rows
+        )
+        validated_acquisition_provenance_count = sum(
+            row["acquisition_provenance"] is not None
+            for row in evidence_rows
+        )
         canonical_acquisition_rows = sorted(
             evidence_rows,
             key=lambda row: json.dumps(
@@ -996,6 +1203,7 @@ def assemble_historical_corpus(
             "acquisition_evidence": {
                 "scope": "selected_point_in_time_snapshots_only",
                 "snapshot_count": len(evidence_rows),
+                "validated_acquisition_provenance_count": validated_acquisition_provenance_count,
                 "snapshots": evidence_rows,
                 "point_in_time_snapshot_contains_odds": True,
                 "historical_window_market_coverage_verified": False,
@@ -1028,8 +1236,9 @@ def assemble_historical_corpus(
                     "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
                     "canonical_response_payload_digest_bound": True,
                     "raw_response_bytes_bound": False,
-                    "normalized_request_scope_bound": False,
-                    "provider_response_metadata_bound": False,
+                    "normalized_request_scope_bound": fully_bound_acquisition_provenance,
+                    "provider_response_metadata_bound": fully_bound_acquisition_provenance,
+                    "validated_acquisition_provenance_count": validated_acquisition_provenance_count,
                     "prospective_authority": False,
                     "raw_redistribution_authority": proof["redistribution_verified"] is True
                     and proof["redistribution_policy"] == "permitted",

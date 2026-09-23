@@ -34,6 +34,7 @@ from .workspace_lock import (
 
 SCHEMA_VERSION = 1
 ANCHOR_SCHEMA_VERSION = 1
+_PENDING_SCHEMA_VERSION = 1
 PROTOCOL_VERSION = "autosport-physical-nvda-manual-review-v1"
 EVENT_TYPE = "MANUAL_NVDA_DECISION"
 
@@ -76,6 +77,15 @@ _ANCHOR_KEYS = frozenset(
         "event_count",
         "ledger_root_sha256",
         "anchor_sha256",
+    }
+)
+_PENDING_KEYS = frozenset(
+    {
+        "pending_schema_version",
+        "prior_event_count",
+        "prior_root_sha256",
+        "event",
+        "pending_sha256",
     }
 )
 
@@ -568,6 +578,7 @@ class ManualNvdaAcceptanceLedger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
+        self._pending_path = self.path.with_name(self.path.name + ".pending.json")
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
 
     def _sync_parent_directory(self) -> None:
@@ -643,13 +654,30 @@ class ManualNvdaAcceptanceLedger:
             )
         return anchor
 
-    def events(self) -> tuple[ManualNvdaDecisionRecord, ...]:
+    @staticmethod
+    def _anchor_matches(
+        anchor: dict[str, Any] | None,
+        *,
+        event_count: int,
+        root: str | None,
+    ) -> bool:
+        if event_count == 0 and root is None:
+            return anchor is None
+        return (
+            anchor is not None
+            and anchor["event_count"] == event_count
+            and anchor["ledger_root_sha256"] == root
+        )
+
+    def _read_ledger_unanchored(
+        self,
+    ) -> tuple[
+        tuple[ManualNvdaDecisionRecord, ...],
+        tuple[dict[str, Any], ...],
+        str | None,
+    ]:
         if not self.path.exists():
-            if self._anchor_path.exists():
-                raise NvdaManualAcceptanceIntegrityError(
-                    "manual NVDA ledger is missing while anchor exists"
-                )
-            return ()
+            return (), (), None
         try:
             raw_lines = self.path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
@@ -662,6 +690,7 @@ class ManualNvdaAcceptanceLedger:
             )
 
         records: list[ManualNvdaDecisionRecord] = []
+        events: list[dict[str, Any]] = []
         prior_sha: str | None = None
         for sequence, raw in enumerate(raw_lines):
             event = _parse_json_object(raw, what="manual NVDA ledger event")
@@ -674,24 +703,229 @@ class ManualNvdaAcceptanceLedger:
                     "manual NVDA ledger predecessor chain is invalid"
                 )
             record = _record_from_event(event)
+            events.append(event)
             records.append(record)
             prior_sha = record.event_sha256
+        return tuple(records), tuple(events), prior_sha
 
+    def _events_locked(self) -> tuple[ManualNvdaDecisionRecord, ...]:
+        records, _, root = self._read_ledger_unanchored()
         anchor = self._read_anchor()
-        if anchor is None:
-            if records:
+        if not self._anchor_matches(
+            anchor,
+            event_count=len(records),
+            root=root,
+        ):
+            if not records and anchor is not None:
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger is missing while anchor exists"
+                )
+            if records and anchor is None:
                 raise NvdaManualAcceptanceIntegrityError(
                     "manual NVDA ledger anchor is missing"
                 )
-        else:
-            if (
-                anchor["event_count"] != len(records)
-                or anchor["ledger_root_sha256"] != prior_sha
-            ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor does not match durable history"
+            )
+        return records
+
+    def _pending_record(
+        self,
+        *,
+        prior_event_count: int,
+        prior_root: str | None,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        body = {
+            "pending_schema_version": _PENDING_SCHEMA_VERSION,
+            "prior_event_count": prior_event_count,
+            "prior_root_sha256": prior_root,
+            "event": event,
+        }
+        return {**body, "pending_sha256": _digest(body)}
+
+    def _write_pending(
+        self,
+        *,
+        prior_event_count: int,
+        prior_root: str | None,
+        event: dict[str, Any],
+    ) -> None:
+        pending = self._pending_record(
+            prior_event_count=prior_event_count,
+            prior_root=prior_root,
+            event=event,
+        )
+        tmp = self._pending_path.with_name(self._pending_path.name + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(_canonical(pending) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._pending_path)
+            self._sync_parent_directory()
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA pending decision durability barrier failed"
+            ) from exc
+
+    def _read_pending(self) -> dict[str, Any] | None:
+        if not self._pending_path.exists():
+            return None
+        try:
+            raw = self._pending_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "cannot read pending manual NVDA decision"
+            ) from exc
+        pending = _parse_json_object(raw, what="pending manual NVDA decision")
+        if frozenset(pending) != _PENDING_KEYS:
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision schema is invalid"
+            )
+        body = {
+            key: pending[key]
+            for key in pending
+            if key != "pending_sha256"
+        }
+        if (
+            pending["pending_schema_version"] != _PENDING_SCHEMA_VERSION
+            or type(pending["prior_event_count"]) is not int
+            or pending["prior_event_count"] < 0
+            or pending["pending_sha256"] != _digest(body)
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision is invalid"
+            )
+        prior_root = pending["prior_root_sha256"]
+        if prior_root is not None and (
+            type(prior_root) is not str
+            or _SHA256_RE.fullmatch(prior_root) is None
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA predecessor root is invalid"
+            )
+        event = pending["event"]
+        if type(event) is not dict:
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA event is invalid"
+            )
+        _record_from_event(event)
+        if (
+            event["sequence"] != pending["prior_event_count"]
+            or event["previous_sha256"] != prior_root
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA event predecessor is invalid"
+            )
+        return pending
+
+    def _remove_pending(self) -> None:
+        try:
+            self._pending_path.unlink(missing_ok=True)
+            self._sync_parent_directory()
+        except OSError as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "cannot retire pending manual NVDA decision"
+            ) from exc
+
+    def _publish_ledger_event(self, event: dict[str, Any]) -> None:
+        try:
+            current = (
+                self.path.read_text(encoding="utf-8")
+                if self.path.exists()
+                else ""
+            )
+            if current and not current.endswith("\n"):
                 raise NvdaManualAcceptanceIntegrityError(
-                    "manual NVDA ledger anchor does not match durable history"
+                    "manual NVDA ledger lacks canonical trailing newline"
                 )
-        return tuple(records)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(current)
+                handle.write(_canonical(event) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            self._sync_parent_directory()
+        except NvdaManualAcceptanceIntegrityError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            try:
+                tmp.unlink()
+            except (FileNotFoundError, UnboundLocalError):
+                pass
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger durability barrier failed"
+            ) from exc
+
+    def _recover_pending_locked(self) -> None:
+        pending = self._read_pending()
+        if pending is None:
+            return
+
+        records, events, root = self._read_ledger_unanchored()
+        anchor = self._read_anchor()
+        prior_count = pending["prior_event_count"]
+        prior_root = pending["prior_root_sha256"]
+        event = pending["event"]
+        event_root = event["event_sha256"]
+
+        prior_anchor_matches = self._anchor_matches(
+            anchor,
+            event_count=prior_count,
+            root=prior_root,
+        )
+        if (
+            len(records) == prior_count
+            and root == prior_root
+            and prior_anchor_matches
+        ):
+            self._remove_pending()
+            return
+
+        new_anchor_matches = self._anchor_matches(
+            anchor,
+            event_count=prior_count + 1,
+            root=event_root,
+        )
+        if (
+            len(records) == prior_count + 1
+            and root == event_root
+            and events
+            and events[-1] == event
+            and (prior_anchor_matches or new_anchor_matches)
+        ):
+            if not new_anchor_matches:
+                self._write_anchor(
+                    event_count=prior_count + 1,
+                    root=event_root,
+                )
+            self._remove_pending()
+            return
+
+        raise NvdaManualAcceptanceIntegrityError(
+            "pending manual NVDA decision cannot be safely recovered"
+        )
+
+    def events(self) -> tuple[ManualNvdaDecisionRecord, ...]:
+        writer_lock = _ManualNvdaWriterLock(self.path)
+        try:
+            with writer_lock:
+                self._recover_pending_locked()
+                return self._events_locked()
+        except WorkspaceEconomicLockBusyError as exc:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA ledger writer is active"
+            ) from exc
+        except (WorkspaceEconomicLockError, OSError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger writer authority is invalid"
+            ) from exc
 
     def record_decision(
         self,
@@ -722,7 +956,8 @@ class ManualNvdaAcceptanceLedger:
         writer_lock = _ManualNvdaWriterLock(self.path)
         try:
             with writer_lock:
-                records = self.events()
+                self._recover_pending_locked()
+                records = self._events_locked()
                 for record in records:
                     if record.decision_id == payload["decision_id"]:
                         return record
@@ -741,33 +976,23 @@ class ManualNvdaAcceptanceLedger:
                     "payload": payload,
                 }
                 event = {**body, "event_sha256": _digest(body)}
-                encoded = _canonical(event) + "\n"
-
-                try:
-                    with self.path.open(
-                        "a",
-                        encoding="utf-8",
-                        newline="\n",
-                    ) as handle:
-                        handle.write(encoded)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    self._sync_parent_directory()
-                    self._write_anchor(
-                        event_count=sequence + 1,
-                        root=event["event_sha256"],
-                    )
-                except OSError as exc:
-                    raise NvdaManualAcceptanceIntegrityError(
-                        "manual NVDA ledger durability barrier failed"
-                    ) from exc
-
+                self._write_pending(
+                    prior_event_count=sequence,
+                    prior_root=previous_sha,
+                    event=event,
+                )
+                self._publish_ledger_event(event)
+                self._write_anchor(
+                    event_count=sequence + 1,
+                    root=event["event_sha256"],
+                )
+                self._remove_pending()
                 return _record_from_event(event)
         except WorkspaceEconomicLockBusyError as exc:
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA ledger writer is active"
             ) from exc
-        except WorkspaceEconomicLockError as exc:
+        except (WorkspaceEconomicLockError, OSError) as exc:
             raise NvdaManualAcceptanceIntegrityError(
                 "manual NVDA ledger writer authority is invalid"
             ) from exc

@@ -342,6 +342,81 @@ class ProductDecisionActivationTests(unittest.TestCase):
             self.goal,
         )
 
+    def test_economic_goal_store_module_rebind_cannot_forge_durable_owner(self) -> None:
+        forged_goal = replace(
+            self.goal,
+            revision=self.goal.revision + 1,
+            max_stake_fraction=Decimal("0.01"),
+        )
+        forged_risk = PaperRiskPolicy(economic_goal=forged_goal)
+        self._write_risk(forged_risk, forged_goal)
+        forged_dispatch_calls: list[str] = []
+
+        class ForgedEconomicGoalStore:
+            def __init__(self, workspace):
+                forged_dispatch_calls.append("init")
+                self.workspace = workspace
+
+            def load(self):
+                forged_dispatch_calls.append("load")
+                return forged_goal
+
+        with mock.patch.object(
+            activation_module,
+            "EconomicGoalStore",
+            ForgedEconomicGoalStore,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "canonical EconomicGoalStore authority changed",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=forged_goal,
+                    risk_policy=forged_risk,
+                    execution_config=self.execution,
+                )
+
+        self.assertEqual(forged_dispatch_calls, [])
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(
+            EconomicGoalStore(self.workspace).load(),
+            self.goal,
+        )
+
+    def test_economic_goal_store_load_rebind_cannot_forge_durable_owner(self) -> None:
+        forged_goal = replace(
+            self.goal,
+            revision=self.goal.revision + 1,
+            max_stake_fraction=Decimal("0.01"),
+        )
+        forged_risk = PaperRiskPolicy(economic_goal=forged_goal)
+        self._write_risk(forged_risk, forged_goal)
+
+        with mock.patch.object(
+            EconomicGoalStore,
+            "load",
+            return_value=forged_goal,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "canonical EconomicGoalStore dispatch changed",
+            ):
+                self.store.initialize_owner(
+                    scientific_registry=self.registry,
+                    strategy_version_id=self.STRATEGY_ID,
+                    economic_goal=forged_goal,
+                    risk_policy=forged_risk,
+                    execution_config=self.execution,
+                )
+
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(
+            EconomicGoalStore(self.workspace).load(),
+            self.goal,
+        )
+
     def test_same_goal_labels_with_changed_semantics_are_rejected(self) -> None:
         self._initialize()
         changed_goal = replace(

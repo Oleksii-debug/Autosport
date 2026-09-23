@@ -32,6 +32,21 @@ PAPER_EXECUTION_MODE: Final = "PAPER"
 _ACTIVATION_AUTHORITY_DOMAIN: Final = "autosport.product-decision-activation.v1"
 _PRODUCT_AUTHORITY_ROOT_NAME: Final = "product-decision-activation-authority-v1"
 
+# Freeze the exact product-import-time fingerprint authority. Exact instance type alone
+# is insufficient because Python permits replacing a class property at runtime. START
+# evidence must never dispatch through a caller-rebound live class descriptor.
+_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY: Final = PaperExecutionModelConfig.fingerprint
+_CANONICAL_EXECUTION_FINGERPRINT_GETTER: Final = (
+    _CANONICAL_EXECUTION_FINGERPRINT_PROPERTY.fget
+    if isinstance(_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY, property)
+    else None
+)
+_CANONICAL_EXECUTION_FINGERPRINT_GETTER_CODE: Final = getattr(
+    _CANONICAL_EXECUTION_FINGERPRINT_GETTER,
+    "__code__",
+    None,
+)
+
 
 def _product_machine_state_base() -> Path:
     """Resolve machine state without caller/process trust-root overrides."""
@@ -583,13 +598,32 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "execution_config must be the exact canonical PaperExecutionModelConfig"
             )
-        # Bind the base-class descriptor directly after exact-type fencing. This
-        # avoids treating an overridden/virtual caller property as START authority.
+        # Never dispatch START authority through the live class descriptor. Even an
+        # exact frozen dataclass instance can be relabelled if caller code temporarily
+        # replaces PaperExecutionModelConfig.fingerprint. Require the original
+        # import-time property/getter/code identity and invoke that captured getter
+        # directly, so transient class-descriptor substitution fails closed.
+        live_fingerprint_property = PaperExecutionModelConfig.fingerprint
+        if (
+            not isinstance(_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY, property)
+            or _CANONICAL_EXECUTION_FINGERPRINT_GETTER is None
+            or _CANONICAL_EXECUTION_FINGERPRINT_GETTER_CODE is None
+            or live_fingerprint_property
+            is not _CANONICAL_EXECUTION_FINGERPRINT_PROPERTY
+            or live_fingerprint_property.fget
+            is not _CANONICAL_EXECUTION_FINGERPRINT_GETTER
+            or getattr(
+                _CANONICAL_EXECUTION_FINGERPRINT_GETTER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_EXECUTION_FINGERPRINT_GETTER_CODE
+        ):
+            raise ProductDecisionActivationError(
+                "canonical PaperExecutionModelConfig fingerprint authority changed"
+            )
         execution_model_fingerprint = _sha256(
-            PaperExecutionModelConfig.fingerprint.__get__(
-                execution_config,
-                PaperExecutionModelConfig,
-            ),
+            _CANONICAL_EXECUTION_FINGERPRINT_GETTER(execution_config),
             "execution_model_fingerprint",
         )
         if not isinstance(intent_producer, BuiltInIntentProducer):

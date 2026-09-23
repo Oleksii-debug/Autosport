@@ -106,7 +106,7 @@ def test_bad_query_fails_closed(kwargs):
 
 @pytest.mark.parametrize("overrides", [
     {"status": "Unknown"}, {"transaction_type": "MYSTERY"}, {"amount": -1},
-    {"amount": "1.0"}, {"change": "1.0"},
+    {"amount": Decimal("-0")}, {"amount": "1.0"}, {"change": "1.0"},
     {"created_at": "2026-08-10T14:00:00"},
 ])
 def test_bad_row_fails_closed(overrides):
@@ -159,6 +159,17 @@ def test_nonstandard_json_numbers_fail_closed(literal):
     )
     c, _ = client(body)
     with pytest.raises(ProphetXReadOnlyError):
+        c.read_page()
+
+
+def test_invalid_unicode_provider_identity_fails_closed():
+    body = (
+        b'{"data":{"transactions":[{"status":"Completed","user_id":"\\ud800",'
+        b'"transaction_type":"PAY","amount":1,"change":1,"balance":2,'
+        b'"balance_before":1,"created_at":"2026-08-10T14:00:00Z"}]}}'
+    )
+    c, _ = client(body)
+    with pytest.raises(ProphetXReadOnlyError, match="UTF-8"):
         c.read_page()
 
 

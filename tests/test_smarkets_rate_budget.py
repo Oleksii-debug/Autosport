@@ -198,6 +198,41 @@ def test_restart_with_wider_configuration_preserves_stricter_durable_limit(tmp_p
     assert not denied.request_budget_available
 
 
+def test_concurrent_first_use_and_tightening_converge_to_strictest_policy(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "budget.sqlite3"
+    barrier = threading.Barrier(3)
+    errors: list[SmarketsRateBudgetError] = []
+
+    def open_with_limit(limit: int) -> None:
+        barrier.wait()
+        try:
+            store(path, approved_limit=limit)
+        except SmarketsRateBudgetError as exc:
+            errors.append(exc)
+
+    wide = threading.Thread(target=open_with_limit, args=(1200,))
+    strict = threading.Thread(target=open_with_limit, args=(1,))
+    wide.start()
+    strict.start()
+    barrier.wait()
+    wide.join()
+    strict.join()
+
+    assert errors == []
+    probe = store(path, approved_limit=1200)
+    probe.record_observation(obs(limit=1200, remaining=1200))
+    assert probe.reserve_request(
+        account_id="acct-1", session_generation="first", now=T0
+    ).request_budget_available
+    denied = probe.reserve_request(
+        account_id="acct-1", session_generation="second", now=T0
+    )
+    assert not denied.request_budget_available
+    assert denied.reason == "budget_exhausted"
+
+
 def test_conflicting_durable_approved_window_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "budget.sqlite3"
     store(path, approved_window_seconds=60)

@@ -21,6 +21,7 @@ DERIVED_DECIMAL_PRECISION = 50
 DERIVED_DECIMAL_ROUNDING = "ROUND_HALF_EVEN"
 DERIVED_DECIMAL_EMIN = -999_999
 DERIVED_DECIMAL_EMAX = 999_999
+ADVERSE_PRICE_SLIPPAGE_BASIS = "BACK_ODDS_RATIO__LAY_LIABILITY_ODDS_MINUS_ONE_RATIO"
 _DERIVED_DECIMAL_CONTEXT = Context(
     prec=DERIVED_DECIMAL_PRECISION,
     rounding=ROUND_HALF_EVEN,
@@ -292,6 +293,7 @@ class PaperExecutionQualityReport:
             "quality_status": self.quality_status.value,
             "live_execution_economics_status": self.live_execution_economics_status.value,
             "percentile_method": self.percentile_method,
+            "adverse_price_slippage_basis": ADVERSE_PRICE_SLIPPAGE_BASIS,
             "derived_decimal_arithmetic": {
                 "precision": DERIVED_DECIMAL_PRECISION,
                 "rounding": DERIVED_DECIMAL_ROUNDING,
@@ -330,7 +332,15 @@ def _price_metrics(
         if side == "BACK":
             adverse_slippage_bps = -spread_bps
         elif side == "LAY":
-            adverse_slippage_bps = spread_bps
+            decision_liability_factor = decision_odds - Decimal(1)
+            execution_liability_factor = execution_odds - Decimal(1)
+            if decision_liability_factor <= 0 or execution_liability_factor <= 0:
+                raise EvaluationUniverseIntegrityError(
+                    "LAY execution-quality odds must be greater than one"
+                )
+            adverse_slippage_bps = (
+                (execution_liability_factor / decision_liability_factor) - Decimal(1)
+            ) * Decimal(10_000)
         else:
             raise EvaluationUniverseIntegrityError(
                 "execution-quality PAPER attempt has unsupported bet side"

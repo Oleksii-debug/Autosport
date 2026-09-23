@@ -100,8 +100,9 @@ def test_state_ordering_fence_covers_operator_enablement_and_runtime_truth() -> 
     # These are the safety-relevant surfaces that stale state must never roll
     # backwards after a newer snapshot has already been presented.
     for required_projection in (
-        'byId("product-runtime-start").disabled',
-        'byId("product-runtime-stop").disabled',
+        "syncRuntimeActionAvailability(",
+        "productRuntime.can_start",
+        "productRuntime.can_stop",
         "state.busy",
         "state.product_runtime",
         "state.tickets",

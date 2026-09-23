@@ -1,4 +1,5 @@
 from decimal import Decimal, localcontext
+from hashlib import sha256
 import json
 from threading import Event, Thread
 
@@ -788,6 +789,92 @@ def test_schema_v1_snapshot_without_provider_status_keeps_legacy_identity() -> N
     decoded = reconciliation._decode_snapshot(payload, schema_version=1)
     assert decoded.open_positions[0].provider_status is None
     assert snapshot_fingerprint(decoded) == snapshot_fingerprint(snapshot)
+
+
+def test_schema_v1_store_migrates_to_v2_without_changing_legacy_snapshot_id(
+    tmp_path,
+) -> None:
+    path = tmp_path / "legacy-workspace" / "account.json"
+    legacy = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(
+            _position(
+                BookmakerPositionState.OPEN,
+                _T1,
+                observation_id="legacy-open",
+            ),
+        ),
+    )
+    legacy_snapshot_id = snapshot_fingerprint(legacy)
+    legacy_document = {
+        "schema_version": 1,
+        "snapshots": [
+            {
+                "snapshot_id": legacy_snapshot_id,
+                "snapshot": reconciliation.snapshot_to_canonical_dict(legacy),
+            }
+        ],
+    }
+    legacy_bytes = (
+        json.dumps(
+            legacy_document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    seeded = BookmakerAccountReconciliationStore(path)
+    legacy_state_sha256 = sha256(legacy_bytes).hexdigest()
+    seeded._authority.prepare(
+        tx_id="legacy-schema-v1-seed",
+        observed_state_sha256=None,
+        intended_state_sha256=legacy_state_sha256,
+        semantic_binding_sha256="b" * 64,
+    )
+    seeded._authority.commit(
+        tx_id="legacy-schema-v1-seed",
+        observed_state_sha256=legacy_state_sha256,
+        semantic_binding_sha256="b" * 64,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(legacy_bytes)
+
+    reopened = BookmakerAccountReconciliationStore(path)
+    assert reopened.history() == (legacy,)
+
+    later = _snapshot(
+        _T2,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(
+            _position(
+                BookmakerPositionState.OPEN,
+                _T2,
+                observation_id="native-status-open",
+                provider_status="FUTURE_PROVIDER_STATUS",
+            ),
+        ),
+    )
+    assert reopened.append_snapshot(later) is True
+
+    migrated = json.loads(path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 2
+    assert migrated["snapshots"][0]["snapshot_id"] == legacy_snapshot_id
+    assert (
+        "provider_status"
+        not in migrated["snapshots"][0]["snapshot"]["open_positions"][0]
+    )
+    assert (
+        migrated["snapshots"][1]["snapshot"]["open_positions"][0]["provider_status"]
+        == "FUTURE_PROVIDER_STATUS"
+    )
+
+    restarted = BookmakerAccountReconciliationStore(path)
+    history = restarted.history()
+    assert history[0] == legacy
+    assert history[1].open_positions[0].provider_status == "FUTURE_PROVIDER_STATUS"
 
 
 def test_schema_v1_rejects_provider_status_field() -> None:

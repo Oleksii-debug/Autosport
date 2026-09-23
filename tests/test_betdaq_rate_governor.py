@@ -289,7 +289,7 @@ def test_blacklist_is_api_scoped_and_unrelated_success_cannot_clear_it(
 def test_shorter_blacklist_observation_cannot_reduce_existing_horizon(
     tmp_path: Path,
 ) -> None:
-    governor, _, wall, _, _ = make_ready(
+    governor, clock, wall, _, _ = make_ready(
         tmp_path, policy(("GetPrices", 3, 0))
     )
     first = governor.observe_blacklist(
@@ -297,6 +297,7 @@ def test_shorter_blacklist_observation_cannot_reduce_existing_horizon(
         remaining_ms=60_000,
         provider_observation_sha256=SHA_A,
     )
+    clock.advance(10.0)
     wall.advance(10.0)
     second = governor.observe_blacklist(
         api_name="GetPrices",
@@ -477,3 +478,145 @@ def test_admission_receipt_is_deterministic_secret_free_non_authority(
     assert len(receipt.receipt_sha256) == 64
     assert receipt.receipt_sha256 == receipt.receipt_sha256
     assert receipt.documented_policy_sha256 == governor.documented_policy_sha256
+
+
+def test_updateorders_uses_documented_changeorder_bucket_without_dispatching_legacy_name(
+    tmp_path: Path,
+) -> None:
+    configured = default_betdaq_rate_policy()
+    governor, _, _, _, _ = make_ready(tmp_path, configured)
+
+    receipt = governor.admit("UpdateOrdersNoReceipt")
+
+    assert receipt.operation_id == "UpdateOrdersNoReceipt"
+    assert receipt.method == "UpdateOrdersNoReceipt"
+    assert receipt.rate_policy_key == "ChangeOrderNoReceipt"
+    assert receipt.documented_policy_sha256 == governor.documented_policy_sha256
+
+    with pytest.raises(BetdaqRateDeferred) as legacy:
+        governor.admit("ChangeOrderNoReceipt")
+    assert legacy.value.reason == "unmodeled_provider_rate_axis"
+
+
+def test_provider_blacklist_alias_preserves_raw_name_and_binds_canonical_operation(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, workspace, _ = make_ready(
+        tmp_path, policy(("GetPrices", 3, 0))
+    )
+
+    observation = governor.observe_blacklist(
+        api_name="GETPRICES",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    assert observation.api_name == "GETPRICES"
+    assert observation.operation_id == "GetPrices"
+    assert observation.mapped is True
+    assert governor.blacklist_status("getprices") is BetdaqBlacklistStatus.BLACKLISTED
+
+    raw = json.loads(
+        (workspace / "betdaq-rate-governor-blacklist.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert raw["observations"][0]["api_name"] == "GETPRICES"
+    assert raw["observations"][0]["operation_id"] == "GetPrices"
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("GetPrices")
+    assert denied.value.reason == "provider_api_blacklisted"
+
+
+def test_unknown_provider_blacklist_name_remains_explicit_unmapped_evidence(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, workspace, _ = make_ready(
+        tmp_path, policy(("GetPrices", 3, 0))
+    )
+
+    observation = governor.observe_blacklist(
+        api_name="GetPricesX",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    assert observation.api_name == "GetPricesX"
+    assert observation.operation_id is None
+    assert observation.mapped is False
+    assert governor.blacklist_status("GetPrices") is BetdaqBlacklistStatus.UNKNOWN
+
+    raw = json.loads(
+        (workspace / "betdaq-rate-governor-blacklist.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert raw["observations"][0]["api_name"] == "GetPricesX"
+    assert raw["observations"][0]["operation_id"] is None
+
+    receipt = governor.admit("GetPrices")
+    assert receipt.blacklist_status is BetdaqBlacklistStatus.UNKNOWN
+
+
+def test_forward_wall_clock_jump_cannot_shorten_remainingms_monotonic_horizon(
+    tmp_path: Path,
+) -> None:
+    governor, clock, wall, _, _ = make_ready(
+        tmp_path, policy(("GetPrices", 3, 0))
+    )
+    governor.observe_blacklist(
+        api_name="GetPrices",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    wall.advance(3600.0)
+
+    assert governor.blacklist_status("GetPrices") is BetdaqBlacklistStatus.BLACKLISTED
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("GetPrices")
+    assert denied.value.reason == "provider_api_blacklisted"
+    assert denied.value.retry_after_seconds == pytest.approx(60.0)
+
+    clock.advance(60.0)
+    assert (
+        governor.blacklist_status("GetPrices")
+        is BetdaqBlacklistStatus.EXPIRED_OBSERVATION
+    )
+
+
+def test_restart_seeds_active_durable_blacklist_into_new_monotonic_horizon(
+    tmp_path: Path,
+) -> None:
+    configured = policy(("GetPrices", 3, 0))
+    governor, _, wall, workspace, authority_root = make_ready(
+        tmp_path, configured
+    )
+    governor.observe_blacklist(
+        api_name="GetPrices",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    simulate_process_restart(workspace)
+    new_clock = FakeClock(10.0)
+    reopened = resolve_betdaq_rate_governor(
+        workspace,
+        configured,
+        clock=new_clock,
+        wall_clock=wall,
+        authority_root=authority_root,
+    )
+
+    wall.advance(3600.0)
+    assert (
+        reopened.blacklist_status("GetPrices")
+        is BetdaqBlacklistStatus.BLACKLISTED
+    )
+
+    new_clock.advance(60.0)
+    assert (
+        reopened.blacklist_status("GetPrices")
+        is BetdaqBlacklistStatus.EXPIRED_OBSERVATION
+    )

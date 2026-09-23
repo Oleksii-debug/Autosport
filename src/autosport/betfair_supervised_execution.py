@@ -51,6 +51,11 @@ PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
 
+# Terminal provider-effect authority must not depend on caller-rebindable method
+# dispatch.  These product-owned implementations are captured once and are used
+# non-virtually by execute_betfair_supervised_action().
+_CANONICAL_URLLIB_BETFAIR_HTTP_POST = UrllibBetfairHttpTransport.post
+
 
 class BetfairSupervisedExecutionError(RuntimeError):
     """The bounded provider-write seam rejected an operation."""
@@ -597,6 +602,8 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _transport_post: Callable[..., bytes] | None = None,
+        _response_parser: Callable[..., BetfairPlaceExecutionReport] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -651,12 +658,21 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Authentication": self._credentials.session_token,
         }
         try:
-            payload = self._transport.post(
-                BETTING_JSON_RPC_ENDPOINT,
-                headers=headers,
-                body=body,
-                timeout_seconds=self._timeout_seconds,
-            )
+            if _transport_post is None:
+                payload = self._transport.post(
+                    BETTING_JSON_RPC_ENDPOINT,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=self._timeout_seconds,
+                )
+            else:
+                payload = _transport_post(
+                    self._transport,
+                    BETTING_JSON_RPC_ENDPOINT,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=self._timeout_seconds,
+                )
         except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport outcome is ambiguous; "
@@ -666,7 +682,8 @@ class BetfairSupervisedPlaceOrdersClient:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport returned non-bytes response"
             )
-        return _parse_place_orders_response(
+        parser = _parse_place_orders_response if _response_parser is None else _response_parser
+        return parser(
             payload,
             request_id=request_id,
             request_sha256=request_sha256,
@@ -674,6 +691,9 @@ class BetfairSupervisedPlaceOrdersClient:
             provider_order_ref=provider_ref,
             observed_at=self._clock(),
         )
+
+
+_CANONICAL_BETFAIR_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
 
 
 def _mapping(
@@ -1028,6 +1048,9 @@ def _parse_place_orders_response(
     )
 
 
+_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE = _parse_place_orders_response
+
+
 def _report_outcome(
     report: BetfairPlaceExecutionReport,
     action: ExecutionAction,
@@ -1119,12 +1142,9 @@ def execute_betfair_supervised_action(
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
@@ -1147,6 +1167,18 @@ def execute_betfair_supervised_action(
             bound=bound,
             execution_workspace=execution_workspace,
         )
+        if (
+            type(client._transport) is not UrllibBetfairHttpTransport
+            or BetfairSupervisedPlaceOrdersClient.place_action
+            is not _CANONICAL_BETFAIR_PLACE_ACTION
+            or UrllibBetfairHttpTransport.post
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
+            or _parse_place_orders_response
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+        ):
+            raise BetfairSupervisedExecutionError(
+                "terminal Betfair execution requires canonical client, transport, and parser authority"
+            )
         begin_supervised_attempt(
             ledger,
             bound,
@@ -1191,12 +1223,15 @@ def execute_betfair_supervised_action(
             submitted_at=now(),
         )
         try:
-            report = client.place_action(
+            report = _CANONICAL_BETFAIR_PLACE_ACTION(
+                client,
                 action,
                 profile=profile,
                 bound=bound,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
+                _transport_post=_CANONICAL_URLLIB_BETFAIR_HTTP_POST,
+                _response_parser=_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE,
             )
         except (
             BetfairPlaceOrdersAmbiguous,

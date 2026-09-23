@@ -20,11 +20,11 @@ from autosport.operator_source_config import (
 @pytest.mark.parametrize(
     "source_id",
     [
-        "parlayapi:table_tennis",
-        "betfair:football",
-        "betdaq:horse-racing",
+        "parlayapi-table-tennis",
+        "betfair-football",
+        "betdaq-horse-racing",
         "smarkets",
-        "the-odds-api:ice_hockey",
+        "the-odds-api-ice-hockey",
     ],
 )
 def test_source_identity_round_trips(source_id: str) -> None:
@@ -36,8 +36,8 @@ def test_source_identity_round_trips(source_id: str) -> None:
 
 
 def test_payload_is_deterministic_canonical_json() -> None:
-    first = dump_operator_source_config("parlayapi:table_tennis")
-    second = dump_operator_source_config("parlayapi:table_tennis")
+    first = dump_operator_source_config("parlayapi-table-tennis")
+    second = dump_operator_source_config("parlayapi-table-tennis")
     assert first == second
     assert first == json.dumps(
         json.loads(first),
@@ -82,8 +82,7 @@ def test_digest_binds_canonical_body_not_runtime_authority() -> None:
         "betfair/football",
         "betfair football",
         "betfaіr",  # Cyrillic i.
-        "a" * 33,
-        "a:" + "b" * 33,
+        "a" * 65,
         "a:b:c:d:e",
     ],
 )
@@ -104,7 +103,11 @@ def test_non_string_source_identity_is_rejected(source_id: object) -> None:
 
 def test_unknown_semantic_identity_is_only_syntax_validated_here() -> None:
     # The product registry, not this payload, owns the allow-list.
-    assert validate_source_id("future-provider:sport") == "future-provider:sport"
+    assert validate_source_id("future-provider-sport") == "future-provider-sport"
+
+
+def test_registry_shape_accepts_maximum_length_product_id() -> None:
+    assert validate_source_id("a" * 64) == "a" * 64
 
 
 def test_duplicate_json_key_is_rejected() -> None:
@@ -171,7 +174,7 @@ def test_payload_size_is_bounded() -> None:
 
 def test_tampered_source_id_with_old_digest_is_rejected() -> None:
     value = json.loads(dump_operator_source_config("smarkets"))
-    value["source_id"] = "betfair:football"
+    value["source_id"] = "betfair-football"
     payload = json.dumps(
         value,
         ensure_ascii=True,
@@ -201,9 +204,9 @@ def test_persisted_selection_is_selected_but_not_authorized() -> None:
 
 
 def test_admin_override_only_is_selected_but_not_authorized() -> None:
-    resolution = resolve_operator_source(None, "betfair:football")
+    resolution = resolve_operator_source(None, "betfair-football")
     assert resolution.state is OperatorSourceResolutionState.SELECTED
-    assert resolution.source_id == "betfair:football"
+    assert resolution.source_id == "betfair-football"
     assert resolution.runtime_authorized is False
 
 
@@ -218,11 +221,11 @@ def test_equal_persisted_and_override_authorities_converge() -> None:
 
 def test_disagreeing_persisted_and_override_authorities_fail_closed() -> None:
     persisted = dump_operator_source_config("smarkets")
-    resolution = resolve_operator_source(persisted, "betfair:football")
+    resolution = resolve_operator_source(persisted, "betfair-football")
     assert resolution.state is OperatorSourceResolutionState.CONFLICT
     assert resolution.source_id is None
     assert resolution.persisted_source_id == "smarkets"
-    assert resolution.override_source_id == "betfair:football"
+    assert resolution.override_source_id == "betfair-football"
     assert resolution.runtime_authorized is False
 
 

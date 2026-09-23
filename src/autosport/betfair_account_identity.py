@@ -233,6 +233,7 @@ def _make_account_identity_authority():
             "stable_account_identity_proven",
             "stable_account_id",
             "cross_session_equivalence_proven",
+            "identity_id",
         )
         for descriptor in (identity_type.__dict__[name],)
     )

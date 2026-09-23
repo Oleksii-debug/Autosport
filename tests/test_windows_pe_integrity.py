@@ -256,11 +256,23 @@ def test_declared_directory_must_fit_optional_header_and_image():
 def test_security_directory_uses_file_offset_and_alignment():
     blob = build_valid_pe()
     _, _, opt, _ = offsets(blob)
+    cert_offset = len(blob)
+    cert_size = 0x100
     b = bytearray(blob + b"\0" * 0x200)
-    struct.pack_into("<II", b, opt + 112 + 4 * 8, len(blob), 0x100)
+    struct.pack_into("<IHH", b, cert_offset, cert_size, 0x0200, 0x0002)
+    struct.pack_into("<II", b, opt + 112 + 4 * 8, cert_offset, cert_size)
     validate_pe32plus_amd64(bytes(b))
-    struct.pack_into("<II", b, opt + 112 + 4 * 8, len(blob) + 1, 0x100)
+    struct.pack_into("<II", b, opt + 112 + 4 * 8, cert_offset + 1, cert_size)
     assert_rejected(bytes(b), "certificate table")
+
+
+def test_malformed_certificate_record_chain_rejected():
+    blob = build_valid_pe()
+    _, _, opt, _ = offsets(blob)
+    cert_offset = len(blob)
+    b = bytearray(blob + b"\0" * 8)
+    struct.pack_into("<II", b, opt + 112 + 4 * 8, cert_offset, 8)
+    assert_rejected(bytes(b), "WIN_CERTIFICATE length")
 
 
 def test_non_bytes_input_rejected():
@@ -293,6 +305,9 @@ def test_adversarial_mutation_campaign_100k_rejects_guaranteed_invalid_cases():
         lambda b, r: mutate_u32(b, sec2 + 12, 0x1000),
         lambda b, r: mutate_u32(b, sec2 + 20, 0x200),
         lambda b, r: mutate_u32(b, opt + 108, 17),
+        lambda b, r: mutate_u32(b, coff + 8, 0x200),
+        lambda b, r: mutate_u32(b, sec + 24, 0x200),
+        lambda b, r: mutate_u32(mutate_u32(b, sec + 8, 0x300), opt + 16, 0x1200),
     ]
     rnd = random.Random(0xA5705)
     for _ in range(100_000):
@@ -390,3 +405,65 @@ def test_reserved_and_global_ptr_data_directories():
     blob = bytearray(build_valid_pe())
     struct.pack_into("<II", blob, opt + 112 + 15 * 8, 0x1000, 0x20)
     assert_rejected(bytes(blob), "reserved and must be zero")
+
+def test_coff_symbol_table_fields_rejected_for_image():
+    blob = build_valid_pe()
+    _, coff, _, _ = offsets(blob)
+    assert_rejected(
+        mutate_u32(blob, coff + 8, 0x200),
+        "COFF symbol table",
+    )
+    assert_rejected(
+        mutate_u32(blob, coff + 12, 1),
+        "COFF symbol table",
+    )
+
+
+def test_image_section_coff_relocation_and_line_fields_rejected():
+    blob = build_valid_pe()
+    _, _, _, sec = offsets(blob)
+    cases = (
+        mutate_u32(blob, sec + 24, 0x200),
+        mutate_u32(blob, sec + 28, 0x200),
+        mutate_u16(blob, sec + 32, 1),
+        mutate_u16(blob, sec + 34, 1),
+    )
+    for candidate in cases:
+        assert_rejected(candidate, "COFF relocation|COFF line-number")
+
+
+def test_pe_header_requires_8_byte_alignment():
+    blob = bytearray(build_valid_pe())
+    blob[0x80:0x80] = b"\0" * 4
+    struct.pack_into("<I", blob, 0x3C, 0x84)
+    assert_rejected(bytes(blob), "8-byte aligned")
+
+
+def _build_valid_low_alignment_pe() -> bytes:
+    blob = bytearray(build_valid_pe())
+    _, _, opt, sec = offsets(blob)
+    struct.pack_into("<I", blob, opt + 16, 0x200)
+    struct.pack_into("<I", blob, opt + 32, 0x200)
+    struct.pack_into("<I", blob, opt + 36, 0x200)
+    struct.pack_into("<I", blob, opt + 56, 0x400)
+    struct.pack_into("<I", blob, sec + 12, 0x200)
+    return bytes(blob)
+
+
+def test_low_section_alignment_requires_raw_offset_equal_rva():
+    valid = _build_valid_low_alignment_pe()
+    validate_pe32plus_amd64(valid)
+
+    candidate = bytearray(valid + b"\0" * 0x200)
+    _, _, _, sec = offsets(candidate)
+    struct.pack_into("<I", candidate, sec + 20, 0x400)
+    assert_rejected(bytes(candidate), "raw file offset equal RVA")
+
+
+def test_entry_point_must_be_backed_by_file_bytes():
+    blob = build_valid_pe()
+    _, _, opt, sec = offsets(blob)
+    candidate = mutate_u32(blob, sec + 8, 0x300)
+    candidate = mutate_u32(candidate, opt + 16, 0x1200)
+    assert_rejected(candidate, "not backed by file bytes")
+

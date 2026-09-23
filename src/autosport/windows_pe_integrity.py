@@ -118,6 +118,25 @@ def _ranges_do_not_overlap(ranges: Iterable[tuple[int, int, str]]) -> None:
         if b0 < a1:
             _fail(f"overlapping ranges: {an} and {bn}")
 
+def _validate_certificate_table_records(data: bytes, offset: int, size: int) -> None:
+    end = offset + size
+    cursor = offset
+    while cursor < end:
+        if cursor % 8:
+            _fail("certificate table entry is not 8-byte aligned")
+        if cursor > end - 8:
+            _fail("certificate table has truncated WIN_CERTIFICATE header")
+        length = _u32(data, cursor, "WIN_CERTIFICATE.dwLength")
+        if length < 8:
+            _fail("WIN_CERTIFICATE length is smaller than header")
+        rounded = (length + 7) // 8 * 8
+        next_cursor = cursor + rounded
+        if next_cursor <= cursor or next_cursor > end:
+            _fail("WIN_CERTIFICATE records exceed certificate table size")
+        cursor = next_cursor
+    if cursor != end:
+        _fail("WIN_CERTIFICATE records do not fill certificate table size")
+
 
 def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInfo:
     """Validate a bounded Windows x64 PE32+ application image.
@@ -136,6 +155,8 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
     pe_offset = _u32(data, 0x3C, "DOS e_lfanew")
     if pe_offset < 0x40:
         _fail("PE header overlaps DOS header")
+    if pe_offset % 8:
+        _fail("PE header is not 8-byte aligned")
     _need(data, pe_offset, 4 + 20, "PE signature and COFF header")
     if data[pe_offset : pe_offset + 4] != _PE_SIGNATURE:
         _fail("missing PE signature")
@@ -143,6 +164,8 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
     coff = pe_offset + 4
     machine = _u16(data, coff + 0, "COFF Machine")
     section_count = _u16(data, coff + 2, "COFF NumberOfSections")
+    pointer_to_symbols = _u32(data, coff + 8, "COFF PointerToSymbolTable")
+    number_of_symbols = _u32(data, coff + 12, "COFF NumberOfSymbols")
     optional_size = _u16(data, coff + 16, "COFF SizeOfOptionalHeader")
     characteristics = _u16(data, coff + 18, "COFF Characteristics")
 
@@ -150,6 +173,8 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
         _fail(f"unexpected machine: 0x{machine:04x}")
     if section_count < 1 or section_count > policy.max_sections:
         _fail("invalid section count")
+    if pointer_to_symbols or number_of_symbols:
+        _fail("COFF symbol table must be absent from executable image")
     if optional_size < _FIXED_PE32_PLUS_FIELDS:
         _fail("optional header too small for PE32+ fixed fields")
 
@@ -239,7 +264,16 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
         virtual_address = _u32(data, off + 12, f"{name}.VirtualAddress")
         raw_size = _u32(data, off + 16, f"{name}.SizeOfRawData")
         raw_pointer = _u32(data, off + 20, f"{name}.PointerToRawData")
+        pointer_to_relocations = _u32(data, off + 24, f"{name}.PointerToRelocations")
+        pointer_to_linenumbers = _u32(data, off + 28, f"{name}.PointerToLinenumbers")
+        number_of_relocations = _u16(data, off + 32, f"{name}.NumberOfRelocations")
+        number_of_linenumbers = _u16(data, off + 34, f"{name}.NumberOfLinenumbers")
         sec_chars = _u32(data, off + 36, f"{name}.Characteristics")
+
+        if pointer_to_relocations or number_of_relocations:
+            _fail(f"{name} contains COFF relocation fields in executable image")
+        if pointer_to_linenumbers or number_of_linenumbers:
+            _fail(f"{name} contains COFF line-number fields in executable image")
 
         if virtual_address < size_of_headers:
             _fail(f"{name} virtual address overlaps headers")
@@ -264,6 +298,8 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
                 _fail(f"{name} raw pointer misaligned")
             if raw_pointer < size_of_headers:
                 _fail(f"{name} raw data overlaps headers")
+            if section_alignment < _PAGE_SIZE and raw_pointer != virtual_address:
+                _fail(f"{name} low SectionAlignment requires raw file offset equal RVA")
             raw_end = raw_pointer + raw_size
             if raw_end < raw_pointer or raw_end > len(data):
                 _fail(f"{name} raw data exceeds file")
@@ -322,6 +358,9 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
             _fail("entry point is not owned by exactly one section")
         if not owners[0].executable:
             _fail("entry point section is not executable")
+        entry_offset = entry - owners[0].virtual_address
+        if owners[0].raw_size == 0 or entry_offset >= owners[0].raw_size:
+            _fail("entry point is not backed by file bytes")
 
     # Data directories are RVA/size pairs except Security, whose first field is a file offset.
     directory_base = opt + _FIXED_PE32_PLUS_FIELDS
@@ -366,6 +405,7 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
                 not (end <= r0 or addr >= r1) for r0, r1, _ in raw_ranges
             ):
                 _fail("certificate table overlaps mapped image bytes")
+            _validate_certificate_table_records(data, addr, size)
         else:
             if end > size_of_image:
                 _fail(f"DataDirectory[{index}] exceeds SizeOfImage")

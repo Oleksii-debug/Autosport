@@ -515,9 +515,11 @@ class ProphetXFixContinuityStore:
         try:
             checkpoint = self.load_checkpoint(identity)
         except ProphetXFixCheckpointMissing:
+            if not local_sequence_store_lost:
+                raise
             checkpoint = None
 
-        if local_sequence_store_lost or checkpoint is None:
+        if local_sequence_store_lost:
             return FixReconnectPlan(
                 identity,
                 checkpoint.revision if checkpoint else None,

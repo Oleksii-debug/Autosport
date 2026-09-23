@@ -33,6 +33,10 @@ from .prophetx_transactions_transport import (
     UrllibProphetXTransactionsTransport,
 )
 
+# Positive provider-origin evidence must not depend on caller-rebindable
+# virtual method dispatch.
+_CANONICAL_TRANSACTIONS_GET = UrllibProphetXTransactionsTransport.get
+
 _MAX_PAGES = 100
 _MAX_MONEY_DIGITS = 256
 _MAX_MONEY_ABS_EXPONENT = 128
@@ -191,6 +195,7 @@ class ProphetXTransactionPage:
 _PROVIDER_TRANSPORTS: WeakKeyDictionary[object, UrllibProphetXTransactionsTransport] = (
     WeakKeyDictionary()
 )
+_PROVIDER_FETCHES: WeakKeyDictionary[object, object] = WeakKeyDictionary()
 _ISSUED_PAGES: WeakKeyDictionary[
     ProphetXTransactionPage, tuple[object, str]
 ] = WeakKeyDictionary()
@@ -218,6 +223,7 @@ class ProphetXTransactionsClient:
             self._transport: ProphetXTransactionsTransport = canonical
             if type(self) is ProphetXTransactionsClient:
                 _PROVIDER_TRANSPORTS[self] = canonical
+                _PROVIDER_FETCHES[self] = canonical._fetch
         else:
             self._transport = transport
         self._timeout = float(timeout_seconds)
@@ -231,12 +237,26 @@ class ProphetXTransactionsClient:
         if not isinstance(query, ProphetXTransactionQuery):
             raise TypeError("query must be ProphetXTransactionQuery")
         url = query.request_url
-        response = self._transport.get(
-            url,
-            headers={"Accept": "application/json", "Accept-Encoding": "identity",
-                     "Authorization": f"Bearer {self._session.access_token}"},
-            timeout_seconds=self._timeout,
-        )
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Authorization": f"Bearer {self._session.access_token}",
+        }
+        canonical = _PROVIDER_TRANSPORTS.get(self)
+        authoritative_fetch = None
+        if canonical is not None:
+            authoritative_fetch = _require_canonical_network_authority(self)
+            response = authoritative_fetch(
+                url,
+                headers=headers,
+                timeout_seconds=self._timeout,
+            )
+        else:
+            response = self._transport.get(
+                url,
+                headers=headers,
+                timeout_seconds=self._timeout,
+            )
         self._validate_response(response, url)
         decoded = _decode_json(response.body)
         data = _mapping(_mapping(decoded, "transaction response").get("data"), "transaction response.data")
@@ -250,13 +270,11 @@ class ProphetXTransactionsClient:
         page = ProphetXTransactionPage(
             query, transactions, cursor, observed_at, sha256(response.body).hexdigest()
         )
-        canonical = _PROVIDER_TRANSPORTS.get(self)
-        if (
-            type(self) is ProphetXTransactionsClient
-            and canonical is not None
-            and type(canonical) is UrllibProphetXTransactionsTransport
-            and self._transport is canonical
-        ):
+        if authoritative_fetch is not None:
+            if _require_canonical_network_authority(self) is not authoritative_fetch:
+                raise ProphetXReadOnlyError(
+                    "canonical ProphetX transaction network authority changed during acquisition"
+                )
             _ISSUED_PAGES[page] = (self, _fingerprint(page))
         return page
 
@@ -339,6 +357,28 @@ def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:
     )
 
 
+def _require_canonical_network_authority(
+    client: ProphetXTransactionsClient,
+):
+    """Return the exact hidden network closure or fail closed on rebinding."""
+
+    canonical = _PROVIDER_TRANSPORTS.get(client)
+    expected_fetch = _PROVIDER_FETCHES.get(client)
+    if (
+        type(client) is not ProphetXTransactionsClient
+        or canonical is None
+        or type(canonical) is not UrllibProphetXTransactionsTransport
+        or client._transport is not canonical
+        or type(canonical).get is not _CANONICAL_TRANSACTIONS_GET
+        or expected_fetch is None
+        or canonical._fetch is not expected_fetch
+    ):
+        raise ProphetXReadOnlyError(
+            "canonical ProphetX transaction origin requires intact product-owned network authority"
+        )
+    return expected_fetch
+
+
 def prophetx_transaction_provider_origin_proven(
     client: object, page: object
 ) -> bool:
@@ -348,12 +388,9 @@ def prophetx_transaction_provider_origin_proven(
         or type(page) is not ProphetXTransactionPage
     ):
         return False
-    canonical = _PROVIDER_TRANSPORTS.get(client)
-    if (
-        canonical is None
-        or type(canonical) is not UrllibProphetXTransactionsTransport
-        or client._transport is not canonical
-    ):
+    try:
+        _require_canonical_network_authority(client)
+    except (ProphetXReadOnlyError, TypeError, ValueError):
         return False
     issued = _ISSUED_PAGES.get(page)
     if issued is None or issued[0] is not client:

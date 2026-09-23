@@ -26,6 +26,11 @@ class BetSide(StrEnum):
     NONE = "NONE"
 
 
+class EconomicCostCausality(StrEnum):
+    DECISION_CAUSED = "DECISION_CAUSED"
+    PREEXISTING_SHARED = "PREEXISTING_SHARED"
+
+
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ForwardEconomicEvidenceError(f"{name} must be a non-empty canonical string")
@@ -519,6 +524,9 @@ class ResolvedPolicyOutcome:
     economic_cost_evidence_sha256: str | None = None
     economic_cost_incurred_at: datetime | None = None
     economic_cost_available_at: datetime | None = None
+    economic_cost_causality: EconomicCostCausality = EconomicCostCausality.DECISION_CAUSED
+    economic_cost_class_id: str | None = None
+    economic_cost_allocation_authority_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.policy_id, "policy_id")
@@ -549,6 +557,42 @@ class ResolvedPolicyOutcome:
             raise ForwardEconomicEvidenceError(
                 "economic_cost_currency must be non-negative"
             )
+        if type(self.economic_cost_causality) is not EconomicCostCausality:
+            raise ForwardEconomicEvidenceError(
+                "economic_cost_causality must be an exact EconomicCostCausality"
+            )
+        if self.economic_cost_causality is EconomicCostCausality.PREEXISTING_SHARED:
+            if cost <= 0:
+                raise ForwardEconomicEvidenceError(
+                    "PREEXISTING_SHARED requires a positive economic cost"
+                )
+            if (
+                self.economic_cost_class_id is None
+                or self.economic_cost_allocation_authority_sha256 is None
+            ):
+                raise ForwardEconomicEvidenceError(
+                    "PREEXISTING_SHARED requires canonical cost class and allocation authority"
+                )
+            object.__setattr__(
+                self,
+                "economic_cost_class_id",
+                _text(self.economic_cost_class_id, "economic_cost_class_id"),
+            )
+            object.__setattr__(
+                self,
+                "economic_cost_allocation_authority_sha256",
+                _sha256(
+                    self.economic_cost_allocation_authority_sha256,
+                    "economic_cost_allocation_authority_sha256",
+                ),
+            )
+        elif (
+            self.economic_cost_class_id is not None
+            or self.economic_cost_allocation_authority_sha256 is not None
+        ):
+            raise ForwardEconomicEvidenceError(
+                "shared cost allocation metadata requires PREEXISTING_SHARED causality"
+            )
         if (self.economic_cost_evidence_sha256 is None) != (
             self.economic_cost_available_at is None
         ):
@@ -570,7 +614,11 @@ class ResolvedPolicyOutcome:
                 "economic_cost_incurred_at",
                 cost_incurred,
             )
-            if cost_incurred < committed:
+            if (
+                cost_incurred < committed
+                and self.economic_cost_causality
+                is not EconomicCostCausality.PREEXISTING_SHARED
+            ):
                 raise ForwardEconomicEvidenceError(
                     "economic cost cannot be incurred before the committed decision"
                 )
@@ -803,6 +851,16 @@ class ForwardEconomicStep:
     champion_execution_accepted_at: datetime | None
     champion_settlement_evidence_sha256: str | None
     champion_settlement_available_at: datetime | None
+    challenger_economic_cost_causality: EconomicCostCausality = (
+        EconomicCostCausality.DECISION_CAUSED
+    )
+    champion_economic_cost_causality: EconomicCostCausality = (
+        EconomicCostCausality.DECISION_CAUSED
+    )
+    challenger_economic_cost_class_id: str | None = None
+    champion_economic_cost_class_id: str | None = None
+    challenger_economic_cost_allocation_authority_sha256: str | None = None
+    champion_economic_cost_allocation_authority_sha256: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -837,6 +895,22 @@ class ForwardEconomicStep:
             ),
             "champion_economic_cost_evidence_sha256": (
                 self.champion_economic_cost_evidence_sha256
+            ),
+            "challenger_economic_cost_causality": (
+                self.challenger_economic_cost_causality.value
+            ),
+            "champion_economic_cost_causality": (
+                self.champion_economic_cost_causality.value
+            ),
+            "challenger_economic_cost_class_id": (
+                self.challenger_economic_cost_class_id
+            ),
+            "champion_economic_cost_class_id": self.champion_economic_cost_class_id,
+            "challenger_economic_cost_allocation_authority_sha256": (
+                self.challenger_economic_cost_allocation_authority_sha256
+            ),
+            "champion_economic_cost_allocation_authority_sha256": (
+                self.champion_economic_cost_allocation_authority_sha256
             ),
             "challenger_economic_cost_incurred_at": (
                 None
@@ -1056,6 +1130,11 @@ class ForwardEconomicEvidenceAccumulator:
             economic_cost_evidence_sha256=snapshot.economic_cost_evidence_sha256,
             economic_cost_incurred_at=snapshot.economic_cost_incurred_at,
             economic_cost_available_at=snapshot.economic_cost_available_at,
+            economic_cost_causality=snapshot.economic_cost_causality,
+            economic_cost_class_id=snapshot.economic_cost_class_id,
+            economic_cost_allocation_authority_sha256=(
+                snapshot.economic_cost_allocation_authority_sha256
+            ),
         )
         if outcome.policy_id != policy_id:
             raise ForwardEconomicEvidenceError("resolved policy identity mismatch")
@@ -1393,6 +1472,16 @@ class ForwardEconomicEvidenceAccumulator:
             champion_execution_accepted_at=champion.execution_accepted_at,
             champion_settlement_evidence_sha256=champion.settlement_evidence_sha256,
             champion_settlement_available_at=champion.settlement_available_at,
+            challenger_economic_cost_causality=challenger.economic_cost_causality,
+            champion_economic_cost_causality=champion.economic_cost_causality,
+            challenger_economic_cost_class_id=challenger.economic_cost_class_id,
+            champion_economic_cost_class_id=champion.economic_cost_class_id,
+            challenger_economic_cost_allocation_authority_sha256=(
+                challenger.economic_cost_allocation_authority_sha256
+            ),
+            champion_economic_cost_allocation_authority_sha256=(
+                champion.economic_cost_allocation_authority_sha256
+            ),
         )
 
         self._steps.append(deepcopy(step))

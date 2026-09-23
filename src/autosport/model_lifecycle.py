@@ -482,6 +482,40 @@ def _canonical_stable_drift_reasons(
     ) != _canonical_utc("drift_observed_at", revision.drift_observed_at)[1]:
         return ("canonical_drift_observation_time_mismatch",)
 
+    reference_id = finding.get("reference_id")
+    if type(reference_id) is not str or not reference_id:
+        return ("canonical_drift_reference_missing",)
+    same_lineage = tuple(
+        entry
+        for entry in monitor.list_findings(as_of=evaluated_at)
+        if entry.payload.get("model_version_id") == revision.model_version_id
+        and entry.payload.get("reference_id") == reference_id
+    )
+    if not same_lineage:
+        return ("canonical_drift_finding_required",)
+    latest_available_at = max(
+        _registry_instant(entry.available_at, "DriftFinding.available_at")
+        for entry in same_lineage
+    )
+    latest = tuple(
+        entry
+        for entry in same_lineage
+        if _registry_instant(entry.available_at, "DriftFinding.available_at")
+        == latest_available_at
+    )
+    if len(latest) != 1:
+        return ("canonical_drift_latest_finding_ambiguous",)
+    latest_entry = latest[0]
+    if latest_entry.record_id != finding_entry.record_id:
+        try:
+            monitor.require_canonical_finding(
+                latest_entry.record_id,
+                as_of=evaluated_at,
+            )
+        except DriftControlError:
+            return ("canonical_latest_drift_finding_invalid",)
+        return ("canonical_drift_finding_superseded",)
+
     state = finding.get("state")
     if state == DriftState.DRIFT_DETECTED.value:
         return ("canonical_drift_detected",)

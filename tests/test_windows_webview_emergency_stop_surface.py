@@ -19,8 +19,10 @@ def test_emergency_stop_is_a_distinct_keyboard_reachable_semantic_control():
     assert 'src="emergency_stop.js"' in html
     assert "Tab + Enter/Space" in html
     assert 'id="product-runtime-stop"' in html
-    assert "durable execution authority" in html
+    assert "стійкий журнал заборони" in html
     assert "не доводить" in html
+    assert "durable execution authority" not in html
+    assert "worker або feed" not in html
 
 
 def test_emergency_stop_frontend_dispatches_only_the_dedicated_authority_command():

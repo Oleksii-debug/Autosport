@@ -11,6 +11,7 @@ from autosport.prophetx_account_readonly import (
 )
 from autosport.prophetx_transactions_readonly import (
     ProphetXTransactionQuery, ProphetXTransactionsClient,
+    _fingerprint,
     prophetx_transaction_provider_origin_proven,
 )
 from autosport.prophetx_transactions_transport import (
@@ -239,55 +240,63 @@ def test_subclass_never_receives_provider_origin_authority(monkeypatch):
     assert not c.provider_origin_proven(page)
 
 
-def test_canonical_origin_is_exact_object_only_and_invalidated_on_transport_swap(monkeypatch):
+def test_canonical_origin_rejects_class_method_rebinding_before_network(monkeypatch):
     body = payload(row())
+    calls = []
+
     def fake_get(self, url, *, headers, timeout_seconds):
+        calls.append(url)
         return ProphetXHttpResponse(200, url, "application/json", "identity", body)
+
     monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
     c = ProphetXTransactionsClient(ProphetXSessionToken("secret"), clock=lambda: NOW)
-    page = c.read_page()
-    assert prophetx_transaction_provider_origin_proven(c, page)
-    assert c.provider_origin_proven(page)
-    assert not prophetx_transaction_provider_origin_proven(c, replace(page))
-    assert not c.provider_origin_proven(replace(page))
-    c._transport = FakeTransport(body)
-    assert not c.provider_origin_proven(page)
+
+    with pytest.raises(ProphetXReadOnlyError, match="intact product-owned network authority"):
+        c.read_page()
+    assert calls == []
 
 
-def test_tampered_live_page_loses_origin_proof(monkeypatch):
+def test_canonical_origin_rejects_hidden_fetch_replacement_before_network():
     body = payload(row())
-    def fake_get(self, url, *, headers, timeout_seconds):
-        return ProphetXHttpResponse(200, url, "application/json", "identity", body)
-    monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
+    calls = []
     c = ProphetXTransactionsClient(ProphetXSessionToken("secret"), clock=lambda: NOW)
+
+    def fake_fetch(url, *, headers, timeout_seconds):
+        calls.append(url)
+        return ProphetXHttpResponse(200, url, "application/json", "identity", body)
+
+    c._transport._fetch = fake_fetch
+
+    with pytest.raises(ProphetXReadOnlyError, match="intact product-owned network authority"):
+        c.read_page()
+    assert calls == []
+def test_tampered_live_page_changes_authority_fingerprint():
+    c, _ = client(payload(row()))
     page = c.read_page()
+    original = _fingerprint(page)
     object.__setattr__(page, "next_cursor", "forged")
+    assert _fingerprint(page) != original
     assert not c.provider_origin_proven(page)
 
 
-def test_tampered_transaction_optional_field_loses_origin_proof(monkeypatch):
-    body = payload(row(description="original", transaction_sub_type="OTHER"))
-    def fake_get(self, url, *, headers, timeout_seconds):
-        return ProphetXHttpResponse(200, url, "application/json", "identity", body)
-    monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
-    c = ProphetXTransactionsClient(ProphetXSessionToken("secret"), clock=lambda: NOW)
+def test_tampered_transaction_optional_field_changes_authority_fingerprint():
+    c, _ = client(payload(row(description="original", transaction_sub_type="OTHER")))
     page = c.read_page()
+    original = _fingerprint(page)
     tx = page.transactions[0]
     object.__setattr__(tx, "description", "forged")
+    assert _fingerprint(page) != original
     assert not c.provider_origin_proven(page)
 
 
-def test_structured_fingerprint_rejects_delimiter_field_repartition(monkeypatch):
-    body = payload(row(details="a|b", market_id="c"))
-    def fake_get(self, url, *, headers, timeout_seconds):
-        return ProphetXHttpResponse(200, url, "application/json", "identity", body)
-    monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
-    c = ProphetXTransactionsClient(ProphetXSessionToken("secret"), clock=lambda: NOW)
+def test_structured_fingerprint_rejects_delimiter_field_repartition():
+    c, _ = client(payload(row(details="a|b", market_id="c")))
     page = c.read_page()
-    assert c.provider_origin_proven(page)
+    original = _fingerprint(page)
     tx = page.transactions[0]
     object.__setattr__(tx, "details", "a")
     object.__setattr__(tx, "market_id", "b|c")
+    assert _fingerprint(page) != original
     assert not c.provider_origin_proven(page)
 
 

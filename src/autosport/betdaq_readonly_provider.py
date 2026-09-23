@@ -149,6 +149,7 @@ class BetdaqRequestEvidence:
     response_sha256: str
     call_id: str | None
     message_created_at: str | None
+    unavailable_market_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +161,7 @@ class BetdaqSnapshotEvidence:
     live_entitlement_verified: bool = False
     provider_origin_verified: bool = False
     receipt_clock_verified: bool = False
+    unavailable_market_ids: tuple[int, ...] = ()
 
 
 Clock = Callable[[], str]
@@ -214,7 +216,8 @@ class BetdaqReadOnlyProvider:
 
     GetPrices has no documented per-price update timestamp, so source_ts is always
     None. StartTime is event schedule metadata; WS-Security Created is message
-    metadata. Market scope is complete, but depth is explicitly TOP_OF_BOOK_ONLY.
+    metadata. Requested market identity coverage is exact; RC016 markets are explicit
+    unavailable evidence and suppress the FULL_MARKET_SCOPE quality claim.
     """
 
     source_id = "betdaq-readonly"
@@ -314,6 +317,25 @@ class BetdaqReadOnlyProvider:
         if self.max_message_age_seconds is not None and age > self.max_message_age_seconds:
             raise BetdaqSoapProtocolError("WS-Security message envelope is stale")
 
+    @staticmethod
+    def _validated_market_scope(
+        response: BetdaqGetPricesWireResponse,
+        market_ids: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        available = tuple(market.market_id for market in response.markets)
+        unavailable = tuple(market.market_id for market in response.unavailable_markets)
+        if len(set(available)) != len(available):
+            raise BetdaqSoapProtocolError("duplicate available GetPrices market")
+        if len(set(unavailable)) != len(unavailable):
+            raise BetdaqSoapProtocolError("duplicate unavailable GetPrices market")
+        if set(available) & set(unavailable):
+            raise BetdaqSoapProtocolError(
+                "GetPrices market cannot be both available and RC016 unavailable"
+            )
+        if set(available) | set(unavailable) != set(market_ids):
+            raise BetdaqSoapProtocolError("GetPrices market set mismatch")
+        return tuple(sorted(unavailable))
+
     def _map(
         self,
         response: BetdaqGetPricesWireResponse,
@@ -321,9 +343,7 @@ class BetdaqReadOnlyProvider:
         observed_text: str,
         sequence: int,
     ) -> list[ProviderQuote]:
-        actual = {market.market_id for market in response.markets}
-        if actual != set(market_ids):
-            raise BetdaqSoapProtocolError("GetPrices market set mismatch")
+        self._validated_market_scope(response, market_ids)
         result: list[ProviderQuote] = []
         for market in sorted(response.markets, key=lambda x: x.market_id):
             binding = self._bindings[market.market_id]
@@ -405,6 +425,7 @@ class BetdaqReadOnlyProvider:
                 int,
                 datetime,
                 str,
+                tuple[int, ...],
             ]
         ] = []
         for market_ids in chunks:
@@ -413,10 +434,19 @@ class BetdaqReadOnlyProvider:
             received, received_text = _time(self.clock(), "response_received_at")
             response = parse_get_prices_response(payload)
             self._check_message_time(response, received)
-            if {m.market_id for m in response.markets} != set(market_ids):
-                raise BetdaqSoapProtocolError("GetPrices market set mismatch")
+            unavailable_ids = self._validated_market_scope(response, market_ids)
             raw = payload.encode() if isinstance(payload, str) else payload
-            parsed.append((request, response, raw, attempts, received, received_text))
+            parsed.append(
+                (
+                    request,
+                    response,
+                    raw,
+                    attempts,
+                    received,
+                    received_text,
+                    unavailable_ids,
+                )
+            )
 
         observed, observed_text = _time(self.clock(), "observed_at")
         if observed.astimezone(timezone.utc) < max(
@@ -428,13 +458,23 @@ class BetdaqReadOnlyProvider:
         quotes: list[ProviderQuote] = []
         evidence: list[BetdaqRequestEvidence] = []
         missing_message_time = False
-        for request, response, raw, attempts, _, received_text in parsed:
+        unavailable_market_ids: set[int] = set()
+        for (
+            request,
+            response,
+            raw,
+            attempts,
+            _,
+            received_text,
+            request_unavailable_ids,
+        ) in parsed:
             quotes.extend(self._map(response, request.market_ids, observed_text, sequence))
             request_hash = _fingerprint(request)
             response_hash = hashlib.sha256(raw).hexdigest()
             digest.update(bytes.fromhex(request_hash))
             digest.update(bytes.fromhex(response_hash))
             missing_message_time |= response.provider_created_at is None
+            unavailable_market_ids.update(request_unavailable_ids)
             evidence.append(
                 BetdaqRequestEvidence(
                     request.request_id,
@@ -445,6 +485,7 @@ class BetdaqReadOnlyProvider:
                     response_hash,
                     response.call_id,
                     response.provider_created_at_text,
+                    request_unavailable_ids,
                 )
             )
 
@@ -452,11 +493,14 @@ class BetdaqReadOnlyProvider:
         flags = [
             "READ_ONLY",
             "QUOTE_SOURCE_TIMESTAMP_UNAVAILABLE",
-            "FULL_MARKET_SCOPE",
             "TOP_OF_BOOK_ONLY",
             "LIVE_ENTITLEMENT_UNVERIFIED",
             "UNVERIFIED_PROVIDER_ORIGIN",
         ]
+        if unavailable_market_ids:
+            flags.extend(("PARTIAL_MARKET_SCOPE", "BETDAQ_RC016_MARKET_UNAVAILABLE"))
+        else:
+            flags.append("FULL_MARKET_SCOPE")
         if not self._receipt_clock_verified:
             flags.append("UNVERIFIED_RECEIPT_CLOCK")
         if missing_message_time:
@@ -467,6 +511,7 @@ class BetdaqReadOnlyProvider:
             cursor,
             provider_origin_verified=False,
             receipt_clock_verified=self._receipt_clock_verified,
+            unavailable_market_ids=tuple(sorted(unavailable_market_ids)),
         )
         self._pending = tuple(quotes)
         self._offset = 0

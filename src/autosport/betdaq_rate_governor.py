@@ -1192,6 +1192,23 @@ def resolve_betdaq_rate_governor(
             root,
             authority_root=resolved_authority,
         )
+        wall_now = _utc(wall_clock(), "wall_clock")
+        for observation in blacklist_store.observations().values():
+            if observation.operation_id is None:
+                continue
+            durable_remaining = max(
+                0.0,
+                (
+                    _parse_utc_text(
+                        observation.blocked_until, "blocked_until"
+                    )
+                    - wall_now
+                ).total_seconds(),
+            )
+            if durable_remaining > 0:
+                runtime.blacklist_blocked_until[
+                    observation.operation_id
+                ] = now + durable_remaining
         governor = BetdaqRateGovernor(
             root,
             policy,

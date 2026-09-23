@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExposureBinding
 from autosport.paper_strategy import PaperValueAgent
-from autosport.risk import ProposedTicketRiskContext
+from autosport.risk import ProposedTicketRiskContext, RiskOfRuinEvidence
 
 
 _TS = "2026-09-22T12:00:00+00:00"
@@ -122,6 +123,36 @@ def test_risk_context_requires_exact_market_semantics_match() -> None:
         ProposedTicketRiskContext(legs=(_leg(_S2),), quotes=(quote,))
 
 
+def test_risk_context_rejects_risk_of_ruin_evidence_subclass() -> None:
+    class DerivedRiskOfRuinEvidence(RiskOfRuinEvidence):
+        pass
+
+    evidence = DerivedRiskOfRuinEvidence(
+        evidence_id="risk-evidence-1",
+        research_protocol_sha256="a" * 64,
+        reproducibility_bundle_sha256="b" * 64,
+        producer_identity="test-producer",
+        causal_cutoff="2026-09-22T11:59:58+00:00",
+        evaluated_at="2026-09-22T11:59:59+00:00",
+        bankroll_id="paper-bankroll",
+        currency="EUR",
+        base_portfolio_sha256="c" * 64,
+        candidate_sha256="d" * 64,
+        evaluated_stake=Decimal("10"),
+        upper_bound=Decimal("0.01"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="risk_of_ruin_evidence must be canonical RiskOfRuinEvidence",
+    ):
+        ProposedTicketRiskContext(
+            legs=(_leg(None),),
+            quotes=(_event(None),),
+            risk_of_ruin_evidence=evidence,
+        )
+
+
 def test_paper_value_material_action_identity_binds_market_semantics() -> None:
     context = SimpleNamespace(replay_run_id="replay-1")
 
@@ -129,6 +160,28 @@ def test_paper_value_material_action_identity_binds_market_semantics() -> None:
     second = PaperValueAgent._material_action_id(context, _event(_S2))
 
     assert first != second
+
+
+def test_paper_value_material_action_identity_preserves_legacy_none_payload() -> None:
+    context = SimpleNamespace(replay_run_id="replay-1")
+    legacy_payload = {
+        "schema": "autosport.paper-value.open-ticket.v1",
+        "replay_run_id": "replay-1",
+        "agent": "paper-value-strategy",
+        "action": "OPEN_PAPER_VALUE_TICKET",
+        "quote_key": _event(None).quote_key,
+    }
+    expected = hashlib.sha256(
+        json.dumps(
+            legacy_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert PaperValueAgent._material_action_id(context, _event(None)) == expected
 
 
 def test_paper_value_restart_matcher_rejects_semantics_substitution() -> None:

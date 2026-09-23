@@ -203,6 +203,28 @@ def test_webview_emergency_stop_rejects_payload_and_request_id_reuse(tmp_path):
     )
     assert reused["status"] == "rejected"
 
+    ordinary_first = controller.dispatch(
+        {
+            "request_id": "ordinary-first",
+            "action_id": "manual.clear",
+            "payload": {},
+        }
+    )
+    assert ordinary_first["status"] == "completed"
+    emergency_reuse = controller.dispatch(_command("ordinary-first"))
+    assert emergency_reuse["status"] == "rejected"
+
+    emergency_first = controller.dispatch(_command("emergency-first"))
+    assert emergency_first["status"] == "completed"
+    ordinary_reuse = controller.dispatch(
+        {
+            "request_id": "emergency-first",
+            "action_id": "manual.clear",
+            "payload": {},
+        }
+    )
+    assert ordinary_reuse["status"] == "rejected"
+
 
 
 class _TrustedWindow:

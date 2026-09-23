@@ -86,3 +86,65 @@ def test_webview_close_does_not_return_while_committed_replay_is_still_active(
         replay.poll()
 
     assert close_returned.is_set()
+
+class _BlockingTerminalWorker:
+    def __init__(self) -> None:
+        self.busy = True
+        self.release = threading.Event()
+
+    def poll(self):
+        if not self.release.is_set():
+            return None
+        self.busy = False
+        return object()
+
+
+class _JoinAwareProductWorker(_IdleProductWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.join_calls = 0
+
+    def join(self, timeout=None) -> bool:
+        del timeout
+        self.join_calls += 1
+        return True
+
+
+def test_webview_close_waits_for_every_non_daemon_one_shot_slot(
+    tmp_path: Path,
+) -> None:
+    for attribute in ("replay_worker", "live_worker", "recovery_worker"):
+        controller = _bare_controller(tmp_path)
+        worker = _BlockingTerminalWorker()
+        setattr(controller, attribute, worker)
+        close_returned = threading.Event()
+
+        def close_controller() -> None:
+            controller.close()
+            close_returned.set()
+
+        close_thread = threading.Thread(target=close_controller)
+        close_thread.start()
+        try:
+            assert not close_returned.wait(0.1), (
+                f"controller.close() returned while {attribute} was still active"
+            )
+        finally:
+            worker.release.set()
+            close_thread.join(2.0)
+
+        assert close_returned.is_set()
+
+
+def test_webview_close_requests_product_stop_then_joins_product_worker(
+    tmp_path: Path,
+) -> None:
+    controller = _bare_controller(tmp_path)
+    product = _JoinAwareProductWorker()
+    controller.product_worker = product
+
+    controller.close()
+
+    assert product.stop_reasons == ["app_close"]
+    assert product.join_calls == 1
+

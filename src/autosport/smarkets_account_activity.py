@@ -179,6 +179,16 @@ def _optional_text(value: object, name: str) -> str | None:
     return value
 
 
+def _nullable_text(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise SmarketsAccountActivityError(f"{name} must be text or null")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise SmarketsAccountActivityError(f"{name} contains control characters")
+    return value
+
+
 def _provider_id(value: object, name: str) -> str | None:
     text = _optional_text(value, name)
     if text is not None and _PROVIDER_ID.fullmatch(text) is None:
@@ -433,8 +443,8 @@ def _row(
             "quantity_user_currency_change",
         ),
         side=side,
-        label=_optional_text(raw.get("label"), "label"),
-        extra=_optional_text(raw.get("extra"), "extra"),
+        label=_nullable_text(raw.get("label"), "label"),
+        extra=_nullable_text(raw.get("extra"), "extra"),
         bet_token_type=bet_token_type,
         bonus_bet=bonus_bet,
         row_sha256=row_sha256,
@@ -732,9 +742,6 @@ def assert_smarkets_account_activity_page_authoritative(
             "account-activity economic evidence identity changed after issuance"
         )
 
-    canonical = page.to_canonical_dict()
-    expected = canonical.copy()
-    expected["evidence_sha256"] = ""
     # evidence_sha256 is not part of to_canonical_dict; recompute over the exact
     # authority-bearing fields and reject object.__setattr__ mutation.
     if _page_digest(page) != page.evidence_sha256:

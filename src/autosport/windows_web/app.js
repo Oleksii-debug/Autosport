@@ -28,12 +28,6 @@
     return "autosport-" + Date.now() + "-" + Math.random().toString(16).slice(2);
   }
 
-  function isEditable(target) {
-    if (!(target instanceof Element)) return false;
-    if (target.matches("input, textarea, select")) return true;
-    return target instanceof HTMLElement && target.isContentEditable;
-  }
-
   function announce(message, assertive = false) {
     const value = message || "Готово.";
     if (assertive) {
@@ -215,7 +209,7 @@
     if (operations.options.length === 0) {
       setSelectOptions(operations, state.manual.operations || []);
     }
-    byId("manual-status").textContent = state.manual.status || "";
+    setTextIfChanged(byId("manual-status"), state.manual.status || "");
     byId(334).value = state.manual.result || "";
 
     const productRuntime = state.product_runtime || {};
@@ -366,9 +360,6 @@
   });
 
   document.addEventListener("keydown", (event) => {
-    const key = String(event.key || "").toLowerCase();
-    const editable = isEditable(event.target);
-
     if (event.key === "F2") {
       event.preventDefault();
       byId(301).focus();
@@ -377,21 +368,6 @@
     if (event.key === "F8") {
       event.preventDefault();
       byId(204).focus();
-      return;
-    }
-
-    if (!event.ctrlKey || event.altKey || event.metaKey) return;
-    if (editable && !["o", "e", "l"].includes(key)) return;
-
-    if (key === "o" && !event.shiftKey) {
-      event.preventDefault();
-      byId("dataset-path").focus();
-    } else if (key === "e") {
-      event.preventDefault();
-      byId("evidence-path").focus();
-    } else if (key === "l") {
-      event.preventDefault();
-      byId(105).click();
     }
   });
 

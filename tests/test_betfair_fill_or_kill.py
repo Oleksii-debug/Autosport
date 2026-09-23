@@ -5,6 +5,7 @@ from autosport.betfair_fill_or_kill import (
     BetfairFillOrKillError,
     BetfairFillOrKillImmediateReport,
     BetfairFillOrKillRequest,
+    BetfairFillOrKillStructuralEvidence,
     FillOrKillStructuralOutcome,
     inspect_betfair_fill_or_kill_lifecycle,
     resolve_betfair_fill_or_kill_lifecycle,
@@ -193,6 +194,39 @@ class BetfairFillOrKillTests(unittest.TestCase):
             self._request(requested_size=5.0)
         with self.assertRaisesRegex(BetfairFillOrKillError, "positive integer text"):
             self._request(selection_id="00123")
+
+    def test_selection_id_is_bounded_before_provider_integer_conversion(self):
+        maximum = self._request(selection_id="9223372036854775807")
+        self.assertEqual(
+            maximum.provider_instruction["selectionId"],
+            9223372036854775807,
+        )
+
+        for selection_id in ("9223372036854775808", "9" * 5000):
+            with self.subTest(length=len(selection_id)), self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "signed-long domain",
+            ):
+                self._request(selection_id=selection_id)
+
+    def test_structural_evidence_cannot_be_caller_minted(self):
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "must be produced by lifecycle inspection",
+        ):
+            BetfairFillOrKillStructuralEvidence()
+
+        for flag in (
+            "per_fragment_price_floor_proven",
+            "provider_origin_verified",
+            "grants_execution_authority",
+            "grants_real_money_authority",
+        ):
+            with self.subTest(flag=flag), self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "must be produced by lifecycle inspection",
+            ):
+                BetfairFillOrKillStructuralEvidence(**{flag: True})
 
     def test_extreme_decimal_exponents_fail_before_fixed_point_materialization(self):
         for field, value in (

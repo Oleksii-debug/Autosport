@@ -5,7 +5,10 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from autosport.betdaq_account_readonly import BetdaqCredentials
+from autosport.betdaq_account_readonly import (
+    BetdaqAccountReadOnlyError,
+    BetdaqCredentials,
+)
 from autosport.betdaq_readonly_live_provider import BetdaqLiveReadOnlyProvider
 from autosport.betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from autosport.betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
@@ -14,7 +17,6 @@ from autosport.betdaq_readonly_provider import (
     BETDAQ_GET_PRICES_SOAP_ACTION,
     BetdaqGetPricesRequest,
     BetdaqMarketBinding,
-    BetdaqTransientTransportError,
 )
 from autosport.providers import ProviderUnavailableError
 
@@ -66,7 +68,7 @@ def _response() -> bytes:
 
 
 class _PostTransport:
-    def __init__(self, payload: bytes | None = None) -> None:
+    def __init__(self, payload: bytes | object | None = None) -> None:
         self.payload = _response() if payload is None else payload
         self.calls: list[tuple[str, dict[str, str], bytes, float]] = []
 
@@ -84,8 +86,39 @@ class _ExplodingPostTransport:
         raise RuntimeError("fixture-password must never escape")
 
 
+class _OpaqueCanonicalErrorTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post(self, url, *, headers, body, timeout_seconds):
+        self.calls += 1
+        raise BetdaqAccountReadOnlyError(
+            "opaque failure containing fixture-password must never escape"
+        )
+
+
+class _ExplicitTransientPostTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post(self, url, *, headers, body, timeout_seconds):
+        self.calls += 1
+        raise TimeoutError("explicit transient fixture")
+
+
 def _request() -> BetdaqGetPricesRequest:
     return BetdaqGetPricesRequest(17, (9001,), Decimal("1.50"))
+
+
+def _provider(transport, *, max_attempts: int) -> BetdaqLiveReadOnlyProvider:
+    return BetdaqLiveReadOnlyProvider(
+        credentials=_credentials(),
+        transport=transport,
+        market_bindings=[BetdaqMarketBinding(9001, "event-1", "football")],
+        threshold_amount=Decimal("1.50"),
+        max_attempts=max_attempts,
+        clock=lambda: "2026-09-23T19:00:00Z",
+    )
 
 
 def test_bridge_delegates_exactly_one_getprices_post_without_own_retry() -> None:
@@ -126,45 +159,64 @@ def test_default_bridge_reuses_product_owned_transport_without_claiming_origin()
     assert "provider_origin_verified" not in text
 
 
-def test_bridge_redacts_arbitrary_transport_exception() -> None:
-    bridge = BetdaqReadOnlyLiveTransport(
-        credentials=_credentials(),
-        transport=_ExplodingPostTransport(),
-    )
+def test_arbitrary_transport_exception_is_redacted_and_not_promoted_to_transient() -> None:
+    post = _ExplodingPostTransport()
+    bridge = BetdaqReadOnlyLiveTransport(credentials=_credentials(), transport=post)
     with pytest.raises(
-        BetdaqTransientTransportError,
-        match=r"^BETDAQ GetPrices transport failed$",
+        ProviderUnavailableError,
+        match=r"^BETDAQ GetPrices transport failed without retryable classification$",
     ) as raised:
         bridge.get_prices(_request(), timeout_seconds=1.0)
+    assert post.calls == 1
     assert "fixture-password" not in str(raised.value)
 
 
-def test_provider_owns_bounded_retry_not_the_bridge() -> None:
+def test_provider_does_not_retry_unclassified_custom_failure() -> None:
     post = _ExplodingPostTransport()
-    provider = BetdaqLiveReadOnlyProvider(
-        credentials=_credentials(),
-        transport=post,
-        market_bindings=[BetdaqMarketBinding(9001, "event-1", "football")],
-        threshold_amount=Decimal("1.50"),
-        max_attempts=2,
-        clock=lambda: "2026-09-23T00:00:01Z",
-    )
+    provider = _provider(post, max_attempts=5)
+    with pytest.raises(
+        ProviderUnavailableError,
+        match="without retryable classification",
+    ):
+        provider.read_batch()
+    assert post.calls == 1
+    assert provider.last_request_evidence is None
+
+
+def test_provider_does_not_retry_opaque_canonical_transport_error() -> None:
+    post = _OpaqueCanonicalErrorTransport()
+    provider = _provider(post, max_attempts=5)
+    with pytest.raises(
+        ProviderUnavailableError,
+        match="without retryable classification",
+    ) as raised:
+        provider.read_batch()
+    assert post.calls == 1
+    assert "fixture-password" not in str(raised.value)
+    assert provider.last_request_evidence is None
+
+
+def test_provider_retries_only_preserved_explicit_transient_signal() -> None:
+    post = _ExplicitTransientPostTransport()
+    provider = _provider(post, max_attempts=2)
     with pytest.raises(ProviderUnavailableError, match="after 2 bounded attempts"):
         provider.read_batch()
     assert post.calls == 2
     assert provider.last_request_evidence is None
 
 
+def test_non_bytes_transport_contract_failure_is_not_retried() -> None:
+    post = _PostTransport(payload="not-bytes")
+    provider = _provider(post, max_attempts=4)
+    with pytest.raises(ProviderUnavailableError, match="non-bytes payload"):
+        provider.read_batch()
+    assert len(post.calls) == 1
+    assert provider.last_request_evidence is None
+
+
 def test_live_provider_keeps_origin_unverified_after_valid_snapshot() -> None:
     post = _PostTransport()
-    provider = BetdaqLiveReadOnlyProvider(
-        credentials=_credentials(),
-        transport=post,
-        market_bindings=[BetdaqMarketBinding(9001, "event-1", "football")],
-        threshold_amount=Decimal("1.50"),
-        max_attempts=1,
-        clock=lambda: "2026-09-23T19:00:00Z",
-    )
+    provider = _provider(post, max_attempts=1)
 
     batch = provider.read_batch()
 

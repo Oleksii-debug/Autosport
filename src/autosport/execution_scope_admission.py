@@ -52,7 +52,7 @@ class ExecutionAdmissionBlocker(str, Enum):
     SETTLEMENT_RULE_UNPROVEN = "SETTLEMENT_RULE_UNPROVEN"
     ECONOMIC_RISK_GATES_UNPROVEN = "ECONOMIC_RISK_GATES_UNPROVEN"
     DISPATCH_REQUEST_UNBOUND = "DISPATCH_REQUEST_UNBOUND"
-    SINGLE_USE_RESTART_UNPROVEN = "SINGLE_USE_RESTART_UNPROVEN"
+    PRODUCT_SUPERVISED_ACTION_UNPROVEN = "PRODUCT_SUPERVISED_ACTION_UNPROVEN"\n    SINGLE_USE_RESTART_UNPROVEN = "SINGLE_USE_RESTART_UNPROVEN"
 
 
 def _text(value: object, field: str) -> str:
@@ -212,7 +212,7 @@ class ExecutionScopePreAdmission:
             "provider_action_documented",
             "governance_automation_permitted",
             "integration_channel_bound",
-            "product_supervised_action_issued",
+            "supervised_action_binding_structurally_valid",
         ):
             if type(getattr(self, field)) is not bool:
                 raise ExecutionScopeAdmissionError(f"{field} must be bool")

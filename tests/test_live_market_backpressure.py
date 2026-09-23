@@ -189,19 +189,40 @@ def test_drain_order_is_deterministic_and_does_not_make_replay_authority() -> No
     assert all(v.causal_replay_safe is False for v in views)
 
 
-def test_capacity_drop_does_not_advance_existing_key_state() -> None:
+def test_existing_key_capacity_drop_requires_explicit_recovery_without_provider_gap() -> None:
     queue = LiveMarketBackpressure(capacity=1)
-    queue.submit_snapshot(snap(1, market="1.1"))
+    queue.submit_snapshot(snap(1, market="1.1", state="OPEN"))
     queue.drain()
 
     queue.submit_snapshot(snap(1, market="1.2"))
-    dropped = queue.submit_snapshot(snap(2, market="1.1"))
+    dropped = queue.submit_snapshot(snap(2, market="1.1", state="SUSPENDED"))
+    assert dropped.accepted is False
     assert dropped.local_capacity_drop is True
+    assert dropped.gap is False
+    assert dropped.resnapshot_required is True
+    assert queue.requires_resnapshot(key(market="1.1")) is True
+    assert queue.stats.local_capacity_drops == 1
+    assert queue.stats.provider_gap_events == 0
     queue.drain()
 
-    retried = queue.submit_snapshot(snap(2, market="1.1"))
-    assert retried.accepted is True
-    assert queue.drain()[0].snapshot.sequence == 2
+    ordinary = queue.submit_snapshot(snap(3, market="1.1", state="OPEN"))
+    assert ordinary.accepted is False
+    assert ordinary.local_capacity_drop is False
+    assert ordinary.gap is False
+    assert ordinary.resnapshot_required is True
+    assert queue.pending_count == 0
+
+    recovered = queue.submit_snapshot(
+        snap(3, market="1.1", state="OPEN"), recovery=True
+    )
+    assert recovered.accepted is True
+    assert recovered.resnapshot_required is False
+    assert queue.requires_resnapshot(key(market="1.1")) is False
+    view = queue.drain()[0]
+    assert view.snapshot.sequence == 3
+    assert view.trusted_current_view is True
+    assert view.resnapshot_required is False
+    assert queue.stats.provider_gap_events == 0
 
 
 def test_recovery_generation_change_respects_capacity_without_clearing_gap() -> None:

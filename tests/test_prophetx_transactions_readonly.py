@@ -226,6 +226,20 @@ def test_tampered_transaction_optional_field_loses_origin_proof(monkeypatch):
     assert not c.provider_origin_proven(page)
 
 
+def test_structured_fingerprint_rejects_delimiter_field_repartition(monkeypatch):
+    body = payload(row(details="a|b", market_id="c"))
+    def fake_get(self, url, *, headers, timeout_seconds):
+        return ProphetXHttpResponse(200, url, "application/json", "identity", body)
+    monkeypatch.setattr(UrllibProphetXTransactionsTransport, "get", fake_get)
+    c = ProphetXTransactionsClient(ProphetXSessionToken("secret"), clock=lambda: NOW)
+    page = c.read_page()
+    assert c.provider_origin_proven(page)
+    tx = page.transactions[0]
+    object.__setattr__(tx, "details", "a")
+    object.__setattr__(tx, "market_id", "b|c")
+    assert not c.provider_origin_proven(page)
+
+
 def test_blank_provider_cursor_fails_closed():
     c, _ = client(payload(row(), cursor=" "))
     with pytest.raises(ProphetXReadOnlyError, match="next_cursor"):

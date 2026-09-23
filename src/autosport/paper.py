@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -27,6 +28,10 @@ _PAPER_DECIMAL_EMAX = 999999
 _PAPER_SNAPSHOT_SCHEMA_VERSION = 8
 _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
 _SCHEMA_MISSING = object()
+_PAPER_SNAPSHOT_WITNESS_SCHEMA_VERSION = 1
+_PAPER_SNAPSHOT_WITNESS_SUFFIX = ".paper-book-snapshot-witness.jsonl"
+_PAPER_SNAPSHOT_WITNESS_PREPARE = "PREPARE"
+_PAPER_SNAPSHOT_WITNESS_COMMIT = "COMMIT"
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
@@ -56,6 +61,228 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 
 def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"PaperBook snapshot contains non-finite JSON constant: {value}")
+
+
+def _snapshot_sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _snapshot_identity(path: Path) -> str:
+    normalized = os.path.normcase(os.path.abspath(os.fspath(path)))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _snapshot_witness_path(snapshot_path: Path) -> Path:
+    # Reuse the already-established independent PAPER execution authority root
+    # rather than storing a caller-editable trust digest beside the snapshot.
+    from ._paper_execution_anti_rollback import _authority_root
+
+    identity = _snapshot_identity(snapshot_path)
+    return _authority_root(snapshot_path) / f"{identity}{_PAPER_SNAPSHOT_WITNESS_SUFFIX}"
+
+
+def _snapshot_witness_digest(payload: dict[str, object]) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("PaperBook snapshot witness is not canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _require_snapshot_sha256(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"PaperBook {label} must be lowercase SHA-256 hex")
+    return value
+
+
+def _read_snapshot_witnesses(
+    snapshot_path: Path,
+) -> tuple[list[dict[str, object]], tuple[int, str] | None, tuple[int, str] | None]:
+    witness_path = _snapshot_witness_path(snapshot_path)
+    if not witness_path.exists():
+        return [], None, None
+    try:
+        lines = witness_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("cannot read PaperBook independent snapshot witness") from exc
+
+    expected_keys = {
+        "witness_schema_version",
+        "sequence",
+        "generation",
+        "event",
+        "snapshot_identity",
+        "snapshot_name",
+        "snapshot_sha256",
+        "previous_witness_sha256",
+        "witness_sha256",
+    }
+    expected_identity = _snapshot_identity(snapshot_path)
+    records: list[dict[str, object]] = []
+    previous_witness_sha256: str | None = None
+    committed: tuple[int, str] | None = None
+    pending: tuple[int, str] | None = None
+
+    for sequence, line in enumerate(lines, start=1):
+        if not line:
+            raise ValueError("PaperBook snapshot witness contains a blank line")
+        try:
+            record = json.loads(
+                line,
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (json.JSONDecodeError, RecursionError) as exc:
+            raise ValueError("PaperBook snapshot witness is unreadable") from exc
+        if type(record) is not dict or set(record) != expected_keys:
+            raise ValueError("PaperBook snapshot witness schema is invalid")
+        if record["witness_schema_version"] != _PAPER_SNAPSHOT_WITNESS_SCHEMA_VERSION:
+            raise ValueError("unsupported PaperBook snapshot witness schema")
+        if record["sequence"] != sequence:
+            raise ValueError("PaperBook snapshot witness sequence is not contiguous")
+        if record["snapshot_identity"] != expected_identity:
+            raise ValueError("PaperBook snapshot witness belongs to another path")
+        if record["snapshot_name"] != snapshot_path.name:
+            raise ValueError("PaperBook snapshot witness belongs to another file")
+        snapshot_sha = _require_snapshot_sha256(
+            record["snapshot_sha256"],
+            "snapshot witness snapshot_sha256",
+        )
+        previous = record["previous_witness_sha256"]
+        if previous != previous_witness_sha256:
+            raise ValueError("PaperBook snapshot witness predecessor mismatch")
+        body = {key: record[key] for key in expected_keys if key != "witness_sha256"}
+        witness_sha = _require_snapshot_sha256(
+            record["witness_sha256"],
+            "snapshot witness witness_sha256",
+        )
+        if witness_sha != _snapshot_witness_digest(body):
+            raise ValueError("PaperBook snapshot witness digest mismatch")
+        generation = record["generation"]
+        if type(generation) is not int or generation <= 0:
+            raise ValueError("PaperBook snapshot witness generation is invalid")
+        event = record["event"]
+        if event == _PAPER_SNAPSHOT_WITNESS_PREPARE:
+            expected_generation = 1 if committed is None else committed[0] + 1
+            if pending is not None or generation != expected_generation:
+                raise ValueError("PaperBook snapshot witness PREPARE order is invalid")
+            pending = (generation, snapshot_sha)
+        elif event == _PAPER_SNAPSHOT_WITNESS_COMMIT:
+            if pending != (generation, snapshot_sha):
+                raise ValueError("PaperBook snapshot witness COMMIT has no matching PREPARE")
+            committed = pending
+            pending = None
+        else:
+            raise ValueError("PaperBook snapshot witness event is invalid")
+        records.append(record)
+        previous_witness_sha256 = witness_sha
+
+    return records, committed, pending
+
+
+def _append_snapshot_witness(
+    snapshot_path: Path,
+    *,
+    event: str,
+    generation: int,
+    snapshot_sha256: str,
+) -> None:
+    records, _, _ = _read_snapshot_witnesses(snapshot_path)
+    previous_witness_sha256 = (
+        None if not records else str(records[-1]["witness_sha256"])
+    )
+    body: dict[str, object] = {
+        "witness_schema_version": _PAPER_SNAPSHOT_WITNESS_SCHEMA_VERSION,
+        "sequence": len(records) + 1,
+        "generation": generation,
+        "event": event,
+        "snapshot_identity": _snapshot_identity(snapshot_path),
+        "snapshot_name": snapshot_path.name,
+        "snapshot_sha256": _require_snapshot_sha256(
+            snapshot_sha256,
+            "snapshot witness snapshot_sha256",
+        ),
+        "previous_witness_sha256": previous_witness_sha256,
+    }
+    record = {**body, "witness_sha256": _snapshot_witness_digest(body)}
+    witness_path = _snapshot_witness_path(snapshot_path)
+    existed = witness_path.exists()
+    try:
+        with witness_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not existed:
+            from ._paper_execution_anti_rollback import _sync_authority_directory
+
+            _sync_authority_directory(witness_path.parent)
+    except OSError as exc:
+        raise ValueError("PaperBook snapshot witness durability barrier failed") from exc
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return _snapshot_sha256(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("cannot read PaperBook snapshot for witness verification") from exc
+
+
+def _recover_snapshot_witness_if_possible(
+    snapshot_path: Path,
+    snapshot_sha256: str,
+) -> tuple[int, str] | None:
+    _, committed, pending = _read_snapshot_witnesses(snapshot_path)
+    if pending is None:
+        return committed
+    generation, pending_sha256 = pending
+    if pending_sha256 != snapshot_sha256:
+        raise ValueError(
+            "PaperBook snapshot witness has an incomplete generation for different bytes"
+        )
+    _append_snapshot_witness(
+        snapshot_path,
+        event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
+        generation=generation,
+        snapshot_sha256=pending_sha256,
+    )
+    _, committed, pending = _read_snapshot_witnesses(snapshot_path)
+    if pending is not None or committed != (generation, pending_sha256):
+        raise ValueError("PaperBook snapshot witness recovery did not commit exactly")
+    return committed
+
+
+def _verify_snapshot_witness(snapshot_path: Path, payload: bytes) -> None:
+    snapshot_sha = _snapshot_sha256(payload)
+    committed = _recover_snapshot_witness_if_possible(snapshot_path, snapshot_sha)
+    if committed is None:
+        raise ValueError(
+            "PaperBook ticket snapshot is missing independent durable opening witness"
+        )
+    if committed[1] != snapshot_sha:
+        raise ValueError(
+            "PaperBook snapshot bytes do not match independent durable opening witness"
+        )
 
 
 class PaperBook:
@@ -325,22 +552,89 @@ class PaperBook:
             ],
             "lifecycle": self._lifecycle_to_json(),
         }
+        try:
+            snapshot_bytes = json.dumps(
+                raw,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise ValueError("PaperBook snapshot cannot be serialized canonically") from exc
+        snapshot_sha = _snapshot_sha256(snapshot_bytes)
+
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                newline="\n",
+                "wb",
                 dir=destination.parent,
                 prefix=f".{destination.name}.",
                 suffix=".tmp",
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                json.dump(raw, handle, ensure_ascii=False, indent=2)
+                handle.write(snapshot_bytes)
                 handle.flush()
                 os.fsync(handle.fileno())
+
+            _, committed, pending = _read_snapshot_witnesses(destination)
+            current_sha = _file_sha256(destination)
+
+            # Recover an interrupted PREPARE if the exact prepared bytes are now
+            # durable, or complete that same prepared generation using this exact
+            # retry payload. Any different pending bytes fail closed.
+            if pending is not None:
+                generation, pending_sha = pending
+                if current_sha == pending_sha:
+                    _append_snapshot_witness(
+                        destination,
+                        event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
+                        generation=generation,
+                        snapshot_sha256=pending_sha,
+                    )
+                    committed = (generation, pending_sha)
+                    pending = None
+                    if snapshot_sha == current_sha:
+                        return
+                elif snapshot_sha == pending_sha:
+                    os.replace(temporary, destination)
+                    temporary = None
+                    _append_snapshot_witness(
+                        destination,
+                        event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
+                        generation=generation,
+                        snapshot_sha256=pending_sha,
+                    )
+                    return
+                else:
+                    raise ValueError(
+                        "PaperBook snapshot witness has an unresolved different PREPARE"
+                    )
+
+            # Existing witnessed state must still match its independent authority
+            # before a new generation can extend it.
+            if committed is not None and current_sha != committed[1]:
+                raise ValueError(
+                    "PaperBook current snapshot differs from independent durable witness"
+                )
+            if committed is not None and snapshot_sha == current_sha == committed[1]:
+                return
+
+            generation = 1 if committed is None else committed[0] + 1
+            _append_snapshot_witness(
+                destination,
+                event=_PAPER_SNAPSHOT_WITNESS_PREPARE,
+                generation=generation,
+                snapshot_sha256=snapshot_sha,
+            )
             os.replace(temporary, destination)
+            temporary = None
+            _append_snapshot_witness(
+                destination,
+                event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
+                generation=generation,
+                snapshot_sha256=snapshot_sha,
+            )
         finally:
             if temporary is not None:
                 try:
@@ -1052,9 +1346,9 @@ class PaperBook:
         return book
 
     @classmethod
-    def load_bytes(cls, payload: bytes) -> "PaperBook":
+    def _decode_snapshot_bytes(cls, payload: bytes) -> "PaperBook":
         if not isinstance(payload, bytes):
-            raise TypeError("PaperBook.load_bytes payload must be bytes")
+            raise TypeError("PaperBook snapshot payload must be bytes")
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -1070,5 +1364,20 @@ class PaperBook:
         return cls._from_raw_snapshot(raw)
 
     @classmethod
+    def load_bytes(cls, payload: bytes) -> "PaperBook":
+        book = cls._decode_snapshot_bytes(payload)
+        if book.tickets:
+            raise ValueError(
+                "PaperBook.load_bytes cannot establish independent durable opening witness; "
+                "use PaperBook.load(path) for ticket-bearing snapshots"
+            )
+        return book
+
+    @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        return cls.load_bytes(Path(path).read_bytes())
+        source = Path(path)
+        payload = source.read_bytes()
+        book = cls._decode_snapshot_bytes(payload)
+        if book.tickets:
+            _verify_snapshot_witness(source, payload)
+        return book

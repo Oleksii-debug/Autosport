@@ -1103,45 +1103,36 @@ class TheOddsApiProviderTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(provider, name))
 
+    def test_product_receipt_clock_code_mutation_cannot_retain_verified_authority(self):
+        product_clock = odds_api_module.utc_now_iso
+        original_code = product_clock.__code__
+
+        def forged_clock():
+            return "2026-09-23T00:00:00+00:00"
+
+        def injected_transport(_url, _timeout):
+            return HttpJsonResponse(
+                payload=[],
+                status_code=200,
+                headers={},
+            )
+
+        try:
+            product_clock.__code__ = forged_clock.__code__
+            provider = TheOddsApiProvider(
+                "secret",
+                sport="soccer_epl",
+                transport=injected_transport,
+            )
+            with self.assertRaisesRegex(
+                TheOddsApiTransportError,
+                "receipt clock authority changed before capture",
+            ):
+                provider.read_batch()
+        finally:
+            product_clock.__code__ = original_code
+
 
 if __name__ == "__main__":
     unittest.main()
-
-def test_product_receipt_clock_code_mutation_cannot_retain_verified_authority() -> None:
-    import pytest
-
-    from autosport import the_odds_api_provider as provider_module
-    from autosport.the_odds_api_provider import (
-        HttpJsonResponse,
-        TheOddsApiProvider,
-        TheOddsApiTransportError,
-    )
-
-    product_clock = provider_module.utc_now_iso
-    original_code = product_clock.__code__
-
-    def forged_clock() -> str:
-        return "2026-09-23T00:00:00+00:00"
-
-    def injected_transport(_url: str, _timeout: float) -> HttpJsonResponse:
-        return HttpJsonResponse(
-            payload=[],
-            status_code=200,
-            headers={},
-        )
-
-    try:
-        product_clock.__code__ = forged_clock.__code__
-        provider = TheOddsApiProvider(
-            "secret",
-            sport="soccer_epl",
-            transport=injected_transport,
-        )
-        with pytest.raises(
-            TheOddsApiTransportError,
-            match="receipt clock authority changed before capture",
-        ):
-            provider.read_batch()
-    finally:
-        product_clock.__code__ = original_code
 

@@ -52,7 +52,7 @@ class OperatorSourceConfigStore:
             try:
                 text = raw.decode("utf-8", errors="strict")
                 value = strict_json_loads(text)
-            except (UnicodeDecodeError, ValueError, TypeError) as exc:
+            except (UnicodeDecodeError, ValueError, TypeError, RecursionError) as exc:
                 raise OperatorSourceStoreError(
                     "operator source configuration is corrupt"
                 ) from exc
@@ -72,7 +72,7 @@ class OperatorSourceConfigStore:
                     allow_nan=False,
                 ).encode("utf-8")
                 return parse_operator_source_config(canonical)
-            except (OperatorSourceConfigError, TypeError, ValueError) as exc:
+            except (OperatorSourceConfigError, TypeError, ValueError, RecursionError) as exc:
                 raise OperatorSourceStoreError(
                     "operator source configuration failed integrity validation"
                 ) from exc

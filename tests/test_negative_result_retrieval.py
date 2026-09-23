@@ -447,9 +447,17 @@ def _append_negative_result_chronology_fixture(
     binding = ScientificProtocolBinding(
         research_protocol_id=f"{prefix}-protocol",
         research_question_id=question.question_id,
-        research_question_sha256=_payload_sha(question),
+        research_question_sha256=(
+            _payload_sha(question)
+            if research_question_sha256 is None
+            else research_question_sha256
+        ),
         hypothesis_id=hypothesis.hypothesis_id,
-        hypothesis_sha256=_payload_sha(hypothesis),
+        hypothesis_sha256=(
+            _payload_sha(hypothesis)
+            if hypothesis_sha256 is None
+            else hypothesis_sha256
+        ),
         inclusion_criteria="frozen",
         exclusion_criteria="invalid provenance",
         lawful_source_requirements="lawful fixture",

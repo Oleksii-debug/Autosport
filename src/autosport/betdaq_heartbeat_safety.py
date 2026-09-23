@@ -628,23 +628,21 @@ def _parse_provider_result(
         for child in result
         if child.tag == f"{{{_EXTERNAL_NS}}}ReturnStatus"
     ]
-    if len(statuses) > 1:
+    if len(statuses) != 1:
         raise BetdaqHeartbeatSafetyError(
-            "heartbeat result contains duplicate ReturnStatus"
+            "heartbeat result requires exactly one ReturnStatus"
         )
-    return_code: int | None = None
-    if statuses:
-        raw = statuses[0].attrib.get("Code")
-        if raw is None:
-            raise BetdaqHeartbeatSafetyError(
-                "heartbeat ReturnStatus is missing Code"
-            )
-        try:
-            return_code = int(raw, 10)
-        except ValueError as exc:
-            raise BetdaqHeartbeatSafetyError(
-                "heartbeat ReturnStatus Code must be integer text"
-            ) from exc
+    raw = statuses[0].attrib.get("Code")
+    if raw is None:
+        raise BetdaqHeartbeatSafetyError(
+            "heartbeat ReturnStatus is missing Code"
+        )
+    try:
+        return_code = int(raw, 10)
+    except ValueError as exc:
+        raise BetdaqHeartbeatSafetyError(
+            "heartbeat ReturnStatus Code must be integer text"
+        ) from exc
     for child in result:
         if child not in statuses:
             raise BetdaqHeartbeatSafetyError(
@@ -652,7 +650,7 @@ def _parse_provider_result(
             )
     performed_at: str | None = None
     performed_action: HeartbeatAction | None = None
-    if method == "Pulse" and return_code in {None, 0}:
+    if method == "Pulse" and return_code == 0:
         raw_time = result.attrib.get("PerformedAt")
         raw_action = result.attrib.get("HeartbeatAction")
         if raw_time is None or raw_action is None:
@@ -834,7 +832,7 @@ class BetdaqHeartbeatSafetyController:
                 threshold_ms=threshold,
                 action=action,
             )
-        if evidence.provider_return_code not in {None, 0}:
+        if evidence.provider_return_code != 0:
             return self._degraded(
                 operation="RegisterHeartbeat",
                 latest=latest,
@@ -902,7 +900,7 @@ class BetdaqHeartbeatSafetyController:
                 threshold_ms=threshold,
                 action=action,
             )
-        if evidence.provider_return_code not in {None, 0}:
+        if evidence.provider_return_code != 0:
             return self._degraded(
                 operation="ChangeHeartbeatRegistration",
                 latest=latest,
@@ -967,7 +965,7 @@ class BetdaqHeartbeatSafetyController:
                 response_sha256=evidence.response_sha256,
                 reconciliation_required=True,
             )
-        if evidence.provider_return_code not in {None, 0}:
+        if evidence.provider_return_code != 0:
             return self._degraded(
                 operation="Pulse",
                 latest=latest,
@@ -1071,7 +1069,7 @@ class BetdaqHeartbeatSafetyController:
                 threshold_ms=latest.threshold_ms,
                 action=latest.registered_action,
             )
-        if evidence.provider_return_code not in {None, 0}:
+        if evidence.provider_return_code != 0:
             return self._degraded(
                 operation="DeregisterHeartbeat",
                 latest=latest,

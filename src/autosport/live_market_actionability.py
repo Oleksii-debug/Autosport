@@ -126,6 +126,10 @@ class RegisteredLiveInputCurrentView:
         return False
 
     @property
+    def product_origin_proven(self) -> bool:
+        return False
+
+    @property
     def continuity_proven(self) -> bool:
         return False
 
@@ -162,11 +166,13 @@ def evaluate_registered_input_current_view(
     as_of: datetime,
     max_age: timedelta,
 ) -> RegisteredLiveInputCurrentView:
-    """Derive one fail-closed current-view gate from canonical live mirror state.
+    """Derive structural current-view diagnostics without minting actionability.
 
-    The function intentionally consumes the existing MarketMirror and registered
-    dependency index. It creates no provider state, no second market store, and no
-    financial authority.
+    The function consumes one coherent MarketMirror + registered dependency index,
+    but those exact Python objects may be caller-constructed. Until a canonical
+    product-runtime composition binds their live acquisition origin, an otherwise
+    fresh/open view remains explicit WAIT/PRODUCT_ORIGIN_UNPROVEN. This creates no
+    provider state, second market store, financial authority, or execution authority.
     """
 
     if not isinstance(updates, BoundedMirrorInvalidationBuffer):
@@ -283,6 +289,7 @@ def evaluate_registered_input_current_view(
             for item in components
         ],
         "stronger_authority": {
+            "product_origin_proven": False,
             "continuity_proven": False,
             "depth_liquidity_proven": False,
             "provider_capability_proven": False,

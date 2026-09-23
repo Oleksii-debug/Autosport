@@ -159,9 +159,7 @@ def economic_client(monkeypatch, *responses, clock=clock_one, credentials=None):
 
 def test_order_settlement_preserves_components_without_netting(monkeypatch):
     client, opener = economic_client(monkeypatch, order_details())
-
     value = client.read_order_details(123)
-
     assert value.order_id == "123"
     assert value.order_status_code == 4
     assert value.sequence_number == 81
@@ -175,28 +173,21 @@ def test_order_settlement_preserves_components_without_netting(monkeypatch):
     assert value.final_settlement_proven is True
     assert value.evidence.authenticated_principal_continuity_proven is False
     assert value.evidence.physical_account_identity_proven is False
-
     request, timeout = opener.calls[0]
     assert timeout == 10.0
     soap_action = next(
         value for key, value in request.headers.items() if key.lower() == "soapaction"
     )
     assert soap_action.endswith('/GetOrderDetails"')
-    body = request.data
-    assert b"getOrderDetailsRequest" in body
-    assert b'OrderId="123"' in body
+    assert b"getOrderDetailsRequest" in request.data
+    assert b'OrderId="123"' in request.data
 
 
 def test_settled_current_order_without_settlement_information_is_not_zero_economics(
     monkeypatch,
 ):
-    client, _ = economic_client(
-        monkeypatch,
-        order_details(status=4, settlement=""),
-    )
-
+    client, _ = economic_client(monkeypatch, order_details(status=4, settlement=""))
     value = client.read_order_details("123")
-
     assert value.final_settlement_proven is False
     assert value.gross_settlement_amount is None
     assert value.order_commission is None
@@ -208,9 +199,7 @@ def test_unknown_order_status_is_preserved_raw_but_cannot_prove_final_settlement
     monkeypatch,
 ):
     client, _ = economic_client(monkeypatch, order_details(status=99))
-
     value = client.read_order_details(123)
-
     assert value.order_status_code == 99
     assert value.gross_settlement_amount == Decimal("12.34")
     assert value.final_settlement_proven is False
@@ -220,9 +209,7 @@ def test_order_settlement_without_provider_currency_cannot_qualify_scalar_econom
     monkeypatch,
 ):
     client, _ = economic_client(monkeypatch, order_details())
-
     value = client.read_order_details(123)
-
     assert value.final_settlement_proven is True
     assert value.currency is None
     assert value.denomination_proven is False
@@ -236,12 +223,10 @@ def test_incomplete_postings_window_keeps_exact_rows_but_not_complete_absence(
         monkeypatch,
         postings_window(posting(9001), complete="false"),
     )
-
     result = client.read_account_postings(
         datetime(2026, 9, 22, 0, 0, tzinfo=timezone.utc),
         datetime(2026, 9, 23, 0, 0, tzinfo=timezone.utc),
     )
-
     assert result.window_complete is False
     assert result.currency == "EUR"
     assert result.balance == Decimal("120.00")
@@ -255,9 +240,7 @@ def test_incomplete_postings_window_keeps_exact_rows_but_not_complete_absence(
 
 def test_by_id_read_never_inherits_window_completeness(monkeypatch):
     client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
-
     result = client.read_account_postings_by_id(9001)
-
     assert result.query_transaction_id == "9001"
     assert result.window_complete is None
     assert len(result.postings) == 1
@@ -270,16 +253,12 @@ def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
     monkeypatch,
 ):
     duplicate = posting(9001)
-    client, _ = economic_client(
-        monkeypatch,
-        postings_window(duplicate, duplicate),
-    )
+    client, _ = economic_client(monkeypatch, postings_window(duplicate, duplicate))
     result = client.read_account_postings(
         datetime(2026, 9, 22, tzinfo=timezone.utc),
         datetime(2026, 9, 23, tzinfo=timezone.utc),
     )
     assert len(result.postings) == 1
-
     conflict_client, _ = economic_client(
         monkeypatch,
         postings_window(posting(9001), posting(9001, amount="9.99")),
@@ -298,10 +277,8 @@ def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monk
     payload = postings_by_id(posting(9001))
     first, _ = economic_client(monkeypatch, payload, clock=clock_one)
     first_value = first.read_account_postings_by_id(9001)
-
     second, _ = economic_client(monkeypatch, payload, clock=clock_two)
     second_value = second.read_account_postings_by_id(9001)
-
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.readback_id == second_value.readback_id
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
@@ -317,14 +294,12 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
         credentials=BetdaqCredentials("alice-a", "secret-a", "app-a"),
     )
     first_value = first.read_account_postings_by_id(9001)
-
     second, _ = economic_client(
         monkeypatch,
         payload,
         credentials=BetdaqCredentials("alice-b", "secret-b", "app-b"),
     )
     second_value = second.read_account_postings_by_id(9001)
-
     assert first_value.evidence.account_context_id != second_value.evidence.account_context_id
     assert first_value.evidence.evidence_id != second_value.evidence.evidence_id
     assert first_value.readback_id != second_value.readback_id
@@ -333,10 +308,8 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
 def test_transport_exception_is_sanitized(monkeypatch):
     secret = "password=super-secret&applicationIdentifier=private"
     client, _ = economic_client(monkeypatch, URLError(secret))
-
     with pytest.raises(BetdaqEconomicReadbackError) as raised:
         client.read_account_postings_by_id(9001)
-
     assert str(raised.value) == "BETDAQ economic read transport failed"
     assert "secret" not in str(raised.value)
     assert "private" not in str(raised.value)
@@ -352,7 +325,6 @@ def test_window_bounds_and_completeness_are_strict(monkeypatch):
             datetime(2026, 9, 22, tzinfo=timezone.utc),
             datetime(2026, 9, 23, tzinfo=timezone.utc),
         )
-
     no_network_client, opener = economic_client(monkeypatch)
     with pytest.raises(
         BetdaqEconomicReadbackError,
@@ -375,7 +347,6 @@ def test_by_id_response_cannot_mint_window_completeness(monkeypatch):
         f"<Orders>{posting(9001)}</Orders>",
     )
     client, _ = economic_client(monkeypatch, payload)
-
     with pytest.raises(
         BetdaqEconomicReadbackError,
         match="cannot.*window completeness|unexpectedly tries to mint window completeness",
@@ -394,9 +365,7 @@ def test_official_generated_response_without_return_status_is_accepted(monkeypat
         include_return_status=False,
     )
     client, _ = economic_client(monkeypatch, payload)
-
     result = client.read_account_postings_by_id(9001)
-
     assert result.postings[0].transaction_id == "9001"
     assert result.window_complete is None
 
@@ -412,7 +381,41 @@ def test_present_nonzero_return_status_fails_closed(monkeypatch):
         return_status_code="17",
     )
     client, _ = economic_client(monkeypatch, payload)
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        client.read_account_postings_by_id(9001)
 
+
+def test_xsd_decimal_exponent_is_rejected(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting(9001, amount="1E+3")),
+    )
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical provider xsd:decimal",
+    ):
+        client.read_account_postings_by_id(9001)
+
+
+def test_unsigned_byte_fields_reject_out_of_contract_values(monkeypatch):
+    client, _ = economic_client(monkeypatch, order_details(status=256))
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="unsigned-byte provider value",
+    ):
+        client.read_order_details(123)
+
+
+def test_soap_body_smuggling_is_rejected(monkeypatch):
+    payload = postings_by_id(posting(9001)).replace(
+        b"<soap:Body>",
+        b'<soap:Body><junk xmlns="urn:not-betdaq" />',
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
     with pytest.raises(
         BetdaqEconomicReadbackError,
         match="failed canonical validation",

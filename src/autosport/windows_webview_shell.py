@@ -967,7 +967,7 @@ class AutosportWebController:
             return self._fail("Невідомий екран продукту.")
         self.surface_key = key
         save_surface_selection(self.workspace, key)
-        return self._ok("", focus_id=303)
+        return self._ok("")
 
     def _action_owner_preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():

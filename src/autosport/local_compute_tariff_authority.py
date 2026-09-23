@@ -485,22 +485,6 @@ class LocalComputeTariffAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             self._records = self._load()
-            current_time = _product_utc_now()
-            previous_recorded_at = max(
-                (
-                    _instant(record.recorded_at, "recorded_at")
-                    for record in self._records
-                ),
-                default=None,
-            )
-            if (
-                previous_recorded_at is not None
-                and current_time <= previous_recorded_at
-            ):
-                raise LocalComputeTariffError(
-                    "product clock did not advance before tariff publication"
-                )
-            recorded_at = _time(current_time.isoformat(), "recorded_at")
             goal, goal_sha256 = self._current_goal()
             if (
                 basis.owner_goal_id != goal.goal_id
@@ -536,6 +520,23 @@ class LocalComputeTariffAuthorityStore:
                 if same_request:
                     return existing
                 raise LocalComputeTariffError("tariff_id is immutable")
+
+            current_time = _product_utc_now()
+            previous_recorded_at = max(
+                (
+                    _instant(existing.recorded_at, "recorded_at")
+                    for existing in self._records
+                ),
+                default=None,
+            )
+            if (
+                previous_recorded_at is not None
+                and current_time <= previous_recorded_at
+            ):
+                raise LocalComputeTariffError(
+                    "product clock did not advance before tariff publication"
+                )
+            recorded_at = _time(current_time.isoformat(), "recorded_at")
 
             record = LocalComputeTariffRecord(
                 tariff_id=canonical_tariff_id,

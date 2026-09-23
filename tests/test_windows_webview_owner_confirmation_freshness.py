@@ -15,8 +15,11 @@ def test_owner_confirmation_is_disabled_until_latest_preview_completes() -> None
 
     assert "let ownerReviewFresh = false;" in source
     assert "let ownerReviewEpoch = 0;" in source
+    assert "function isAnyWorkerBusy(state)" in source
     assert "function syncOwnerConfirmationAvailability(canInitialize)" in source
-    assert "const reviewDisabled = canInitialize !== true || ownerReviewFresh !== true;" in source
+    assert "canInitialize !== true" in source
+    assert "ownerReviewFresh !== true" in source
+    assert "isAnyWorkerBusy(latestState)" in source
     assert 'const checkbox = byId("owner-confirm-checkbox");' in source
     assert "setDisabledWithFocusFallback(checkbox, reviewDisabled);" in source
     assert "reviewDisabled || checkbox.checked !== true" in source
@@ -129,3 +132,38 @@ def test_preview_always_clears_checkbox_even_if_previous_review_was_confirmed() 
     # A fresh preview enables the controls but never auto-confirms the new contract.
     body = source[mark:source.index("function requestId()", mark)]
     assert ".checked = true" not in body
+
+
+def test_owner_backend_mutations_are_disabled_while_any_worker_is_busy() -> None:
+    source = _source()
+
+    helper = source.index("function isAnyWorkerBusy(state)")
+    sync = source.index("function syncOwnerConfirmationAvailability(canInitialize)", helper)
+    helper_body = source[helper:sync]
+    assert "state.busy" in helper_body
+    assert "Object.values(state.busy).some(Boolean)" in helper_body
+
+    render = source.index("function renderState(state)")
+    preview_gate = source.index("setDisabledWithFocusFallback(", render)
+    preview_control = source.index("byId(328)", preview_gate)
+    preview_busy = source.index("isAnyWorkerBusy(state)", preview_control)
+    confirmation_sync = source.index(
+        "syncOwnerConfirmationAvailability(state.owner.can_initialize);",
+        preview_busy,
+    )
+    assert render < preview_control < preview_busy < confirmation_sync
+
+    sync_body = source[sync:source.index("function invalidateOwnerReview()", sync)]
+    assert "isAnyWorkerBusy(latestState)" in sync_body
+    assert "setDisabledWithFocusFallback(checkbox, reviewDisabled);" in sync_body
+    assert "reviewDisabled || checkbox.checked !== true" in sync_body
+
+    # Busy only gates backend-mutating owner actions. The form remains available
+    # for inspection/editing while canonical owner.can_initialize permits it.
+    owner_controls = source.index(
+        'document.querySelectorAll("[data-owner-field], #327")',
+        render,
+    )
+    assert owner_controls < preview_control
+    owner_slice = source[owner_controls:preview_control]
+    assert "isAnyWorkerBusy" not in owner_slice

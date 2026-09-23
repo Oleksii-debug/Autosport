@@ -177,6 +177,7 @@ def _delta(
     delta_id: str,
     cursor_position: int,
     *,
+    stream_epoch: str = "epoch-1",
     revision_of: str | None = None,
     revision_number: int = 0,
     event_identity: str | None = None,
@@ -189,7 +190,7 @@ def _delta(
         source_id="source-x",
         lawful_terms_ref="terms:source-x:v1",
         retention_ref="retention:source-x:v1",
-        stream_epoch="epoch-1",
+        stream_epoch=stream_epoch,
         source_cursor=str(cursor_position),
         cursor_position=cursor_position,
         event_dedupe_key=f"dedupe-{identity}",
@@ -329,3 +330,57 @@ def test_ambiguous_predecessor_order_stays_readable_but_cursor_fails_closed(
         match="commit order is not independently verified",
     ):
         reopened.deltas_after_commit(source_id="source-x")
+
+
+def test_unverified_predecessor_cannot_export_or_reuse_epoch_activation(
+    tmp_path,
+) -> None:
+    path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta("d1", 1, stream_epoch="epoch-1")) is True
+    assert store.append(_delta("d2", 1, stream_epoch="epoch-2")) is True
+    _install_predecessor_projection_trigger(path)
+
+    # Model an activation issued by predecessor code while commit_seq was not
+    # independently protected.  The new migration must preserve this row as
+    # evidence but must not let an UNVERIFIED source export or reuse it.
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO collector_epoch_activations_v1("
+            "source_id, generation, stream_epoch, activated_at"
+            ") VALUES(?,?,?,?)",
+            ("source-x", 1, "epoch-2", "2026-09-23T00:00:04+00:00"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = CollectorDeltaStore(path)
+
+    with pytest.raises(
+        ValueError,
+        match="commit order is not independently verified",
+    ):
+        reopened.runtime_stream_epoch("source-x")
+
+    with pytest.raises(
+        ValueError,
+        match="commit order is not independently verified",
+    ):
+        reopened._bootstrap_or_recover_runtime_stream_epoch(
+            source_id="source-x",
+            stream_epoch="epoch-2",
+            activated_at="2026-09-23T00:00:05+00:00",
+        )
+
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT generation, stream_epoch, activated_at "
+            "FROM collector_epoch_activations_v1 "
+            "WHERE source_id='source-x' ORDER BY generation DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row == (1, "epoch-2", "2026-09-23T00:00:04+00:00")

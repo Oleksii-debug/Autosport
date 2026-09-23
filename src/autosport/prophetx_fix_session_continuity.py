@@ -517,31 +517,19 @@ class ProphetXFixContinuityStore:
             raise ProphetXFixContractError("local_sequence_store_lost must be bool")
         if type(venue_reset_notice_seen) is not bool:
             raise ProphetXFixContractError("venue_reset_notice_seen must be bool")
-        checkpoint: FixSequenceCheckpoint | None
         try:
             checkpoint = self.load_checkpoint(identity)
-        except ProphetXFixCheckpointMissing:
-            if not local_sequence_store_lost:
-                raise
-            checkpoint = None
+        except ProphetXFixCheckpointMissing as exc:
+            if local_sequence_store_lost:
+                raise ProphetXFixContractError(
+                    "local sequence-store loss requires product-owned recovery incident authority"
+                ) from exc
+            raise
 
         if local_sequence_store_lost:
-            plan = FixReconnectPlan(
-                identity,
-                checkpoint.revision if checkpoint else None,
-                ReconnectDisposition.RESET_LOCAL_STORE_LOST,
-                provider_logon_msg_seq_num,
-                True,
-                None,
-                None,
-                True,
-                venue_reset_notice_seen,
-                observed,
+            raise ProphetXFixContractError(
+                "caller local_sequence_store_lost flag cannot authorize sequence reset"
             )
-            return self._publish_reconnect_plan(plan)
-
-        if checkpoint is None:
-            raise ProphetXFixCheckpointMissing("FIX session has no durable checkpoint")
 
         if disconnected_since is not None:
             disconnected = _canonical_time(disconnected_since, "disconnected_since")
@@ -690,13 +678,16 @@ class ProphetXFixContinuityStore:
                 row = conn.execute(
                     "SELECT * FROM sessions WHERE session_key=?", (plan.identity.session_key,)
                 ).fetchone()
-                current: FixSequenceCheckpoint | None = None
-                if row is not None:
-                    current = self._checkpoint_from_row(row)
-                    if current.identity != plan.identity:
-                        raise ProphetXFixEvidenceConflict("reset session identity changed")
-                    if plan.checkpoint_revision != current.revision:
-                        raise ProphetXFixEvidenceConflict("reset plan is stale")
+                if row is None:
+                    raise ProphetXFixContractError(
+                        "reset target session is missing; local sequence-store loss "
+                        "requires product-owned recovery incident authority"
+                    )
+                current = self._checkpoint_from_row(row)
+                if current.identity != plan.identity:
+                    raise ProphetXFixEvidenceConflict("reset session identity changed")
+                if plan.checkpoint_revision != current.revision:
+                    raise ProphetXFixEvidenceConflict("reset plan is stale")
 
                 authority = conn.execute(
                     """SELECT checkpoint_revision, plan_sha256, observed_at
@@ -718,30 +709,18 @@ class ProphetXFixContinuityStore:
                         "reset plan authority observation does not match plan"
                     )
 
-                if current is None:
-                    if plan.disposition is not ReconnectDisposition.RESET_LOCAL_STORE_LOST:
-                        raise ProphetXFixContractError("reset target session is missing")
-                    conn.execute(
-                        """INSERT INTO sessions(
-                            session_key, identity_json, next_expected_inbound, next_outbound,
-                            last_durable_inbound, reset_epoch, revision,
-                            reconciliation_required, updated_at
-                        ) VALUES (?, ?, 1, 1, 0, 1, 1, 1, ?)""",
-                        (plan.identity.session_key, _identity_json(plan.identity), observed),
+                conn.execute(
+                    """UPDATE sessions
+                       SET next_expected_inbound=1, next_outbound=1,
+                           last_durable_inbound=0, reset_epoch=reset_epoch+1,
+                           revision=revision+1, reconciliation_required=1,
+                           updated_at=? WHERE session_key=? AND revision=?""",
+                    (observed, plan.identity.session_key, current.revision),
+                )
+                if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise ProphetXFixEvidenceConflict(
+                        "reset checkpoint changed concurrently"
                     )
-                else:
-                    conn.execute(
-                        """UPDATE sessions
-                           SET next_expected_inbound=1, next_outbound=1,
-                               last_durable_inbound=0, reset_epoch=reset_epoch+1,
-                               revision=revision+1, reconciliation_required=1,
-                               updated_at=? WHERE session_key=? AND revision=?""",
-                        (observed, plan.identity.session_key, current.revision),
-                    )
-                    if conn.execute("SELECT changes()").fetchone()[0] != 1:
-                        raise ProphetXFixEvidenceConflict(
-                            "reset checkpoint changed concurrently"
-                        )
 
                 conn.execute(
                     """DELETE FROM reset_plan_authority
@@ -1065,15 +1044,18 @@ class ProphetXFixContinuityStore:
             if revision is not None:
                 _positive_int(revision, "stored reset authority checkpoint_revision")
             checkpoint = checkpoints.get(session_key)
-            if checkpoint is None and revision is not None:
+            if checkpoint is None:
                 raise ProphetXFixEvidenceConflict(
-                    "missing-session reset authority cannot carry checkpoint revision"
+                    "orphan reset plan authority session"
                 )
-            if checkpoint is not None and revision is not None:
-                if revision > checkpoint.revision:
-                    raise ProphetXFixEvidenceConflict(
-                        "reset authority references future checkpoint revision"
-                    )
+            if revision is None:
+                raise ProphetXFixEvidenceConflict(
+                    "reset plan authority is missing checkpoint revision"
+                )
+            if revision > checkpoint.revision:
+                raise ProphetXFixEvidenceConflict(
+                    "reset authority references future checkpoint revision"
+                )
 
     @staticmethod
     def _checkpoint_from_row(row: sqlite3.Row) -> FixSequenceCheckpoint:

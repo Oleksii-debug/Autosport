@@ -122,22 +122,47 @@ def test_provider_lower_sequence_is_reset_candidate_and_requires_reconciliation(
         assert reset.application_reconciliation_required is True
 
 
-def test_lost_local_store_is_explicit_reset_incident_not_completeness() -> None:
+def test_local_store_loss_caller_flag_cannot_mint_reset_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
         identity = ident()
-        plan = store.plan_reconnect(
+        with pytest.raises(
+            ProphetXFixContractError,
+            match="product-owned recovery incident authority",
+        ):
+            store.plan_reconnect(
+                identity,
+                provider_logon_msg_seq_num=1,
+                observed_at=T1,
+                disconnected_since=None,
+                local_sequence_store_lost=True,
+            )
+        with pytest.raises(ProphetXFixCheckpointMissing):
+            store.load_checkpoint(identity)
+
+
+def test_local_store_loss_flag_cannot_reset_an_existing_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
+        identity = ident()
+        before = store.initialize_session(
             identity,
-            provider_logon_msg_seq_num=1,
-            observed_at=T1,
-            disconnected_since=None,
-            local_sequence_store_lost=True,
+            next_expected_inbound=42,
+            next_outbound=17,
+            observed_at=T0,
         )
-        assert plan.disposition is ReconnectDisposition.RESET_LOCAL_STORE_LOST
-        assert plan.economic_state_complete is False
-        reset = store.record_reset(plan, observed_at=T2)
-        assert reset.reset_epoch == 1
-        assert reset.application_reconciliation_required is True
+        with pytest.raises(
+            ProphetXFixContractError,
+            match="cannot authorize sequence reset",
+        ):
+            store.plan_reconnect(
+                identity,
+                provider_logon_msg_seq_num=1,
+                observed_at=T1,
+                disconnected_since=T0,
+                local_sequence_store_lost=True,
+            )
+        assert store.load_checkpoint(identity) == before
 
 
 def test_higher_provider_sequence_requests_gap_with_exact_range() -> None:

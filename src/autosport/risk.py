@@ -420,8 +420,9 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
-        if self.risk_of_ruin_evidence is not None and not isinstance(
-            self.risk_of_ruin_evidence, RiskOfRuinEvidence
+        if (
+            self.risk_of_ruin_evidence is not None
+            and type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence
         ):
             raise ValueError(
                 "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"

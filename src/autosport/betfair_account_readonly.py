@@ -179,8 +179,10 @@ class BetfairClearedOrderObservation:
         _positive_int(self.selection_id, "selection_id")
         _enum_text(self.side, "side", {"BACK", "LAY"})
         _required_text(self.bet_status, "bet_status")
-        _iso_timestamp(self.placed_date, "placed_date")
-        _iso_timestamp(self.settled_date, "settled_date")
+        placed_at = _iso_timestamp(self.placed_date, "placed_date")
+        settled_at = _iso_timestamp(self.settled_date, "settled_date")
+        if settled_at < placed_at:
+            raise BetfairReadOnlyError("settled_date must not predate placed_date")
         _positive_decimal(self.price_requested, "price_requested")
         _nonnegative_decimal(self.price_matched, "price_matched")
         _nonnegative_decimal(self.size_settled, "size_settled")

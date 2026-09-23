@@ -24,6 +24,7 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 
 THE_ODDS_API_BASE_URL = "https://api.the-odds-api.com"
 THE_ODDS_API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+THE_ODDS_API_MAX_DECIMAL_TEXT_CHARS = 4096
 THE_ODDS_API_TERMS_SOURCE_REF = "https://the-odds-api.com/terms-and-conditions.html"
 THE_ODDS_API_TERMS_LAST_UPDATED = "2026-08-31"
 THE_ODDS_API_DOCS_SOURCE_REF = "https://the-odds-api.com/liveapi/guides/v4/"
@@ -306,7 +307,6 @@ _default_transport = _build_product_transport(
     Request,
     _perform_http_json_response,
 )
-
 def _plain_text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise TheOddsApiPayloadError(f"{field} must be a non-empty trimmed string")
@@ -408,6 +408,21 @@ def _decimal(
 
 
 def _decimal_text(value: Decimal) -> str:
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise TheOddsApiPayloadError("provider decimal must be finite")
+    digit_count = len(digits)
+    sign_chars = 1 if sign else 0
+    if exponent >= 0:
+        text_length = sign_chars + digit_count + exponent
+    elif digit_count + exponent > 0:
+        text_length = sign_chars + digit_count + 1
+    else:
+        text_length = sign_chars + 2 - exponent
+    if text_length > THE_ODDS_API_MAX_DECIMAL_TEXT_CHARS:
+        raise TheOddsApiPayloadError(
+            "provider decimal fixed-point representation exceeds bounded size"
+        )
     return format(value, "f")
 
 

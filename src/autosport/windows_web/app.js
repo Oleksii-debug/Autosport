@@ -261,7 +261,8 @@
     return response.state;
   }
 
-  async function dispatch(actionId, payload = {}) {
+  async function dispatch(actionId, payload = {}, options = {}) {
+    const useGlobalAnnouncement = options.globalAnnouncement !== false;
     // A state read that began before this command is not allowed to overwrite
     // the operator-visible result after the command crosses the backend bridge.
     invalidateStateProjection();
@@ -275,13 +276,20 @@
       // shared refresh loop will skip them and obtain one post-command snapshot.
       invalidateStateProjection();
       const rejected = !result || result.status !== "completed";
-      announce(result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."), rejected);
+      if (useGlobalAnnouncement) {
+        announce(
+          result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."),
+          rejected,
+        );
+      }
       focusResult(result);
       await refreshState();
       return result;
     } catch (_error) {
       invalidateStateProjection();
-      announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
+      if (useGlobalAnnouncement) {
+        announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
+      }
       return null;
     }
   }

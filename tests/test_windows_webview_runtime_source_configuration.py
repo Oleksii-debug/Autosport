@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import autosport.product_gui_worker as product_gui_worker_module
 from autosport.operator_source_config import OperatorSourceSelectionState
+from autosport.product_entrypoint import ProductEntrypointError
 from autosport.windows_webview_shell import AutosportWebController
 
 
@@ -153,10 +158,87 @@ def test_runtime_start_rereads_persisted_source_and_uses_closed_registry_factory
         {
             "workspace": tmp_path,
             "source_factory": _FACTORY_SPEC,
+            "expected_source_id": "parlayapi:table_tennis",
             "initial_bankroll": "10000",
             "poll_seconds": 30.0,
         }
     ]
+
+
+def test_runtime_builder_rejects_provider_identity_mismatch_before_composition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = SimpleNamespace(source_id="unexpected:provider")
+    built = False
+
+    monkeypatch.setattr(
+        product_gui_worker_module,
+        "_validated_source",
+        lambda _factory, *, workspace: source,
+    )
+
+    def forbidden_build(**_kwargs):
+        nonlocal built
+        built = True
+        raise AssertionError("durable runtime composition must not run")
+
+    monkeypatch.setattr(
+        product_gui_worker_module,
+        "build_autonomous_product_runtime",
+        forbidden_build,
+    )
+
+    with pytest.raises(
+        ProductEntrypointError,
+        match="source identity does not match",
+    ):
+        product_gui_worker_module._runtime_builder(
+            tmp_path,
+            _FACTORY_SPEC,
+            "10000",
+            expected_source_id="parlayapi:table_tennis",
+        )
+
+    assert built is False
+
+
+def test_runtime_builder_accepts_exact_expected_provider_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = SimpleNamespace(source_id="parlayapi:table_tennis")
+    runtime = object()
+    captured = {}
+
+    monkeypatch.setattr(
+        product_gui_worker_module,
+        "_validated_source",
+        lambda _factory, *, workspace: source,
+    )
+
+    def build_runtime(**kwargs):
+        captured.update(kwargs)
+        return runtime
+
+    monkeypatch.setattr(
+        product_gui_worker_module,
+        "build_autonomous_product_runtime",
+        build_runtime,
+    )
+
+    assert (
+        product_gui_worker_module._runtime_builder(
+            tmp_path,
+            _FACTORY_SPEC,
+            "10000",
+            expected_source_id="parlayapi:table_tennis",
+        )
+        is runtime
+    )
+    assert captured["workspace"] == tmp_path
+    assert captured["source"] is source
+    assert captured["initial_bankroll"] == "10000"
 
 
 def test_exact_registered_factory_env_is_admin_override_not_free_text(

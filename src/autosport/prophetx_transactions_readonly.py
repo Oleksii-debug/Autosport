@@ -183,8 +183,13 @@ class ProphetXWalletTransaction:
     currency: str = PROVIDER_CURRENCY
 
     @property
-    def provider_transaction_id(self) -> str | None:
-        """Provider idempotency identity when ProphetX actually supplies one."""
+    def client_transaction_id(self) -> str | None:
+        """Client-supplied transaction/idempotency key preserved as provider evidence.
+
+        ProphetX documents details as a client-supplied transaction ID used when
+        the transaction was created. It is not promoted to a unique provider wallet
+        lifecycle-event identifier.
+        """
         return self.details if self.details else None
 
     @property
@@ -298,11 +303,8 @@ class ProphetXTransactionsClient:
             raise TypeError("query must be ProphetXTransactionQuery")
         pages: list[ProphetXTransactionPage] = []
         seen_cursors = {current.next_cursor} if current.next_cursor else set()
-        seen_provider_transactions: dict[str, str] = {}
         for _ in range(max_pages):
             page = self.read_page(current)
-            for transaction in page.transactions:
-                _register_provider_transaction(transaction, seen_provider_transactions)
             pages.append(page)
             if page.next_cursor is None:
                 return tuple(pages)
@@ -315,7 +317,13 @@ class ProphetXTransactionsClient:
     def read_history(
         self, query: ProphetXTransactionQuery | None = None, *, max_pages: int = _MAX_PAGES
     ) -> tuple[ProphetXWalletTransaction, ...]:
-        """Read one complete first-page cursor chain and collapse proven provider replays."""
+        """Read one complete first-page cursor chain without inventing row identity.
+
+        The endpoint exposes lifecycle rows and preserves details as a client
+        idempotency key. Without a provider-documented unique wallet-event identity,
+        equal client keys or equal row content are not sufficient authority to
+        collapse observations.
+        """
         current = query or ProphetXTransactionQuery()
         if not isinstance(current, ProphetXTransactionQuery):
             raise TypeError("query must be ProphetXTransactionQuery")
@@ -323,7 +331,7 @@ class ProphetXTransactionsClient:
             raise ProphetXReadOnlyError(
                 "complete ProphetX transaction history must start without next_cursor"
             )
-        return _canonical_transactions(self.read_all(current, max_pages=max_pages))
+        return _history_transactions(self.read_all(current, max_pages=max_pages))
 
     def provider_origin_proven(self, page: ProphetXTransactionPage) -> bool:
         """Compatibility convenience; authority lives in the exact module verifier."""
@@ -467,42 +475,15 @@ def _transaction_evidence_sha256(transaction: ProphetXWalletTransaction) -> str:
     return _transaction_digest(transaction, include_description=True)
 
 
-def _transaction_economics_sha256(transaction: ProphetXWalletTransaction) -> str:
-    # Human-readable description is not economic identity. Every other provider field
-    # changes the transaction's lifecycle, money, causal time, or provider linkage.
-    return _transaction_digest(transaction, include_description=False)
-
-
-def _register_provider_transaction(
-    transaction: ProphetXWalletTransaction, seen: dict[str, str]
-) -> bool:
-    """Register one provider idempotency identity; return True on first observation."""
-    provider_id = transaction.provider_transaction_id
-    if provider_id is None:
-        return True
-    economics_sha256 = _transaction_economics_sha256(transaction)
-    previous = seen.get(provider_id)
-    if previous is None:
-        seen[provider_id] = economics_sha256
-        return True
-    if previous != economics_sha256:
-        raise ProphetXReadOnlyError(
-            "ProphetX transaction id replay has conflicting lifecycle/economics"
-        )
-    return False
-
-
-def _canonical_transactions(
+def _history_transactions(
     pages: tuple[ProphetXTransactionPage, ...],
 ) -> tuple[ProphetXWalletTransaction, ...]:
-    seen: dict[str, str] = {}
-    canonical: list[ProphetXWalletTransaction] = []
-    for page in pages:
-        for transaction in page.transactions:
-            if _register_provider_transaction(transaction, seen):
-                canonical.append(transaction)
-    return tuple(canonical)
-
+    """Flatten a complete cursor chain while preserving every provider lifecycle row."""
+    return tuple(
+        transaction
+        for page in pages
+        for transaction in page.transactions
+    )
 
 def _fingerprint(page: ProphetXTransactionPage) -> str:
     payload = {

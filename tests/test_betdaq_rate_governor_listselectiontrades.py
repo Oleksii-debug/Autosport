@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from autosport.betdaq_rate_governor import (
+    BetdaqBlacklistObservation,
     BetdaqMethodRatePolicy,
     BetdaqRateGovernorError,
     default_betdaq_rate_policy,
@@ -33,3 +34,15 @@ def test_listselectiontrades_cannot_be_configured_above_documented_default() -> 
             method="ListSelectionTrades",
             capacity=2,
         )
+
+
+def test_listselectiontrades_blacklist_identity_binds_same_operation() -> None:
+    observation = BetdaqBlacklistObservation(
+        api_name="ListSelectionTrades",
+        operation_id="ListSelectionTrades",
+        observed_at="2026-09-23T09:00:00Z",
+        blocked_until="2026-09-23T09:01:00Z",
+        provider_observation_sha256="a" * 64,
+    )
+
+    assert observation.operation_id == "ListSelectionTrades"

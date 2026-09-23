@@ -11,7 +11,7 @@ import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -564,7 +564,7 @@ class TheOddsApiProvider:
         self.timeout_seconds = float(timeout_seconds)
         self.transport = transport
         self.clock = clock
-        self.source_id = f"the-odds-api:{self.sport}"
+        self.source_id = self._stream_source_id("current")
         self._pending_quotes: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
         self._pending_cursor: str | None = None
@@ -718,7 +718,10 @@ class TheOddsApiProvider:
         if not quotes:
             flags.append("EMPTY_RESPONSE")
         batch = ProviderBatch(
-            self.source_id,
+            self._stream_source_id(
+                "historical",
+                requested_snapshot_at=requested_at,
+            ),
             quotes,
             cursor=evidence.response_sha256 or snapshot_at,
             quality_flags=tuple(flags),
@@ -784,6 +787,65 @@ class TheOddsApiProvider:
         if not evidence.receipt_clock_verified:
             flags.append("UNVERIFIED_RECEIPT_CLOCK")
         return tuple(flags)
+
+    def _stream_source_id(
+        self,
+        endpoint_kind: str,
+        *,
+        requested_snapshot_at: str | None = None,
+    ) -> str:
+        """Return one stable causal stream identity for exact request semantics."""
+
+        if endpoint_kind not in {"current", "historical"}:
+            raise ValueError("endpoint_kind must be current or historical")
+        if endpoint_kind == "current" and requested_snapshot_at is not None:
+            raise ValueError("current stream identity cannot carry a historical cutoff")
+        if endpoint_kind == "historical" and requested_snapshot_at is None:
+            raise ValueError("historical stream identity requires requested_snapshot_at")
+
+        scope_kind = "bookmakers" if self.bookmakers else "regions"
+        scope_values = self.bookmakers if self.bookmakers else self.regions
+        normalized_scope = tuple(sorted(scope_values))
+        normalized_markets = tuple(sorted(self.markets))
+        normalized_event_ids = tuple(sorted(self.event_ids))
+
+        # Preserve the deployed source ID for the exact default current request
+        # semantics while reserving every non-default scope a digest-bound ID.
+        # This keeps existing default stream continuity without allowing another
+        # request scope to alias it.
+        if (
+            endpoint_kind == "current"
+            and scope_kind == "regions"
+            and normalized_scope == ("eu",)
+            and normalized_markets == ("h2h",)
+            and not normalized_event_ids
+            and self.include_sids
+            and not self.include_bet_limits
+        ):
+            return f"the-odds-api:{self.sport}"
+
+        normalized_cutoff = None
+        if requested_snapshot_at is not None:
+            normalized_cutoff = (
+                _datetime(requested_snapshot_at)
+                .astimezone(timezone.utc)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+
+        scope_sha256 = _identity_digest(
+            "the-odds-api-source-scope-v1",
+            endpoint_kind,
+            self.sport,
+            scope_kind,
+            normalized_scope,
+            normalized_markets,
+            normalized_event_ids,
+            self.include_sids,
+            self.include_bet_limits,
+            normalized_cutoff,
+        )
+        return f"the-odds-api:{self.sport}:{endpoint_kind}:{scope_sha256}"
 
     def _current_url(self) -> str:
         return f"{self.base_url}/v4/sports/{self.sport}/odds?{urlencode(self._query_items())}"

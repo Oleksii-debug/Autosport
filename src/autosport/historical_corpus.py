@@ -684,9 +684,15 @@ def assemble_historical_corpus(
     if source_ids != proof["source_ids"]:
         raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
     event_sports = {event.sport for event, _ in events}
+    snapshot_sports = {str(row["sport_key"]) for row in evidence_rows}
     if event_sports == {None}:
-        # Preserve old captured evidence as legacy schema-v2 table-tennis truth.
-        # Do not infer event sport from manifest/evidence after the fact.
+        # Preserve only the pre-existing table-tennis legacy lineage. Once a
+        # provider sport other than table_tennis is selected, event-level sport
+        # truth is mandatory; otherwise schema-v2 would silently relabel it.
+        if snapshot_sports != {"table_tennis"}:
+            raise ValueError(
+                "non-table-tennis historical snapshots require explicit event sport identity"
+            )
         corpus_schema_version = 2
         manifest_sport = "table_tennis"
     elif None not in event_sports and len(event_sports) == 1:

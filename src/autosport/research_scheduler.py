@@ -642,6 +642,7 @@ class ResearchScheduler:
             connection = sqlite3.connect(path, timeout=30.0)
             connection.execute("PRAGMA synchronous = FULL")
             if create and new_database:
+                connection.execute("BEGIN IMMEDIATE")
                 existing_object = connection.execute(
                     """
                     SELECT name

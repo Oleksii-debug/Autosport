@@ -108,14 +108,26 @@ class ActionEstimate:
     @property
     def mean_reward(self) -> Decimal:
         if self.observations == 0:
-            return Decimal("0")
+            raise LearningEnvironmentError(
+                "unobserved action has no empirical mean reward"
+            )
         return self.reward_sum / Decimal(self.observations)
 
     @property
     def exact_mean_reward(self) -> Fraction:
         if self.observations == 0:
-            return Fraction(0)
+            raise LearningEnvironmentError(
+                "unobserved action has no empirical mean reward"
+            )
         return Fraction(self.reward_sum) / self.observations
+
+    @property
+    def selection_score(self) -> Fraction:
+        """Deterministic bootstrap score; never evidence of an observed reward."""
+
+        if self.observations == 0:
+            return Fraction(0)
+        return self.exact_mean_reward
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -306,19 +318,9 @@ class BanditPolicyState:
             raise LearningEnvironmentError(
                 "admissible action set contains action outside immutable policy identity"
             )
-        # An unobserved action has no empirical reward evidence.  Its internal
-        # zero accumulator is an identity/serialization invariant, not a utility
-        # observation and must not outrank an observed negative reward as though
-        # the missing evidence were an explicit zero reward.
-        observed = {
-            action_type
-            for action_type in admitted
-            if estimates[action_type].observations > 0
-        }
-        candidates = observed or admitted
         ranked = sorted(
-            candidates,
-            key=lambda action_type: (-estimates[action_type].exact_mean_reward, action_type),
+            admitted,
+            key=lambda action_type: (-estimates[action_type].selection_score, action_type),
         )
         return ranked[0]
 

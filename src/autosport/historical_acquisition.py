@@ -537,7 +537,17 @@ def capture_historical_acquisition_bundle(
         raise ValueError("output_dir already exists; historical acquisition bundles never overwrite")
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    expected_coverage_sport_key = provider.sport_key
     coverage_report = provider.historical_coverage(coverage_from, coverage_to)
+    if (
+        provider.sport_key != expected_coverage_sport_key
+        or coverage_report.sport_key != expected_coverage_sport_key
+    ):
+        raise ProviderPayloadError("historical coverage preflight sport_key mismatch")
+    if coverage_report.date_from != coverage_from:
+        raise ProviderPayloadError("historical coverage preflight date_from mismatch")
+    if coverage_report.date_to != coverage_to:
+        raise ProviderPayloadError("historical coverage preflight date_to mismatch")
     if not coverage_report.has_data:
         raise ProviderPayloadError("historical coverage preflight returned no source rows")
     coverage_request = {

@@ -174,6 +174,28 @@ class SupportedProductEntrypointTests(unittest.TestCase):
         self.assertIn('value.note: "line\\n\\u001b[31mred"', text)
         self.assertNotIn("\x1b", text)
 
+    def test_text_formatter_escapes_mapping_keys_before_rendering_labels(self) -> None:
+        hostile_key = "provider\n\x1b[31m.status"
+        text = _format_text_record(
+            {
+                "kind": "product_tick",
+                "paper_only": True,
+                "real_money_execution": False,
+                "value": {
+                    hostile_key: "safe",
+                    "ordinary_key": "unchanged",
+                },
+            }
+        )
+
+        lines = text.splitlines()
+        self.assertIn('value["provider\\n\\u001b[31m.status"]: "safe"', text)
+        self.assertIn('value.ordinary_key: "unchanged"', text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("provider\n", text)
+        self.assertEqual(lines.count("AUTOSPORT RECORD"), 1)
+        self.assertEqual(lines.count("END AUTOSPORT RECORD"), 1)
+
     def test_main_routes_explicit_text_format_without_changing_default_contract(self) -> None:
         with patch(
             "autosport.product_entrypoint.run_product_command",

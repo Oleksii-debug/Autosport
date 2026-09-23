@@ -397,8 +397,19 @@ def _build_keepalive_authority_runtime():
     canonical_request = Request
     redirect_handler_type = _NoRedirectHandler
     canonical_redirect_request = redirect_handler_type.redirect_request
+    json_module = json
     json_loads = json.loads
+    json_loads_code = getattr(json_loads, "__code__", None)
     json_decode_error = json.JSONDecodeError
+    json_decoder = json.JSONDecoder
+    json_decoder_init = json_decoder.__init__
+    json_decoder_init_code = getattr(json_decoder_init, "__code__", None)
+    json_decoder_decode = json_decoder.decode
+    json_decoder_decode_code = getattr(json_decoder_decode, "__code__", None)
+    json_decoder_raw_decode = json_decoder.raw_decode
+    json_decoder_raw_decode_code = getattr(
+        json_decoder_raw_decode, "__code__", None
+    )
     sha256_fn = sha256
     hmac_digest = hmac.digest
     hmac_compare_digest = hmac.compare_digest
@@ -408,9 +419,30 @@ def _build_keepalive_authority_runtime():
     exact_keys = _KEEPALIVE_KEYS
     venue_id = VENUE_ID
 
+    def json_executable_graph_matches() -> bool:
+        return bool(
+            json is json_module
+            and getattr(json_module, "loads", None) is json_loads
+            and getattr(json_loads, "__code__", None) is json_loads_code
+            and getattr(json_module, "JSONDecodeError", None)
+            is json_decode_error
+            and getattr(json_module, "JSONDecoder", None) is json_decoder
+            and getattr(json_decoder, "__init__", None) is json_decoder_init
+            and getattr(json_decoder_init, "__code__", None)
+            is json_decoder_init_code
+            and getattr(json_decoder, "decode", None) is json_decoder_decode
+            and getattr(json_decoder_decode, "__code__", None)
+            is json_decoder_decode_code
+            and getattr(json_decoder, "raw_decode", None)
+            is json_decoder_raw_decode
+            and getattr(json_decoder_raw_decode, "__code__", None)
+            is json_decoder_raw_decode_code
+        )
+
     def implementation_is_current() -> bool:
         return (
-            BetfairReadOnlyClient is client_type
+            json_executable_graph_matches()
+            and BetfairReadOnlyClient is client_type
             and BetfairSessionCredentials is credentials_type
             and BetfairAuthenticatedJurisdiction is jurisdiction_type
             and BetfairLoginJurisdiction is login_jurisdiction_type
@@ -506,14 +538,23 @@ def _build_keepalive_authority_runtime():
                 f"non-standard keepAlive-response JSON constant: {value}"
             )
 
+        if not json_executable_graph_matches():
+            raise error_type(
+                "canonical keepAlive JSON executable authority changed"
+            )
         try:
             document = json_loads(
                 raw,
+                cls=json_decoder,
                 object_pairs_hook=pairs,
                 parse_constant=reject_constant,
             )
         except json_decode_error as exc:
             raise error_type("keepAlive response is not valid JSON") from exc
+        if not json_executable_graph_matches():
+            raise error_type(
+                "canonical keepAlive JSON executable authority changed"
+            )
         if type(document) is not dict or frozenset(document) != exact_keys:
             raise error_type(
                 "keepAlive response schema does not match provider contract"

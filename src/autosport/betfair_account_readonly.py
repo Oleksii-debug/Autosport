@@ -2315,7 +2315,6 @@ def _install_execution_readback_authority() -> None:
             if tracking:
                 session[3] = True
             return raw_rpc(self, method, params)
-        transport = record[1]
         response_limit = record[9]
         if type(response_limit) is not int or response_limit <= 0:
             raise sealed_error_type(

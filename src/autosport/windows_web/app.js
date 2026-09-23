@@ -13,6 +13,7 @@
   let ownerReviewEpoch = 0;
   let refreshInFlight = null;
   let refreshPending = false;
+  let refreshClosed = false;
   let stateProjectionEpoch = 0;
 
   function setTextIfChanged(node, value) {
@@ -402,6 +403,7 @@
   }
 
   async function refreshState() {
+    if (refreshClosed) return;
     if (refreshInFlight !== null) {
       refreshPending = true;
       await refreshInFlight;
@@ -410,10 +412,15 @@
 
     refreshInFlight = (async () => {
       do {
+        if (refreshClosed) {
+          refreshPending = false;
+          break;
+        }
         refreshPending = false;
         const requestEpoch = stateProjectionEpoch;
         try {
           const state = await apiState();
+          if (refreshClosed) break;
           if (requestEpoch === stateProjectionEpoch) {
             renderState(state);
           } else {
@@ -422,6 +429,7 @@
             refreshPending = true;
           }
         } catch (_error) {
+          if (refreshClosed) break;
           if (requestEpoch === stateProjectionEpoch) {
             announce("Не вдалося оновити стан застосунку.", true);
           } else {
@@ -430,7 +438,7 @@
             refreshPending = true;
           }
         }
-      } while (refreshPending);
+      } while (refreshPending && !refreshClosed);
     })();
 
     try {
@@ -591,6 +599,8 @@
   });
 
   window.addEventListener("beforeunload", () => {
+    refreshClosed = true;
+    refreshPending = false;
     if (pollHandle !== null) window.clearInterval(pollHandle);
   });
 })();

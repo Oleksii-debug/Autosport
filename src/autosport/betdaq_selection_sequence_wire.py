@@ -204,6 +204,21 @@ def _reject_unknown_attributes(
         )
 
 
+def _reject_non_whitespace_character_content(
+    element: ET.Element,
+    field: str,
+) -> None:
+    if element.text is not None and element.text.strip():
+        raise BetdaqSoapProtocolError(
+            f"{field} contains unexpected character content"
+        )
+    for child in list(element):
+        if child.tail is not None and child.tail.strip():
+            raise BetdaqSoapProtocolError(
+                f"{field} contains unexpected character content"
+            )
+
+
 def _parse_return_status(
     result: ET.Element,
 ) -> tuple[bool, int | None, str | None, str | None]:
@@ -215,6 +230,9 @@ def _parse_return_status(
 
     status = statuses[0]
     _reject_unknown_attributes(status, _RETURN_STATUS_ATTRIBUTES, "ReturnStatus")
+    _reject_non_whitespace_character_content(status, "ReturnStatus")
+    if list(status):
+        raise BetdaqSoapProtocolError("ReturnStatus must not contain child content")
     code = _integer(_required_attr(status, "Code"), "ReturnStatus Code")
     description = _safe_text(
         _required_attr(status, "Description"),
@@ -298,7 +316,8 @@ def _parse_settlement_information(
         _SETTLEMENT_INFORMATION_ATTRIBUTES,
         "SettlementInformation",
     )
-    if list(element) or (element.text and element.text.strip()):
+    _reject_non_whitespace_character_content(element, "SettlementInformation")
+    if list(element):
         raise BetdaqSoapProtocolError(
             "SettlementInformation must not contain child content"
         )
@@ -335,6 +354,7 @@ def _parse_changed_selection(element: ET.Element) -> BetdaqChangedSelection:
         _CHANGED_SELECTION_ATTRIBUTES,
         "Selections",
     )
+    _reject_non_whitespace_character_content(element, "Selections")
     settlement_rows: list[BetdaqSettlementInformation] = []
     for child in list(element):
         if child.tag != _tag(EXTERNAL_API_NS, "SettlementInformation"):
@@ -426,6 +446,10 @@ def parse_get_current_selection_sequence_number_response(
         _CURRENT_SEQUENCE_RESULT_ATTRIBUTES,
         "GetCurrentSelectionSequenceNumberResult",
     )
+    _reject_non_whitespace_character_content(
+        result,
+        "GetCurrentSelectionSequenceNumberResult",
+    )
     allowed_child = _tag(EXTERNAL_API_NS, "ReturnStatus")
     if any(child.tag != allowed_child for child in list(result)):
         raise BetdaqSoapProtocolError(
@@ -460,6 +484,10 @@ def parse_list_selections_changed_since_response(
     _reject_unknown_attributes(
         result,
         _CHANGED_RESULT_ATTRIBUTES,
+        "ListSelectionsChangedSinceResult",
+    )
+    _reject_non_whitespace_character_content(
+        result,
         "ListSelectionsChangedSinceResult",
     )
     (

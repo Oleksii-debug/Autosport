@@ -358,3 +358,46 @@ def test_verified_load_private_authority_rejects_visible_leg_witness_rewrite(
         restored.save(path)
 
     assert path.read_bytes() == durable_before
+
+
+def test_private_opening_authority_rejects_settlement_after_visible_leg_witness_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+
+    inflated = _leg("selection-1", "100")
+    assert inflated.quote_key == ticket.legs[0].quote_key
+    ticket.legs = (inflated,)
+    ticket._opening_legs = (inflated,)
+
+    balance_before = book.balance
+    lifecycle_before = tuple(book._lifecycle)
+    status_before = ticket.status
+    payout_before = ticket.payout
+    settled_at_before = ticket.settled_at
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.settle(
+            ticket.ticket_id,
+            {inflated.quote_key},
+            settled_at="2026-09-23T02:00:00+00:00",
+        )
+
+    assert book.balance == balance_before
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert ticket.status is status_before
+    assert ticket.payout == payout_before
+    assert ticket.settled_at == settled_at_before

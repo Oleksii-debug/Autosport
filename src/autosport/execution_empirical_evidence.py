@@ -5,6 +5,7 @@ import json
 from dataclasses import InitVar, dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 from weakref import ReferenceType, ref
 
@@ -13,6 +14,7 @@ from .real_execution_ledger import (
     EventType,
     ExecutionLedgerIntegrityError,
     RealExecutionLedger,
+    VerifiedExecutionLedgerSnapshot,
 )
 
 SCHEMA_VERSION = 4
@@ -140,6 +142,26 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _canonical_verified_ledger_snapshot(
+    ledger: RealExecutionLedger,
+) -> VerifiedExecutionLedgerSnapshot:
+    """Read one ledger snapshot without caller-rebindable instance method seams."""
+
+    path_value = ledger.path
+    if not isinstance(path_value, Path):
+        raise EmpiricalExecutionEvidenceUnavailable(
+            "canonical RealExecutionLedger path must be pathlib.Path"
+        )
+    path = Path(path_value)
+    raw = path.read_bytes() if path.exists() else b""
+    events = RealExecutionLedger._parse(raw)
+    return VerifiedExecutionLedgerSnapshot(
+        payload=raw,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        event_count=len(events),
+    )
 
 
 def _single_event(
@@ -683,7 +705,7 @@ def build_empirical_execution_evidence(
         raise TypeError("ledger must be canonical RealExecutionLedger")
     attempt = _text(attempt_id, "attempt_id")
 
-    snapshot = ledger.verified_snapshot()
+    snapshot = _canonical_verified_ledger_snapshot(ledger)
     try:
         events = RealExecutionLedger._parse(snapshot.payload)
     except ExecutionLedgerIntegrityError:
@@ -1421,7 +1443,7 @@ def build_empirical_execution_population_evidence(
         "evaluation_protocol_sha256",
     )
 
-    initial_snapshot = ledger.verified_snapshot()
+    initial_snapshot = _canonical_verified_ledger_snapshot(ledger)
     try:
         events = RealExecutionLedger._parse(initial_snapshot.payload)
     except ExecutionLedgerIntegrityError:
@@ -1450,7 +1472,7 @@ def build_empirical_execution_population_evidence(
         for attempt_id in sorted(attempt_ids)
     )
 
-    final_snapshot = ledger.verified_snapshot()
+    final_snapshot = _canonical_verified_ledger_snapshot(ledger)
     if (
         final_snapshot.sha256 != initial_snapshot.sha256
         or final_snapshot.event_count != initial_snapshot.event_count

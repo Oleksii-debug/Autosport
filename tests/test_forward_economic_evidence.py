@@ -573,6 +573,7 @@ def test_none_preserves_authoritative_nonzero_cost_and_causal_availability():
         settlement_available_at=None,
         economic_cost_currency=Decimal("1"),
         economic_cost_evidence_sha256=SHA_C,
+        economic_cost_incurred_at=T0 + timedelta(minutes=2),
         economic_cost_available_at=cost_available_at,
     )
     champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
@@ -618,6 +619,7 @@ def test_back_all_in_loss_can_extend_below_gross_wager_bound_when_cost_is_bounde
         wager_pnl_currency=Decimal("-10"),
         economic_cost_currency=Decimal("1"),
         economic_cost_evidence_sha256=SHA_A,
+        economic_cost_incurred_at=T0 + timedelta(minutes=2),
         economic_cost_available_at=T0 + timedelta(hours=2),
     )
     champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
@@ -678,6 +680,7 @@ def test_cost_above_frozen_support_fails_without_accumulator_mutation():
         settlement_available_at=None,
         economic_cost_currency=Decimal("2"),
         economic_cost_evidence_sha256=SHA_C,
+        economic_cost_incurred_at=T0 + timedelta(minutes=2),
         economic_cost_available_at=T0 + timedelta(hours=1),
     )
     champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
@@ -713,6 +716,7 @@ def test_cost_authority_and_availability_are_bound_into_evidence_identity():
             settlement_available_at=None,
             economic_cost_currency=Decimal("1"),
             economic_cost_evidence_sha256=cost_sha,
+            economic_cost_incurred_at=T0 + timedelta(minutes=2),
             economic_cost_available_at=cost_time,
         )
         acc = ForwardEconomicEvidenceAccumulator(
@@ -751,6 +755,7 @@ def test_early_cost_debit_contributes_to_drawdown_before_later_wager_profit():
         wager_pnl_currency=Decimal("10"),
         economic_cost_currency=Decimal("1"),
         economic_cost_evidence_sha256=SHA_A,
+        economic_cost_incurred_at=T0 + timedelta(minutes=2),
         economic_cost_available_at=T0 + timedelta(minutes=30),
     )
     champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
@@ -786,6 +791,7 @@ def test_executed_cost_requires_explicit_gross_wager_pnl():
             settlement_available_at=T0 + timedelta(hours=1),
             economic_cost_currency=Decimal("1"),
             economic_cost_evidence_sha256=SHA_A,
+            economic_cost_incurred_at=T0 + timedelta(minutes=2),
             economic_cost_available_at=T0 + timedelta(hours=2),
         )
 

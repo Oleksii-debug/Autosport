@@ -423,6 +423,7 @@ class ResolvedPolicyOutcome:
     wager_pnl_currency: Decimal | None = None
     economic_cost_currency: Decimal = Decimal(0)
     economic_cost_evidence_sha256: str | None = None
+    economic_cost_incurred_at: datetime | None = None
     economic_cost_available_at: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -454,6 +455,21 @@ class ResolvedPolicyOutcome:
             raise ForwardEconomicEvidenceError(
                 "economic cost evidence and availability must be bound together"
             )
+        cost_incurred = None
+        if self.economic_cost_incurred_at is not None:
+            if self.economic_cost_evidence_sha256 is None:
+                raise ForwardEconomicEvidenceError(
+                    "economic cost incidence requires canonical cost evidence"
+                )
+            cost_incurred = _instant(
+                self.economic_cost_incurred_at,
+                "economic_cost_incurred_at",
+            )
+            object.__setattr__(
+                self,
+                "economic_cost_incurred_at",
+                cost_incurred,
+            )
         cost_available = None
         if self.economic_cost_evidence_sha256 is not None:
             object.__setattr__(
@@ -472,9 +488,17 @@ class ResolvedPolicyOutcome:
                 raise ForwardEconomicEvidenceError(
                     "economic cost cannot become available before the committed decision"
                 )
+            if cost_incurred is not None and cost_available < cost_incurred:
+                raise ForwardEconomicEvidenceError(
+                    "economic cost evidence cannot become available before cost incidence"
+                )
         elif cost != 0:
             raise ForwardEconomicEvidenceError(
                 "non-zero economic cost requires canonical evidence and availability"
+            )
+        if cost != 0 and cost_incurred is None:
+            raise ForwardEconomicEvidenceError(
+                "non-zero economic cost requires canonical incurred/effective time"
             )
         if self.wager_pnl_currency is None:
             if cost == 0:
@@ -597,7 +621,13 @@ class ResolvedPolicyOutcome:
 
     @property
     def economic_cost_complete(self) -> bool:
-        return self.economic_cost_evidence_sha256 is not None
+        return (
+            self.economic_cost_evidence_sha256 is not None
+            and (
+                self.economic_cost_currency == 0
+                or self.economic_cost_incurred_at is not None
+            )
+        )
 
 
 class EconomicAuthorityResolver(Protocol):
@@ -632,6 +662,8 @@ class ForwardEconomicStep:
     champion_economic_cost_currency: Decimal
     challenger_economic_cost_evidence_sha256: str | None
     champion_economic_cost_evidence_sha256: str | None
+    challenger_economic_cost_incurred_at: datetime | None
+    champion_economic_cost_incurred_at: datetime | None
     challenger_economic_cost_complete: bool
     champion_economic_cost_complete: bool
     challenger_economic_cost_available_at: datetime | None
@@ -684,6 +716,16 @@ class ForwardEconomicStep:
             ),
             "champion_economic_cost_evidence_sha256": (
                 self.champion_economic_cost_evidence_sha256
+            ),
+            "challenger_economic_cost_incurred_at": (
+                None
+                if self.challenger_economic_cost_incurred_at is None
+                else _instant_text(self.challenger_economic_cost_incurred_at)
+            ),
+            "champion_economic_cost_incurred_at": (
+                None
+                if self.champion_economic_cost_incurred_at is None
+                else _instant_text(self.champion_economic_cost_incurred_at)
             ),
             "challenger_economic_cost_complete": (
                 self.challenger_economic_cost_complete
@@ -1144,6 +1186,12 @@ class ForwardEconomicEvidenceAccumulator:
             champion_economic_cost_evidence_sha256=(
                 champion.economic_cost_evidence_sha256
             ),
+            challenger_economic_cost_incurred_at=(
+                challenger.economic_cost_incurred_at
+            ),
+            champion_economic_cost_incurred_at=(
+                champion.economic_cost_incurred_at
+            ),
             challenger_economic_cost_complete=challenger.economic_cost_complete,
             champion_economic_cost_complete=champion.economic_cost_complete,
             challenger_economic_cost_available_at=(
@@ -1190,12 +1238,12 @@ class ForwardEconomicEvidenceAccumulator:
         for step in self._steps:
             cost = step.challenger_economic_cost_currency
             if cost != 0:
-                cost_available_at = step.challenger_economic_cost_available_at
-                if cost_available_at is None:
+                cost_incurred_at = step.challenger_economic_cost_incurred_at
+                if cost_incurred_at is None:
                     raise ForwardEconomicEvidenceError(
-                        "challenger economic cost is missing causal availability"
+                        "challenger economic cost is missing causal incidence"
                     )
-                capital_groups.setdefault(cost_available_at, []).append(
+                capital_groups.setdefault(cost_incurred_at, []).append(
                     cost.copy_negate()
                 )
 

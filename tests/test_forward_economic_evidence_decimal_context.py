@@ -49,6 +49,7 @@ def _executed_outcome(
         wager_pnl_currency=Decimal(wager_pnl),
         economic_cost_currency=Decimal(cost),
         economic_cost_evidence_sha256=COST_SHA,
+        economic_cost_incurred_at=T0 + timedelta(minutes=2),
         economic_cost_available_at=T0 + timedelta(minutes=6),
     )
 
@@ -162,6 +163,7 @@ def _cost_only_summary(*, precision: int, rounding: str):
         settlement_available_at=None,
         economic_cost_currency=exact_cost,
         economic_cost_evidence_sha256=COST_SHA,
+        economic_cost_incurred_at=T0 + timedelta(minutes=2),
         economic_cost_available_at=T0 + timedelta(minutes=4),
     )
     champion = ResolvedPolicyOutcome(

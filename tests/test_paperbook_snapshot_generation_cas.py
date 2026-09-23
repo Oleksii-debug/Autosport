@@ -456,3 +456,57 @@ def test_exact_serialized_candidate_rejects_post_validation_opening_rewrite(
 
     assert calls >= 2
     assert path.read_bytes() == durable_before
+
+
+def test_exact_serialized_candidate_rejects_post_validation_ticket_history_deletion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    book.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+    durable_before = path.read_bytes()
+
+    import autosport.paper as paper_module
+
+    original_binding = paper_module._snapshot_authority_binding
+    calls = 0
+
+    def _erase_after_initial_validation(target):
+        nonlocal calls
+        binding = original_binding(target)
+        if target is book:
+            calls += 1
+            if calls == 2:
+                # This is a structurally coherent empty-book rewrite: without
+                # the private ticket-set authority the serialized candidate can
+                # replay to bankroll 100 and look self-consistent.
+                book.tickets.clear()
+                book._lifecycle.clear()
+                book.balance = Decimal("100")
+        return binding
+
+    monkeypatch.setattr(
+        paper_module,
+        "_snapshot_authority_binding",
+        _erase_after_initial_validation,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "serialized candidate ticket set differs from "
+            "product-issued opening authority"
+        ),
+    ):
+        book.save(path)
+
+    assert calls >= 2
+    assert path.read_bytes() == durable_before

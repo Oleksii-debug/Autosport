@@ -512,3 +512,34 @@ def test_secrets_are_absent_from_evidence_and_contract_claims_remain_narrow(monk
     assert evidence.execution_fill_proven is False
     assert evidence.realized_price_proven is False
     assert evidence.real_money_authorized is False
+
+
+
+def test_positive_assessment_use_time_freshness_is_capture_bounded():
+    observed = NOW.isoformat()
+    received_ns = MONOTONIC_NS
+    max_age = Decimal("5")
+
+    assert decision_quote._positive_assessment_current(
+        observed_at=observed,
+        received_monotonic_ns=received_ns,
+        max_age_seconds=max_age,
+        now_utc=NOW + timedelta(seconds=5),
+        now_monotonic_ns=received_ns + 5_000_000_000,
+    )
+
+    assert not decision_quote._positive_assessment_current(
+        observed_at=observed,
+        received_monotonic_ns=received_ns,
+        max_age_seconds=max_age,
+        now_utc=NOW + timedelta(seconds=6),
+        now_monotonic_ns=received_ns + 6_000_000_000,
+    )
+
+    assert not decision_quote._positive_assessment_current(
+        observed_at=observed,
+        received_monotonic_ns=received_ns,
+        max_age_seconds=max_age,
+        now_utc=NOW - timedelta(seconds=1),
+        now_monotonic_ns=received_ns - 1,
+    )

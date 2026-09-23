@@ -456,3 +456,42 @@ def test_adapter_protocol_remains_read_only_and_structural() -> None:
     assert "place" not in ReadOnlyBookmakerAdapter.__dict__
     assert "cancel" not in ReadOnlyBookmakerAdapter.__dict__
     assert "cashout" not in ReadOnlyBookmakerAdapter.__dict__
+
+
+@pytest.mark.parametrize(
+    "provider_status",
+    ("PUSH", "PUSH_WIN", "PUSH_LOSE", "FUTURE_PROVIDER_STATUS"),
+)
+def test_position_preserves_opaque_provider_status(provider_status: str) -> None:
+    position = _position(
+        BookmakerPositionState.SETTLED,
+        provider_status=provider_status,
+        gross_return=None,
+    )
+
+    assert position.provider_status == provider_status
+    assert position.state is BookmakerPositionState.SETTLED
+    assert position.gross_return is None
+
+
+@pytest.mark.parametrize("provider_status", ("", " PUSH", "PUSH ", 42))
+def test_position_rejects_malformed_provider_status(
+    provider_status: object,
+) -> None:
+    with pytest.raises(BookmakerCapabilityError, match="provider_status"):
+        _position(
+            BookmakerPositionState.SETTLED,
+            provider_status=provider_status,
+        )
+
+
+def test_provider_status_does_not_mint_canonical_settlement_or_return() -> None:
+    position = _position(
+        BookmakerPositionState.OPEN,
+        provider_status="PUSH_WIN",
+        gross_return=None,
+    )
+
+    assert position.provider_status == "PUSH_WIN"
+    assert position.state is BookmakerPositionState.OPEN
+    assert position.gross_return is None

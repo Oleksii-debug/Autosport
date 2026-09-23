@@ -103,9 +103,51 @@ def make_ready(tmp_path: Path, configured: BetdaqRatePolicy):
 
 
 def simulate_process_restart(workspace: Path) -> None:
-    key = str(workspace.resolve())
+    key = subject._workspace_registry_key(workspace.resolve())
     subject._GOVERNORS.pop(key, None)
     subject._RUNTIME.pop(key, None)
+
+
+def test_workspace_registry_identity_uses_os_case_normalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = policy(("GetPrices", 2, 0))
+    clock = FakeClock()
+    wall = FakeWallClock()
+    authority_root = (tmp_path / "machine-authority").resolve()
+    upper = (tmp_path / "BETDAQ-Workspace").resolve()
+    lower = (tmp_path / "betdaq-workspace").resolve()
+
+    monkeypatch.setattr(
+        subject.os.path,
+        "normcase",
+        lambda value: value.casefold(),
+    )
+
+    first = resolve_betdaq_rate_governor(
+        upper,
+        configured,
+        clock=clock,
+        wall_clock=wall,
+        authority_root=authority_root,
+    )
+    clock.advance(60.0)
+    first.admit("GetPrices")
+
+    second = resolve_betdaq_rate_governor(
+        lower,
+        configured,
+        clock=clock,
+        wall_clock=wall,
+        authority_root=authority_root,
+    )
+    assert second is first
+
+    second.admit("GetPrices")
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        first.admit("GetPrices")
+    assert denied.value.reason == "provider_rate_capacity_exhausted"
 
 
 def test_direct_construction_is_not_a_supported_admission_authority(tmp_path: Path) -> None:

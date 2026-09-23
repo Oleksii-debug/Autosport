@@ -22,6 +22,7 @@ from pathlib import Path
 from secrets import token_bytes
 import ssl
 from threading import RLock
+from types import MappingProxyType
 from typing import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -56,13 +57,15 @@ class BetfairLoginJurisdiction(str, Enum):
     ROMANIA = "ROMANIA"
 
 
-_CERT_LOGIN_ENDPOINTS = {
-    BetfairLoginJurisdiction.GLOBAL_COM: "https://identitysso-cert.betfair.com/api/certlogin",
-    BetfairLoginJurisdiction.AUSTRALIA_NEW_ZEALAND: "https://identitysso-cert.betfair.com.au/api/certlogin",
-    BetfairLoginJurisdiction.ITALY: "https://identitysso-cert.betfair.it/api/certlogin",
-    BetfairLoginJurisdiction.SPAIN: "https://identitysso-cert.betfair.es/api/certlogin",
-    BetfairLoginJurisdiction.ROMANIA: "https://identitysso-cert.betfair.ro/api/certlogin",
-}
+_CERT_LOGIN_ENDPOINTS: Mapping[BetfairLoginJurisdiction, str] = MappingProxyType(
+    {
+        BetfairLoginJurisdiction.GLOBAL_COM: "https://identitysso-cert.betfair.com/api/certlogin",
+        BetfairLoginJurisdiction.AUSTRALIA_NEW_ZEALAND: "https://identitysso-cert.betfair.com.au/api/certlogin",
+        BetfairLoginJurisdiction.ITALY: "https://identitysso-cert.betfair.it/api/certlogin",
+        BetfairLoginJurisdiction.SPAIN: "https://identitysso-cert.betfair.es/api/certlogin",
+        BetfairLoginJurisdiction.ROMANIA: "https://identitysso-cert.betfair.ro/api/certlogin",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -390,15 +393,133 @@ def _canonical_network_transport(transport: object) -> bool:
 
 
 def _build_origin_authority_runtime():
-    """Build the canonical issuer/verifier without exporting a registration hook."""
+    """Build the canonical issuer/verifier with a hidden executable trust root."""
 
     lock = RLock()
     issued: dict[int, _IssuedOriginRecord] = {}
     hmac_key = token_bytes(32)
 
+    error_type = BetfairSessionOriginError
+    secrets_type = BetfairNonInteractiveLoginSecrets
+    jurisdiction_type = BetfairLoginJurisdiction
+    origin_type = BetfairSessionOrigin
+    login_session_type = BetfairLoginSession
+    credentials_type = BetfairSessionCredentials
+    transport_type = UrllibBetfairCertLoginTransport
+    endpoint_table = _CERT_LOGIN_ENDPOINTS
+    venue_id = VENUE_ID
+    login_method = LOGIN_METHOD
+    max_response_bytes = _MAX_RESPONSE_BYTES
+
+    transport_init = transport_type.__init__
+    transport_init_code = getattr(transport_init, "__code__", None)
+    transport_post = transport_type.post_cert_login
+    transport_post_code = getattr(transport_post, "__code__", None)
+    no_redirect_type = _NoRedirectHandler
+    no_redirect_request = no_redirect_type.redirect_request
+    no_redirect_request_code = getattr(no_redirect_request, "__code__", None)
+    build_opener_fn = build_opener
+    build_opener_code = getattr(build_opener_fn, "__code__", None)
+    https_handler_type = HTTPSHandler
+    redirect_handler_type = HTTPRedirectHandler
+    ssl_module = ssl
+    ssl_context_factory = ssl.create_default_context
+    ssl_context_factory_code = getattr(ssl_context_factory, "__code__", None)
+    request_type = Request
+    urlencode_fn = urlencode
+    urlencode_code = getattr(urlencode_fn, "__code__", None)
+
+    json_module = json
+    json_loads = json.loads
+    json_loads_code = getattr(json_loads, "__code__", None)
+    json_decode_error = json.JSONDecodeError
+    json_decoder = json.JSONDecoder
+    json_decoder_init = json_decoder.__init__
+    json_decoder_init_code = getattr(json_decoder_init, "__code__", None)
+    json_decoder_decode = json_decoder.decode
+    json_decoder_decode_code = getattr(json_decoder_decode, "__code__", None)
+    json_decoder_raw_decode = json_decoder.raw_decode
+    json_decoder_raw_decode_code = getattr(
+        json_decoder_raw_decode, "__code__", None
+    )
+
+    origin_init = origin_type.__init__
+    origin_init_code = getattr(origin_init, "__code__", None)
+    origin_post_init = origin_type.__post_init__
+    origin_post_init_code = getattr(origin_post_init, "__code__", None)
+    weakref_ref = ref
+    sha256_fn = sha256
+    hmac_digest = hmac.digest
+    hmac_compare_digest = hmac.compare_digest
+    datetime_type = datetime
+    utc = timezone.utc
+
+    def json_executable_graph_matches() -> bool:
+        return bool(
+            json is json_module
+            and getattr(json_module, "loads", None) is json_loads
+            and getattr(json_loads, "__code__", None) is json_loads_code
+            and getattr(json_module, "JSONDecodeError", None)
+            is json_decode_error
+            and getattr(json_module, "JSONDecoder", None) is json_decoder
+            and getattr(json_decoder, "__init__", None) is json_decoder_init
+            and getattr(json_decoder_init, "__code__", None)
+            is json_decoder_init_code
+            and getattr(json_decoder, "decode", None) is json_decoder_decode
+            and getattr(json_decoder_decode, "__code__", None)
+            is json_decoder_decode_code
+            and getattr(json_decoder, "raw_decode", None)
+            is json_decoder_raw_decode
+            and getattr(json_decoder_raw_decode, "__code__", None)
+            is json_decoder_raw_decode_code
+        )
+
+    def implementation_is_current() -> bool:
+        return bool(
+            BetfairSessionOriginError is error_type
+            and BetfairNonInteractiveLoginSecrets is secrets_type
+            and BetfairLoginJurisdiction is jurisdiction_type
+            and BetfairSessionOrigin is origin_type
+            and BetfairLoginSession is login_session_type
+            and BetfairSessionCredentials is credentials_type
+            and UrllibBetfairCertLoginTransport is transport_type
+            and _CERT_LOGIN_ENDPOINTS is endpoint_table
+            and VENUE_ID == venue_id
+            and LOGIN_METHOD == login_method
+            and _MAX_RESPONSE_BYTES == max_response_bytes
+            and transport_type.__init__ is transport_init
+            and getattr(transport_init, "__code__", None)
+            is transport_init_code
+            and transport_type.post_cert_login is transport_post
+            and getattr(transport_post, "__code__", None)
+            is transport_post_code
+            and _NoRedirectHandler is no_redirect_type
+            and no_redirect_type.redirect_request is no_redirect_request
+            and getattr(no_redirect_request, "__code__", None)
+            is no_redirect_request_code
+            and build_opener is build_opener_fn
+            and getattr(build_opener_fn, "__code__", None)
+            is build_opener_code
+            and HTTPSHandler is https_handler_type
+            and HTTPRedirectHandler is redirect_handler_type
+            and ssl is ssl_module
+            and ssl_module.create_default_context is ssl_context_factory
+            and getattr(ssl_context_factory, "__code__", None)
+            is ssl_context_factory_code
+            and Request is request_type
+            and urlencode is urlencode_fn
+            and getattr(urlencode_fn, "__code__", None) is urlencode_code
+            and origin_type.__init__ is origin_init
+            and getattr(origin_init, "__code__", None) is origin_init_code
+            and origin_type.__post_init__ is origin_post_init
+            and getattr(origin_post_init, "__code__", None)
+            is origin_post_init_code
+            and json_executable_graph_matches()
+        )
+
     def credential_binding(credentials: BetfairSessionCredentials) -> bytes:
-        if type(credentials) is not BetfairSessionCredentials:
-            raise BetfairSessionOriginError(
+        if type(credentials) is not credentials_type:
+            raise error_type(
                 "credential binding requires canonical BetfairSessionCredentials"
             )
         try:
@@ -408,8 +529,122 @@ def _build_origin_authority_runtime():
                 + credentials.session_token.encode("utf-8")
             )
         except (AttributeError, UnicodeEncodeError) as exc:
-            raise BetfairSessionOriginError("Betfair credentials are malformed") from exc
-        return hmac.digest(hmac_key, material, "sha256")
+            raise error_type("Betfair credentials are malformed") from exc
+        return hmac_digest(hmac_key, material, "sha256")
+
+    def endpoint_for(jurisdiction: BetfairLoginJurisdiction) -> str:
+        if type(jurisdiction) is not jurisdiction_type:
+            raise error_type(
+                "jurisdiction must be exact BetfairLoginJurisdiction"
+            )
+        try:
+            return endpoint_table[jurisdiction]
+        except KeyError as exc:
+            raise error_type(
+                "jurisdiction has no canonical certificate-login endpoint"
+            ) from exc
+
+    def canonical_network_transport(transport: object) -> bool:
+        if not implementation_is_current():
+            return False
+        state = getattr(transport, "__dict__", None)
+        return bool(
+            type(transport) is transport_type
+            and type(transport).post_cert_login is transport_post
+            and type(state) is dict
+            and set(state) == {"_max_response_bytes"}
+            and state["_max_response_bytes"] == max_response_bytes
+        )
+
+    def parse_success_payload(payload: bytes) -> tuple[str, str]:
+        if type(payload) is not bytes or not payload:
+            raise error_type("login response must be non-empty bytes")
+        if len(payload) > max_response_bytes:
+            raise error_type("login response exceeds safe limit")
+        try:
+            raw = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise error_type("login response is not UTF-8 JSON") from exc
+
+        def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in items:
+                if key in result:
+                    raise error_type(
+                        f"duplicate login-response JSON key: {key}"
+                    )
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise error_type(
+                f"non-standard login-response JSON constant: {value}"
+            )
+
+        if not json_executable_graph_matches():
+            raise error_type(
+                "canonical Betfair login JSON authority changed"
+            )
+        try:
+            document = json_loads(
+                raw,
+                cls=json_decoder,
+                object_pairs_hook=pairs,
+                parse_constant=reject_constant,
+            )
+        except json_decode_error as exc:
+            raise error_type("login response is not valid JSON") from exc
+        if not json_executable_graph_matches():
+            raise error_type(
+                "canonical Betfair login JSON authority changed"
+            )
+        if (
+            type(document) is not dict
+            or frozenset(document) != {"sessionToken", "loginStatus"}
+        ):
+            raise error_type(
+                "successful login response schema does not match provider contract"
+            )
+        status = document["loginStatus"]
+        token = document["sessionToken"]
+        if status != "SUCCESS":
+            raise error_type("Betfair login was not successful")
+        if type(token) is not str or not token or "\x00" in token:
+            raise error_type("successful login response lacks canonical sessionToken")
+        return token, sha256_fn(payload).hexdigest()
+
+    def origin_fingerprint(value: BetfairSessionOrigin) -> str:
+        if type(value) is not origin_type:
+            raise error_type("session origin type changed")
+        issued_at = value.issued_at
+        if (
+            type(issued_at) is not datetime_type
+            or issued_at.tzinfo is None
+            or issued_at.utcoffset() is None
+        ):
+            raise error_type("session origin issued_at is not timezone-aware")
+        if (
+            value.venue_id != venue_id
+            or value.login_method != login_method
+            or type(value.jurisdiction) is not jurisdiction_type
+            or value.login_endpoint != endpoint_for(value.jurisdiction)
+            or type(value.response_sha256) is not str
+            or len(value.response_sha256) != 64
+            or any(
+                ch not in "0123456789abcdef"
+                for ch in value.response_sha256
+            )
+        ):
+            raise error_type("session origin fields are not canonical")
+        material = (
+            value.venue_id,
+            value.login_method,
+            value.jurisdiction.value,
+            value.login_endpoint,
+            issued_at.astimezone(utc).isoformat(),
+            value.response_sha256,
+        )
+        return sha256_fn(repr(material).encode("utf-8")).hexdigest()
 
     def remember(
         value: BetfairSessionOrigin,
@@ -425,8 +660,8 @@ def _build_origin_authority_runtime():
 
         with lock:
             issued[key] = _IssuedOriginRecord(
-                value_ref=ref(value, discard),
-                origin_id=value.origin_id,
+                value_ref=weakref_ref(value, discard),
+                origin_id=origin_fingerprint(value),
                 credentials=credentials,
                 credential_binding=credential_binding(credentials),
             )
@@ -437,18 +672,23 @@ def _build_origin_authority_runtime():
         jurisdiction: BetfairLoginJurisdiction,
         timeout_seconds: float = 10.0,
     ) -> BetfairLoginSession:
-        if type(secrets) is not BetfairNonInteractiveLoginSecrets:
-            raise BetfairSessionOriginError(
+        if not implementation_is_current():
+            raise error_type(
+                "canonical Betfair login authority binding changed"
+            )
+        if type(secrets) is not secrets_type:
+            raise error_type(
                 "secrets must be exact BetfairNonInteractiveLoginSecrets"
             )
-        endpoint = cert_login_endpoint(jurisdiction)
+        endpoint = endpoint_for(jurisdiction)
         _positive_timeout(timeout_seconds)
-        transport = UrllibBetfairCertLoginTransport()
-        if not _canonical_network_transport(transport):
-            raise BetfairSessionOriginError(
+        transport = transport_type()
+        if not canonical_network_transport(transport):
+            raise error_type(
                 "canonical Betfair certificate-login transport origin is unavailable"
             )
-        payload = transport.post_cert_login(
+        payload = transport_post(
+            transport,
             endpoint,
             application_key=secrets.application_key,
             username=secrets.username,
@@ -457,54 +697,66 @@ def _build_origin_authority_runtime():
             private_key_path=secrets.private_key_path,
             timeout_seconds=timeout_seconds,
         )
-        if not _canonical_network_transport(transport):
-            raise BetfairSessionOriginError(
+        if not canonical_network_transport(transport):
+            raise error_type(
                 "canonical Betfair certificate-login transport changed during login"
             )
-        response = parse_noninteractive_login_response(payload)
-        if response.login_status != "SUCCESS" or response.session_token is None:
-            raise BetfairSessionOriginError(
-                f"Betfair login was not successful: {response.login_status}"
+        session_token, response_sha256 = parse_success_payload(payload)
+        if not implementation_is_current():
+            raise error_type(
+                "canonical Betfair login authority changed during login"
             )
-        if BetfairSessionCredentials is not _CANONICAL_CREDENTIALS_TYPE:
-            raise BetfairSessionOriginError("Betfair credentials type binding changed")
-        credentials = BetfairSessionCredentials(
+        credentials = credentials_type(
             application_key=secrets.application_key,
-            session_token=response.session_token,
+            session_token=session_token,
         )
-        origin = BetfairSessionOrigin(
-            venue_id=VENUE_ID,
-            login_method=LOGIN_METHOD,
+        origin = origin_type(
+            venue_id=venue_id,
+            login_method=login_method,
             jurisdiction=jurisdiction,
             login_endpoint=endpoint,
-            issued_at=datetime.now(timezone.utc),
-            response_sha256=response.response_sha256,
+            issued_at=datetime_type.now(utc),
+            response_sha256=response_sha256,
         )
+        if (
+            not implementation_is_current()
+            or origin.venue_id != venue_id
+            or origin.login_method != login_method
+            or origin.jurisdiction is not jurisdiction
+            or origin.login_endpoint != endpoint
+        ):
+            raise error_type(
+                "canonical Betfair login observation construction changed"
+            )
         remember(origin, credentials)
-        return BetfairLoginSession(credentials=credentials, origin=origin)
+        return login_session_type(credentials=credentials, origin=origin)
 
     def is_authoritative(
         value: object,
         *,
         credentials: BetfairSessionCredentials | None = None,
     ) -> bool:
-        if type(value) is not BetfairSessionOrigin:
-            return False
-        if BetfairSessionCredentials is not _CANONICAL_CREDENTIALS_TYPE:
+        if type(value) is not origin_type or not implementation_is_current():
             return False
         with lock:
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
                 return False
-            if not hmac.compare_digest(record.origin_id, value.origin_id):
+            try:
+                if not hmac_compare_digest(
+                    record.origin_id,
+                    origin_fingerprint(value),
+                ):
+                    return False
+            except Exception:
                 return False
             if credentials is not None and record.credentials is not credentials:
                 return False
             try:
                 current = credential_binding(record.credentials)
-            except (AttributeError, TypeError, BetfairSessionOriginError):
+            except Exception:
                 return False
-            return hmac.compare_digest(record.credential_binding, current)
+            return hmac_compare_digest(record.credential_binding, current)
 
     def require(
         value: object,
@@ -512,20 +764,72 @@ def _build_origin_authority_runtime():
         credentials: BetfairSessionCredentials | None = None,
     ) -> BetfairSessionOrigin:
         if not is_authoritative(value, credentials=credentials):
-            raise BetfairSessionOriginError(
+            raise error_type(
                 "Betfair session origin lacks current canonical login authority"
             )
-        assert type(value) is BetfairSessionOrigin
+        assert type(value) is origin_type
         return value
 
     return login, is_authoritative, require
 
-
 def _build_bound_authority_runtime(require_origin):
-    """Build K07 binding issuer/verifier without exporting a registration hook."""
+    """Build K07 binding issuer/verifier with hidden canonical dependencies."""
 
     lock = RLock()
     issued: dict[int, _IssuedBoundRecord] = {}
+
+    error_type = BetfairSessionOriginError
+    client_type = BetfairReadOnlyClient
+    credentials_type = BetfairSessionCredentials
+    identity_type = BetfairAuthenticatedAccountIdentity
+    origin_type = BetfairSessionOrigin
+    bound_type = BetfairAuthenticatedJurisdiction
+    identity_require = require_authoritative_betfair_account_identity
+    venue_id = VENUE_ID
+    hmac_compare_digest = hmac.compare_digest
+    bound_init = bound_type.__init__
+    bound_init_code = getattr(bound_init, "__code__", None)
+    bound_post_init = bound_type.__post_init__
+    bound_post_init_code = getattr(bound_post_init, "__code__", None)
+
+    def implementation_is_current() -> bool:
+        return bool(
+            BetfairSessionOriginError is error_type
+            and BetfairReadOnlyClient is client_type
+            and BetfairSessionCredentials is credentials_type
+            and BetfairAuthenticatedAccountIdentity is identity_type
+            and BetfairSessionOrigin is origin_type
+            and BetfairAuthenticatedJurisdiction is bound_type
+            and require_authoritative_betfair_account_identity
+            is identity_require
+            and VENUE_ID == venue_id
+            and bound_type.__init__ is bound_init
+            and getattr(bound_init, "__code__", None) is bound_init_code
+            and bound_type.__post_init__ is bound_post_init
+            and getattr(bound_post_init, "__code__", None)
+            is bound_post_init_code
+        )
+
+    def bound_fingerprint(value: BetfairAuthenticatedJurisdiction) -> str:
+        if type(value) is not bound_type:
+            raise error_type("authenticated jurisdiction type changed")
+        if (
+            value.venue_id != venue_id
+            or type(value.jurisdiction) is not BetfairLoginJurisdiction
+            or type(value.session_context_id) is not str
+            or not value.session_context_id
+            or type(value.account_identity_id) is not str
+            or type(value.session_origin_id) is not str
+        ):
+            raise error_type("authenticated jurisdiction fields are not canonical")
+        material = (
+            value.venue_id,
+            value.jurisdiction.value,
+            value.session_context_id,
+            value.account_identity_id,
+            value.session_origin_id,
+        )
+        return sha256(repr(material).encode("utf-8")).hexdigest()
 
     def remember(
         value: BetfairAuthenticatedJurisdiction,
@@ -544,7 +848,7 @@ def _build_bound_authority_runtime(require_origin):
         with lock:
             issued[key] = _IssuedBoundRecord(
                 value_ref=ref(value, discard),
-                authority_id=value.authority_id,
+                authority_id=bound_fingerprint(value),
                 origin_ref=ref(origin),
                 identity_ref=ref(identity),
                 client_ref=ref(client),
@@ -556,40 +860,50 @@ def _build_bound_authority_runtime(require_origin):
         *,
         client: BetfairReadOnlyClient,
     ) -> BetfairAuthenticatedJurisdiction:
-        if (
-            BetfairReadOnlyClient is not _CANONICAL_CLIENT_TYPE
-            or BetfairAuthenticatedAccountIdentity is not _CANONICAL_IDENTITY_TYPE
-            or require_authoritative_betfair_account_identity
-            is not _CANONICAL_ACCOUNT_IDENTITY_REQUIRE
-        ):
-            raise BetfairSessionOriginError(
+        if not implementation_is_current():
+            raise error_type(
                 "canonical K07 identity verifier binding changed"
             )
-        if type(client) is not BetfairReadOnlyClient:
-            raise BetfairSessionOriginError("client must be exact BetfairReadOnlyClient")
-        if type(identity) is not BetfairAuthenticatedAccountIdentity:
-            raise BetfairSessionOriginError(
+        if type(client) is not client_type:
+            raise error_type("client must be exact BetfairReadOnlyClient")
+        if type(identity) is not identity_type:
+            raise error_type(
                 "identity must be exact BetfairAuthenticatedAccountIdentity"
             )
         credentials = getattr(client, "_credentials", None)
-        if type(credentials) is not BetfairSessionCredentials:
-            raise BetfairSessionOriginError(
+        if type(credentials) is not credentials_type:
+            raise error_type(
                 "authenticated client credentials are not canonical"
             )
         require_origin(origin, credentials=credentials)
         try:
-            require_authoritative_betfair_account_identity(identity, client=client)
+            identity_require(identity, client=client)
         except Exception as exc:
-            raise BetfairSessionOriginError(
+            raise error_type(
                 "K07 authenticated session-context identity is not authoritative"
             ) from exc
-        value = BetfairAuthenticatedJurisdiction(
-            venue_id=VENUE_ID,
+        if not implementation_is_current():
+            raise error_type(
+                "canonical K07 identity verifier changed during binding"
+            )
+        value = bound_type(
+            venue_id=venue_id,
             jurisdiction=origin.jurisdiction,
             session_context_id=identity.session_context_id,
             account_identity_id=identity.identity_id,
             session_origin_id=origin.origin_id,
         )
+        if (
+            not implementation_is_current()
+            or value.venue_id != venue_id
+            or value.jurisdiction is not origin.jurisdiction
+            or value.session_context_id != identity.session_context_id
+            or value.account_identity_id != identity.identity_id
+            or value.session_origin_id != origin.origin_id
+        ):
+            raise error_type(
+                "authenticated jurisdiction construction changed"
+            )
         remember(value, origin, identity, client)
         return value
 
@@ -598,20 +912,19 @@ def _build_bound_authority_runtime(require_origin):
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
-        if type(value) is not BetfairAuthenticatedJurisdiction:
-            return False
-        if (
-            BetfairReadOnlyClient is not _CANONICAL_CLIENT_TYPE
-            or BetfairAuthenticatedAccountIdentity is not _CANONICAL_IDENTITY_TYPE
-            or require_authoritative_betfair_account_identity
-            is not _CANONICAL_ACCOUNT_IDENTITY_REQUIRE
-        ):
+        if type(value) is not bound_type or not implementation_is_current():
             return False
         with lock:
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
                 return False
-            if not hmac.compare_digest(record.authority_id, value.authority_id):
+            try:
+                if not hmac_compare_digest(
+                    record.authority_id,
+                    bound_fingerprint(value),
+                ):
+                    return False
+            except Exception:
                 return False
             origin = record.origin_ref()
             identity = record.identity_ref()
@@ -621,13 +934,11 @@ def _build_bound_authority_runtime(require_origin):
             if client is not None and issued_client is not client:
                 return False
             credentials = getattr(issued_client, "_credentials", None)
-            if type(credentials) is not BetfairSessionCredentials:
+            if type(credentials) is not credentials_type:
                 return False
             try:
                 require_origin(origin, credentials=credentials)
-                require_authoritative_betfair_account_identity(
-                    identity, client=issued_client
-                )
+                identity_require(identity, client=issued_client)
             except Exception:
                 return False
             return (
@@ -643,14 +954,13 @@ def _build_bound_authority_runtime(require_origin):
         client: BetfairReadOnlyClient | None = None,
     ) -> BetfairAuthenticatedJurisdiction:
         if not is_authoritative(value, client=client):
-            raise BetfairSessionOriginError(
+            raise error_type(
                 "Betfair jurisdiction lacks current authenticated-session authority"
             )
-        assert type(value) is BetfairAuthenticatedJurisdiction
+        assert type(value) is bound_type
         return value
 
     return bind, is_authoritative, require
-
 
 (
     login_betfair_noninteractive,

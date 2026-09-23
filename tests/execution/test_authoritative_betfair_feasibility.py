@@ -271,7 +271,6 @@ def test_authentic_market_book_receipt_before_bound_quote_fails_closed() -> None
                 bound,
                 receipt,
                 action_id=ACTION_ID,
-                decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=3),
             )
 
@@ -287,7 +286,6 @@ def test_authenticated_market_book_receipt_cannot_bypass_provider_limit_authorit
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=decision_at,
             max_snapshot_age=timedelta(seconds=2),
         )
 
@@ -322,7 +320,6 @@ def test_unknown_market_price_ladder_cannot_mint_positive_admissibility() -> Non
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=decision_at,
             max_snapshot_age=timedelta(seconds=2),
         )
 
@@ -351,7 +348,6 @@ def test_unknown_currency_jurisdiction_minimum_rule_cannot_mint_positive_admissi
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=decision_at,
             max_snapshot_age=timedelta(seconds=2),
         )
 
@@ -382,7 +378,6 @@ def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None
                 bound,
                 forged,
                 action_id=ACTION_ID,
-                decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=2),
             )
 
@@ -400,7 +395,6 @@ def test_response_level_delayed_data_fails_closed() -> None:
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=decision_at,
             max_snapshot_age=timedelta(seconds=2),
         )
 
@@ -421,7 +415,6 @@ def test_non_active_runner_fails_closed() -> None:
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=decision_at,
             max_snapshot_age=timedelta(seconds=2),
         )
 
@@ -445,7 +438,6 @@ def test_back_uses_available_to_back_not_available_to_lay() -> None:
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=decision_at,
             max_snapshot_age=timedelta(seconds=2),
         )
 
@@ -469,7 +461,6 @@ def test_unreserved_bound_plan_cannot_cross_product_authority_seam() -> None:
                 bound,
                 receipt,
                 action_id=ACTION_ID,
-                decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=2),
             )
 
@@ -488,7 +479,6 @@ def test_injected_transport_and_clock_cannot_mint_positive_provider_origin() -> 
                 bound,
                 receipt,
                 action_id=ACTION_ID,
-                decision_at=NOW,
                 max_snapshot_age=timedelta(seconds=1),
             )
 
@@ -517,7 +507,6 @@ def test_post_construction_io_origin_swap_cannot_mint_positive_authority(
                 bound,
                 receipt,
                 action_id=ACTION_ID,
-                decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=2),
             )
 
@@ -547,7 +536,6 @@ def test_module_urlopen_swap_invalidates_canonical_provider_origin(
                 bound,
                 receipt,
                 action_id=ACTION_ID,
-                decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=2),
             )
 
@@ -587,7 +575,6 @@ def test_urlopen_kwdefault_and_module_alias_substitution_cannot_mint_provider_or
                 bound,
                 receipt,
                 action_id=ACTION_ID,
-                decision_at=decision_at,
                 max_snapshot_age=timedelta(seconds=2),
             )
 
@@ -595,3 +582,64 @@ def test_urlopen_kwdefault_and_module_alias_substitution_cannot_mint_provider_or
 def test_market_book_authority_exposes_no_callable_mint_or_writable_registry() -> None:
     assert not hasattr(betfair_account_readonly, "_issue_market_book_depth")
     assert not hasattr(betfair_account_readonly, "_MARKET_BOOK_DEPTH_ISSUED")
+
+def test_authoritative_decision_time_is_issued_by_product_clock() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    before = datetime.now(timezone.utc)
+    bound = _bound(before)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+    after = datetime.now(timezone.utc)
+
+    assert before <= result.decision_at <= after
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+
+
+def test_caller_cannot_supply_backdated_authoritative_decision_time() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(TypeError, match="decision_at"):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                decision_at=decision_at - timedelta(hours=1),
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_expired_action_cannot_be_revived_by_historical_time() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc) - timedelta(minutes=1))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            ValueError,
+            match="execution action expired before feasibility decision",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+

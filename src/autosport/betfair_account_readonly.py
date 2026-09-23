@@ -1369,6 +1369,8 @@ def _install_market_book_depth_authority():
     canonical_client_type = BetfairReadOnlyClient
     canonical_transport_type = UrllibBetfairHttpTransport
     canonical_clock = _CANONICAL_MARKET_BOOK_CLOCK
+    canonical_datetime_type = datetime
+    canonical_utc = timezone.utc
     canonical_post = canonical_transport_type.post
     canonical_post_code = canonical_post.__code__
     canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
@@ -1419,8 +1421,8 @@ def _install_market_book_depth_authority():
 
     def assert_authoritative(
         observation: BetfairMarketBookDepthObservation,
-    ) -> None:
-        """Reject receipts lacking exact canonical direct-provider issuance."""
+    ) -> datetime:
+        """Reject noncanonical receipts and return the product-owned decision instant."""
 
         if type(observation) is not BetfairMarketBookDepthObservation:
             raise BetfairReadOnlyError(
@@ -1437,6 +1439,16 @@ def _install_market_book_depth_authority():
             raise BetfairReadOnlyError(
                 "market-book depth observation lacks canonical direct Betfair provider IO origin"
             )
+        decision_at = canonical_clock()
+        if (
+            not isinstance(decision_at, canonical_datetime_type)
+            or decision_at.tzinfo is None
+            or decision_at.utcoffset() is None
+        ):
+            raise BetfairReadOnlyError(
+                "canonical MarketBook product clock returned an invalid datetime"
+            )
+        return decision_at.astimezone(canonical_utc)
 
     BetfairReadOnlyClient.read_market_book_depth = authoritative_read
     return assert_authoritative

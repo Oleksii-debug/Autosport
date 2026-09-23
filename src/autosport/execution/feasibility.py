@@ -414,14 +414,15 @@ def assess_authoritative_betfair_execution_feasibility(
     receipt: BetfairMarketBookDepthObservation,
     *,
     action_id: str,
-    decision_at: datetime,
     max_snapshot_age: timedelta,
 ) -> ExecutionFeasibilitySnapshot:
     """Resolve provider depth against the durable plan and fail closed on limits.
 
     The receipt must have been minted by the authenticated Betfair read-only
-    client. The exact execution plan must already exist in the canonical real
-    execution ledger with the same fingerprint. Positive standard-LIMIT
+    client. That same authority seam supplies the product-owned decision instant;
+    callers cannot backdate freshness or action expiry. The exact execution plan
+    must already exist in the canonical real execution ledger with the same
+    fingerprint. Positive standard-LIMIT
     feasibility additionally needs canonical provider/account/currency/market
     admissibility evidence; profile/adapter identity alone is not that authority.
     Until that authority is composed here, the result remains UNKNOWN_UNPROVEN
@@ -434,8 +435,8 @@ def assess_authoritative_betfair_execution_feasibility(
         raise TypeError("bound must be BoundSupervisedExecutionPlan")
     if not isinstance(receipt, BetfairMarketBookDepthObservation):
         raise TypeError("receipt must be BetfairMarketBookDepthObservation")
+    decision_at = assert_market_book_depth_authoritative(receipt)
     _require_aware(decision_at, "decision_at")
-    assert_market_book_depth_authoritative(receipt)
     bound.verify_binding()
     try:
         saga = ledger.saga(bound.execution_plan.plan_id)

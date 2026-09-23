@@ -200,7 +200,11 @@ class ExecutionFeasibilitySnapshot:
         )
 
 
-_EXECUTION_FEASIBILITY_RESULT_ISSUED: dict[int, tuple[object, str]] = {}
+# This seal is an API-level provenance fence inside a trusted Python process.
+# Ordinary imports expose neither a writable issuance registry nor a callable
+# mint. Arbitrary same-interpreter reflection/object-graph/code mutation is
+# explicitly outside this boundary; no cryptographic process isolation is claimed.
+EXECUTION_FEASIBILITY_RESULT_TRUST_BOUNDARY = "trusted-process-api-provenance-v1"
 
 
 def _feasibility_result_fingerprint(result: ExecutionFeasibilitySnapshot) -> str:
@@ -232,42 +236,6 @@ def _feasibility_result_fingerprint(result: ExecutionFeasibilitySnapshot) -> str
             "liquidity_overlap_key": result.liquidity_overlap_key,
         }
     )
-
-
-def _issue_execution_feasibility_result(
-    result: ExecutionFeasibilitySnapshot,
-) -> ExecutionFeasibilitySnapshot:
-    """Seal resolver-issued authority without making the DTO self-authenticating."""
-
-    if type(result) is not ExecutionFeasibilitySnapshot:
-        raise TypeError("issued feasibility result must use the exact result type")
-    result_id = id(result)
-    fingerprint = _feasibility_result_fingerprint(result)
-
-    def forget(current: object, *, result_id: int = result_id) -> None:
-        existing = _EXECUTION_FEASIBILITY_RESULT_ISSUED.get(result_id)
-        if existing is not None and existing[0] is current:
-            _EXECUTION_FEASIBILITY_RESULT_ISSUED.pop(result_id, None)
-
-    reference = ref(result, forget)
-    _EXECUTION_FEASIBILITY_RESULT_ISSUED[result_id] = (reference, fingerprint)
-    return result
-
-
-def _is_execution_feasibility_result_authoritative(
-    result: ExecutionFeasibilitySnapshot,
-) -> bool:
-    """Fail closed for direct construction, copies, reconstruction, or mutation."""
-
-    if type(result) is not ExecutionFeasibilitySnapshot:
-        return False
-    current = _EXECUTION_FEASIBILITY_RESULT_ISSUED.get(id(result))
-    if current is None or current[0]() is not result:
-        return False
-    try:
-        return current[1] == _feasibility_result_fingerprint(result)
-    except Exception:
-        return False
 
 
 def assess_execution_feasibility(
@@ -425,7 +393,7 @@ def _assess_execution_feasibility(
     )
 
 
-def assess_authoritative_betfair_execution_feasibility(
+def _assess_authoritative_betfair_execution_feasibility_unsealed(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
     receipt: BetfairMarketBookDepthObservation,
@@ -607,7 +575,61 @@ def assess_authoritative_betfair_execution_feasibility(
         max_snapshot_age=max_snapshot_age,
         product_owned=True,
     )
-    return _issue_execution_feasibility_result(result)
+    return result
+
+
+def _install_execution_feasibility_result_authority():
+    issued: dict[int, tuple[object, str]] = {}
+    raw_assess = _assess_authoritative_betfair_execution_feasibility_unsealed
+    fingerprint = _feasibility_result_fingerprint
+
+    def assess(
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+        receipt: BetfairMarketBookDepthObservation,
+        *,
+        action_id: str,
+        max_snapshot_age: timedelta,
+    ) -> ExecutionFeasibilitySnapshot:
+        result = raw_assess(
+            ledger,
+            bound,
+            receipt,
+            action_id=action_id,
+            max_snapshot_age=max_snapshot_age,
+        )
+        if type(result) is not ExecutionFeasibilitySnapshot:
+            raise TypeError("authoritative feasibility resolver returned invalid result type")
+        result_id = id(result)
+        result_fingerprint = fingerprint(result)
+
+        def forget(current: object, *, result_id: int = result_id) -> None:
+            existing = issued.get(result_id)
+            if existing is not None and existing[0] is current:
+                issued.pop(result_id, None)
+
+        reference = ref(result, forget)
+        issued[result_id] = (reference, result_fingerprint)
+        return result
+
+    def is_authoritative(result: ExecutionFeasibilitySnapshot) -> bool:
+        if type(result) is not ExecutionFeasibilitySnapshot:
+            return False
+        current = issued.get(id(result))
+        if current is None or current[0]() is not result:
+            return False
+        try:
+            return current[1] == fingerprint(result)
+        except Exception:
+            return False
+
+    return assess, is_authoritative
+
+
+(
+    assess_authoritative_betfair_execution_feasibility,
+    _is_execution_feasibility_result_authoritative,
+) = _install_execution_feasibility_result_authority()
 
 
 def _append_if(reasons: list[str], condition: bool, reason: str) -> None:

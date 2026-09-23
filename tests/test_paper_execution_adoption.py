@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from autosport.paper import PaperBook
@@ -172,6 +173,46 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertIsNone(ticket.legs[0].market_semantics_id)
             self.assertEqual(ticket.placed_at, STARTED_AT)
             self.assertEqual(book.balance, __import__("decimal").Decimal("90.00"))
+
+    def test_legacy_side_less_back_exposure_replays_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-legacy-back",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            ticket = next(iter(book.tickets.values()))
+            ticket.legs = (replace(ticket.legs[0], exchange_side=None),)
+            book.save(Path(tmp) / "paper-book.json")
+
+            second = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-legacy-back",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run.run_id, second.run.run_id)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(book.tickets), 1)
+            self.assertIsNone(next(iter(book.tickets.values())).legs[0].exchange_side)
 
     def test_market_semantics_survives_accepted_adoption_and_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

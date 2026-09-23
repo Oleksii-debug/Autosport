@@ -13,7 +13,7 @@ from .continuous_session import (
     ContinuousTickResult,
     SessionStoppedError,
 )
-from .product_entrypoint import _validated_source
+from .product_entrypoint import ProductEntrypointError, _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
 
@@ -24,15 +24,30 @@ def _runtime_builder(
     workspace: Path,
     source_factory: str,
     initial_bankroll: str,
+    *,
+    expected_source_id: str | None = None,
 ) -> AutonomousProductRuntime:
     """Build the canonical runtime through the same validated source boundary as CLI."""
 
+    if expected_source_id is not None and (
+        type(expected_source_id) is not str
+        or not expected_source_id
+        or expected_source_id.strip() != expected_source_id
+    ):
+        raise ValueError("expected_source_id must be a non-empty trimmed string")
     source = _validated_source(source_factory, workspace=workspace)
+    if expected_source_id is not None and source.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "product source identity does not match the configured source"
+        )
     return build_autonomous_product_runtime(
         workspace=workspace,
         source=source,
         initial_bankroll=initial_bankroll,
     )
+
+
+_CANONICAL_RUNTIME_BUILDER = _runtime_builder
 
 
 def _safe_error_type(exc: BaseException) -> str:
@@ -107,6 +122,7 @@ class ProductGuiWorker:
         *,
         workspace: str | Path,
         source_factory: str,
+        expected_source_id: str | None = None,
         initial_bankroll: str = "10000",
         poll_seconds: float = 30.0,
     ) -> bool:
@@ -116,6 +132,12 @@ class ProductGuiWorker:
             or source_factory.strip() != source_factory
         ):
             raise ValueError("source_factory must be a non-empty trimmed string")
+        if expected_source_id is not None and (
+            type(expected_source_id) is not str
+            or not expected_source_id
+            or expected_source_id.strip() != expected_source_id
+        ):
+            raise ValueError("expected_source_id must be a non-empty trimmed string")
         if (
             isinstance(poll_seconds, bool)
             or not isinstance(poll_seconds, (int, float))
@@ -141,6 +163,7 @@ class ProductGuiWorker:
                 args=(
                     root,
                     source_factory,
+                    expected_source_id,
                     initial_bankroll,
                     float(poll_seconds),
                     start_gate,
@@ -219,6 +242,7 @@ class ProductGuiWorker:
         self,
         workspace: Path,
         source_factory: str,
+        expected_source_id: str | None,
         initial_bankroll: str,
         poll_seconds: float,
         start_gate: threading.Event,
@@ -230,6 +254,7 @@ class ProductGuiWorker:
         self._run(
             workspace=workspace,
             source_factory=source_factory,
+            expected_source_id=expected_source_id,
             initial_bankroll=initial_bankroll,
             poll_seconds=poll_seconds,
         )
@@ -239,6 +264,7 @@ class ProductGuiWorker:
         *,
         workspace: Path,
         source_factory: str,
+        expected_source_id: str | None,
         initial_bankroll: str,
         poll_seconds: float,
     ) -> None:
@@ -247,7 +273,23 @@ class ProductGuiWorker:
         stopped_status: ContinuousSessionStatus | None = None
         stop_reason: str | None = None
         try:
-            runtime = self._runtime_builder(workspace, source_factory, initial_bankroll)
+            if expected_source_id is None:
+                runtime = self._runtime_builder(
+                    workspace,
+                    source_factory,
+                    initial_bankroll,
+                )
+            else:
+                if self._runtime_builder is not _CANONICAL_RUNTIME_BUILDER:
+                    raise ProductEntrypointError(
+                        "configured source identity requires the canonical runtime builder"
+                    )
+                runtime = _CANONICAL_RUNTIME_BUILDER(
+                    workspace,
+                    source_factory,
+                    initial_bankroll,
+                    expected_source_id=expected_source_id,
+                )
             with self._lock:
                 self._runtime = runtime
 

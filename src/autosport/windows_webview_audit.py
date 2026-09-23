@@ -203,6 +203,10 @@ def inspect_semantic_shell() -> dict[str, Any]:
             failures.append(
                 "emergency STOP must describe both durable safety boundary and current status"
             )
+        if emergency_attrs.get("type") != "button":
+            failures.append("emergency STOP must remain a native type=button action")
+        if "disabled" in emergency_attrs:
+            failures.append("emergency STOP must remain enabled in static shell semantics")
 
     emergency_status = parser.elements.get("emergency-stop-status")
     if emergency_status is None:

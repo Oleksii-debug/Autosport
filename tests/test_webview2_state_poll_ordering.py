@@ -155,6 +155,7 @@ def test_mutating_dispatch_invalidates_pre_and_mid_action_state_snapshots() -> N
 
     assert "globalThis.autosportDispatch = dispatch;" in javascript
 
+
 def test_beforeunload_closes_refresh_scheduler_before_late_state_projection() -> None:
     javascript = _APP_JS.read_text(encoding="utf-8")
     refresh_body = _javascript_function_body(javascript, "refreshState")

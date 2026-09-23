@@ -15,7 +15,7 @@ input[type="text"], select, textarea, button { font: inherit; }
 input[type="text"], select, textarea { width: 100%; max-width: 70rem; padding: .45rem; }
 textarea { resize: vertical; }
 button { margin: .6rem .45rem .4rem 0; padding: .55rem .75rem; min-height: 2.5rem; }
-button:focus, input:focus, select:focus, textarea:focus, [tabindex="0"]:focus {
+button:focus, input:focus, select:focus, textarea:focus, [tabindex]:focus {
   outline: 3px solid currentColor;
   outline-offset: 2px;
 }

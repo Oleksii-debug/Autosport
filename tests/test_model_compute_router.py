@@ -540,6 +540,15 @@ class ModelComputeRouterTests(unittest.TestCase):
             "contradiction_state": value.voc_contradiction_state,
             "routing_policy_id": active_policy.policy_id,
             "routing_policy_version": str(active_policy.policy_version),
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    active_policy.payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
             "cloud_permission": (
                 "ALLOW" if active_policy.cloud_enabled else "DENY"
             ),
@@ -758,6 +767,28 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(wrong_policy.tier, ComputeTier.LOCAL)
         self.assertIn("routing policy", wrong_policy.reason)
+
+        canonical_policy = policy()
+        altered_policy = policy(max_cloud_cost=Decimal("999"))
+        digest_request = request(
+            request_id="req-cloud-permission-policy-digest"
+        )
+        digest_request = self.canonical_request(
+            digest_request,
+            observation,
+            policy_value=canonical_policy,
+        )
+        digest_mismatch = self.route_compute(
+            digest_request,
+            self.candidates,
+            altered_policy,
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(digest_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("routing policy", digest_mismatch.reason)
 
     def test_v2_context_is_readable_but_cannot_mint_cloud_permission(self):
         observation = slow_observation()

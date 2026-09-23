@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,8 @@ _CANONICAL_READ_SEAM_NAMES = frozenset(
     }
 )
 _CANONICAL_CLASS_READ_SEAMS = {
-    name: getattr(CollectorDeltaStore, name) for name in _CANONICAL_READ_SEAM_NAMES
+    name: inspect.getattr_static(CollectorDeltaStore, name)
+    for name in _CANONICAL_READ_SEAM_NAMES
 }
 
 
@@ -32,7 +34,7 @@ def _require_canonical_class_read_seams() -> None:
     rebound = sorted(
         name
         for name, expected in _CANONICAL_CLASS_READ_SEAMS.items()
-        if getattr(CollectorDeltaStore, name, None) is not expected
+        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
     )
     if rebound:
         raise SourceUniverseCommitmentError(

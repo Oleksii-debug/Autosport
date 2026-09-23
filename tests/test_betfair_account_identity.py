@@ -323,6 +323,8 @@ def test_personal_developer_identity_never_claims_cross_session_stability(
 
     assert value.mode is BetfairAccountIdentityMode.PERSONAL_DEVELOPER
     assert value.identity_scope == IDENTITY_SCOPE
+    assert value.remote_provider_origin_proven is False
+    assert value.provider_account_details_origin_proven is False
     assert value.stable_account_identity_proven is False
     assert value.stable_account_id is None
     assert value.cross_session_equivalence_proven is False

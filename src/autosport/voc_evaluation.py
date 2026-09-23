@@ -24,7 +24,7 @@ _ONE = Decimal("1")
 _ARITHMETIC_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 VOC_CURRENT_CONTEXT_ACTION = "VOC_ROUTE_CONTEXT"
 VOC_CURRENT_CONTEXT_PAYLOAD_KEY = "voc_current_context"
-_VOC_CURRENT_CONTEXT_FIELDS = frozenset(
+_VOC_CURRENT_CONTEXT_FIELDS_V1 = frozenset(
     {
         "request_id",
         "decision_input_sha256",
@@ -34,6 +34,24 @@ _VOC_CURRENT_CONTEXT_FIELDS = frozenset(
         "regime_id",
         "urgency_id",
         "contradiction_state",
+    }
+)
+_VOC_CURRENT_CONTEXT_FIELDS_V2 = {
+    "request_id",
+    "decision_input_sha256",
+    "task_class",
+    "data_classification",
+    "sport_id",
+    "league_id",
+    "regime_id",
+    "urgency_id",
+    "contradiction_state",
+}
+_VOC_CURRENT_CONTEXT_FIELDS = frozenset(_VOC_CURRENT_CONTEXT_FIELDS_V2)
+_VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS = frozenset(
+    {
+        _VOC_CURRENT_CONTEXT_FIELDS_V1,
+        _VOC_CURRENT_CONTEXT_FIELDS,
     }
 )
 
@@ -151,10 +169,13 @@ def resolve_voc_decision_context(
     if not isinstance(payload, Mapping):
         raise VOCEvaluationError("canonical current VOC decision payload is invalid")
     context = payload.get(VOC_CURRENT_CONTEXT_PAYLOAD_KEY)
-    if not isinstance(context, Mapping) or set(context) != _VOC_CURRENT_CONTEXT_FIELDS:
+    if not isinstance(context, Mapping):
+        raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
+    context_fields = frozenset(context)
+    if context_fields not in _VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS:
         raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
     resolved: dict[str, str] = {}
-    for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS):
+    for field in sorted(context_fields):
         if field == "decision_input_sha256":
             resolved[field] = _sha256(
                 "canonical current VOC context decision_input_sha256",
@@ -1440,11 +1461,14 @@ class VOCEvaluationStore:
         resolved = resolver.resolve_decision_context(expected, as_of=as_of)
         if resolved is None:
             raise VOCEvaluationError("canonical current VOC decision context is missing")
-        if not isinstance(resolved, Mapping) or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
+        if not isinstance(resolved, Mapping):
+            raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
+        resolved_fields = frozenset(resolved)
+        if resolved_fields not in _VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS:
             raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
         return {
             field: _text(f"canonical current VOC context {field}", resolved.get(field))
-            for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS)
+            for field in sorted(resolved_fields)
         }
 
     def require(

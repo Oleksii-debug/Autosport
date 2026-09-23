@@ -2170,13 +2170,17 @@ def _install_execution_readback_authority() -> None:
         return record
 
     def canonical_network_post(
-        transport: UrllibBetfairHttpTransport,
+        response_limit: int,
         url: str,
         *,
         headers: Mapping[str, str],
         body: bytes,
         timeout_seconds: float,
     ) -> bytes:
+        if type(response_limit) is not int or response_limit <= 0:
+            raise sealed_error_type(
+                "canonical Betfair response size authority changed"
+            )
         if not opener_graph_matches():
             raise sealed_error_type(
                 "canonical Betfair private opener dispatch changed"
@@ -2193,7 +2197,7 @@ def _install_execution_readback_authority() -> None:
                 request,
                 timeout=timeout_seconds,
             ) as response:
-                payload = response.read(transport._max_response_bytes + 1)
+                payload = response.read(response_limit + 1)
         except sealed_http_error as exc:
             raise sealed_error_type(
                 f"Betfair HTTP request failed with status {exc.code}"
@@ -2204,7 +2208,7 @@ def _install_execution_readback_authority() -> None:
             raise sealed_error_type(
                 "canonical Betfair private opener dispatch changed"
             )
-        if len(payload) > transport._max_response_bytes:
+        if len(payload) > response_limit:
             raise sealed_error_type("Betfair response exceeded the size limit")
         return payload
 
@@ -2243,6 +2247,11 @@ def _install_execution_readback_authority() -> None:
             raise BetfairReadOnlyError(
                 "canonical Betfair client did not install the sealed network transport"
             )
+        response_limit = getattr(trusted_transport, "_max_response_bytes", None)
+        if type(response_limit) is not int or response_limit <= 0:
+            raise BetfairReadOnlyError(
+                "canonical Betfair client response size authority is invalid"
+            )
         client_id = id(self)
 
         def forget_client(_weakref: object, *, key: int = client_id) -> None:
@@ -2258,6 +2267,7 @@ def _install_execution_readback_authority() -> None:
             self._credentials.session_token,
             self._venue_id,
             self._account_id,
+            response_limit,
         )
 
     def has_trusted_transport(self: BetfairReadOnlyClient) -> bool:
@@ -2306,6 +2316,11 @@ def _install_execution_readback_authority() -> None:
                 session[3] = True
             return raw_rpc(self, method, params)
         transport = record[1]
+        response_limit = record[9]
+        if type(response_limit) is not int or response_limit <= 0:
+            raise sealed_error_type(
+                "canonical Betfair response size authority changed"
+            )
         if (
             getattr(BetfairReadOnlyClient, "_rpc", None) is not authoritative_rpc
             or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
@@ -2328,7 +2343,7 @@ def _install_execution_readback_authority() -> None:
             timeout_seconds: float,
         ) -> bytes:
             payload = canonical_network_post(
-                transport,
+                response_limit,
                 url,
                 headers=headers,
                 body=body,

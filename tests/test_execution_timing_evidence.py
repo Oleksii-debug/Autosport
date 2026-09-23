@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
-import threading
 
 import pytest
 
@@ -107,7 +107,7 @@ def test_concurrent_marker_commit_cannot_lower_monotonic_high_water() -> None:
     def issue(key: str) -> None:
         try:
             outcomes[key] = session.mark(key)
-        except BaseException as exc:
+        except Exception as exc:
             outcomes[key] = exc
 
     high = threading.Thread(target=issue, args=("high",), name="high-worker")

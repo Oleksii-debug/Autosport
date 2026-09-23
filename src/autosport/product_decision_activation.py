@@ -107,6 +107,22 @@ _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD_CODE: Final = getattr(
 )
 
 
+# Supported START must derive scientific identity from exact durable registry bytes.
+# A live ScientificRegistry.get() method is application code and can be rebound at
+# runtime without changing the registry file, so it is never positive START authority.
+_CANONICAL_SCIENTIFIC_REGISTRY_CLASS: Final = ScientificRegistry
+_CANONICAL_SCIENTIFIC_REGISTRY_SCHEMA_VERSION: Final = ScientificRegistry.SCHEMA_VERSION
+_SCIENTIFIC_REGISTRY_ENTRY_FIELDS: Final = frozenset(
+    {
+        "record_type",
+        "record_id",
+        "available_at",
+        "payload",
+        "record_sha256",
+    }
+)
+
+
 def _product_machine_state_base() -> Path:
     """Resolve machine state without caller/process trust-root overrides."""
 
@@ -481,14 +497,84 @@ def _risk_policy_file_digest(
     return hashlib.sha256(raw).hexdigest()
 
 
+def _validated_scientific_registry_records(
+    path: Path,
+) -> list[dict[str, object]]:
+    """Read START scientific authority directly from exact durable registry bytes."""
+
+    if (
+        ScientificRegistry is not _CANONICAL_SCIENTIFIC_REGISTRY_CLASS
+        or _CANONICAL_SCIENTIFIC_REGISTRY_CLASS.SCHEMA_VERSION
+        != _CANONICAL_SCIENTIFIC_REGISTRY_SCHEMA_VERSION
+    ):
+        raise ProductDecisionActivationError(
+            "canonical ScientificRegistry authority changed"
+        )
+
+    _, state = _strict_json_file(path, "scientific registry")
+    if (
+        type(state) is not dict
+        or state.get("schema_version")
+        != _CANONICAL_SCIENTIFIC_REGISTRY_SCHEMA_VERSION
+        or type(state.get("records")) is not list
+    ):
+        raise ProductDecisionActivationError("scientific registry schema mismatch")
+
+    records: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in state["records"]:
+        if type(raw) is not dict or frozenset(raw) != _SCIENTIFIC_REGISTRY_ENTRY_FIELDS:
+            raise ProductDecisionActivationError(
+                "scientific registry entry fields mismatch"
+            )
+        record_type = _text(raw.get("record_type"), "scientific record_type")
+        record_id = _text(raw.get("record_id"), "scientific record_id")
+        available_at = _text(
+            raw.get("available_at"),
+            "scientific available_at",
+        )
+        payload = raw.get("payload")
+        if type(payload) is not dict:
+            raise ProductDecisionActivationError(
+                "scientific registry payload must be an object"
+            )
+        declared = _sha256(
+            raw.get("record_sha256"),
+            "scientific record_sha256",
+        )
+        expected = _digest(
+            {
+                "record_type": record_type,
+                "record_id": record_id,
+                "available_at": available_at,
+                "payload": payload,
+            }
+        )
+        if declared != expected:
+            raise ProductDecisionActivationError(
+                "scientific registry record digest mismatch"
+            )
+        key = (record_type, record_id)
+        if key in seen:
+            raise ProductDecisionActivationError(
+                "scientific registry contains duplicate record identity"
+            )
+        seen.add(key)
+        records.append(raw)
+    return records
+
+
 def _registry_strategy_prefix(
     workspace: Path,
     registry: ScientificRegistry,
     strategy_version_id: str,
 ) -> tuple[dict[str, object], int, str, str, str | None]:
-    if type(registry) is not ScientificRegistry:
+    if (
+        ScientificRegistry is not _CANONICAL_SCIENTIFIC_REGISTRY_CLASS
+        or type(registry) is not _CANONICAL_SCIENTIFIC_REGISTRY_CLASS
+    ):
         raise ProductDecisionActivationError(
-            "scientific_registry must be the canonical ScientificRegistry"
+            "scientific_registry must be the exact canonical ScientificRegistry"
         )
     path = _require_workspace_path(
         workspace,
@@ -496,28 +582,14 @@ def _registry_strategy_prefix(
         "scientific_registry.json",
         "scientific registry",
     )
-    canonical = ScientificRegistry(path)
     wanted = _text(strategy_version_id, "strategy_version_id")
-    entry = canonical.get("StrategyVersion", wanted)
-    if entry is None:
-        raise ProductDecisionActivationError(
-            "activation StrategyVersion is missing from ScientificRegistry"
-        )
-    _, state = _strict_json_file(path, "scientific registry")
-    if (
-        type(state) is not dict
-        or state.get("schema_version") != ScientificRegistry.SCHEMA_VERSION
-        or type(state.get("records")) is not list
-    ):
-        raise ProductDecisionActivationError("scientific registry schema mismatch")
-    records = state["records"]
+    records = _validated_scientific_registry_records(path)
     index = next(
         (
             i
             for i, raw in enumerate(records)
-            if type(raw) is dict
-            and raw.get("record_type") == "StrategyVersion"
-            and raw.get("record_id") == wanted
+            if raw["record_type"] == "StrategyVersion"
+            and raw["record_id"] == wanted
         ),
         None,
     )
@@ -525,7 +597,19 @@ def _registry_strategy_prefix(
         raise ProductDecisionActivationError(
             "activation StrategyVersion is absent from registry sequence"
         )
-    strategy_payload = dict(entry.payload)
+
+    strategy_entry = records[index]
+    strategy_payload_raw = strategy_entry["payload"]
+    if type(strategy_payload_raw) is not dict:
+        raise ProductDecisionActivationError(
+            "activation StrategyVersion payload is invalid"
+        )
+    strategy_payload = dict(strategy_payload_raw)
+    strategy_record_sha256 = _sha256(
+        strategy_entry["record_sha256"],
+        "strategy record_sha256",
+    )
+
     model_record_sha256: str | None = None
     model_version_id = strategy_payload.get("model_version_id")
     if model_version_id is not None:
@@ -533,41 +617,39 @@ def _registry_strategy_prefix(
             model_version_id,
             "strategy model_version_id",
         )
-        model_entry = canonical.get("ModelVersion", model_version_id)
-        if model_entry is None:
-            raise ProductDecisionActivationError(
-                "activation StrategyVersion references a missing ModelVersion"
-            )
         model_index = next(
             (
                 i
                 for i, raw in enumerate(records)
-                if type(raw) is dict
-                and raw.get("record_type") == "ModelVersion"
-                and raw.get("record_id") == model_version_id
+                if raw["record_type"] == "ModelVersion"
+                and raw["record_id"] == model_version_id
             ),
             None,
         )
-        if model_index is None or model_index >= index:
+        if model_index is None:
+            raise ProductDecisionActivationError(
+                "activation StrategyVersion references a missing ModelVersion"
+            )
+        if model_index >= index:
             raise ProductDecisionActivationError(
                 "activation ModelVersion was not durable before StrategyVersion"
             )
         model_record_sha256 = _sha256(
-            model_entry.record_sha256,
+            records[model_index]["record_sha256"],
             "strategy model record_sha256",
         )
+
     prefix = {
-        "schema_version": ScientificRegistry.SCHEMA_VERSION,
+        "schema_version": _CANONICAL_SCIENTIFIC_REGISTRY_SCHEMA_VERSION,
         "records": records[: index + 1],
     }
     return (
         strategy_payload,
         index + 1,
         _digest(prefix),
-        entry.record_sha256,
+        strategy_record_sha256,
         model_record_sha256,
     )
-
 
 @dataclass(frozen=True, slots=True)
 class ProductDecisionActivationBinding:

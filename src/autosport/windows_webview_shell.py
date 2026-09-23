@@ -550,7 +550,7 @@ class AutosportWebController:
                 self._ok(self.product_runtime_status)
                 self._refresh_economic_projection()
             elif product_message.kind == "ERROR":
-                self._recovery_required_workspaces.add(Path(self.workspace))
+                self._recovery_required_workspaces.add(Path(self._active_workspace))
                 error_type = product_message.error_type or "BaseException"
                 self.product_runtime_status = (
                     "Тривалий імітаційний режим завершився помилкою типу "

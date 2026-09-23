@@ -62,6 +62,65 @@ def _publish(tmp_path, monkeypatch, value=None):
     return receipt, workspace, registry, authority_root, resolved
 
 
+
+
+def test_stable_read_accepts_cross_view_timestamp_representation_skew(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b'{"ok":true}\n')
+    real_fstat = publication.os.fstat
+
+    class _StatView:
+        def __init__(self, value, *, timestamp_offset: int = 0) -> None:
+            self.st_mode = value.st_mode
+            self.st_dev = value.st_dev
+            self.st_ino = value.st_ino
+            self.st_size = value.st_size
+            self.st_mtime_ns = value.st_mtime_ns + timestamp_offset
+            self.st_ctime_ns = value.st_ctime_ns + timestamp_offset
+            self.st_nlink = value.st_nlink
+
+    def skewed_fstat(fd):
+        return _StatView(real_fstat(fd), timestamp_offset=1)
+
+    monkeypatch.setattr(publication.os, "fstat", skewed_fstat)
+
+    assert publication._read_stable_state_bytes(path) == b'{"ok":true}\n'
+
+
+def test_stable_read_rejects_open_handle_metadata_change(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b'{"ok":true}\n')
+    real_fstat = publication.os.fstat
+    calls = 0
+
+    class _StatView:
+        def __init__(self, value, *, size_offset: int = 0) -> None:
+            self.st_mode = value.st_mode
+            self.st_dev = value.st_dev
+            self.st_ino = value.st_ino
+            self.st_size = value.st_size + size_offset
+            self.st_mtime_ns = value.st_mtime_ns
+            self.st_ctime_ns = value.st_ctime_ns
+            self.st_nlink = value.st_nlink
+
+    def changing_fstat(fd):
+        nonlocal calls
+        calls += 1
+        return _StatView(real_fstat(fd), size_offset=1 if calls == 2 else 0)
+
+    monkeypatch.setattr(publication.os, "fstat", changing_fstat)
+
+    with pytest.raises(
+        publication.RiskMembershipPublicationError,
+        match="changed during stable read",
+    ):
+        publication._read_stable_state_bytes(path)
+
+
 def test_publication_is_durable_but_not_causal_or_iid_authority(
     tmp_path, monkeypatch
 ) -> None:

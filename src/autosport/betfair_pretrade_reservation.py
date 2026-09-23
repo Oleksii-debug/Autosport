@@ -13,8 +13,9 @@ snapshot therefore cannot be double-spent by concurrent Autosport workers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from enum import Enum
+from fractions import Fraction
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -166,7 +167,15 @@ def worst_case_incremental_exposure(action: ExecutionAction) -> Decimal:
             raise BetfairPreTradeReservationError(
                 "LAY requested_odds must exceed 1"
             )
-        return stake * (odds - Decimal("1"))
+        odds_digits = max(len(odds.as_tuple().digits), odds.adjusted() + 1)
+        precision = len(stake.as_tuple().digits) + odds_digits + 4
+        if precision > 10000:
+            raise BetfairPreTradeReservationError(
+                "LAY exposure arithmetic exceeds bounded exact precision"
+            )
+        with localcontext() as context:
+            context.prec = max(50, precision)
+            return stake * (odds - Decimal("1"))
     raise BetfairPreTradeReservationError(
         "only BACK/LAY exposure is supported"
     )
@@ -275,6 +284,22 @@ class BetfairPreTradeReservationStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            try:
+                locked_precheck = require_authoritative_funds_precheck(
+                    funds_precheck
+                )
+            except (BetfairAccountFundsPrecheckError, TypeError, ValueError) as exc:
+                raise BetfairPreTradeReservationError(
+                    "funds precheck expired while waiting for reservation lock"
+                ) from exc
+            if (
+                locked_precheck is not precheck
+                or locked_precheck.precheck_id != candidate.funds_precheck_id
+            ):
+                raise BetfairPreTradeReservationError(
+                    "funds precheck identity changed before atomic admission"
+                )
+            self._bind_ledger_path(conn, ledger_view.path)
             reservations = self._read_all(conn)
             existing = reservations.get(attempt_id)
             if existing is not None:
@@ -299,9 +324,14 @@ class BetfairPreTradeReservationStore:
                     "active capital belongs to a different authenticated account context"
                 )
             locally_reserved = sum(
-                (item.reserved_amount for item in active), _ZERO
+                (Fraction(item.reserved_amount) for item in active),
+                Fraction(0),
             )
-            if precheck.available_to_bet_balance - locally_reserved < required:
+            if (
+                Fraction(precheck.available_to_bet_balance)
+                - locally_reserved
+                < Fraction(required)
+            ):
                 raise BetfairPreTradeReservationError(
                     "provider balance minus local reservations is insufficient"
                 )
@@ -391,13 +421,10 @@ class BetfairPreTradeReservationStore:
     def active_reserved_amount(self) -> Decimal:
         conn = self._connect()
         try:
-            return sum(
-                (
-                    item.reserved_amount
-                    for item in self._read_all(conn).values()
-                    if item.active
-                ),
-                _ZERO,
+            return _exact_decimal_sum(
+                item.reserved_amount
+                for item in self._read_all(conn).values()
+                if item.active
             )
         finally:
             conn.close()
@@ -439,7 +466,8 @@ class BetfairPreTradeReservationStore:
                     schema_version INTEGER NOT NULL,
                     venue_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
-                    currency_code TEXT NOT NULL
+                    currency_code TEXT NOT NULL,
+                    ledger_path TEXT
                 )
                 """
             )
@@ -491,6 +519,30 @@ class BetfairPreTradeReservationStore:
         conn.execute("PRAGMA synchronous=FULL")
         return conn
 
+    def _bind_ledger_path(
+        self,
+        conn: sqlite3.Connection,
+        ledger_path: str,
+    ) -> None:
+        ledger_path = _text(ledger_path, "ledger_path")
+        row = conn.execute(
+            "SELECT ledger_path FROM reservation_meta WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise BetfairPreTradeReservationError(
+                "reservation metadata is missing"
+            )
+        if row[0] is None:
+            conn.execute(
+                "UPDATE reservation_meta SET ledger_path = ? WHERE singleton = 1",
+                (ledger_path,),
+            )
+            return
+        if row[0] != ledger_path:
+            raise BetfairPreTradeReservationError(
+                "reservation store is bound to a different execution ledger"
+            )
+
     def _read_all(
         self, conn: sqlite3.Connection
     ) -> dict[str, BetfairExposureReservation]:
@@ -507,6 +559,13 @@ class BetfairPreTradeReservationStore:
                     "reservation payload hash mismatch"
                 )
             item = _reservation_from_payload(payload)
+            if (
+                item.account_id != self.account_id
+                or item.currency_code != self.currency_code
+            ):
+                raise BetfairPreTradeReservationError(
+                    "reservation row is outside store identity"
+                )
             if item.attempt_id != attempt_id or item.attempt_id in result:
                 raise BetfairPreTradeReservationError(
                     "reservation primary-key identity mismatch"
@@ -873,6 +932,31 @@ def _currency(value: object) -> str:
             "currency_code must be three uppercase ASCII letters"
         )
     return raw
+
+
+def _exact_decimal_sum(values) -> Decimal:
+    items = tuple(values)
+    if not items:
+        return _ZERO
+    if any(type(value) is not Decimal or not value.is_finite() for value in items):
+        raise BetfairPreTradeReservationError(
+            "reservation sum requires finite exact Decimals"
+        )
+    minimum_exponent = min(value.as_tuple().exponent for value in items)
+    total = 0
+    for value in items:
+        sign, digits, exponent = value.as_tuple()
+        coefficient = 0
+        for digit in digits:
+            coefficient = coefficient * 10 + digit
+        if sign:
+            coefficient = -coefficient
+        total += coefficient * (10 ** (exponent - minimum_exponent))
+    if total == 0:
+        return Decimal("0")
+    sign = 1 if total < 0 else 0
+    digits = tuple(int(ch) for ch in str(abs(total)))
+    return Decimal((sign, digits, minimum_exponent))
 
 
 def _positive_decimal(value: object, field: str) -> Decimal:

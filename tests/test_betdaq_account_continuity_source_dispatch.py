@@ -85,10 +85,10 @@ def test_redirected_source_client_cannot_authenticate_b_and_issue_principal_a(
         redirected_source,
     )
 
-    client = BetdaqAccountContinuityClient(principal_a, clock=_clock)
     with pytest.raises(
         (BetdaqAccountContinuityError, BetdaqAccountReadOnlyError),
     ):
+        client = BetdaqAccountContinuityClient(principal_a, clock=_clock)
         client.read_account_evidence(
             frozenset({BookmakerCapability.BALANCE_READ})
         )

@@ -12,6 +12,7 @@ _ORIGINAL_OBSERVED = _impl._observed_attempt
 _ORIGINAL_PUBLIC_SYNTHETIC = _public._synthetic_attempt
 
 _FUTURE_QUOTE_ERROR = "PAPER execution timestamp cannot predate decision quote"
+_LEGACY_NEGATIVE_AGE_ERROR = "quote age must be non-negative"
 
 
 def _age_exceeds_bound(*, execution_time, decision_time, max_quote_age_ms: int) -> bool:
@@ -24,23 +25,10 @@ def _age_exceeds_bound(*, execution_time, decision_time, max_quote_age_ms: int) 
     return age > timedelta(milliseconds=max_quote_age_ms)
 
 
-def _exact_synthetic(original, **kwargs):
-    try:
-        attempt = original(**kwargs)
-    except ValueError as exc:
-        # Both synthetic implementations reject a future-dated decision quote
-        # through the legacy millisecond helper. Reclassify only that exact
-        # causality failure so callers receive the PAPER state-error contract;
-        # unrelated input validation remains ValueError.
-        if str(exc) == "quote age must be non-negative":
-            raise _impl.PaperExecutionStateError(_FUTURE_QUOTE_ERROR) from exc
-        raise
-
+def _synthetic_times(kwargs):
     config = kwargs["config"]
     action = kwargs["action"]
     started_at = kwargs["started_at"]
-    suspended = kwargs["suspended"]
-
     start = _impl._timestamp(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
@@ -52,6 +40,35 @@ def _exact_synthetic(original, **kwargs):
         )
     execution_time = start + timedelta(milliseconds=delay_ms)
     decision_time = _impl._timestamp(action.quote_observed_at, "quote_observed_at")
+    return execution_time, decision_time
+
+
+def _synthetic_future_quote_proven(kwargs) -> bool:
+    try:
+        execution_time, decision_time = _synthetic_times(kwargs)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return decision_time > execution_time
+
+
+def _exact_synthetic(original, **kwargs):
+    try:
+        attempt = original(**kwargs)
+    except ValueError as exc:
+        # Error text is not authority. Reclassify the legacy negative-age error
+        # only when this wrapper independently reconstructs the exact deterministic
+        # synthetic execution time and proves that the decision quote is future-dated.
+        if (
+            str(exc) == _LEGACY_NEGATIVE_AGE_ERROR
+            and _synthetic_future_quote_proven(kwargs)
+        ):
+            raise _impl.PaperExecutionStateError(_FUTURE_QUOTE_ERROR) from exc
+        raise
+
+    config = kwargs["config"]
+    action = kwargs["action"]
+    suspended = kwargs["suspended"]
+    execution_time, decision_time = _synthetic_times(kwargs)
     expires = _impl._timestamp(action.expires_at, "expires_at")
 
     # Preserve the original precedence for suspension and quote expiry. Only

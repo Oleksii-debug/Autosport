@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from autosport.campaign_inception import AUTHORITY_DOMAIN, CampaignAuthorityBinding, CampaignInceptionConflictError, CampaignInceptionIntegrityError, CampaignInceptionReceipt, CampaignObservationNotProspectiveError, ObservationAdmissionFrontier, ResolvedObservationPosition, admit_campaign_observation, begin_campaign_inception, finalize_campaign_inception, load_campaign_inception
 from autosport.monotonic_workspace_authority import AuthorityPhase, MonotonicAuthorityRollbackError, MonotonicWorkspaceAuthority
+from autosport.workspace_lock import WorkspaceEconomicLock
 SHA_A = 'a' * 64
 SHA_B = 'b' * 64
 SHA_C = 'c' * 64
@@ -31,6 +32,11 @@ class _Source:
     def capture_campaign_frontier(self) -> ObservationAdmissionFrontier:
         self.capture_calls += 1
         if self.workspace is not None:
+            # A canonical source is allowed to use the ordinary workspace writer
+            # lock while issuing its durable frontier. Campaign inception must not
+            # hold that lock across this external source call.
+            with WorkspaceEconomicLock(self.workspace):
+                pass
             authority = MonotonicWorkspaceAuthority(workspace=self.workspace, domain=AUTHORITY_DOMAIN, key=f'campaign:{self.campaign_id}', authority_root=self.authority_root)
             history = authority.read_history()
             assert history

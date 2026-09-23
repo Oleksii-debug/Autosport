@@ -10,9 +10,7 @@ from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
 )
-from autosport.betfair_session_keepalive import (
-    BetfairApiRouteResolutionStatus if False else BetfairKeepAliveResponse,
-)
+from autosport.betfair_session_keepalive import BetfairKeepAliveResponse
 from autosport.betfair_session_keepalive import (
     BetfairSessionKeepAliveError,
     BetfairSessionKeepAliveObservation,

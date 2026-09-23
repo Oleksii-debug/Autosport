@@ -239,3 +239,51 @@ def test_provider_http_post_closure_replacement_fails_before_durable_attempt() -
         finally:
             cell.cell_contents = original_value
 
+@pytest.mark.parametrize("attribute", ("_open", "_call_chain"))
+def test_private_opener_internal_dispatch_shadow_fails_before_durable_attempt(
+    attribute: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        target = betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_POST
+        closure = target.__closure__
+        assert closure is not None
+        assert "private_opener" in target.__code__.co_freevars
+        private_opener = closure[
+            target.__code__.co_freevars.index("private_opener")
+        ].cell_contents
+        assert (
+            private_opener
+            is betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+        )
+        assert attribute not in getattr(private_opener, "__dict__", {})
+        forged_calls: list[tuple[object, ...]] = []
+
+        def forged_dispatch(*args, **kwargs):
+            forged_calls.append(args)
+            raise AssertionError(
+                "forged private-opener dispatch must not be reached"
+            )
+
+        setattr(private_opener, attribute, forged_dispatch)
+        try:
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id=f"attempt-private-opener-{attribute}",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert forged_calls == []
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            delattr(private_opener, attribute)
+

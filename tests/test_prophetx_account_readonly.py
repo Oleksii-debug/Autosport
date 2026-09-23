@@ -5,7 +5,7 @@ from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException
 from urllib.error import HTTPError
-from urllib.request import OpenerDirector, ProxyHandler
+from urllib.request import HTTPSHandler, OpenerDirector, ProxyHandler
 
 import pytest
 
@@ -282,6 +282,76 @@ def test_canonical_wallet_authority_rejects_hidden_fetch_replacement_before_netw
     with pytest.raises(
         ProphetXReadOnlyError,
         match="requires product-owned transport",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert calls == []
+
+
+def _forged_wallet_network_response():
+    class ForgedResponse:
+        code = 200
+        msg = "OK"
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(GOOD_BODY)),
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, limit: int) -> bytes:
+            return GOOD_BODY
+
+        def getcode(self) -> int:
+            return self.code
+
+        def geturl(self) -> str:
+            return BALANCE_URL
+
+        def info(self):
+            return self.headers
+
+    return ForgedResponse()
+
+
+@pytest.mark.parametrize("mutation", ["instance-shadow", "dispatch-map"])
+def test_canonical_wallet_authority_rejects_hidden_opener_handler_graph_mutation(
+    mutation: str,
+):
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    opener = client._transport._opener  # type: ignore[attr-defined]
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is HTTPSHandler
+    )
+    calls: list[str] = []
+
+    def forged_https_open(request):
+        calls.append(request.full_url)
+        return _forged_wallet_network_response()
+
+    if mutation == "instance-shadow":
+        https_handler.https_open = forged_https_open
+    else:
+        class ForgedHttpsHandler:
+            def https_open(self, request):
+                return forged_https_open(request)
+
+        opener.handle_open["https"] = [ForgedHttpsHandler()]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network authority changed",
     ):
         client.read_account_snapshot(
             frozenset({BookmakerCapability.BALANCE_READ})

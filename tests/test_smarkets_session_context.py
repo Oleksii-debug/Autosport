@@ -141,7 +141,9 @@ def test_open_session_uses_fixed_accounts_origin_and_keeps_secret_out_of_evidenc
     assert session.account_witness.payload_sha256 == sha256(payload).hexdigest()
     assert session.account_witness.payload_size == len(payload)
     assert session.account_witness.provider_account_id == "provider-account-A"
+    assert session.account_witness.provider_currency == "GBP"
     assert session.provider_account_id == "provider-account-A"
+    assert session.provider_currency == "GBP"
     assert secret not in repr(session)
     assert secret not in repr(session.account_witness)
     assert b"provider-owned-value" not in repr(session.account_witness).encode()
@@ -510,6 +512,7 @@ def test_account_and_session_public_constructors_are_not_authority() -> None:
             payload_size=2,
             product_available_at="2026-09-22T18:00:00+00:00",
             provider_account_id="fake-account",
+            provider_currency="GBP",
         )
 
 
@@ -608,6 +611,7 @@ def test_account_activity_read_uses_exact_live_session_and_hides_payload(
     assert read.session_generation_id == session.generation_id
     assert read.account_context_sha256 == session.account_context_sha256
     assert read.provider_account_id == session.provider_account_id
+    assert read.provider_currency == session.provider_currency == "GBP"
     assert read.endpoint == session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
     assert read.provider_date == "2026-09-21T10:00:00+00:00"
     assert read.content_type == "application/json; charset=utf-8"
@@ -768,6 +772,7 @@ def test_forged_account_activity_read_cannot_resolve(monkeypatch) -> None:
         session_generation_id=issued.session_generation_id,
         account_context_sha256=issued.account_context_sha256,
         provider_account_id=issued.provider_account_id,
+        provider_currency=issued.provider_currency,
         endpoint=issued.endpoint,
         http_status=issued.http_status,
         provider_date=issued.provider_date,
@@ -815,4 +820,43 @@ def test_close_revokes_account_activity_resolution(monkeypatch) -> None:
         session.resolve_account_activity_read(read)
     with pytest.raises(SmarketsSessionContextError, match="closed"):
         session.acquire_account_activity()
+
+def test_account_activity_currency_is_provider_bound_not_caller_supplied(monkeypatch) -> None:
+    responses = iter(
+        (
+            _FakeResponse(
+                _account_payload("provider-account-A").replace(
+                    b'"currency":"GBP"', b'"currency":"EUR"'
+                )
+            ),
+            _FakeResponse(
+                b'{"account_activity":[]}',
+                url=session_context.SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        session_context,
+        "_open_accounts_request",
+        lambda request, timeout: next(responses),
+    )
+    _install_identity(
+        monkeypatch,
+        times=(
+            "2026-09-22T18:00:00+00:00",
+            "2026-09-22T18:00:01+00:00",
+        ),
+    )
+
+    session = open_smarkets_authenticated_session("token-A")
+    read = session.acquire_account_activity()
+
+    assert session.provider_currency == "EUR"
+    assert session.account_witness.provider_currency == "EUR"
+    assert read.provider_currency == "EUR"
+    assert "currency" not in session.acquire_account_activity.__annotations__
+
+    object.__setattr__(read, "provider_currency", "GBP")
+    with pytest.raises(SmarketsSessionContextError, match="does not match"):
+        session.resolve_account_activity_read(read)
 

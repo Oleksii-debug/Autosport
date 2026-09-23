@@ -18,6 +18,7 @@ from hashlib import sha256
 import secrets
 from typing import Final
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request
 
 from . import smarkets_orders_acquisition as orders_acquisition
@@ -35,6 +36,122 @@ _AUTHENTICATED_READ_SEAL: Final = object()
 
 class SmarketsSessionContextError(RuntimeError):
     """Authenticated Smarkets session/account context could not be established."""
+
+
+def _activity_filter_text(value: object, name: str) -> str:
+    if type(value) is not str:
+        raise SmarketsSessionContextError(f"{name} must be text")
+    normalized = value.strip()
+    if not normalized or normalized != value:
+        raise SmarketsSessionContextError(f"{name} must be non-empty canonical text")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise SmarketsSessionContextError(f"{name} contains control characters")
+    return normalized
+
+
+def _activity_filter_tuple(value: object, name: str) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise SmarketsSessionContextError(f"{name} must be an immutable tuple")
+    normalized = tuple(_activity_filter_text(item, name) for item in value)
+    return tuple(sorted(set(normalized)))
+
+
+def _activity_timestamp(value: datetime, name: str) -> str:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise SmarketsSessionContextError(f"{name} must be a timezone-aware datetime")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True, slots=True)
+class SmarketsAccountActivityQuery:
+    """Closed canonical query contract for the fixed account-activity endpoint."""
+
+    timestamp_min: datetime | None = None
+    timestamp_max: datetime | None = None
+    limit: int | None = None
+    market_ids: tuple[str, ...] = ()
+    order_ids: tuple[str, ...] = ()
+    pagination_last_seq: int | None = None
+    pagination_last_subseq: int | None = None
+    sort: str | None = None
+    sources: tuple[str, ...] = ()
+    event_info: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.timestamp_min is not None:
+            _activity_timestamp(self.timestamp_min, "timestamp_min")
+        if self.timestamp_max is not None:
+            _activity_timestamp(self.timestamp_max, "timestamp_max")
+        if self.timestamp_min is not None and self.timestamp_max is not None:
+            if self.timestamp_min > self.timestamp_max:
+                raise SmarketsSessionContextError(
+                    "timestamp_min must not be later than timestamp_max"
+                )
+        if self.limit is not None:
+            if type(self.limit) is not int or not 0 <= self.limit <= 500:
+                raise SmarketsSessionContextError("limit must be an integer in [0, 500]")
+        object.__setattr__(
+            self,
+            "market_ids",
+            _activity_filter_tuple(self.market_ids, "market_ids"),
+        )
+        object.__setattr__(
+            self,
+            "order_ids",
+            _activity_filter_tuple(self.order_ids, "order_ids"),
+        )
+        if (self.pagination_last_seq is None) != (
+            self.pagination_last_subseq is None
+        ):
+            raise SmarketsSessionContextError(
+                "pagination_last_seq and pagination_last_subseq must be supplied together"
+            )
+        for name in ("pagination_last_seq", "pagination_last_subseq"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise SmarketsSessionContextError(
+                    f"{name} must be a non-negative integer"
+                )
+        if self.sort is not None and self.sort not in {
+            "seq,subseq",
+            "-seq,-subseq",
+        }:
+            raise SmarketsSessionContextError(
+                "sort must be seq,subseq or -seq,-subseq"
+            )
+        object.__setattr__(
+            self,
+            "sources",
+            _activity_filter_tuple(self.sources, "sources"),
+        )
+        if self.event_info is not None and type(self.event_info) is not bool:
+            raise SmarketsSessionContextError("event_info must be bool or None")
+
+    def to_query_string(self) -> str:
+        pairs: list[tuple[str, str]] = []
+        if self.timestamp_min is not None:
+            pairs.append(
+                ("timestamp_min", _activity_timestamp(self.timestamp_min, "timestamp_min"))
+            )
+        if self.timestamp_max is not None:
+            pairs.append(
+                ("timestamp_max", _activity_timestamp(self.timestamp_max, "timestamp_max"))
+            )
+        if self.limit is not None:
+            pairs.append(("limit", str(self.limit)))
+        pairs.extend(("market_id", value) for value in self.market_ids)
+        pairs.extend(("order_id", value) for value in self.order_ids)
+        if self.pagination_last_seq is not None:
+            pairs.append(("pagination_last_seq", str(self.pagination_last_seq)))
+            pairs.append(
+                ("pagination_last_subseq", str(self.pagination_last_subseq))
+            )
+        if self.sort is not None:
+            pairs.append(("sort", self.sort))
+        pairs.extend(("source", value) for value in self.sources)
+        if self.event_info is not None:
+            pairs.append(("event_info", "true" if self.event_info else "false"))
+        return urlencode(pairs)
 
 
 def _validated_token(value: object) -> str:
@@ -261,6 +378,7 @@ class SmarketsSessionAuthenticatedRead:
     provider_account_id: str
     provider_currency: str
     endpoint: str
+    request_query: str
     http_status: int
     provider_date: str
     content_type: str
@@ -278,6 +396,7 @@ class SmarketsSessionAuthenticatedRead:
         provider_account_id: str,
         provider_currency: str,
         endpoint: str,
+        request_query: str,
         http_status: int,
         provider_date: str,
         content_type: str,
@@ -297,6 +416,7 @@ class SmarketsSessionAuthenticatedRead:
         object.__setattr__(self, "provider_account_id", provider_account_id)
         object.__setattr__(self, "provider_currency", provider_currency)
         object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "request_query", request_query)
         object.__setattr__(self, "http_status", http_status)
         object.__setattr__(self, "provider_date", provider_date)
         object.__setattr__(self, "content_type", content_type)
@@ -469,13 +589,25 @@ class SmarketsAuthenticatedSession:
     def acquire_account_activity(
         self,
         *,
+        query: SmarketsAccountActivityQuery | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
     ) -> SmarketsSessionAuthenticatedRead:
-        """Acquire the fixed account-activity endpoint under this exact live session."""
+        """Acquire one canonical account-activity query under this exact live session."""
         token = self._require_open()
         timeout = _validated_timeout(timeout_seconds)
+        if query is None:
+            request_query = ""
+        elif type(query) is SmarketsAccountActivityQuery:
+            request_query = query.to_query_string()
+        else:
+            raise SmarketsSessionContextError(
+                "query must be SmarketsAccountActivityQuery or None"
+            )
+        request_url = SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT
+        if request_query:
+            request_url = f"{request_url}?{request_query}"
         request = Request(
-            SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            request_url,
             method="GET",
             headers={
                 "Accept": "application/json",
@@ -489,9 +621,9 @@ class SmarketsAuthenticatedSession:
             with response:
                 final_url = response.geturl()
                 status = response.getcode()
-                if final_url != SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT:
+                if final_url != request_url:
                     raise SmarketsSessionContextError(
-                        "Smarkets account activity final URL is not the fixed official endpoint"
+                        "Smarkets account activity final URL does not match the canonical request"
                     )
                 if type(status) is not int or status != 200:
                     raise SmarketsSessionContextError(
@@ -529,12 +661,13 @@ class SmarketsAuthenticatedSession:
         available_at = _utc_now_iso()
         payload_sha256 = sha256(raw).hexdigest()
         evidence_sha256 = _digest_parts(
-            "autosport.smarkets.session-authenticated-read.v1",
+            "autosport.smarkets.session-authenticated-read.v2",
             self._generation_id,
             self._account_context_sha256,
             self._account_witness.provider_account_id,
             self._account_witness.provider_currency,
             SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            request_query,
             provider_date,
             content_type,
             available_at,
@@ -547,6 +680,7 @@ class SmarketsAuthenticatedSession:
             provider_account_id=self._account_witness.provider_account_id,
             provider_currency=self._account_witness.provider_currency,
             endpoint=SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
+            request_query=request_query,
             http_status=200,
             provider_date=provider_date,
             content_type=content_type,
@@ -584,6 +718,24 @@ class SmarketsAuthenticatedSession:
         ):
             raise SmarketsSessionContextError(
                 "Smarkets account activity evidence does not match this session/account context"
+            )
+        expected_evidence_sha256 = _digest_parts(
+            "autosport.smarkets.session-authenticated-read.v2",
+            candidate.session_generation_id,
+            candidate.account_context_sha256,
+            candidate.provider_account_id,
+            candidate.provider_currency,
+            candidate.endpoint,
+            candidate.request_query,
+            candidate.provider_date,
+            candidate.content_type,
+            candidate.product_available_at,
+            candidate.payload_sha256,
+            str(candidate.payload_size),
+        )
+        if candidate.evidence_sha256 != expected_evidence_sha256:
+            raise SmarketsSessionContextError(
+                "Smarkets account activity evidence fields no longer match issued identity"
             )
         return candidate
 

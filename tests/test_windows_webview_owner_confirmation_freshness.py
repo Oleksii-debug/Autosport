@@ -16,9 +16,10 @@ def test_owner_confirmation_is_disabled_until_latest_preview_completes() -> None
     assert "let ownerReviewFresh = false;" in source
     assert "let ownerReviewEpoch = 0;" in source
     assert "function syncOwnerConfirmationAvailability(canInitialize)" in source
-    assert "canInitialize !== true || ownerReviewFresh !== true" in source
-    assert 'setDisabledWithFocusFallback(byId("owner-confirm-checkbox"), disabled);' in source
-    assert 'setDisabledWithFocusFallback(byId("owner-confirm"), disabled);' in source
+    assert "const reviewDisabled = canInitialize !== true || ownerReviewFresh !== true;" in source
+    assert 'const checkbox = byId("owner-confirm-checkbox");' in source
+    assert "setDisabledWithFocusFallback(checkbox, reviewDisabled);" in source
+    assert "reviewDisabled || checkbox.checked !== true" in source
     assert "syncOwnerConfirmationAvailability(state.owner.can_initialize);" in source
 
     preview = source.index('byId(328).addEventListener("click", async () => {')
@@ -28,6 +29,32 @@ def test_owner_confirmation_is_disabled_until_latest_preview_completes() -> None
     preview_fresh = source.index("markOwnerReviewFresh(reviewEpoch);", preview)
     assert preview < preview_invalidate < preview_epoch < preview_dispatch < preview_fresh
     assert 'result && result.status === "completed"' in source[preview:preview_fresh]
+
+
+def test_create_actionability_tracks_explicit_confirmation_checkbox() -> None:
+    source = _source()
+
+    sync = source.index("function syncOwnerConfirmationAvailability(canInitialize)")
+    invalidate = source.index("function invalidateOwnerReview()", sync)
+    body = source[sync:invalidate]
+    assert 'const checkbox = byId("owner-confirm-checkbox");' in body
+    assert "setDisabledWithFocusFallback(checkbox, reviewDisabled);" in body
+    assert "reviewDisabled || checkbox.checked !== true" in body
+
+    listener = source.index(
+        'byId("owner-confirm-checkbox").addEventListener("change", () => {'
+    )
+    preview = source.index('byId(328).addEventListener("click", async () => {', listener)
+    listener_body = source[listener:preview]
+    assert "syncOwnerConfirmationAvailability(" in listener_body
+    assert "latestState.owner.can_initialize" in listener_body
+
+    mark = source.index("function markOwnerReviewFresh(epoch)")
+    request_id = source.index("function requestId()", mark)
+    mark_body = source[mark:request_id]
+    checked_false = mark_body.index('byId("owner-confirm-checkbox").checked = false;')
+    resync = mark_body.index("syncOwnerConfirmationAvailability(", checked_false)
+    assert checked_false < resync
 
 
 def test_any_owner_contract_edit_invalidates_prior_confirmation() -> None:

@@ -1663,10 +1663,14 @@ def route_compute(
                             + str(exc)
                         )
                     else:
+                        canonical_data_classification = current_context.get(
+                            "data_classification"
+                        )
                         expected_current_context = {
                             "request_id": request.request_id,
                             "decision_input_sha256": request.decision_input_sha256,
                             "task_class": request.required_capability,
+                            "data_classification": request.data_classification.value,
                             "sport_id": domain_observation.sport_id,
                             "league_id": domain_observation.league_id,
                             "regime_id": request.voc_regime_id,
@@ -1675,7 +1679,20 @@ def route_compute(
                                 request.voc_contradiction_state
                             ),
                         }
-                        if current_context != expected_current_context:
+                        if canonical_data_classification is None:
+                            baseline_reason = (
+                                "canonical current VOC decision context is legacy "
+                                "and lacks data classification"
+                            )
+                        elif (
+                            canonical_data_classification
+                            != request.data_classification.value
+                        ):
+                            baseline_reason = (
+                                "canonical current VOC data classification "
+                                "does not match the current request"
+                            )
+                        elif current_context != expected_current_context:
                             baseline_reason = (
                                 "canonical current VOC decision context "
                                 "does not match the current request"

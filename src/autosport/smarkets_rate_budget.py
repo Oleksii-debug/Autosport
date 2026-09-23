@@ -187,12 +187,81 @@ class SmarketsAccountRateBudget:
         connection.execute('PRAGMA foreign_keys = ON')
         return connection
 
+    def _read_durable_policy(self, connection: sqlite3.Connection) -> tuple[int, int]:
+        row = connection.execute(
+            'SELECT approved_limit, approved_window_seconds '
+            'FROM smarkets_rate_policy WHERE account_id = ?',
+            (self._account_id,),
+        ).fetchone()
+        if row is None:
+            raise SmarketsRateBudgetError('durable approved rate policy is missing')
+        return (
+            _positive_int(row['approved_limit'], 'stored approved_limit'),
+            _positive_int(
+                row['approved_window_seconds'],
+                'stored approved_window_seconds',
+            ),
+        )
+
+    def _bind_or_tighten_durable_policy(self, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            'SELECT approved_limit, approved_window_seconds '
+            'FROM smarkets_rate_policy WHERE account_id = ?',
+            (self._account_id,),
+        ).fetchone()
+        if row is None:
+            legacy_budget = connection.execute(
+                'SELECT 1 FROM smarkets_rate_budget WHERE account_id = ?',
+                (self._account_id,),
+            ).fetchone()
+            legacy_block = connection.execute(
+                'SELECT 1 FROM smarkets_rate_block WHERE account_id = ?',
+                (self._account_id,),
+            ).fetchone()
+            if legacy_budget is not None or legacy_block is not None:
+                raise SmarketsRateBudgetError(
+                    'existing account rate state lacks durable approved policy'
+                )
+            connection.execute(
+                'INSERT INTO smarkets_rate_policy '
+                '(account_id, approved_limit, approved_window_seconds) '
+                'VALUES (?, ?, ?)',
+                (
+                    self._account_id,
+                    self._approved_limit,
+                    self._approved_window_seconds,
+                ),
+            )
+            return
+
+        durable_limit = _positive_int(
+            row['approved_limit'], 'stored approved_limit'
+        )
+        durable_window = _positive_int(
+            row['approved_window_seconds'],
+            'stored approved_window_seconds',
+        )
+        if durable_window != self._approved_window_seconds:
+            raise SmarketsRateBudgetError(
+                'approved rate window conflicts with durable account policy'
+            )
+        if self._approved_limit < durable_limit:
+            connection.execute(
+                'UPDATE smarkets_rate_policy SET approved_limit = ? '
+                'WHERE account_id = ?',
+                (self._approved_limit, self._account_id),
+            )
+
     def _initialize(self) -> None:
         try:
             with self._connect() as connection:
                 connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_budget (\n                        account_id TEXT PRIMARY KEY,\n                        observation_sha256 TEXT NOT NULL,\n                        provider_limit INTEGER NOT NULL,\n                        provider_remaining INTEGER NOT NULL,\n                        window_seconds INTEGER NOT NULL,\n                        observed_at TEXT NOT NULL,\n                        reset_at TEXT NOT NULL,\n                        http_status INTEGER NOT NULL,\n                        error_type TEXT,\n                        reservation_sequence INTEGER NOT NULL CHECK (reservation_sequence >= 0)\n                    )\n                    ')
                 connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_reservation (\n                        reservation_id TEXT PRIMARY KEY,\n                        account_id TEXT NOT NULL,\n                        budget_reset_at TEXT NOT NULL,\n                        issued_observation_sha256 TEXT NOT NULL,\n                        completed_observation_sha256 TEXT,\n                        FOREIGN KEY(account_id) REFERENCES smarkets_rate_budget(account_id)\n                    )\n                    ')
                 connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_block (\n                        account_id TEXT PRIMARY KEY,\n                        observed_at TEXT NOT NULL,\n                        reason TEXT NOT NULL\n                    )\n                    ')
+                connection.execute('\n                    CREATE TABLE IF NOT EXISTS smarkets_rate_policy (\n                        account_id TEXT PRIMARY KEY,\n                        approved_limit INTEGER NOT NULL CHECK (approved_limit > 0),\n                        approved_window_seconds INTEGER NOT NULL CHECK (approved_window_seconds > 0)\n                    )\n                    ')
+                connection.execute('BEGIN IMMEDIATE')
+                self._bind_or_tighten_durable_policy(connection)
+                connection.execute('COMMIT')
         except sqlite3.Error as exc:
             raise SmarketsRateBudgetError('rate-budget database initialization failed') from exc
 
@@ -201,8 +270,6 @@ class SmarketsAccountRateBudget:
             raise SmarketsRateBudgetError('observation must be SmarketsRateBudgetObservation')
         if observation.account_id != self._account_id:
             raise SmarketsRateBudgetError('rate-budget observation account mismatch')
-        if observation.window_seconds != self._approved_window_seconds:
-            raise SmarketsRateBudgetError('provider and approved rate windows must match before positive use')
         if reservation_id is not None:
             _sha_text(reservation_id, 'reservation_id')
         digest = observation.evidence_sha256
@@ -211,6 +278,11 @@ class SmarketsAccountRateBudget:
         try:
             with self._connect() as connection:
                 connection.execute('BEGIN IMMEDIATE')
+                _, approved_window_seconds = self._read_durable_policy(connection)
+                if observation.window_seconds != approved_window_seconds:
+                    raise SmarketsRateBudgetError(
+                        'provider and approved rate windows must match before positive use'
+                    )
                 current = connection.execute('SELECT * FROM smarkets_rate_budget WHERE account_id = ?', (self._account_id,)).fetchone()
                 reset_changed = current is None
                 if current is not None:
@@ -302,6 +374,7 @@ class SmarketsAccountRateBudget:
         try:
             with self._connect() as connection:
                 connection.execute('BEGIN IMMEDIATE')
+                approved_limit, approved_window_seconds = self._read_durable_policy(connection)
                 block = connection.execute('SELECT observed_at, reason FROM smarkets_rate_block WHERE account_id = ?', (self._account_id,)).fetchone()
                 row = connection.execute('SELECT * FROM smarkets_rate_budget WHERE account_id = ?', (self._account_id,)).fetchone()
                 if row is None:
@@ -311,12 +384,19 @@ class SmarketsAccountRateBudget:
                 reset_at = _parse_dt(row['reset_at'], 'stored reset_at')
                 observed_remaining = _nonnegative_int(row['provider_remaining'], 'stored provider_remaining')
                 provider_limit = _positive_int(row['provider_limit'], 'stored provider_limit')
+                stored_window_seconds = _positive_int(
+                    row['window_seconds'], 'stored window_seconds'
+                )
+                if stored_window_seconds != approved_window_seconds:
+                    raise SmarketsRateBudgetError(
+                        'stored provider and durable approved rate windows differ'
+                    )
                 pending = connection.execute('\n                    SELECT COUNT(*) FROM smarkets_rate_reservation\n                    WHERE account_id = ? AND budget_reset_at = ?\n                      AND completed_observation_sha256 IS NULL\n                    ', (self._account_id, row['reset_at'])).fetchone()[0]
                 pending = _nonnegative_int(pending, 'stored pending reservations')
                 provider_used = provider_limit - observed_remaining
                 if provider_used < 0:
                     raise SmarketsRateBudgetError('stored provider usage is invalid')
-                approved_remaining = max(0, self._approved_limit - provider_used)
+                approved_remaining = max(0, approved_limit - provider_used)
                 base_remaining = min(observed_remaining, approved_remaining)
                 effective_before = max(0, base_remaining - pending)
                 reason: str | None = None

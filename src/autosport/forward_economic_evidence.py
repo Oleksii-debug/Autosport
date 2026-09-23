@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import StrEnum
@@ -226,6 +226,11 @@ class FamilywiseAlphaRegistry:
     total_alpha: Decimal
     allocations: tuple[AlphaAllocation, ...]
     sealed_at: datetime
+    _sealed_identity_sha256: str = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         _text(self.family_id, "family_id")
@@ -235,28 +240,35 @@ class FamilywiseAlphaRegistry:
         _decimal_text(total)
         if total >= 1:
             raise ForwardEconomicEvidenceError("total_alpha must be less than one")
-        _instant(self.sealed_at, "sealed_at")
+        sealed_at = _instant(self.sealed_at, "sealed_at")
         if not self.allocations:
             raise ForwardEconomicEvidenceError("alpha registry must allocate at least one challenger")
         if any(type(item) is not AlphaAllocation for item in self.allocations):
             raise ForwardEconomicEvidenceError("alpha allocations must be exact AlphaAllocation values")
-        challenger_ids = tuple(item.challenger_id for item in self.allocations)
+
+        # Freeze caller-owned containers/items at the seal boundary. A list that
+        # is mutated after construction, or a later object.__setattr__ on a caller's
+        # AlphaAllocation, must not rewrite this registry's scientific family.
+        allocations = tuple(deepcopy(item) for item in self.allocations)
+        challenger_ids = tuple(item.challenger_id for item in allocations)
         if challenger_ids != tuple(sorted(challenger_ids)):
             raise ForwardEconomicEvidenceError("alpha allocations must be sorted by challenger_id")
         if len(set(challenger_ids)) != len(challenger_ids):
             raise ForwardEconomicEvidenceError("alpha allocations must have unique challenger_id values")
-        allocated = sum((Fraction(item.alpha) for item in self.allocations), Fraction(0))
+        allocated = sum((Fraction(item.alpha) for item in allocations), Fraction(0))
         if allocated > Fraction(total):
             raise ForwardEconomicEvidenceError("familywise alpha allocations exceed total_alpha")
 
-    def allocation_for(self, challenger_id: str) -> Decimal:
-        challenger_id = _text(challenger_id, "challenger_id")
-        for item in self.allocations:
-            if item.challenger_id == challenger_id:
-                return item.alpha
-        raise ForwardEconomicEvidenceError("challenger is not preallocated in alpha registry")
+        object.__setattr__(self, "total_alpha", total)
+        object.__setattr__(self, "allocations", allocations)
+        object.__setattr__(self, "sealed_at", sealed_at)
+        object.__setattr__(
+            self,
+            "_sealed_identity_sha256",
+            _canonical_digest(self._payload_unchecked()),
+        )
 
-    def to_payload(self) -> dict[str, object]:
+    def _payload_unchecked(self) -> dict[str, object]:
         return {
             "schema_version": 1,
             "family_id": self.family_id,
@@ -265,9 +277,28 @@ class FamilywiseAlphaRegistry:
             "allocations": [item.to_payload() for item in self.allocations],
         }
 
+    def _require_sealed_identity(self) -> None:
+        if _canonical_digest(self._payload_unchecked()) != self._sealed_identity_sha256:
+            raise ForwardEconomicEvidenceError(
+                "sealed alpha registry identity integrity drift"
+            )
+
+    def allocation_for(self, challenger_id: str) -> Decimal:
+        self._require_sealed_identity()
+        challenger_id = _text(challenger_id, "challenger_id")
+        for item in self.allocations:
+            if item.challenger_id == challenger_id:
+                return item.alpha
+        raise ForwardEconomicEvidenceError("challenger is not preallocated in alpha registry")
+
+    def to_payload(self) -> dict[str, object]:
+        self._require_sealed_identity()
+        return self._payload_unchecked()
+
     @property
     def identity_sha256(self) -> str:
-        return _canonical_digest(self.to_payload())
+        self._require_sealed_identity()
+        return self._sealed_identity_sha256
 
 
 @dataclass(frozen=True, slots=True, init=False)

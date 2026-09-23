@@ -331,7 +331,10 @@ def test_primary_and_dropcopy_have_independent_sequences_but_one_execid_event() 
     with tempfile.TemporaryDirectory() as tmp:
         store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
         primary = ident(ProphetXFixStream.PRIMARY)
-        drop = ident(ProphetXFixStream.DROP_COPY)
+        drop = replace(
+            ident(ProphetXFixStream.DROP_COPY),
+            credential_identity_sha256="f" * 64,
+        )
         store.initialize_session(primary, next_expected_inbound=101, observed_at=T0)
         store.initialize_session(drop, next_expected_inbound=7, observed_at=T0)
         first = store.record_execution_report(report(primary, seq=100))

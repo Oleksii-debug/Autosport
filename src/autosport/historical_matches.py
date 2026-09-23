@@ -23,6 +23,7 @@ from .parlayapi_provider import (
 TERMS_REFERENCE = "https://parlay-api.com/terms"
 REQUEST_CONTRACT_REFERENCE = "https://api.parlay-api.com/docs"
 _CAPTURE_PUBLISH_LOCK = threading.Lock()
+_CANONICAL_HISTORICAL_SPORT_KEY = "table_tennis"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,10 @@ def historical_match_request_url(
     base_url = provider.base_url
     if not isinstance(base_url, str) or not base_url:
         raise ValueError("provider base_url must be a non-empty URL")
+    if provider.sport_key != _CANONICAL_HISTORICAL_SPORT_KEY:
+        raise ProviderPayloadError(
+            "historical match request requires the canonical table-tennis sport scope"
+        )
     parsed_base = urlsplit(base_url)
     if parsed_base.username is not None or parsed_base.password is not None:
         raise ValueError("provider base_url must not contain credentials")
@@ -71,7 +76,7 @@ def historical_match_request_url(
         "pricedOnly": "true" if priced_only else "false",
     }
     return (
-        f"{base_url}/v1/historical/sports/{provider.sport_key}/matches?"
+        f"{base_url}/v1/historical/sports/{_CANONICAL_HISTORICAL_SPORT_KEY}/matches?"
         + urlencode(query_values)
     )
 
@@ -115,7 +120,7 @@ def capture_historical_matches(
         raise ValueError("output_path and evidence_path must refer to different files")
 
     requested_sport_key = provider.sport_key
-    if requested_sport_key != ParlayApiTableTennisProvider.sport_key:
+    if requested_sport_key != _CANONICAL_HISTORICAL_SPORT_KEY:
         raise ProviderPayloadError(
             "historical match capture requires the canonical table-tennis sport scope"
         )

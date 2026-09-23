@@ -476,6 +476,126 @@ def test_router_instance_get_request_shadow_is_rejected(monkeypatch) -> None:
             _issue(authority, router, intent)
 
 
+def test_opportunity_intent_module_rebind_cannot_redefine_canonical_origin(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="intent-class-rebind")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    class ReboundOpportunityIntent:
+        def __init__(self, canonical) -> None:
+            self._canonical = canonical
+
+        def __getattr__(self, name: str):
+            return getattr(self._canonical, name)
+
+    forged = ReboundOpportunityIntent(intent)
+    temporary, workspace, authority_root = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        authority = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        monkeypatch.setattr(
+            subject,
+            "OpportunityIntent",
+            ReboundOpportunityIntent,
+        )
+
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="exact canonical OpportunityIntent",
+        ):
+            _issue(authority, router, forged)
+
+        assert not authority.path.exists()
+        assert router.get_request("intent-route-1") is None
+
+
+def test_router_store_module_rebind_cannot_redefine_canonical_origin(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="router-class-rebind")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    class ReboundRouterStore:
+        def __init__(self, canonical: ModelComputeRouterStore) -> None:
+            self._canonical = canonical
+            self.path = canonical.path
+
+        def get_request(self, request_id: str):
+            return self._canonical.get_request(request_id)
+
+    temporary, workspace, authority_root = _workspace()
+    with temporary:
+        canonical_router = ModelComputeRouterStore(workspace / "router.json")
+        forged_router = ReboundRouterStore(canonical_router)
+        authority = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        monkeypatch.setattr(
+            subject,
+            "ModelComputeRouterStore",
+            ReboundRouterStore,
+        )
+
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="exact canonical ModelComputeRouterStore",
+        ):
+            _issue(authority, forged_router, intent)  # type: ignore[arg-type]
+
+        assert not authority.path.exists()
+        assert canonical_router.get_request("intent-route-1") is None
+
+
+def test_route_request_module_rebind_does_not_control_product_construction(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="request-class-rebind")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    class ReboundRouteRequest:
+        def __init__(self, **kwargs) -> None:
+            self._canonical = ComputeRouteRequest(**kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(self._canonical, name)
+
+        def payload(self):
+            return self._canonical.payload()
+
+        @classmethod
+        def from_payload(cls, raw):
+            item = object.__new__(cls)
+            item._canonical = ComputeRouteRequest.from_payload(raw)
+            return item
+
+    temporary, workspace, authority_root = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        authority = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        monkeypatch.setattr(
+            subject,
+            "ComputeRouteRequest",
+            ReboundRouteRequest,
+        )
+
+        issued = _issue(authority, router, intent)
+
+        assert type(issued) is ComputeRouteRequest
+        assert issued.decision_input_sha256 == intent.intent_sha256
+        assert issued.decision_evidence_sha256 == intent.evidence.evidence_sha256
+
+
 def test_deleted_authority_state_fails_monotonic_rollback_fence(
     monkeypatch,
 ) -> None:

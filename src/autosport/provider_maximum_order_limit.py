@@ -90,6 +90,21 @@ class ProviderMaximumOrderLimitEvidence:
             raise ProviderMaximumOrderLimitError(
                 "limit_kind must be exact ProviderMaximumOrderLimitKind"
             )
+        allowed_limit_kinds = {
+            "BACK": {
+                ProviderMaximumOrderLimitKind.BACK_STAKE_PER_ORDER,
+                ProviderMaximumOrderLimitKind.ORDER_NOTIONAL_PER_ORDER,
+            },
+            "LAY": {
+                ProviderMaximumOrderLimitKind.LAY_STAKE_PER_ORDER,
+                ProviderMaximumOrderLimitKind.LAY_LIABILITY_PER_ORDER,
+                ProviderMaximumOrderLimitKind.ORDER_NOTIONAL_PER_ORDER,
+            },
+        }
+        if self.limit_kind not in allowed_limit_kinds[self.side]:
+            raise ProviderMaximumOrderLimitError(
+                "limit_kind is incompatible with side"
+            )
         _positive_decimal(self.maximum_amount, "maximum_amount")
         observed = _utc(self.observed_at, "observed_at")
         valid_until = _utc(self.valid_until, "valid_until")

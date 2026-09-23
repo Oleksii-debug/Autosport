@@ -457,3 +457,62 @@ def test_boolean_quote_count_cannot_mint_historical_evidence_identity(tmp_path: 
             outcome_reveal_after=REVEAL_AT,
             imported_at=IMPORTED_AT,
         )
+
+
+def test_same_snapshot_set_reversed_is_identity_idempotent(tmp_path: Path) -> None:
+    first = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="order-a",
+        event_id="event-order-a",
+    )
+    second = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="order-b",
+        requested_at="2026-01-01T10:00:30+00:00",
+        event_id="event-order-b",
+    )
+    events = (first[2], second[2])
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="order-stable",
+    )
+    results = _write_results(tmp_path, events, suffix="order-stable")
+
+    assemble_historical_corpus(
+        [(first[0], first[1]), (second[0], second[1])],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "order-corpus-a",
+        name="ordered-a",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+    assemble_historical_corpus(
+        [(second[0], second[1]), (first[0], first[1])],
+        results_path=results,
+        governance_proof_path=proof,
+        output_dir=tmp_path / "order-corpus-b",
+        name="ordered-b",
+        outcome_reveal_after=REVEAL_AT,
+        imported_at=IMPORTED_AT,
+    )
+
+    first_manifest = json.loads(
+        (tmp_path / "order-corpus-a" / "manifest.json").read_text(encoding="utf-8")
+    )
+    second_manifest = json.loads(
+        (tmp_path / "order-corpus-b" / "manifest.json").read_text(encoding="utf-8")
+    )
+    first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
+    assert first_provenance["governance_identity"] == second_provenance["governance_identity"]
+    assert (
+        first_provenance["qualified_corpus_identity"]
+        == second_provenance["qualified_corpus_identity"]
+    )

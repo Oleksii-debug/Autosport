@@ -220,6 +220,22 @@ def _make_account_identity_authority():
     canonical_rpc_result_init = rpc_result_type.__init__
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
+    semantic_property_bindings = tuple(
+        (
+            name,
+            descriptor,
+            descriptor.fget,
+            getattr(descriptor.fget, "__code__", None),
+        )
+        for name in (
+            "remote_provider_origin_proven",
+            "provider_account_details_origin_proven",
+            "stable_account_identity_proven",
+            "stable_account_id",
+            "cross_session_equivalence_proven",
+        )
+        for descriptor in (identity_type.__dict__[name],)
+    )
     readonly_globals = canonical_read_account_details.__globals__
     function_type = type(canonical_read_account_details)
     missing_global = object()
@@ -354,9 +370,16 @@ def _make_account_identity_authority():
         return sha256_fn(encoded).hexdigest()
 
     def identity_class_is_current() -> bool:
-        return (
+        return bool(
             identity_type.__init__ is canonical_identity_init
             and identity_type.__post_init__ is canonical_identity_post_init
+            and all(
+                identity_type.__dict__.get(name) is descriptor
+                and descriptor.fget is getter
+                and getattr(getter, "__code__", None) is getter_code
+                for name, descriptor, getter, getter_code
+                in semantic_property_bindings
+            )
         )
 
     def readonly_dependencies_are_current() -> bool:

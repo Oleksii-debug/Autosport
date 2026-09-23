@@ -785,7 +785,8 @@ class AutosportWebController:
             return self._fail(text("ui.status.replay.start_failed"))
         self.evaluation = [text("ui.evaluation.running")]
         return self._ok(
-            text("ui.status.replay.running", strategy_id=strategy_id, plan_identity="")
+            text("ui.status.replay.running", strategy_id=strategy_id, plan_identity=""),
+            focus_id="204",
         )
 
     def _action_live_refresh(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -807,7 +808,10 @@ class AutosportWebController:
         if not self.live_worker.start(task):
             return self._fail(text("ui.status.live.busy"))
         self.live_status = text("ui.status.live.running")
-        return self._ok(text("ui.status.live.read_only_running"))
+        return self._ok(
+            text("ui.status.live.read_only_running"),
+            focus_id="203",
+        )
 
     def _action_recovery_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():
@@ -834,7 +838,14 @@ class AutosportWebController:
             return self._fail(text("ui.status.recovery.start_failed"))
         self.bank = text("ui.status.bank.quarantined", workspace=workspace)
         self.tickets = [text("ui.status.recovery.in_progress_ticket")]
-        return self._ok(text("ui.status.recovery.running", strategy_id=strategy_id, plan_identity=""))
+        return self._ok(
+            text(
+                "ui.status.recovery.running",
+                strategy_id=strategy_id,
+                plan_identity="",
+            ),
+            focus_id="202",
+        )
 
     def _action_evidence_export(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():
@@ -852,7 +863,10 @@ class AutosportWebController:
             return self._fail(text("ui.status.evidence_export.destination_invalid"))
         if not self.evidence_export_worker.start(workspace, destination):
             return self._fail(text("ui.status.evidence_export.start_failed"))
-        return self._ok(text("ui.status.evidence_export.running"))
+        return self._ok(
+            text("ui.status.evidence_export.running"),
+            focus_id="202",
+        )
 
     def _action_product_runtime_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():

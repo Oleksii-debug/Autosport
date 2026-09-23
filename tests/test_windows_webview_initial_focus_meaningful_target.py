@@ -68,7 +68,9 @@ def _startup_focus_target(script: str) -> str:
         r'byId\("([^"]+)"\)\.focus\(\);',
         ready.group("body"),
     )
-    assert len(targets) == 1, "startup must choose exactly one deterministic focus target"
+    assert len(targets) == 1, (
+        "startup must choose exactly one deterministic focus target"
+    )
     return targets[0]
 
 
@@ -90,7 +92,9 @@ def test_startup_focus_targets_named_heading_or_native_control() -> None:
 
     document = _Document()
     document.feed(document_text)
-    assert target_id in document.elements, "startup focus target must exist in canonical HTML"
+    assert target_id in document.elements, (
+        "startup focus target must exist in canonical HTML"
+    )
 
     element = document.elements[target_id]
     tag = element["tag"]
@@ -99,12 +103,15 @@ def test_startup_focus_targets_named_heading_or_native_control() -> None:
     assert isinstance(attrs, dict)
 
     assert tag != "main", (
-        "startup focus must land on a meaningful heading/control, not a generic main landmark"
+        "startup focus must land on a meaningful heading/control, "
+        "not a generic main landmark"
     )
     assert tag in _HEADING_TAGS or tag in _NATIVE_FOCUS_TAGS or (
         tag == "a" and bool(attrs.get("href"))
     ), "startup target must be a semantic heading or native interactive control"
-    assert _has_meaningful_name(element), "startup target must expose a stable accessible name"
+    assert _has_meaningful_name(element), (
+        "startup target must expose a stable accessible name"
+    )
 
     if tag in _HEADING_TAGS:
         assert attrs.get("tabindex") in {"-1", "0"}, (
@@ -113,7 +120,9 @@ def test_startup_focus_targets_named_heading_or_native_control() -> None:
 
     tabindex = attrs.get("tabindex")
     if tabindex is not None:
-        assert tabindex in {"-1", "0"}, "positive tabindex must not be introduced"
+        assert tabindex in {"-1", "0"}, (
+            "positive tabindex must not be introduced"
+        )
 
 
 def test_parser_control_rejects_generic_main_target() -> None:

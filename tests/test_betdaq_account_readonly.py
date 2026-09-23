@@ -46,8 +46,10 @@ class _FakeHttpResponse:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
-    def read(self):
-        return self.payload
+    def read(self, size=-1):
+        if size is None or size < 0:
+            return self.payload
+        return self.payload[:size]
 
 
 class QueueUrlopen:
@@ -379,6 +381,63 @@ def test_transport_exception_text_is_not_propagated_or_logged_as_error_detail():
         c.read_account_balance()
     assert "p@ss" not in str(exc.value)
     assert "app-id" not in str(exc.value)
+
+
+def test_canonical_transport_reads_at_most_one_byte_past_response_limit(monkeypatch):
+    payload = b"x" * (betdaq_account_module._MAX_SOAP_RESPONSE_BYTES + 1)
+    opener = QueueUrlopen(payload)
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+
+    transport = UrllibBetdaqSoapTransport()
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="response exceeds bounded size",
+    ):
+        transport.post(
+            "https://api.betdaq.com/v2.0/Secure/SecureService.asmx",
+            headers={"Content-Type": "text/xml"},
+            body=b"<secret/>",
+            timeout_seconds=1.0,
+        )
+
+
+def test_canonical_redirect_handler_refuses_redirect_before_following():
+    handler = betdaq_account_module._NoRedirectHandler()
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="redirect refused",
+    ):
+        handler.redirect_request(
+            None,
+            None,
+            307,
+            "Temporary Redirect",
+            {},
+            "https://example.invalid/credential-sink",
+        )
+
+
+def test_canonical_secure_opener_does_not_inherit_environment_proxies():
+    proxy_handlers = [
+        handler
+        for handler in betdaq_account_module._CANONICAL_SECURE_OPENER.handlers
+        if hasattr(handler, "proxies")
+    ]
+    assert proxy_handlers
+    assert all(handler.proxies == {} for handler in proxy_handlers)
+
+
+@pytest.mark.parametrize(
+    "timeout_seconds",
+    [float("nan"), float("inf"), float("-inf"), 10**10000],
+)
+def test_account_client_rejects_nonfinite_or_unrepresentable_timeout(timeout_seconds):
+    with pytest.raises(ValueError, match="positive finite number"):
+        BetdaqAccountReadOnlyClient(
+            BetdaqCredentials("alice", "p@ss", "app-id"),
+            timeout_seconds=timeout_seconds,
+            clock=clock,
+        )
 
 
 def test_soap_fault_fails_closed():

@@ -133,6 +133,7 @@ class PaperExecutionQualitySample:
     fill_ratio: Decimal | None
     signed_odds_delta: Decimal | None
     signed_price_spread_bps: Decimal | None
+    signed_adverse_price_slippage_bps: Decimal | None
     price_movement: PriceMovement
     model_delay_ms: int
     model_quote_age_ms: int
@@ -179,6 +180,11 @@ class PaperExecutionQualitySample:
                 if self.signed_price_spread_bps is None
                 else _decimal_text(self.signed_price_spread_bps)
             ),
+            "signed_adverse_price_slippage_bps": (
+                None
+                if self.signed_adverse_price_slippage_bps is None
+                else _decimal_text(self.signed_adverse_price_slippage_bps)
+            ),
             "price_movement": self.price_movement.value,
             "model_delay_ms": self.model_delay_ms,
             "model_quote_age_ms": self.model_quote_age_ms,
@@ -200,6 +206,7 @@ class PaperExecutionQualitySlice:
     outcome_counts: tuple[tuple[str, int], ...]
     fill_ratio: NumericDistribution
     signed_price_spread_bps: NumericDistribution
+    signed_adverse_price_slippage_bps: NumericDistribution
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -210,6 +217,9 @@ class PaperExecutionQualitySlice:
             "outcome_counts": dict(self.outcome_counts),
             "fill_ratio": self.fill_ratio.to_payload(),
             "signed_price_spread_bps": self.signed_price_spread_bps.to_payload(),
+            "signed_adverse_price_slippage_bps": (
+                self.signed_adverse_price_slippage_bps.to_payload()
+            ),
         }
 
 
@@ -234,6 +244,7 @@ class PaperExecutionQualityReport:
     model_quote_age_ms: NumericDistribution
     fill_ratio: NumericDistribution
     signed_price_spread_bps: NumericDistribution
+    signed_adverse_price_slippage_bps: NumericDistribution
     slices: tuple[PaperExecutionQualitySlice, ...]
     samples: tuple[PaperExecutionQualitySample, ...]
     protocol: str = PROTOCOL
@@ -269,6 +280,9 @@ class PaperExecutionQualityReport:
                 "model_quote_age_ms": self.model_quote_age_ms.to_payload(),
                 "fill_ratio": self.fill_ratio.to_payload(),
                 "signed_price_spread_bps": self.signed_price_spread_bps.to_payload(),
+                "signed_adverse_price_slippage_bps": (
+                    self.signed_adverse_price_slippage_bps.to_payload()
+                ),
             },
             "slices": [item.to_payload() for item in self.slices],
             "samples": [item.to_payload() for item in self.samples],
@@ -281,18 +295,28 @@ class PaperExecutionQualityReport:
 def _price_metrics(
     decision_odds: Decimal,
     execution_odds: Decimal | None,
-) -> tuple[Decimal | None, Decimal | None, PriceMovement]:
+    *,
+    side: str,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, PriceMovement]:
     if execution_odds is None:
-        return None, None, PriceMovement.UNAVAILABLE
+        return None, None, None, PriceMovement.UNAVAILABLE
     delta = execution_odds - decision_odds
     spread_bps = ((execution_odds / decision_odds) - Decimal(1)) * Decimal(10_000)
+    if side == "BACK":
+        adverse_slippage_bps = -spread_bps
+    elif side == "LAY":
+        adverse_slippage_bps = spread_bps
+    else:
+        raise EvaluationUniverseIntegrityError(
+            "execution-quality PAPER attempt has unsupported bet side"
+        )
     if delta > 0:
         movement = PriceMovement.HIGHER_ODDS
     elif delta < 0:
         movement = PriceMovement.LOWER_ODDS
     else:
         movement = PriceMovement.SAME_ODDS
-    return delta, spread_bps, movement
+    return delta, spread_bps, adverse_slippage_bps, movement
 
 
 def _sample_for_event(ledger: EvaluationUniverseLedger, row, event) -> PaperExecutionQualitySample:
@@ -323,9 +347,10 @@ def _sample_for_event(ledger: EvaluationUniverseLedger, row, event) -> PaperExec
     else:
         assert attempt.execution_stake is not None
         fill_ratio = attempt.execution_stake / attempt.requested_stake
-    delta, spread_bps, movement = _price_metrics(
+    delta, spread_bps, adverse_slippage_bps, movement = _price_metrics(
         attempt.decision_odds,
         attempt.execution_odds,
+        side=attempt.side,
     )
     return PaperExecutionQualitySample(
         row_id=row.row_id,
@@ -348,6 +373,7 @@ def _sample_for_event(ledger: EvaluationUniverseLedger, row, event) -> PaperExec
         fill_ratio=fill_ratio,
         signed_odds_delta=delta,
         signed_price_spread_bps=spread_bps,
+        signed_adverse_price_slippage_bps=adverse_slippage_bps,
         price_movement=movement,
         model_delay_ms=attempt.delay_ms,
         model_quote_age_ms=attempt.quote_age_ms,
@@ -388,6 +414,11 @@ def _slice(samples: tuple[PaperExecutionQualitySample, ...]) -> tuple[PaperExecu
                     member.signed_price_spread_bps
                     for member in members
                     if member.signed_price_spread_bps is not None
+                ),
+                signed_adverse_price_slippage_bps=NumericDistribution.from_values(
+                    member.signed_adverse_price_slippage_bps
+                    for member in members
+                    if member.signed_adverse_price_slippage_bps is not None
                 ),
             )
         )
@@ -443,6 +474,11 @@ def project_paper_execution_quality(
         for sample in ordered
         if sample.signed_price_spread_bps is not None
     )
+    adverse_price_observations = tuple(
+        sample.signed_adverse_price_slippage_bps
+        for sample in ordered
+        if sample.signed_adverse_price_slippage_bps is not None
+    )
     fill_observations = tuple(
         sample.fill_ratio for sample in ordered if sample.fill_ratio is not None
     )
@@ -481,6 +517,9 @@ def project_paper_execution_quality(
         ),
         fill_ratio=NumericDistribution.from_values(fill_observations),
         signed_price_spread_bps=NumericDistribution.from_values(price_observations),
+        signed_adverse_price_slippage_bps=NumericDistribution.from_values(
+            adverse_price_observations
+        ),
         slices=_slice(ordered),
         samples=ordered,
     )

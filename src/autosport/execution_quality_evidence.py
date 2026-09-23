@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
 from typing import Iterable
 
@@ -16,7 +16,9 @@ from .evaluation_universe import (
 from .paper_execution_reality import PaperAttemptOutcome
 
 
-PROTOCOL = "autosport-execution-quality-evidence/v1"
+PROTOCOL = "autosport-execution-quality-evidence/v2"
+DERIVED_DECIMAL_PRECISION = 50
+DERIVED_DECIMAL_ROUNDING = "ROUND_HALF_EVEN"
 
 
 class ExecutionEvidencePlane(StrEnum):
@@ -65,6 +67,13 @@ def _digest(payload: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _derived_ratio(numerator: Decimal, denominator: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = DERIVED_DECIMAL_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        return numerator / denominator
 
 
 def _nearest_rank(values: tuple[Decimal, ...], percentile: int) -> Decimal | None:
@@ -275,6 +284,10 @@ class PaperExecutionQualityReport:
             "quality_status": self.quality_status.value,
             "live_execution_economics_status": self.live_execution_economics_status.value,
             "percentile_method": self.percentile_method,
+            "derived_decimal_arithmetic": {
+                "precision": DERIVED_DECIMAL_PRECISION,
+                "rounding": DERIVED_DECIMAL_ROUNDING,
+            },
             "distributions": {
                 "model_delay_ms": self.model_delay_ms.to_payload(),
                 "model_quote_age_ms": self.model_quote_age_ms.to_payload(),
@@ -300,16 +313,19 @@ def _price_metrics(
 ) -> tuple[Decimal | None, Decimal | None, Decimal | None, PriceMovement]:
     if execution_odds is None:
         return None, None, None, PriceMovement.UNAVAILABLE
-    delta = execution_odds - decision_odds
-    spread_bps = ((execution_odds / decision_odds) - Decimal(1)) * Decimal(10_000)
-    if side == "BACK":
-        adverse_slippage_bps = -spread_bps
-    elif side == "LAY":
-        adverse_slippage_bps = spread_bps
-    else:
-        raise EvaluationUniverseIntegrityError(
-            "execution-quality PAPER attempt has unsupported bet side"
-        )
+    with localcontext() as context:
+        context.prec = DERIVED_DECIMAL_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        delta = execution_odds - decision_odds
+        spread_bps = ((execution_odds / decision_odds) - Decimal(1)) * Decimal(10_000)
+        if side == "BACK":
+            adverse_slippage_bps = -spread_bps
+        elif side == "LAY":
+            adverse_slippage_bps = spread_bps
+        else:
+            raise EvaluationUniverseIntegrityError(
+                "execution-quality PAPER attempt has unsupported bet side"
+            )
     if delta > 0:
         movement = PriceMovement.HIGHER_ODDS
     elif delta < 0:
@@ -346,7 +362,7 @@ def _sample_for_event(ledger: EvaluationUniverseLedger, row, event) -> PaperExec
         fill_ratio = Decimal(0)
     else:
         assert attempt.execution_stake is not None
-        fill_ratio = attempt.execution_stake / attempt.requested_stake
+        fill_ratio = _derived_ratio(attempt.execution_stake, attempt.requested_stake)
     delta, spread_bps, adverse_slippage_bps, movement = _price_metrics(
         attempt.decision_odds,
         attempt.execution_odds,

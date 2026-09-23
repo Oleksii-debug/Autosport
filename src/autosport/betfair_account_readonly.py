@@ -6,6 +6,7 @@ numbers remain Decimal observations and every response carries an exact SHA-256 
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1144,6 +1145,10 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
 def _install_execution_readback_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     trusted_clients: dict[int, tuple[object, object]] = {}
+    active_capture_session: ContextVar[list[object] | None] = ContextVar(
+        "betfair_authoritative_readback_capture",
+        default=None,
+    )
     raw_init = BetfairReadOnlyClient.__init__
     raw_read = BetfairReadOnlyClient.read_execution_readback
     raw_rpc = BetfairReadOnlyClient._rpc
@@ -1223,7 +1228,7 @@ def _install_execution_readback_authority() -> None:
             venue_id=venue_id,
             account_id=account_id,
         )
-        if transport is not None:
+        if type(self) is not BetfairReadOnlyClient or transport is not None:
             return
         trusted_transport = self._transport
         if type(trusted_transport) is not sealed_transport_type:
@@ -1269,8 +1274,19 @@ def _install_execution_readback_authority() -> None:
         method: str,
         params: Mapping[str, object],
     ) -> _RpcResult:
+        session = active_capture_session.get()
+        tracking = (
+            isinstance(session, list)
+            and len(session) == 4
+            and session[0] is self
+        )
+        if tracking:
+            session[1] = int(session[1]) + 1
+
         record = trusted_record(self)
         if record is None:
+            if tracking:
+                session[3] = True
             return raw_rpc(self, method, params)
         transport = record[1]
         if (
@@ -1298,7 +1314,10 @@ def _install_execution_readback_authority() -> None:
                 timeout_seconds=timeout_seconds,
             )
 
-        return raw_rpc_with_post(self, method, params, post)
+        result = raw_rpc_with_post(self, method, params, post)
+        if tracking:
+            session[2] = int(session[2]) + 1
+        return result
 
     authoritative_rpc_code = authoritative_rpc.__code__
 
@@ -1311,19 +1330,40 @@ def _install_execution_readback_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
-        capture = raw_read(
-            self,
-            action_id=action_id,
-            market_id=market_id,
-            provider_order_ref=provider_order_ref,
-            page_size=page_size,
-            max_pages=max_pages,
+        trusted_at_start = has_trusted_transport(self)
+        session: list[object] = [self, 0, 0, False]
+        context_token = active_capture_session.set(session)
+        try:
+            capture = raw_read(
+                self,
+                action_id=action_id,
+                market_id=market_id,
+                provider_order_ref=provider_order_ref,
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+        finally:
+            active_capture_session.reset(context_token)
+
+        expected_rpc_count = (
+            1
+            + len(capture.current_pages)
+            + sum(
+                len(pages)
+                for _, pages in capture.cleared_pages_by_status
+            )
         )
         capture_id = id(capture)
         def forget(_weakref: object, *, key: int = capture_id) -> None:
             issued.pop(key, None)
 
-        if has_trusted_transport(self):
+        if (
+            trusted_at_start
+            and session[1] == expected_rpc_count
+            and session[2] == expected_rpc_count
+            and session[3] is False
+            and has_trusted_transport(self)
+        ):
             issued[capture_id] = (
                 ref(capture, forget),
                 capture._authority_fingerprint(),

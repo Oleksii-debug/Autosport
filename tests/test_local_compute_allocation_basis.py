@@ -64,16 +64,14 @@ def _review(
 def _resolve(
     store: subject.LocalComputeAllocationBasisAuthorityStore,
     *,
-    decision_at: str = "2099-01-01T00:00:00Z",
     allocation_policy_id: str = "full-cost-per-request-v1",
 ):
-    return store.resolve(
+    return store.resolve_current(
         basis_id="basis-local-a-2026-09",
         backend_id="local-backend",
         model_id="model-a",
         config_sha256="c" * 64,
         allocation_policy_id=allocation_policy_id,
-        decision_at=decision_at,
         bankroll_id="paper-bankroll",
         currency="USD",
     )
@@ -202,10 +200,27 @@ def test_bare_digest_or_historical_timestamp_is_not_publish_authority(
         published_at - timedelta(microseconds=1)
     ).isoformat()
 
-    assert _resolve(
-        store,
-        decision_at=before_publication,
-    ) is None
+    for decision_at in (
+        before_publication,
+        record.available_at,
+        "2099-01-01T00:00:00Z",
+    ):
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="timestamp-only historical",
+        ):
+            store.resolve(
+                basis_id="basis-local-a-2026-09",
+                backend_id="local-backend",
+                model_id="model-a",
+                config_sha256="c" * 64,
+                allocation_policy_id="full-cost-per-request-v1",
+                decision_at=decision_at,
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+
+    assert _resolve(store) == record
 
 
 def test_measurement_period_cannot_end_after_owner_confirmation(
@@ -365,13 +380,12 @@ def test_exact_policy_compute_identity_and_owner_currency_are_required(
         allocation_policy_id="different-allocation-policy",
     ) is None
 
-    assert store.resolve(
+    assert store.resolve_current(
         basis_id="basis-local-a-2026-09",
         backend_id="other-backend",
         model_id="model-a",
         config_sha256="c" * 64,
         allocation_policy_id="full-cost-per-request-v1",
-        decision_at="2026-09-23T12:00:00Z",
         bankroll_id="paper-bankroll",
         currency="USD",
     ) is None
@@ -380,13 +394,12 @@ def test_exact_policy_compute_identity_and_owner_currency_are_required(
         subject.LocalComputeAllocationBasisError,
         match="bankroll/currency",
     ):
-        store.resolve(
+        store.resolve_current(
             basis_id="basis-local-a-2026-09",
             backend_id="local-backend",
             model_id="model-a",
             config_sha256="c" * 64,
             allocation_policy_id="full-cost-per-request-v1",
-            decision_at="2026-09-23T12:00:00Z",
             bankroll_id="paper-bankroll",
             currency="EUR",
         )

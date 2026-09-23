@@ -94,6 +94,19 @@ def test_serializes_documented_soap11_getprices_shape_and_headers() -> None:
     ] == ["11", "22", "33"]
 
 
+def test_readonly_header_does_not_fabricate_secure_credential_requirement() -> None:
+    header = BetdaqExternalApiHeader(username="read-only-user", language_code="en")
+    wire = build_get_prices_soap11_request(header, _request())
+    root = ET.fromstring(wire.body)
+    external = root.find(
+        f"{_tag(SOAP11_NS, 'Header')}/{_tag(EXTERNAL_API_NS, 'ExternalApiHeader')}"
+    )
+    assert external is not None
+    assert external.attrib["username"] == "read-only-user"
+    assert external.attrib["password"] == ""
+    assert external.attrib["applicationIdentifier"] == ""
+
+
 def test_internal_request_id_is_not_laundered_into_provider_wire_contract() -> None:
     request = _request(request_id=123456789)
     wire = build_get_prices_soap11_request(_header(), request)

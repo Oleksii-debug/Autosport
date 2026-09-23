@@ -329,6 +329,62 @@ class ProductDecisionActivationTests(unittest.TestCase):
                 risk_policy=changed_risk,
             )
 
+    def test_economic_goal_subclass_cannot_forge_start_authority(self) -> None:
+        canonical = self.goal
+
+        class MutableEconomicGoal(EconomicGoalContract):
+            def __getattribute__(self, name: str):
+                if name == "max_stake_fraction":
+                    try:
+                        expose_canonical = object.__getattribute__(
+                            self, "_expose_canonical"
+                        )
+                    except AttributeError:
+                        expose_canonical = False
+                    if expose_canonical:
+                        return canonical.max_stake_fraction
+                return super().__getattribute__(name)
+
+        forged = MutableEconomicGoal(
+            goal_id=canonical.goal_id,
+            revision=canonical.revision,
+            bankroll_id=canonical.bankroll_id,
+            currency=canonical.currency,
+            max_stake_fraction=Decimal("0.90"),
+        )
+        object.__setattr__(forged, "_expose_canonical", True)
+        forged_risk = PaperRiskPolicy(economic_goal=forged)
+        self._write_risk(forged_risk, forged)
+
+        self.assertIsInstance(forged, EconomicGoalContract)
+        self.assertIsNot(type(forged), EconomicGoalContract)
+        self.assertEqual(
+            EconomicGoalContract.max_stake_fraction.__get__(
+                forged, EconomicGoalContract
+            ),
+            Decimal("0.90"),
+        )
+        self.assertEqual(
+            forged.max_stake_fraction,
+            canonical.max_stake_fraction,
+        )
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "exact canonical EconomicGoalContract",
+        ):
+            self.store.initialize_owner(
+                scientific_registry=self.registry,
+                strategy_version_id=self.STRATEGY_ID,
+                economic_goal=forged,
+                risk_policy=forged_risk,
+                execution_config=self.execution,
+            )
+
+        object.__setattr__(forged, "_expose_canonical", False)
+        self.assertEqual(forged.max_stake_fraction, Decimal("0.90"))
+        self.assertFalse(self.store.path.exists())
+
     def test_changed_risk_policy_is_rejected_even_with_same_goal(self) -> None:
         self._initialize()
         changed_risk = PaperRiskPolicy(

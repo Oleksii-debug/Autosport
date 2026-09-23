@@ -596,6 +596,63 @@ def test_route_request_module_rebind_does_not_control_product_construction(
         assert issued.decision_evidence_sha256 == intent.evidence.evidence_sha256
 
 
+def test_record_class_module_rebind_cannot_forge_durable_origin(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="record-class-rebind")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+    canonical_record_class = subject.ModelComputeIntentRouteRecord
+
+    class ReboundIntentRouteRecord:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError(
+                "live record class must not construct product origin authority"
+            )
+
+        @classmethod
+        def from_dict(cls, _raw):
+            raise AssertionError(
+                "live record class must not parse durable origin authority"
+            )
+
+    temporary, workspace, authority_root = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        authority = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        monkeypatch.setattr(
+            subject,
+            "ModelComputeIntentRouteRecord",
+            ReboundIntentRouteRecord,
+        )
+
+        issued = _issue(authority, router, intent)
+        assert type(authority._records[0]) is canonical_record_class
+        _route(router, issued)
+
+        reopened = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+            authority_root=authority_root,
+        )
+        resolved = reopened.resolve(
+            intent=intent,
+            router_store=router,
+            request_id=issued.request_id,
+            decision_at=issued_at + timedelta(seconds=1),
+        )
+
+        assert type(resolved) is canonical_record_class
+        assert resolved.request == issued.payload()
+        assert resolved.intent_sha256 == intent.intent_sha256
+        assert (
+            resolved.opportunity_evidence_sha256
+            == intent.evidence.evidence_sha256
+        )
+
+
 def test_deleted_authority_state_fails_monotonic_rollback_fence(
     monkeypatch,
 ) -> None:

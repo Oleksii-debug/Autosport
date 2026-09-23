@@ -9,12 +9,14 @@ import pytest
 
 from benchmarks.benchmark_market_store_io import (
     MarketStoreIOProfile,
+    _build_quotes,
     _current_projection_snapshot,
     _positive_elapsed,
     _positive_int,
     _sqlite_footprint,
     run_profile,
 )
+from autosport.providers import CanonicalNormalizer
 from autosport.storage import SQLiteMarketStore
 
 
@@ -77,23 +79,13 @@ def test_small_profile_proves_closed_durable_counts_and_restart_projection() -> 
 
 
 def test_projection_snapshot_is_order_independent_and_content_exact() -> None:
-    original = {
-        ("source-b", "quote-b"): run_profile.__globals__["_build_quotes"](2)[1],
-        ("source-a", "quote-a"): run_profile.__globals__["_build_quotes"](2)[0],
-    }
-    # The helper also proves key/event identity, so use canonical normalized
-    # MarketEvent values rather than provider-side fixture DTOs.
-    from autosport.providers import CanonicalNormalizer
-
     normalizer = CanonicalNormalizer()
-    quotes = run_profile.__globals__["_build_quotes"](2)
+    quotes = _build_quotes(2)
+    first = normalizer.normalize("benchmark-market-store-io", quotes[0])
+    second = normalizer.normalize("benchmark-market-store-io", quotes[1])
     current = {
-        ("benchmark-market-store-io", normalizer.normalize(
-            "benchmark-market-store-io", quotes[0]
-        ).quote_key): normalizer.normalize("benchmark-market-store-io", quotes[0]),
-        ("benchmark-market-store-io", normalizer.normalize(
-            "benchmark-market-store-io", quotes[1]
-        ).quote_key): normalizer.normalize("benchmark-market-store-io", quotes[1]),
+        (first.source_id, first.quote_key): first,
+        (second.source_id, second.quote_key): second,
     }
     reverse = dict(reversed(tuple(current.items())))
 

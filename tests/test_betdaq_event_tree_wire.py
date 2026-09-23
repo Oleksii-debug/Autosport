@@ -162,6 +162,24 @@ def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
         )
 
 
+def test_event_and_market_unknown_attributes_fail_closed() -> None:
+    event_attribute = _response().replace(
+        'ParentId="0">',
+        'ParentId="0" FutureSemanticField="x">',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected provider attribute"):
+        parse_get_event_subtree_no_selections_response(event_attribute)
+
+    market_attribute = _response().replace(
+        'PlacePayout="0.5000">',
+        'PlacePayout="0.5000" FutureSemanticField="x">',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected provider attribute"):
+        parse_get_event_subtree_no_selections_response(market_attribute)
+
+
 def test_non_success_return_status_fails_before_tree_publication() -> None:
     status = (
         '<ReturnStatus Code="533" '

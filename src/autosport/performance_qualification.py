@@ -89,18 +89,6 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
             finally:
                 active_containers.remove(marker)
 
-        if type(value) is tuple:
-            marker = id(value)
-            if marker in active_containers:
-                raise PerformanceQualificationError(
-                    "endurance report contains a circular object"
-                )
-            active_containers.add(marker)
-            try:
-                return tuple(detach(item) for item in value)
-            finally:
-                active_containers.remove(marker)
-
         raise PerformanceQualificationError(
             "endurance report contains an unsupported non-JSON value"
         )

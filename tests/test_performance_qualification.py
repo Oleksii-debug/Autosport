@@ -219,6 +219,27 @@ def test_report_snapshot_rejects_non_string_nested_object_keys(key: object) -> N
         )
 
 
+def test_report_snapshot_rejects_tuple_alias_for_json_array() -> None:
+    report = _report()
+    restart_hashes = report["restart_hashes"]
+    assert type(restart_hashes) is list
+    report["restart_hashes"] = tuple(restart_hashes)
+
+    # json.dumps serializes list and tuple identically, so the precomputed stable
+    # fingerprint still matches unless the snapshot layer enforces JSON-native
+    # container types before validation/identity construction.
+    with pytest.raises(
+        PerformanceQualificationError,
+        match="unsupported non-JSON value",
+    ):
+        qualify_endurance_report(
+            report,
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="machine",
+        )
+
+
 def test_correctness_failure_cannot_become_performance_pass() -> None:
     report = _report()
     report["status"] = "FAIL"

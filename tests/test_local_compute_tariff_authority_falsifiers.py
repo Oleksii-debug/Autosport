@@ -46,17 +46,34 @@ def _publish(
     effective_from: str,
     effective_until: str | None,
 ):
+    basis_id = f"basis-{tariff_id}"
+    target_amount = Decimal(amount)
+    denominator = 100
+    store.publish_allocation_basis(
+        basis_id=basis_id,
+        backend_id="local-backend",
+        model_id="local-model",
+        config_sha256="c" * 64,
+        allocation_policy_id="owner-full-cost-v1",
+        components=(
+            subject.LocalComputeCostComponent(
+                component_id=f"cost-{tariff_id}",
+                kind=subject.LocalComputeCostComponentKind.OTHER_ALLOCABLE,
+                amount=target_amount * Decimal(denominator),
+                currency="USD",
+            ),
+        ),
+        denominator_request_count=denominator,
+    )
     return store.publish_owner_tariff(
         tariff_id=tariff_id,
         backend_id="local-backend",
         model_id="local-model",
         config_sha256="c" * 64,
-        amount_per_request=Decimal(amount),
         effective_from=effective_from,
         effective_until=effective_until,
         allocation_policy_id="owner-full-cost-v1",
-        allocation_basis_sha256="b" * 64,
-        basis_available_at="2026-09-23T09:00:00Z",
+        allocation_basis_id=basis_id,
     )
 
 
@@ -152,3 +169,34 @@ def test_nonoverlapping_tariff_rollover_selects_exact_interval(
 
     assert _resolve(tariff_store, "2026-09-23T23:59:59Z") == first
     assert _resolve(tariff_store, "2026-09-24T00:00:00Z") == second
+
+
+def test_tariff_amount_cannot_diverge_from_resolved_basis(tmp_path, monkeypatch):
+    _workspace, _authority, _goal_store, tariff_store = _store(
+        tmp_path, monkeypatch
+    )
+    record = _publish(
+        tariff_store,
+        tariff_id="tariff-derived",
+        amount="0.37",
+        effective_from="2026-09-23T10:00:00Z",
+        effective_until=None,
+    )
+
+    assert record.amount_per_request == Decimal("0.37")
+    assert record.allocation_basis_id == "basis-tariff-derived"
+
+    raw = tariff_store.path.read_text(encoding="utf-8")
+    tariff_store.path.write_text(
+        raw.replace(
+            '"amount_per_request": "0.37"',
+            '"amount_per_request": "0.38"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(MonotonicWorkspaceAuthorityError):
+        subject.LocalComputeTariffAuthorityStore(
+            tariff_store.workspace,
+            authority_root=_authority,
+        )

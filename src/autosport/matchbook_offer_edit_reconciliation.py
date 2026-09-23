@@ -46,7 +46,12 @@ class MatchbookOfferEditIdentityDisposition(str, Enum):
 
 
 def _canonical_text(value: object, field: str) -> str:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+    ):
         raise MatchbookOfferEditReconciliationError(f"{field} must be canonical text")
     try:
         value.encode("utf-8", errors="strict")

@@ -79,6 +79,14 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             ).get(_SequenceProvider.source_id)
             self.assertEqual(persisted_failure.status, "failed")
             self.assertEqual(persisted_failure.consecutive_failures, 1)
+            self.assertEqual(
+                persisted_failure.last_failure_kind,
+                "provider_unavailable",
+            )
+            self.assertEqual(
+                persisted_failure.consecutive_failure_kind_count,
+                1,
+            )
 
             crash_status = json.loads(
                 (workspace / "continuous_observation_status.json").read_text("utf-8")
@@ -118,6 +126,8 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             ).get(_SequenceProvider.source_id)
             self.assertEqual(recovered.status, "healthy")
             self.assertEqual(recovered.consecutive_failures, 0)
+            self.assertIsNone(recovered.last_failure_kind)
+            self.assertEqual(recovered.consecutive_failure_kind_count, 0)
 
             recovered_status = json.loads(
                 (workspace / "continuous_observation_status.json").read_text("utf-8")
@@ -231,6 +241,14 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
                 workspace / "source_health.json"
             ).get(_SequenceProvider.source_id)
             self.assertEqual(before_outage.consecutive_failures, 1)
+            self.assertEqual(
+                before_outage.last_failure_kind,
+                "provider_or_validation",
+            )
+            self.assertEqual(
+                before_outage.consecutive_failure_kind_count,
+                1,
+            )
 
             outage_provider = _SequenceProvider(
                 [ProviderUnavailableError("provider outage before second crash")]
@@ -259,6 +277,8 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
                 workspace / "source_health.json"
             ).get(_SequenceProvider.source_id)
             self.assertEqual(mixed_health.consecutive_failures, 2)
+            self.assertEqual(mixed_health.last_failure_kind, "provider_unavailable")
+            self.assertEqual(mixed_health.consecutive_failure_kind_count, 1)
 
             mixed_status = json.loads(
                 (workspace / "continuous_observation_status.json").read_text("utf-8")

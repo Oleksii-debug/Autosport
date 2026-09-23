@@ -90,8 +90,16 @@
     }
   }
 
+  function isAnyWorkerBusy(state) {
+    return Boolean(state && state.busy && Object.values(state.busy).some(Boolean));
+  }
+
   function syncOwnerConfirmationAvailability(canInitialize) {
-    const reviewDisabled = canInitialize !== true || ownerReviewFresh !== true;
+    const reviewDisabled = (
+      canInitialize !== true
+      || ownerReviewFresh !== true
+      || isAnyWorkerBusy(latestState)
+    );
     const checkbox = byId("owner-confirm-checkbox");
     setDisabledWithFocusFallback(checkbox, reviewDisabled);
     setDisabledWithFocusFallback(
@@ -327,10 +335,14 @@
     renderList(byId(307), state.owner.lines || []);
     renderList(byId("owner-review-list"), state.owner.review_lines || []);
     applyOwnerDefaults(state.owner.defaults);
-    document.querySelectorAll("[data-owner-field], #327, #328")
+    document.querySelectorAll("[data-owner-field], #327")
       .forEach((node) => {
         setDisabledWithFocusFallback(node, !state.owner.can_initialize);
       });
+    setDisabledWithFocusFallback(
+      byId(328),
+      !state.owner.can_initialize || isAnyWorkerBusy(state),
+    );
     syncOwnerConfirmationAvailability(state.owner.can_initialize);
 
     const operations = byId(331);
@@ -352,7 +364,7 @@
       productRuntime.can_stop,
     );
 
-    const busyDisabled = Boolean(state.busy && Object.values(state.busy).some(Boolean));
+    const busyDisabled = isAnyWorkerBusy(state);
     [101, 102, 103, 104, 105, 106, 108, 109].forEach((id) => {
       setDisabledWithFocusFallback(byId(id), busyDisabled);
     });

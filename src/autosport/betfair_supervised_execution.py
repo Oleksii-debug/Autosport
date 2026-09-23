@@ -55,6 +55,9 @@ WRITE_ADAPTER_VERSION = "1"
 # dispatch.  These product-owned implementations are captured once and are used
 # non-virtually by execute_betfair_supervised_action().
 _CANONICAL_URLLIB_BETFAIR_HTTP_POST = UrllibBetfairHttpTransport.post
+_CANONICAL_URLLIB_BETFAIR_URLOPEN = (
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__["urlopen"]
+)
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -1173,6 +1176,8 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_BETFAIR_PLACE_ACTION
             or UrllibBetfairHttpTransport.post
             is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
+            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
             or _parse_place_orders_response
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
         ):

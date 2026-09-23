@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -52,6 +54,12 @@ class _RecordingTransport:
             }
         )
         instruction = request["params"]["instructions"][0]
+        echoed_instruction = dict(instruction)
+        echoed_instruction["limitOrder"] = {
+            **instruction["limitOrder"],
+            "price": 2,
+            "size": 1,
+        }
         return json.dumps(
             {
                 "jsonrpc": "2.0",
@@ -61,11 +69,11 @@ class _RecordingTransport:
                     "instructionReports": [
                         {
                             "status": "SUCCESS",
-                            "instruction": instruction,
+                            "instruction": echoed_instruction,
                             "betId": "bet-stop-composition",
                             "placedDate": OBSERVED_AT,
-                            "averagePriceMatched": instruction["limitOrder"]["price"],
-                            "sizeMatched": instruction["limitOrder"]["size"],
+                            "averagePriceMatched": 2,
+                            "sizeMatched": 1,
                         }
                     ],
                 },
@@ -73,6 +81,47 @@ class _RecordingTransport:
             },
             separators=(",", ":"),
         ).encode("utf-8")
+
+
+class _BlockingRecordingTransport(_RecordingTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = Event()
+        self.release = Event()
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers,
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise AssertionError("test did not release blocked provider call")
+        return super().post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+class _FailingTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers,
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        self.calls += 1
+        raise OSError("synthetic provider failure")
 
 
 def _profile() -> BookmakerCapabilityProfile:
@@ -135,7 +184,7 @@ def _action() -> ExecutionAction:
     )
 
 
-def _client_and_bound(workspace: Path):
+def _client_and_bound(workspace: Path, *, transport=None):
     goal = _goal()
     store = EconomicGoalStore(workspace)
     store.initialize_owner(goal)
@@ -146,7 +195,7 @@ def _client_and_bound(workspace: Path):
         account_id="acct-stop-composition",
         profile_sha256=profile.profile_id,
     )
-    transport = _RecordingTransport()
+    transport = _RecordingTransport() if transport is None else transport
     client = BetfairSupervisedPlaceOrdersClient(
         BetfairSessionCredentials("app-key", "session-token"),
         gate=gate,
@@ -258,3 +307,113 @@ def test_explicit_armed_execution_stop_authority_keeps_bounded_write_reachable(
 
     assert report.instruction.bet_id == "bet-stop-composition"
     assert len(transport.calls) == 1
+
+
+
+def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
+    tmp_path: Path,
+) -> None:
+    authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
+    stopped = authority.initialize_stopped(
+        operator_id="owner",
+        reason="safe initialization",
+        command_id="stop-composition-race-init",
+    )
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised write explicitly armed",
+        confirmation_id="stop-composition-race-confirmation",
+        expected_revision=stopped.revision,
+        command_id="stop-composition-race-arm",
+    )
+    transport = _BlockingRecordingTransport()
+    client, bound, profile, _ = _client_and_bound(
+        tmp_path,
+        transport=transport,
+    )
+    stop_started = Event()
+
+    def place():
+        return client.place_action(
+            _action(),
+            profile=profile,
+            bound=bound,
+            provider_order_ref="b" * 16,
+            execution_workspace=tmp_path,
+        )
+
+    def stop():
+        stop_started.set()
+        return authority.stop(
+            operator_id="owner",
+            reason="concurrent operator STOP",
+            expected_revision=armed.revision,
+            command_id="stop-composition-race-stop",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        place_future = pool.submit(place)
+        assert transport.entered.wait(timeout=5)
+        stop_future = pool.submit(stop)
+        assert stop_started.wait(timeout=5)
+        assert not stop_future.done()
+
+        transport.release.set()
+        report = place_future.result(timeout=5)
+        stopped_after_call = stop_future.result(timeout=5)
+
+    assert report.instruction.bet_id == "bet-stop-composition"
+    assert len(transport.calls) == 1
+    assert stopped_after_call.mode.value == "STOPPED"
+
+    denied_client, denied_bound, denied_profile, denied_transport = _client_and_bound(
+        tmp_path
+    )
+    with pytest.raises(Exception):
+        denied_client.place_action(
+            _action(),
+            profile=denied_profile,
+            bound=denied_bound,
+            provider_order_ref="c" * 16,
+            execution_workspace=tmp_path,
+        )
+    assert denied_transport.calls == []
+
+
+def test_transport_exception_releases_stop_admission_lease(tmp_path: Path) -> None:
+    authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
+    stopped = authority.initialize_stopped(
+        operator_id="owner",
+        reason="safe initialization",
+        command_id="stop-composition-error-init",
+    )
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised write explicitly armed",
+        confirmation_id="stop-composition-error-confirmation",
+        expected_revision=stopped.revision,
+        command_id="stop-composition-error-arm",
+    )
+    transport = _FailingTransport()
+    client, bound, profile, _ = _client_and_bound(
+        tmp_path,
+        transport=transport,
+    )
+
+    with pytest.raises(Exception, match="ambiguous"):
+        client.place_action(
+            _action(),
+            profile=profile,
+            bound=bound,
+            provider_order_ref="d" * 16,
+            execution_workspace=tmp_path,
+        )
+
+    stopped_after_error = authority.stop(
+        operator_id="owner",
+        reason="STOP after failed provider call",
+        expected_revision=armed.revision,
+        command_id="stop-composition-error-stop",
+    )
+    assert stopped_after_error.mode.value == "STOPPED"
+    assert transport.calls == 1

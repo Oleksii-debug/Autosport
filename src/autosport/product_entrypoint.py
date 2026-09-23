@@ -185,8 +185,10 @@ def run_product(
         started = True
         _print_record("product_status", runtime=runtime, value=start_status)
         cycles = 0
+        exit_code = 0
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
+                exit_code = stop_request.exit_code
                 _print_record(
                     "product_status",
                     runtime=runtime,
@@ -198,6 +200,18 @@ def run_product(
             cycles += 1
             _print_record("product_tick", runtime=runtime, value=result)
 
+            # A signal observed during a tick is the selected STOP cause even when
+            # that tick also reaches max_cycles. Freeze the exit code at the same
+            # decision point so a later signal cannot contradict an already-recorded
+            # max_cycles stop in public status evidence.
+            if stop_request.requested:
+                exit_code = stop_request.exit_code
+                _print_record(
+                    "product_status",
+                    runtime=runtime,
+                    value=runtime.stop(stop_request.reason),
+                )
+                break
             if max_cycles is not None and cycles >= max_cycles:
                 _print_record(
                     "product_status",
@@ -205,15 +219,8 @@ def run_product(
                     value=runtime.stop("max_cycles_reached"),
                 )
                 break
-            if stop_request.requested:
-                _print_record(
-                    "product_status",
-                    runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
-                )
-                break
             sleep(float(poll_seconds))
-        return stop_request.exit_code
+        return exit_code
     except Exception as exc:
         if started:
             if isinstance(exc, ProductRuntimeError):

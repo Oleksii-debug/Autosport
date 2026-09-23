@@ -5,32 +5,30 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+from autosport.betdaq_account_readonly import BetdaqCredentials
 from autosport.betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
 from autosport.betdaq_readonly_provider import (
     BETDAQ_GET_PRICES_ENDPOINT,
     BETDAQ_GET_PRICES_SOAP_ACTION,
     BetdaqGetPricesRequest,
 )
-from autosport.betdaq_readonly_request_wire import (
-    BetdaqExternalApiHeader,
-    build_get_prices_soap11_request,
-)
+from autosport.betdaq_readonly_request_wire import build_get_prices_soap11_request
 
 
 def _tag(namespace: str, local_name: str) -> str:
     return f"{{{namespace}}}{local_name}"
 
 
-def _header(**overrides) -> BetdaqExternalApiHeader:
+def _credentials(**overrides) -> BetdaqCredentials:
     values = {
         "username": "fixture-user<&",
         "password": "fixture-pass<&\"'",
         "application_identifier": "fixture-app<&",
         "language_code": "en",
-        "version": Decimal("2.0"),
+        "version": "2.0",
     }
     values.update(overrides)
-    return BetdaqExternalApiHeader(**values)
+    return BetdaqCredentials(**values)
 
 
 def _request(**overrides) -> BetdaqGetPricesRequest:
@@ -49,9 +47,9 @@ def _request(**overrides) -> BetdaqGetPricesRequest:
 
 
 def test_serializes_documented_soap11_getprices_shape_and_headers() -> None:
-    header = _header()
+    credentials = _credentials()
     request = _request()
-    wire = build_get_prices_soap11_request(header, request)
+    wire = build_get_prices_soap11_request(credentials, request)
 
     assert wire.endpoint == BETDAQ_GET_PRICES_ENDPOINT
     assert wire.headers == {
@@ -94,87 +92,96 @@ def test_serializes_documented_soap11_getprices_shape_and_headers() -> None:
     ] == ["11", "22", "33"]
 
 
-def test_readonly_header_does_not_fabricate_secure_credential_requirement() -> None:
-    header = BetdaqExternalApiHeader(username="read-only-user", language_code="en")
-    wire = build_get_prices_soap11_request(header, _request())
-    root = ET.fromstring(wire.body)
-    external = root.find(
-        f"{_tag(SOAP11_NS, 'Header')}/{_tag(EXTERNAL_API_NS, 'ExternalApiHeader')}"
-    )
-    assert external is not None
-    assert external.attrib["username"] == "read-only-user"
-    assert external.attrib["password"] == ""
-    assert external.attrib["applicationIdentifier"] == ""
-
-
 def test_internal_request_id_is_not_laundered_into_provider_wire_contract() -> None:
-    request = _request(request_id=123456789)
-    wire = build_get_prices_soap11_request(_header(), request)
+    wire = build_get_prices_soap11_request(
+        _credentials(),
+        _request(request_id=123456789),
+    )
     text = wire.body.decode("utf-8")
     assert "123456789" not in text
     assert "request_id" not in text
     assert "RequestId" not in text
 
 
-def test_credentials_and_raw_xml_are_redacted_from_repr() -> None:
-    header = _header(
+def test_canonical_credentials_and_raw_xml_are_redacted_from_repr() -> None:
+    credentials = _credentials(
         username="never-log-user",
         password="never-log-password",
         application_identifier="never-log-app-id",
     )
-    wire = build_get_prices_soap11_request(header, _request())
+    wire = build_get_prices_soap11_request(credentials, _request())
 
-    header_repr = repr(header)
+    credentials_repr = repr(credentials)
     wire_repr = repr(wire)
     for secret in ("never-log-user", "never-log-password", "never-log-app-id"):
-        assert secret not in header_repr
+        assert secret not in credentials_repr
         assert secret not in wire_repr
-    assert "credentials=<redacted>" in header_repr
+    assert credentials_repr == "BetdaqCredentials(<redacted>)"
     assert "body=<redacted " in wire_repr
     assert "GetPrices" not in wire_repr
 
 
-def test_xml_serializer_escapes_opaque_header_values_without_changing_them() -> None:
-    header = _header(
+def test_xml_serializer_escapes_opaque_credential_values_without_changing_them() -> None:
+    credentials = _credentials(
         username="user <&> Ω",
         password="pass <&> \"quoted\" 'single'",
         application_identifier="app <&> Ω",
     )
-    wire = build_get_prices_soap11_request(header, _request())
+    wire = build_get_prices_soap11_request(credentials, _request())
     root = ET.fromstring(wire.body)
     external = root.find(
         f"{_tag(SOAP11_NS, 'Header')}/{_tag(EXTERNAL_API_NS, 'ExternalApiHeader')}"
     )
     assert external is not None
-    assert external.attrib["username"] == header.username
-    assert external.attrib["password"] == header.password
-    assert external.attrib["applicationIdentifier"] == header.application_identifier
+    assert external.attrib["username"] == credentials.username
+    assert external.attrib["password"] == credentials.password
+    assert external.attrib["applicationIdentifier"] == credentials.application_identifier
 
 
-def test_header_validation_fails_without_echoing_secret_value() -> None:
-    secret = "top-secret\nshould-never-appear"
+def test_serializer_validation_fails_without_echoing_secret_value() -> None:
+    secret = "top-secret\x01should-never-appear"
+    credentials = _credentials(password=secret)
     with pytest.raises(ValueError) as raised:
-        _header(password=secret)
+        build_get_prices_soap11_request(credentials, _request())
     assert secret not in str(raised.value)
     assert "password" in str(raised.value)
 
 
-def test_header_rejects_unbounded_values_before_xml_materialization() -> None:
+def test_serializer_rejects_unbounded_credentials_and_noncanonical_version() -> None:
+    credentials = _credentials(application_identifier="a" * 4097)
     with pytest.raises(ValueError, match="application_identifier is too long"):
-        _header(application_identifier="a" * 4097)
+        build_get_prices_soap11_request(credentials, _request())
+
+    huge_version = _credentials(version="1E+1000000")
     with pytest.raises(ValueError, match="fixed-point representation exceeds"):
-        _header(version=Decimal("1E+1000000"))
+        build_get_prices_soap11_request(huge_version, _request())
+
+    exponent_version = _credentials(version="2E0")
+    with pytest.raises(ValueError, match="canonical fixed-point"):
+        build_get_prices_soap11_request(exponent_version, _request())
+
+
+def test_serializer_requires_product_owned_canonical_credentials() -> None:
+    class Lookalike:
+        version = "2.0"
+        language_code = "en"
+        username = "u"
+        password = "p"
+        application_identifier = "a"
+
+    with pytest.raises(TypeError, match="canonical BetdaqCredentials"):
+        build_get_prices_soap11_request(Lookalike(), _request())
 
 
 def test_serializer_is_deterministic_for_identical_request_inputs() -> None:
-    first = build_get_prices_soap11_request(_header(), _request())
-    second = build_get_prices_soap11_request(_header(), _request())
+    first = build_get_prices_soap11_request(_credentials(), _request())
+    second = build_get_prices_soap11_request(_credentials(), _request())
     assert first.body == second.body
     assert first.headers == second.headers
 
 
 def test_request_wire_exposes_no_provider_write_surface() -> None:
-    wire = build_get_prices_soap11_request(_header(), _request())
+    wire = build_get_prices_soap11_request(_credentials(), _request())
     text = wire.body.decode("utf-8")
     assert "PlaceOrders" not in text
     assert "UpdateOrders" not in text

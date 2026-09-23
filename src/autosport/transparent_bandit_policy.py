@@ -306,8 +306,18 @@ class BanditPolicyState:
             raise LearningEnvironmentError(
                 "admissible action set contains action outside immutable policy identity"
             )
+        # An unobserved action has no empirical reward evidence.  Its internal
+        # zero accumulator is an identity/serialization invariant, not a utility
+        # observation and must not outrank an observed negative reward as though
+        # the missing evidence were an explicit zero reward.
+        observed = {
+            action_type
+            for action_type in admitted
+            if estimates[action_type].observations > 0
+        }
+        candidates = observed or admitted
         ranked = sorted(
-            admitted,
+            candidates,
             key=lambda action_type: (-estimates[action_type].exact_mean_reward, action_type),
         )
         return ranked[0]

@@ -19,11 +19,13 @@ continuity only; stronger account-identity truth remains explicitly false.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 import json
+from threading import Lock
 from typing import Callable
+from weakref import WeakValueDictionary
 
 from .betdaq_account_readonly import (
     ADAPTER_ID,
@@ -103,19 +105,13 @@ class BetdaqAuthenticatedPrincipalContext:
             )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetdaqContinuousAccountEvidence:
     """Fresh canonical BETDAQ evidence with a restart-stable principal projection."""
 
     snapshot: BookmakerAccountSnapshot
     source_evidence: BetdaqAccountEvidence
     principal_context: BetdaqAuthenticatedPrincipalContext
-    _issuer_token: object | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
 
     def __post_init__(self) -> None:
         if type(self.snapshot) is not BookmakerAccountSnapshot:
@@ -288,7 +284,10 @@ def require_reconciliation_history_compatible(
 
 
 def _build_evidence_issuer():
-    token = object()
+    issued: WeakValueDictionary[int, BetdaqContinuousAccountEvidence] = (
+        WeakValueDictionary()
+    )
+    lock = Lock()
 
     def issue(
         *,
@@ -301,14 +300,15 @@ def _build_evidence_issuer():
             source_evidence=source_evidence,
             principal_context=principal_context,
         )
-        object.__setattr__(value, "_issuer_token", token)
+        with lock:
+            issued[id(value)] = value
         return value
 
     def is_issued(value: object) -> bool:
-        return (
-            type(value) is BetdaqContinuousAccountEvidence
-            and value._issuer_token is token
-        )
+        if type(value) is not BetdaqContinuousAccountEvidence:
+            return False
+        with lock:
+            return issued.get(id(value)) is value
 
     return issue, is_issued
 

@@ -200,6 +200,25 @@ def test_read_only_mapping_input_remains_supported() -> None:
     assert result.status == "PASS"
 
 
+@pytest.mark.parametrize("key", [True, 7])
+def test_report_snapshot_rejects_non_string_nested_object_keys(key: object) -> None:
+    report = _report()
+    config = report["config"]
+    assert isinstance(config, dict)
+    config[key] = "aliased-value"
+
+    with pytest.raises(
+        PerformanceQualificationError,
+        match="object keys must be strings",
+    ):
+        qualify_endurance_report(
+            report,
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="machine",
+        )
+
+
 def test_correctness_failure_cannot_become_performance_pass() -> None:
     report = _report()
     report["status"] = "FAIL"

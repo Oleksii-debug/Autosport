@@ -364,12 +364,15 @@ class MarketEvent:
         event_id = _required_canonical_string(raw, "event_id")
         market_id = _required_canonical_string(raw, "market_id")
         selection_id = _required_canonical_string(raw, "selection_id")
-        observed_ts = _required_canonical_string(raw, "observed_ts")
+        observed_ts = _timezone_aware_iso8601_value(raw.get("observed_ts"), "observed_ts")
         source_id = _required_canonical_string(raw, "source_id")
         sequence = _required_sequence(raw)
         decimal_odds = _required_decimal_odds(raw)
 
-        ingest_ts = _canonical_string_value(raw.get("ingest_ts", observed_ts), "ingest_ts")
+        ingest_ts = _timezone_aware_iso8601_value(
+            raw.get("ingest_ts", observed_ts),
+            "ingest_ts",
+        )
 
         market_type_raw = _canonical_string_value(raw.get("market_type", "other"), "market_type")
         try:

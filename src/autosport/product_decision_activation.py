@@ -935,6 +935,7 @@ class ProductDecisionActivationBinding:
 class ProductDecisionActivationStore:
     """Creation-only supported-START binding; it grants no execution authority."""
 
+    __slots__ = ("workspace", "path", "_authority")
     FILE_NAME: Final = "product_decision_activation.json"
 
     def __init__(self, workspace: str | Path) -> None:

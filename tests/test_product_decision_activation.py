@@ -316,6 +316,52 @@ class ProductDecisionActivationTests(unittest.TestCase):
         with self.assertRaises((ProductDecisionActivationError, ValueError)):
             self._verify()
 
+    def test_registry_get_rebind_cannot_forge_durable_strategy_authority(
+        self,
+    ) -> None:
+        durable = ScientificRegistry.get(
+            self.registry,
+            "StrategyVersion",
+            self.STRATEGY_ID,
+        )
+        self.assertIsNotNone(durable)
+        assert durable is not None
+        forged_payload = dict(durable.payload)
+        forged_payload["source_sha256"] = "9" * 64
+
+        class ForgedEntry:
+            pass
+
+        forged = ForgedEntry()
+        forged.payload = forged_payload
+        forged.record_sha256 = "a" * 64
+        original_get = ScientificRegistry.get
+
+        def forged_get(instance, record_type, record_id):
+            if (
+                record_type == "StrategyVersion"
+                and record_id == self.STRATEGY_ID
+            ):
+                return forged
+            return original_get(instance, record_type, record_id)
+
+        with mock.patch.object(ScientificRegistry, "get", forged_get):
+            binding = self._initialize()
+
+        durable_state = json.loads(
+            (self.workspace / "scientific_registry.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        durable_strategy = durable_state["records"][0]
+        self.assertEqual(binding.strategy_source_sha256, "1" * 64)
+        self.assertEqual(
+            binding.strategy_record_sha256,
+            durable_strategy["record_sha256"],
+        )
+        self.assertNotEqual(binding.strategy_source_sha256, "9" * 64)
+        self.assertNotEqual(binding.strategy_record_sha256, "a" * 64)
+
     def test_matching_risk_file_cannot_promote_non_durable_owner_goal(self) -> None:
         forged_goal = replace(
             self.goal,

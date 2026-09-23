@@ -225,6 +225,8 @@ def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
         coefficient = 0
         for digit in digits:
             coefficient = (coefficient * 10) + digit
+        if coefficient == 0:
+            return 0, 0
         return (-coefficient if sign else coefficient), exponent
 
     left_coefficient, left_exponent = signed_coefficient(left)

@@ -96,14 +96,26 @@ class OneShotObservationWorker:
 
             # Thread.start() may already have launched the helper before raising.
             # Cancel first, then open the gate so that helper exits without task().
+            # If it really started, retain ownership until it is fully quiescent;
+            # never publish/release a slot while a prior non-daemon helper is alive.
             cancelled.set()
             start_gate.set()
+            self._reap_ambiguous_start(thread)
             if isinstance(exc, Exception):
                 self._publish_setup_failure(exc)
                 return True
             self._release_unstarted_slot()
             raise
         return True
+
+    @staticmethod
+    def _reap_ambiguous_start(thread: threading.Thread) -> None:
+        # CPython's public ident remains None for a Thread that never started and is
+        # assigned before Thread.start() can return normally. Guarding on it avoids
+        # RuntimeError from joining an unstarted helper while still deterministically
+        # reaping the start-then-raise case after the cancellation gate is opened.
+        if thread.ident is not None:
+            thread.join()
 
     def _publish_setup_failure(self, exc: Exception) -> None:
         # Preserve the established caller contract: False means "already busy";

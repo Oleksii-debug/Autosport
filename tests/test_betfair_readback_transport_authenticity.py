@@ -329,3 +329,42 @@ def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
             original,
         )
 
+def test_trusted_network_witness_rejects_status_remaining_contradiction() -> None:
+    action = _action()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+    matcher = _trusted_capture_matcher()
+    witnesses = _current_capture_witnesses(capture)
+    order = capture.current_pages[0].orders[0]
+
+    assert order.status == "EXECUTABLE"
+    assert order.size_remaining > 0
+
+    # Model a transient bypass of the separately composed DTO __post_init__ guard:
+    # the trusted provider bytes and forged exact-type DTO agree on the same
+    # contradictory tuple. The closure-owned byte re-derivation must independently
+    # enforce the provider state relation rather than accepting field equality alone.
+    original_status = order.status
+    object.__setattr__(order, "status", "EXECUTION_COMPLETE")
+    witnesses[1][2]["currentOrders"][0]["status"] = "EXECUTION_COMPLETE"
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="EXECUTION_COMPLETE current order must have zero size_remaining",
+        ):
+            matcher(
+                capture,
+                witnesses,
+                venue_id=capture.venue_id,
+                account_id=capture.account_id,
+                action_id=capture.action_id,
+                market_id=capture.market_id,
+                provider_order_ref=capture.provider_order_ref,
+                page_size=capture.page_size,
+            )
+    finally:
+        object.__setattr__(order, "status", original_status)
+

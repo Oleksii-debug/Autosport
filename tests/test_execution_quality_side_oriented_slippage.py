@@ -31,7 +31,7 @@ def test_adverse_slippage_is_positive_for_bad_back_and_bad_lay_prices() -> None:
     assert lay_movement is PriceMovement.HIGHER_ODDS
 
 
-def test_favorable_prices_are_negative_for_both_sides() -> None:
+def test_favorable_prices_keep_signed_spread_but_zero_adverse_slippage() -> None:
     _delta, back_spread, back_adverse, _movement = _price_metrics(
         Decimal("2.0"),
         Decimal("2.1"),
@@ -44,9 +44,27 @@ def test_favorable_prices_are_negative_for_both_sides() -> None:
     )
 
     assert back_spread == Decimal("500.00")
-    assert back_adverse == Decimal("-500.00")
+    assert back_adverse == Decimal("0")
     assert lay_spread == Decimal("-500.00")
-    assert lay_adverse == Decimal("-1000.00")
+    assert lay_adverse == Decimal("0")
+
+
+def test_equal_price_has_zero_adverse_slippage_for_both_sides() -> None:
+    _delta, back_spread, back_adverse, _movement = _price_metrics(
+        Decimal("2.0"),
+        Decimal("2.0"),
+        side="BACK",
+    )
+    _delta, lay_spread, lay_adverse, _movement = _price_metrics(
+        Decimal("2.0"),
+        Decimal("2.0"),
+        side="LAY",
+    )
+
+    assert back_spread == Decimal("0")
+    assert back_adverse == Decimal("0")
+    assert lay_spread == Decimal("0")
+    assert lay_adverse == Decimal("0")
 
 
 def test_near_even_lay_slippage_tracks_liability_not_raw_odds_ratio() -> None:

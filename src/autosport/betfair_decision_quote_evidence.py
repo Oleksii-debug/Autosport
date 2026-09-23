@@ -503,7 +503,16 @@ def _install_authority() -> None:
 
     evidence_registry: dict[int, tuple[object, str, bool, object, object]] = {}
     assessment_registry: dict[
-        int, tuple[object, str, str, int, Decimal]
+        int,
+        tuple[
+            object,
+            str,
+            BetfairDecisionQuoteEvidence,
+            str,
+            str,
+            int,
+            Decimal,
+        ],
     ] = {}
     validate = BetfairDecisionQuoteEvidence.__post_init__
 
@@ -654,6 +663,8 @@ def _install_authority() -> None:
         assessment_registry[key] = (
             ref(assessment, lambda _r, key=key: assessment_registry.pop(key, None)),
             assessment.assessment_id,
+            self,
+            self.evidence_id,
             self.observed_at,
             self.received_monotonic_ns,
             requested_max_age,
@@ -666,15 +677,27 @@ def _install_authority() -> None:
             raise BetfairDecisionQuoteError("assessment is not product-issued")
         if not self.decision_eligible:
             return
+        evidence = record[2]
+        if (
+            type(evidence) is not BetfairDecisionQuoteEvidence
+            or evidence.evidence_id != record[3]
+        ):
+            raise BetfairDecisionQuoteError(
+                "positive assessment lost its exact decision-quote evidence binding"
+            )
+        # Positive decision authority is use-time authority, not a historical fact.
+        # Revalidate the exact source evidence so credential/session/network/App-Key
+        # drift after assessment issuance cannot keep a once-valid permission alive.
+        provider_record(evidence)
         current_ns = _integer(
             production_monotonic_ns(),
             "product use-time monotonic_ns",
         )
         current_utc = production_utc_now(timezone.utc)
         if not _positive_assessment_current(
-            observed_at=record[2],
-            received_monotonic_ns=record[3],
-            max_age_seconds=record[4],
+            observed_at=record[4],
+            received_monotonic_ns=record[5],
+            max_age_seconds=record[6],
             now_utc=current_utc,
             now_monotonic_ns=current_ns,
         ):

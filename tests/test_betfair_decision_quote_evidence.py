@@ -142,6 +142,7 @@ def _network_capture(
     price: str = "2.0",
     size: str = "4",
     depth: int = 3,
+    client_sink=None,
 ):
     market_payload = market_payload or _market_payload()
     calls = []
@@ -190,6 +191,8 @@ def _network_capture(
         venue_id="betfair-global",
         account_id="configured-account",
     )
+    if client_sink is not None:
+        client_sink.append(client)
     evidence = _read(
         client,
         side=side,
@@ -270,6 +273,36 @@ def test_canonical_network_live_app_snapshot_is_quantity_aware_and_authoritative
         "SportsAPING/v1.0/listMarketBook",
         "AccountAPING/v1.0/getDeveloperAppKeys",
     ]
+
+
+def test_positive_assessment_revalidates_provider_origin_at_use_time(monkeypatch):
+    clients = []
+    evidence, _ = _network_capture(monkeypatch, client_sink=clients)
+    assessment = _assess(evidence)
+    assessment.assert_authoritative()
+
+    monkeypatch.setattr(
+        clients[0],
+        "_credentials",
+        BetfairSessionCredentials("rotated-app-secret", "rotated-session-secret"),
+    )
+    with pytest.raises(BetfairDecisionQuoteError, match="current live App Key authority"):
+        assessment.assert_authoritative()
+
+    negative_clients = []
+    negative_evidence, _ = _network_capture(
+        monkeypatch,
+        market_payload=_market_payload(delayed=True),
+        client_sink=negative_clients,
+    )
+    negative_assessment = _assess(negative_evidence)
+    assert negative_assessment.decision_eligible is False
+    monkeypatch.setattr(
+        negative_clients[0],
+        "_credentials",
+        BetfairSessionCredentials("rotated-app-secret", "rotated-session-secret"),
+    )
+    negative_assessment.assert_authoritative()
 
 
 def test_direct_or_copied_values_cannot_mint_positive_authority(monkeypatch):

@@ -60,8 +60,16 @@ def _decimal_text(value: Decimal) -> str:
             "turnover evidence requires finite exact Decimal values"
         )
     if value == 0:
-        return "0"
-    return str(value.normalize())
+        return "0e0"
+    sign, digits, exponent = value.as_tuple()
+    canonical_digits = list(digits)
+    canonical_exponent = exponent
+    while canonical_digits and canonical_digits[-1] == 0:
+        canonical_digits.pop()
+        canonical_exponent += 1
+    coefficient = "".join(str(digit) for digit in canonical_digits)
+    prefix = "-" if sign else ""
+    return f"{prefix}{coefficient}e{canonical_exponent}"
 
 
 def _parse_timestamp(value: object, field_name: str) -> datetime:
@@ -113,6 +121,42 @@ def _exact_sum(values: tuple[Decimal, ...]) -> Decimal:
     if not result.is_finite():
         raise PaperDayTurnoverEvidenceIncompleteError(
             "turnover constituent sum is not finite"
+        )
+    return result
+
+
+def _exact_nonnegative_difference(left: Decimal, right: Decimal) -> Decimal:
+    if (
+        not isinstance(left, Decimal)
+        or not left.is_finite()
+        or not isinstance(right, Decimal)
+        or not right.is_finite()
+        or left < 0
+        or right < 0
+        or right > left
+    ):
+        raise PaperDayTurnoverEvidenceError(
+            "turnover difference requires finite non-negative ordered Decimals"
+        )
+    if left == right:
+        return Decimal("0")
+    nonzero = tuple(value for value in (left, right) if value != 0)
+    max_adjusted = max(value.adjusted() for value in nonzero)
+    min_exponent = min(value.as_tuple().exponent for value in nonzero)
+    precision = max(32, max_adjusted - min_exponent + 8)
+    try:
+        with localcontext() as context:
+            context.prec = precision
+            context.traps[Inexact] = True
+            context.traps[InvalidOperation] = True
+            result = left - right
+    except DecimalException as exc:
+        raise PaperDayTurnoverEvidenceError(
+            "turnover difference is not exactly representable"
+        ) from exc
+    if not result.is_finite() or result < 0:
+        raise PaperDayTurnoverEvidenceError(
+            "turnover difference is outside canonical domain"
         )
     return result
 
@@ -245,7 +289,10 @@ class PaperDayTurnoverEvidence:
         expected_headroom = (
             Decimal("0")
             if expected_breached
-            else self.turnover_cap - self.confirmed_turnover
+            else _exact_nonnegative_difference(
+                self.turnover_cap,
+                self.confirmed_turnover,
+            )
         )
         if self.breached != expected_breached:
             raise PaperDayTurnoverEvidenceError(
@@ -365,7 +412,11 @@ class PaperDayTurnoverResolver:
         confirmed = _exact_sum(tuple(stakes))
         cap = _exact_product(book.initial_bankroll, goal.max_turnover_fraction)
         breached = confirmed > cap
-        residual = Decimal("0") if breached else cap - confirmed
+        residual = (
+            Decimal("0")
+            if breached
+            else _exact_nonnegative_difference(cap, confirmed)
+        )
 
         constituent_sha256 = _canonical_json_sha256(
             {

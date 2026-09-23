@@ -1076,13 +1076,15 @@ class PaperBook:
                 new_snapshot_sha256=snapshot_sha,
             )
         finally:
-            if publication_lock is not None:
-                _release_snapshot_publication_lock(publication_lock)
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
+            try:
+                if publication_lock is not None:
+                    _release_snapshot_publication_lock(publication_lock)
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:

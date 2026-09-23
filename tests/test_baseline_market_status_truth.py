@@ -57,6 +57,57 @@ class BaselineMarketStatusTruthTests(unittest.TestCase):
         self.assertEqual(ticket.legs[0].quote_key, reopened.quote_key)
         self.assertEqual(ticket.placed_at, reopened.observed_ts)
 
+    def test_explicit_back_preserves_exchange_side_and_semantics_identity(self) -> None:
+        book = PaperBook("1000")
+        agent = PaperBaselineAgent("50")
+        context = AgentContext(book)
+        event = replace(
+            self._event("open", 1),
+            sport="soccer",
+            exchange_side="back",
+            market_semantics_id="soccer:h2h:v1",
+        )
+
+        agent.on_market_event(event, context)
+
+        self.assertEqual(book.balance, Decimal("950"))
+        self.assertEqual(len(book.tickets), 1)
+        ticket = next(iter(book.tickets.values()))
+        leg = ticket.legs[0]
+        self.assertEqual(leg.exchange_side, "back")
+        self.assertEqual(leg.market_semantics_id, event.market_semantics_id)
+        self.assertEqual(leg.quote_key, event.quote_key)
+
+    def test_explicit_lay_fails_closed_without_consuming_signal(self) -> None:
+        book = PaperBook("1000")
+        agent = PaperBaselineAgent("50")
+        context = AgentContext(book)
+        lay_event = replace(
+            self._event("open", 1),
+            sport="soccer",
+            exchange_side="lay",
+            market_semantics_id="soccer:h2h:v1",
+        )
+        back_event = replace(
+            lay_event,
+            exchange_side="back",
+            sequence=2,
+            observed_ts="2026-01-01T00:00:02+00:00",
+        )
+
+        agent.on_market_event(lay_event, context)
+
+        self.assertEqual(book.balance, Decimal("1000"))
+        self.assertEqual(book.tickets, {})
+
+        agent.on_market_event(back_event, context)
+
+        self.assertEqual(book.balance, Decimal("950"))
+        self.assertEqual(len(book.tickets), 1)
+        ticket = next(iter(book.tickets.values()))
+        self.assertEqual(ticket.legs[0].exchange_side, "back")
+        self.assertEqual(ticket.legs[0].quote_key, back_event.quote_key)
+
 
 if __name__ == "__main__":
     unittest.main()

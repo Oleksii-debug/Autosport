@@ -485,6 +485,7 @@ class ResolvedPolicyOutcome:
             _sha256(self.decision_sha256, "decision_sha256"),
         )
         committed = _instant(self.decision_committed_at, "decision_committed_at")
+        object.__setattr__(self, "decision_committed_at", committed)
         if type(self.side) is not BetSide:
             raise ForwardEconomicEvidenceError("side must be an exact BetSide")
         pnl = _decimal(self.net_pnl_currency, "net_pnl_currency")
@@ -697,6 +698,8 @@ class ForwardEconomicStep:
     universe_event_sha256: str
     challenger_decision_sha256: str
     champion_decision_sha256: str
+    challenger_decision_committed_at: datetime
+    champion_decision_committed_at: datetime
     challenger_side: BetSide
     champion_side: BetSide
     challenger_net_pnl_currency: Decimal
@@ -740,6 +743,12 @@ class ForwardEconomicStep:
             "universe_event_sha256": self.universe_event_sha256,
             "challenger_decision_sha256": self.challenger_decision_sha256,
             "champion_decision_sha256": self.champion_decision_sha256,
+            "challenger_decision_committed_at": _instant_text(
+                self.challenger_decision_committed_at
+            ),
+            "champion_decision_committed_at": _instant_text(
+                self.champion_decision_committed_at
+            ),
             "challenger_side": self.challenger_side.value,
             "champion_side": self.champion_side.value,
             "challenger_net_pnl_currency": _decimal_text(self.challenger_net_pnl_currency),
@@ -1217,6 +1226,8 @@ class ForwardEconomicEvidenceAccumulator:
             universe_event_sha256=observation.universe_event_sha256,
             challenger_decision_sha256=observation.challenger_decision_sha256,
             champion_decision_sha256=observation.champion_decision_sha256,
+            challenger_decision_committed_at=challenger.decision_committed_at,
+            champion_decision_committed_at=champion.decision_committed_at,
             challenger_side=challenger.side,
             champion_side=champion.side,
             challenger_net_pnl_currency=challenger.net_pnl_currency,

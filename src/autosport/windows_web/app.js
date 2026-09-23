@@ -83,10 +83,10 @@
     const focused = document.activeElement;
     startButton.disabled = canStart !== true;
     stopButton.disabled = canStop !== true;
-    if (focused === startButton && startButton.disabled && !stopButton.disabled) {
-      stopButton.focus();
-    } else if (focused === stopButton && stopButton.disabled && !startButton.disabled) {
-      startButton.focus();
+    if (focused === startButton && startButton.disabled) {
+      focusOperatorTarget(stopButton);
+    } else if (focused === stopButton && stopButton.disabled) {
+      focusOperatorTarget(startButton);
     }
   }
 

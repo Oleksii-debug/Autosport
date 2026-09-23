@@ -44,7 +44,7 @@ def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
     stable_readbacks = (
         'setValueIfChanged(byId(205), state.bank || "");',
         'setValueIfChanged(byId(202), (state.log || []).join("\\n"));',
-        'setValueIfChanged(byId(302), state.surface_state || "");',
+        'setValueIfChanged(byId(302), surfaceDetails[0] || "СТАН: невідомий");',
         'setValueIfChanged(byId(306), state.owner.summary || "");',
         'setValueIfChanged(byId(334), state.manual.result || "");',
         'byId("product-runtime-status"),',
@@ -55,7 +55,7 @@ def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
     stale_unconditional_readbacks = (
         'byId(205).value = state.bank || "";',
         'byId(202).value = (state.log || []).join("\\n");',
-        'byId(302).value = state.surface_state || "";',
+        'byId(302).value = surfaceDetails[0] || "СТАН: невідомий";',
         'byId(306).value = state.owner.summary || "";',
         'byId(334).value = state.manual.result || "";',
         'byId("product-runtime-status").value =',
@@ -64,17 +64,21 @@ def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
         assert projection not in source
 
 
-def test_runtime_start_stop_transition_keeps_focus_on_an_action() -> None:
+def test_runtime_start_stop_transition_keeps_focus_on_an_action_or_fallback() -> None:
     source = _source()
 
     assert "function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop)" in source
     assert "const focused = document.activeElement;" in source
     assert "startButton.disabled = canStart !== true;" in source
     assert "stopButton.disabled = canStop !== true;" in source
-    assert "focused === startButton && startButton.disabled && !stopButton.disabled" in source
-    assert "stopButton.focus();" in source
-    assert "focused === stopButton && stopButton.disabled && !startButton.disabled" in source
-    assert "startButton.focus();" in source
+    assert "focused === startButton && startButton.disabled" in source
+    assert "focusOperatorTarget(stopButton);" in source
+    assert "focused === stopButton && stopButton.disabled" in source
+    assert "focusOperatorTarget(startButton);" in source
+    assert "focused === startButton && startButton.disabled && !stopButton.disabled" not in source
+    assert "focused === stopButton && stopButton.disabled && !startButton.disabled" not in source
+    assert "stopButton.focus();" not in source
+    assert "startButton.focus();" not in source
     assert 'byId("product-runtime-start").disabled = productRuntime.can_start !== true;' not in source
     assert 'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true;' not in source
     assert "syncRuntimeActionAvailability(" in source
@@ -93,7 +97,7 @@ def test_poll_driven_disable_moves_focus_to_status_or_error() -> None:
     assert "fallback.focus();" in source
 
     assert "setDisabledWithFocusFallback(node, !state.owner.can_initialize);" in source
-    assert "const busyDisabled = Boolean(state.busy && Object.values(state.busy).some(Boolean));" in source
+    assert "const busyDisabled = isAnyWorkerBusy(state);" in source
     assert "setDisabledWithFocusFallback(byId(id), busyDisabled);" in source
     assert "const planDisabled = busyDisabled || state.strategy_requires_plan === false;" in source
     assert "setDisabledWithFocusFallback(byId(107), planDisabled);" in source

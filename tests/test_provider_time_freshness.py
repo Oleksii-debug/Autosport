@@ -164,6 +164,22 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
             with self.subTest(value=value[:20]), self.assertRaises(ValueError):
                 self.evidence(sequence_id=value)
 
+
+    def test_opaque_sequence_utf8_byte_boundary_and_invalid_unicode(self) -> None:
+        exactly_512_bytes = "é" * 256
+        too_large = "é" * 257
+
+        accepted = self.evidence(sequence_id=exactly_512_bytes)
+        self.assertEqual(accepted.sequence_id, exactly_512_bytes)
+        self.assertIsInstance(accepted.evidence_id, str)
+        self.assertEqual(len(accepted.evidence_id), 64)
+
+        with self.assertRaisesRegex(ValueError, "UTF-8 size bound"):
+            self.evidence(sequence_id=too_large)
+
+        with self.assertRaisesRegex(ValueError, "valid UTF-8 text"):
+            self.evidence(sequence_id="\ud800")
+
     def test_evidence_identity_changes_for_each_bound_dimension(self) -> None:
         base = self.evidence()
         variants = (

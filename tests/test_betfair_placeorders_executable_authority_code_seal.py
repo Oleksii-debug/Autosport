@@ -239,7 +239,7 @@ def test_provider_http_post_closure_replacement_fails_before_durable_attempt() -
         finally:
             cell.cell_contents = original_value
 
-@pytest.mark.parametrize("attribute", ("_open", "_call_chain"))
+@pytest.mark.parametrize("attribute", ("_open", "_call_chain", "error"))
 def test_private_opener_internal_dispatch_shadow_fails_before_durable_attempt(
     attribute: str,
 ) -> None:
@@ -383,3 +383,38 @@ def test_private_https_handler_instance_dispatch_shadow_fails_before_durable_att
             assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
         finally:
             delattr(https_handler, "https_open")
+
+
+def test_private_opener_error_dispatch_map_rewrite_fails_before_durable_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, client = _client_for(tmp)
+        private_opener = (
+            betfair_supervised_execution._CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+        )
+        error_mapping = private_opener.handle_error
+        assert type(error_mapping) is dict and error_mapping
+        protocol = next(iter(error_mapping))
+        by_code = error_mapping[protocol]
+        assert type(by_code) is dict and by_code
+        code = next(iter(by_code))
+        original_handlers = by_code[code]
+        by_code[code] = [object()]
+        try:
+            with pytest.raises(
+                BetfairSupervisedExecutionError,
+                match="canonical client, transport",
+            ):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-private-opener-error-map",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+
+            assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+        finally:
+            by_code[code] = original_handlers

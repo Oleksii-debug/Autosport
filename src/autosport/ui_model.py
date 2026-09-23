@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from .domain import MarketType
 from .localization import text
 from .price_truth import market_price_truth_from_run_summary
 from .session import ObservationResult, SessionResult
@@ -28,6 +29,12 @@ _INGESTION_QUALITY_FLAG_TEXT_KEYS = {
     "FUTURE_CLOCK_SKEW": "ui.observation.quality_flag.future_clock_skew",
     "INVALID_QUOTE": "ui.observation.quality_flag.invalid_quote",
     "SOURCE_TIME_REGRESSION": "ui.observation.quality_flag.source_time_regression",
+}
+_MARKET_TYPE_TEXT_KEYS = {
+    MarketType.WINNER: "ui.observation.market_type.winner",
+    MarketType.TOTAL: "ui.observation.market_type.total",
+    MarketType.HANDICAP: "ui.observation.market_type.handicap",
+    MarketType.OTHER: "ui.observation.market_type.other",
 }
 
 
@@ -225,7 +232,7 @@ def observation_quote_lines(result: ObservationResult) -> list[str]:
             "ui.observation.quote",
             sport=event.sport,
             event_id=event.event_id,
-            market_type=event.market_type.value,
+            market_type=text(_MARKET_TYPE_TEXT_KEYS[event.market_type]),
             market_id=event.market_id,
             selection_id=event.selection_id,
             odds=event.decimal_odds,

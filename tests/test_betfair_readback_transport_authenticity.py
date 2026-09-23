@@ -221,6 +221,41 @@ def test_private_opener_internal_dispatch_shadow_fails_before_network() -> None:
     assert called is False
 
 
+def test_private_opener_handler_method_rebind_fails_before_network() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+    opener = _private_authority_opener()
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler).__name__ == "HTTPSHandler"
+    )
+    handler_type = type(https_handler)
+    original = handler_type.https_open
+    called = False
+
+    def synthetic_https_open(self, request):
+        nonlocal called
+        called = True
+        raise AssertionError("synthetic HTTPS handler must never be trusted")
+
+    handler_type.https_open = synthetic_https_open
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair network authority changed",
+        ):
+            client.read_execution_readback(
+                action_id="action-handler-method-falsifier",
+                market_id="1.234",
+            )
+    finally:
+        handler_type.https_open = original
+
+    assert called is False
+
+
 def test_trusted_network_witness_rejects_forged_current_dto_field() -> None:
     action = _action()
     capture = _capture(

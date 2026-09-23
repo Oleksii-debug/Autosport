@@ -287,6 +287,9 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
     assert provenance["causal_classification"] == "RETROSPECTIVE_POINT_IN_TIME_PRICE"
     assert provenance["qualification_scope"] == "selected_point_in_time_snapshot_corpus_v1"
     assert provenance["prospective_authority"] is False
+    assert provenance["canonical_response_payload_digest_bound"] is True
+    assert provenance["raw_response_bytes_bound"] is False
+    assert provenance["normalized_request_scope_bound"] is False
     assert provenance["provider_response_metadata_bound"] is False
     assert provenance["raw_redistribution_authority"] is False
     assert provenance["upstream_bookmaker_keys"] == ["book-a"]

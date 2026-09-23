@@ -121,14 +121,24 @@ def _text_atom(value: object) -> str:
     )
 
 
+def _text_label_child(prefix: str, key: object) -> str:
+    """Append one mapping-key path component without emitting raw terminal controls."""
+
+    component = str(key)
+    if component and all(character.isalnum() or character in "_-" for character in component):
+        return f"{prefix}.{component}" if prefix else component
+
+    encoded = _text_atom(component)
+    return f"{prefix}[{encoded}]" if prefix else f"[{encoded}]"
+
+
 def _append_text_lines(lines: list[str], prefix: str, value: object) -> None:
     if isinstance(value, Mapping):
         if not value:
             lines.append(f"{prefix}: empty mapping")
             return
         for key in sorted(value, key=str):
-            child_prefix = f"{prefix}.{key}" if prefix else str(key)
-            _append_text_lines(lines, child_prefix, value[key])
+            _append_text_lines(lines, _text_label_child(prefix, key), value[key])
         return
     if isinstance(value, (list, tuple)):
         if not value:

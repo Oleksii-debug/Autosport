@@ -918,10 +918,58 @@ class TheOddsApiProvider:
         self,
         url: str,
         product_transport: Transport = _default_transport,
+        product_transport_code: object = _default_transport.__code__,
+        product_transport_freevars: tuple[str, ...] = _default_transport.__code__.co_freevars,
+        product_transport_closure: tuple[object, ...] = tuple(
+            cell.cell_contents for cell in (_default_transport.__closure__ or ())
+        ),
+        product_transport_performer: Callable[..., HttpJsonResponse] = _perform_http_json_response,
+        product_transport_performer_code: object = _perform_http_json_response.__code__,
+        product_transport_performer_kwdefaults: tuple[tuple[str, object], ...] = tuple(
+            sorted((_perform_http_json_response.__kwdefaults__ or {}).items())
+        ),
     ) -> tuple[HttpJsonResponse, bool]:
         transport = self.transport
+
+        def product_transport_is_intact() -> bool:
+            if transport is not product_transport:
+                return False
+            if (
+                getattr(transport, "__code__", None) is not product_transport_code
+                or product_transport_code.co_freevars != product_transport_freevars
+            ):
+                return False
+            closure = getattr(transport, "__closure__", None) or ()
+            if len(closure) != len(product_transport_closure):
+                return False
+            if any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(closure, product_transport_closure, strict=True)
+            ):
+                return False
+            if (
+                getattr(product_transport_performer, "__code__", None)
+                is not product_transport_performer_code
+            ):
+                return False
+            current_kwdefaults = product_transport_performer.__kwdefaults__ or {}
+            if len(current_kwdefaults) != len(product_transport_performer_kwdefaults):
+                return False
+            return all(
+                key in current_kwdefaults and current_kwdefaults[key] is expected
+                for key, expected in product_transport_performer_kwdefaults
+            )
+
         provider_origin_verified = transport is product_transport
+        if provider_origin_verified and not product_transport_is_intact():
+            raise TheOddsApiTransportError(
+                "The Odds API product transport authority changed before request"
+            )
         response = transport(url, self.timeout_seconds)
+        if provider_origin_verified and not product_transport_is_intact():
+            raise TheOddsApiTransportError(
+                "The Odds API product transport authority changed during request"
+            )
         if type(response) is not HttpJsonResponse:
             raise TypeError("transport must return HttpJsonResponse")
         if response.status_code != 200:

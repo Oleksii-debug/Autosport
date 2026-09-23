@@ -16,6 +16,7 @@ import math
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from weakref import WeakKeyDictionary
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -85,6 +86,69 @@ class _RejectRedirectHandler(HTTPRedirectHandler):
         raise ProphetXReadOnlyError("ProphetX HTTP redirect refused")
 
 
+def _make_provider_fetch(
+    opener: object,
+    max_response_bytes: int,
+):
+    """Capture one construction-time network primitive for positive wallet authority."""
+
+    open_response = opener.open
+    request_type = Request
+
+    def fetch(
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> ProphetXHttpResponse:
+        if url != BALANCE_URL:
+            raise ProphetXReadOnlyError(
+                "ProphetX transport target is outside the fixed balance origin"
+            )
+        request = request_type(url, headers=dict(headers), method="GET")
+        try:
+            with open_response(request, timeout=timeout_seconds) as response:
+                body = response.read(max_response_bytes + 1)
+                if len(body) > max_response_bytes:
+                    raise ProphetXReadOnlyError(
+                        "ProphetX response exceeded the size limit"
+                    )
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    stripped = content_length.strip()
+                    if (
+                        not stripped
+                        or not stripped.isascii()
+                        or not stripped.isdigit()
+                    ):
+                        raise ProphetXReadOnlyError(
+                            "ProphetX response Content-Length is invalid"
+                        )
+                    if int(stripped) != len(body):
+                        raise ProphetXReadOnlyError(
+                            "ProphetX response Content-Length does not match body"
+                        )
+                return ProphetXHttpResponse(
+                    status=int(response.getcode()),
+                    final_url=str(response.geturl()),
+                    content_type=response.headers.get("Content-Type"),
+                    content_encoding=response.headers.get("Content-Encoding"),
+                    body=body,
+                )
+        except ProphetXReadOnlyError:
+            raise
+        except HTTPError as exc:
+            status = exc.code
+            exc.close()
+            raise ProphetXReadOnlyError(
+                f"ProphetX HTTP request failed with status {status}"
+            ) from None
+        except (URLError, TimeoutError, OSError, HTTPException):
+            raise ProphetXReadOnlyError("ProphetX network request failed") from None
+
+    return fetch
+
+
 class UrllibProphetXHttpTransport:
     def __init__(self, *, max_response_bytes: int = _MAX_RESPONSE_BYTES) -> None:
         if (
@@ -95,6 +159,10 @@ class UrllibProphetXHttpTransport:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
         self._opener = build_opener(ProxyHandler({}), _RejectRedirectHandler())
+        self._provider_fetch = _make_provider_fetch(
+            self._opener,
+            max_response_bytes,
+        )
 
     def get(
         self,
@@ -147,6 +215,13 @@ class UrllibProphetXHttpTransport:
             ) from None
         except (URLError, TimeoutError, OSError, HTTPException):
             raise ProphetXReadOnlyError("ProphetX network request failed") from None
+
+
+_CANONICAL_WALLET_GET = UrllibProphetXHttpTransport.get
+_PROVIDER_TRANSPORTS: WeakKeyDictionary[
+    object, UrllibProphetXHttpTransport
+] = WeakKeyDictionary()
+_PROVIDER_FETCHES: WeakKeyDictionary[object, object] = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,12 +310,11 @@ class ProphetXReadOnlyClient:
         if transport is None:
             canonical_transport = UrllibProphetXHttpTransport()
             self._transport: ProphetXHttpTransport = canonical_transport
-            self._provider_origin_transport: UrllibProphetXHttpTransport | None = (
-                canonical_transport
-            )
+            if type(self) is ProphetXReadOnlyClient:
+                _PROVIDER_TRANSPORTS[self] = canonical_transport
+                _PROVIDER_FETCHES[self] = canonical_transport._provider_fetch
         else:
             self._transport = transport
-            self._provider_origin_transport = None
         self._timeout_seconds = float(timeout_seconds)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._venue_id = _required_text(venue_id, "venue_id")
@@ -253,16 +327,35 @@ class ProphetXReadOnlyClient:
         )
 
     def read_wallet(self) -> ProphetXWalletObservation:
-        response = self._transport.get(
-            BALANCE_URL,
-            headers={
-                "Accept": "application/json",
-                "Accept-Encoding": "identity",
-                "Authorization": f"Bearer {self._session.access_token}",
-            },
-            timeout_seconds=self._timeout_seconds,
-        )
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Authorization": f"Bearer {self._session.access_token}",
+        }
+        canonical_transport = _PROVIDER_TRANSPORTS.get(self)
+        authoritative_fetch = None
+        if canonical_transport is not None:
+            authoritative_fetch = _require_canonical_network_authority(self)
+            response = authoritative_fetch(
+                BALANCE_URL,
+                headers=headers,
+                timeout_seconds=self._timeout_seconds,
+            )
+        else:
+            response = self._transport.get(
+                BALANCE_URL,
+                headers=headers,
+                timeout_seconds=self._timeout_seconds,
+            )
         self._validate_http_response(response)
+        if (
+            authoritative_fetch is not None
+            and _require_canonical_network_authority(self)
+            is not authoritative_fetch
+        ):
+            raise ProphetXReadOnlyError(
+                "canonical ProphetX account network authority changed during acquisition"
+            )
         payload_sha256 = sha256(response.body).hexdigest()
         decoded = _decode_json(response.body)
         envelope = _mapping(decoded, "ProphetX balance response")
@@ -368,15 +461,7 @@ class ProphetXReadOnlyClient:
         )
 
     def _require_provider_origin_authority(self) -> None:
-        authority_transport = self._provider_origin_transport
-        if (
-            authority_transport is None
-            or type(authority_transport) is not UrllibProphetXHttpTransport
-            or self._transport is not authority_transport
-        ):
-            raise ProphetXReadOnlyError(
-                "canonical ProphetX account authority requires product-owned transport"
-            )
+        _require_canonical_network_authority(self)
 
     @staticmethod
     def _require_synchronized_wallet(wallet: ProphetXWalletObservation) -> None:
@@ -430,6 +515,28 @@ class ProphetXReadOnlyClient:
                 "clock must return timezone-aware datetime"
             )
         return value.isoformat()
+
+
+def _require_canonical_network_authority(
+    client: ProphetXReadOnlyClient,
+):
+    """Return the exact construction-time wallet fetch or fail closed on drift."""
+
+    canonical = _PROVIDER_TRANSPORTS.get(client)
+    expected_fetch = _PROVIDER_FETCHES.get(client)
+    if (
+        type(client) is not ProphetXReadOnlyClient
+        or canonical is None
+        or type(canonical) is not UrllibProphetXHttpTransport
+        or client._transport is not canonical
+        or type(canonical).get is not _CANONICAL_WALLET_GET
+        or expected_fetch is None
+        or canonical._provider_fetch is not expected_fetch
+    ):
+        raise ProphetXReadOnlyError(
+            "canonical ProphetX account authority requires product-owned transport"
+        )
+    return expected_fetch
 
 
 def _decode_json(payload: bytes) -> object:

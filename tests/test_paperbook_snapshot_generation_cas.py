@@ -104,3 +104,38 @@ def test_stale_bound_book_cannot_mutate_after_newer_generation(
     assert stale.balance == balance_before
     assert tuple(stale.tickets) == tickets_before
     assert tuple(stale._lifecycle) == lifecycle_before
+
+
+def test_snapshot_publication_lock_fails_closed_for_competing_writer_and_reader(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.save(path)
+    competing = PaperBook.load(path)
+
+    import autosport.paper as paper_module
+
+    witness_path = paper_module._snapshot_witness_path(path)
+    lock_fd = paper_module._acquire_snapshot_publication_lock(witness_path)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="snapshot publication lock is held by another writer",
+        ):
+            competing.save(path)
+
+        with pytest.raises(
+            ValueError,
+            match="snapshot publication lock is held by another writer",
+        ):
+            PaperBook.load(path)
+    finally:
+        paper_module._release_snapshot_publication_lock(lock_fd)
+
+    restored = PaperBook.load(path)
+    assert restored.balance == Decimal("100")
+    assert restored.tickets == {}

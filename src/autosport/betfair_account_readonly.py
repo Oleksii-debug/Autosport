@@ -1126,8 +1126,67 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
 # authority for caller-constructed DTOs.
 def _install_execution_readback_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
+    trusted_clients: dict[int, tuple[object, object]] = {}
+    raw_init = BetfairReadOnlyClient.__init__
     raw_read = BetfairReadOnlyClient.read_execution_readback
     validate_integrity = BetfairExecutionReadbackEnvelope.assert_authoritative
+    sealed_transport_type = UrllibBetfairHttpTransport
+    sealed_transport_post = UrllibBetfairHttpTransport.post
+    sealed_transport_post_code = sealed_transport_post.__code__
+
+    def authoritative_init(
+        self: BetfairReadOnlyClient,
+        credentials: BetfairSessionCredentials,
+        *,
+        transport: BetfairHttpTransport | None = None,
+        timeout_seconds: float = 10.0,
+        clock: Callable[[], datetime] | None = None,
+        venue_id: str = "betfair",
+        account_id: str = "default-account",
+    ) -> None:
+        raw_init(
+            self,
+            credentials,
+            transport=transport,
+            timeout_seconds=timeout_seconds,
+            clock=clock,
+            venue_id=venue_id,
+            account_id=account_id,
+        )
+        if transport is not None:
+            return
+        trusted_transport = self._transport
+        if type(trusted_transport) is not sealed_transport_type:
+            raise BetfairReadOnlyError(
+                "canonical Betfair client did not install the sealed network transport"
+            )
+        client_id = id(self)
+
+        def forget_client(_weakref: object, *, key: int = client_id) -> None:
+            trusted_clients.pop(key, None)
+
+        trusted_clients[client_id] = (
+            ref(self, forget_client),
+            trusted_transport,
+        )
+
+    def has_trusted_transport(self: BetfairReadOnlyClient) -> bool:
+        record = trusted_clients.get(id(self))
+        if record is None or record[0]() is not self:
+            return False
+        transport = record[1]
+        if self._transport is not transport or type(transport) is not sealed_transport_type:
+            return False
+        current_post = getattr(sealed_transport_type, "post", None)
+        if (
+            current_post is not sealed_transport_post
+            or getattr(current_post, "__code__", None) is not sealed_transport_post_code
+        ):
+            return False
+        instance_dict = getattr(transport, "__dict__", {})
+        if isinstance(instance_dict, dict) and "post" in instance_dict:
+            return False
+        return True
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -1150,10 +1209,11 @@ def _install_execution_readback_authority() -> None:
         def forget(_weakref: object, *, key: int = capture_id) -> None:
             issued.pop(key, None)
 
-        issued[capture_id] = (
-            ref(capture, forget),
-            capture._authority_fingerprint(),
-        )
+        if has_trusted_transport(self):
+            issued[capture_id] = (
+                ref(capture, forget),
+                capture._authority_fingerprint(),
+            )
         return capture
 
     def assert_authoritative(self: BetfairExecutionReadbackEnvelope) -> None:
@@ -1170,6 +1230,7 @@ def _install_execution_readback_authority() -> None:
                 "execution readback changed after canonical adapter capture"
             )
 
+    BetfairReadOnlyClient.__init__ = authoritative_init
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     BetfairExecutionReadbackEnvelope.assert_authoritative = assert_authoritative
 

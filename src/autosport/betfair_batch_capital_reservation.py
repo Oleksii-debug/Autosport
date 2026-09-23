@@ -57,6 +57,21 @@ def _instant_text(value: datetime) -> str:
     return _instant(value, "instant").isoformat().replace("+00:00", "Z")
 
 
+def _instant_from_text(value: object, name: str) -> datetime:
+    if type(value) is not str or not value or value != value.strip():
+        raise BetfairBatchCapitalReservationError(
+            f"{name} must be canonical timestamp text"
+        )
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise BetfairBatchCapitalReservationError(
+            f"{name} must be an ISO-8601 timestamp"
+        ) from exc
+    return _instant(parsed, name)
+
+
 def _decimal_text(value: Decimal) -> str:
     if type(value) is not Decimal or not value.is_finite():
         raise BetfairBatchCapitalReservationError(
@@ -325,7 +340,7 @@ class BetfairBatchCapitalReservation:
             raise BetfairBatchCapitalReservationError(
                 "members must be a non-empty tuple of exact batch reservations"
             )
-        _instant(self.as_of, "as_of")
+        as_of = _instant(self.as_of, "as_of")
         if self.execution_authority is not False:
             raise BetfairBatchCapitalReservationError(
                 "batch capital reservation never grants execution authority"
@@ -346,6 +361,24 @@ class BetfairBatchCapitalReservation:
             raise BetfairBatchCapitalReservationError(
                 "batch attempt identities must be unique"
             )
+
+        for member in self.members:
+            evidence = member.live_risk_evidence
+            if evidence is None:
+                continue
+            evidence = _validated_live_evidence(
+                evidence,
+                attempt_id=member.attempt_id,
+                action_id=member.action_id,
+            )
+            if _instant_from_text(
+                evidence.readback_observed_at,
+                "live_risk_evidence.readback_observed_at",
+            ) > as_of:
+                raise BetfairBatchCapitalReservationError(
+                    "batch as_of cannot precede provider readback evidence"
+                )
+
         # Validate every member against current canonical evidence at creation.
         _ = self.total_reserved
         _ = self.evidence_id

@@ -331,3 +331,67 @@ def test_acquisition_drift_changes_only_acquisition_and_qualified_identity(tmp_p
         first_provenance["qualified_corpus_identity"]
         != second_provenance["qualified_corpus_identity"]
     )
+
+
+
+def test_governance_drift_changes_only_governance_and_qualified_identity(tmp_path: Path) -> None:
+    snapshot = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="governance-stable",
+        event_id="event-governance-stable",
+    )
+
+    first_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="governance-corpus-a",
+        governance_suffix="governance-a",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="governance-corpus-b",
+        governance_suffix="governance-b",
+    )
+    first_provenance = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    second_provenance = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert first_provenance["content_identity"] == second_provenance["content_identity"]
+    assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
+    assert first_provenance["governance_identity"] != second_provenance["governance_identity"]
+    assert (
+        first_provenance["qualified_corpus_identity"]
+        != second_provenance["qualified_corpus_identity"]
+    )
+
+
+def test_invalid_provider_response_digest_cannot_enter_acquisition_identity(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="bad-response-digest",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload["response_sha256"] = "not-a-canonical-digest"
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="bad-response-digest",
+    )
+
+    with pytest.raises(ValueError, match="response_sha256"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="bad-response-digest",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-response-digest",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )

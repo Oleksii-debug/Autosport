@@ -415,3 +415,56 @@ def test_goal_and_day_authority_must_share_workspace(tmp_path):
             window_store=store,
             window_evidence=window,
         )
+
+
+def test_ticket_mapping_permutation_preserves_turnover_identity(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    _open(book, window, stake="10", suffix="perm-a")
+    _open(book, window, stake="20", suffix="perm-b", placed_at=_inside(window, hours=2))
+
+    first = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+    book.tickets = dict(reversed(tuple(book.tickets.items())))
+    second = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    assert second.confirmed_turnover == Decimal("30")
+    assert second.constituent_sha256 == first.constituent_sha256
+    assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_decimal_scale_alias_preserves_turnover_identity(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    ticket = _open(book, window, stake="10", suffix="scale")
+
+    first = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+    ticket.stake = Decimal("10.00")
+    second = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    assert second.confirmed_turnover == Decimal("10")
+    assert second.constituent_sha256 == first.constituent_sha256
+    assert second.evidence_sha256 == first.evidence_sha256

@@ -655,6 +655,32 @@ class BookmakerAccountReconciliationStore:
             )
 
     @staticmethod
+    def _require_profile_continuity(
+        previous: BookmakerCapabilityProfile,
+        current: BookmakerCapabilityProfile,
+    ) -> None:
+        """Prevent a later account checkpoint from rolling capability truth backward.
+
+        The canonical capability registry treats profile_version as the immutable
+        version key for one venue/account/adapter scope. A durable account history may
+        replay the exact same profile, or advance to a higher version, but it must not
+        regress to an older version or attach different content to an already-used
+        version.
+        """
+
+        if current.profile_version < previous.profile_version:
+            raise AccountReconciliationIntegrityError(
+                "capability profile_version cannot regress within account history"
+            )
+        if (
+            current.profile_version == previous.profile_version
+            and current.profile_id != previous.profile_id
+        ):
+            raise AccountReconciliationIntegrityError(
+                "capability profile_version was reused with conflicting content"
+            )
+
+    @staticmethod
     def _require_nested_evidence_after(
         snapshot: BookmakerAccountSnapshot,
         previous_snapshot_at: datetime,
@@ -704,6 +730,7 @@ class BookmakerAccountReconciliationStore:
             )
         first = history[0]
         previous_at: datetime | None = None
+        previous_profile: BookmakerCapabilityProfile | None = None
         positions: dict[str, ReconciledPosition] = {}
         latest_balance: BookmakerBalanceObservation | None = None
         balance_delta: UnexplainedBalanceDelta | None = None
@@ -713,6 +740,8 @@ class BookmakerAccountReconciliationStore:
         for snapshot in history:
             cls._require_same_account(first, snapshot)
             current_at = _time(snapshot.observed_at, "snapshot.observed_at")
+            if previous_profile is not None:
+                cls._require_profile_continuity(previous_profile, snapshot.profile)
             if previous_at is not None:
                 if current_at <= previous_at:
                     raise AccountReconciliationIntegrityError(
@@ -725,6 +754,7 @@ class BookmakerAccountReconciliationStore:
                     position_observations=position_observations,
                 )
             previous_at = current_at
+            previous_profile = snapshot.profile
             balance_delta = None
 
             explicitly_seen: set[str] = set()

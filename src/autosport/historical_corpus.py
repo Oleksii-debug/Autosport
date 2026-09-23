@@ -16,7 +16,7 @@ from .domain import MarketEvent
 from .historical_governance import verify_governance_authority_binding
 from .integrity import atomic_write_json
 from .outcome_lineage import validate_outcome_source_lineage
-from .parlayapi_provider import ParlayApiTableTennisProvider
+from .parlay_sport_provider import _canonical_sport_key
 
 
 _SNAPSHOT_KIND = "parlayapi_point_in_time_historical_snapshot"
@@ -444,8 +444,12 @@ def _snapshot(
     if evidence.get("kind") != _SNAPSHOT_KIND:
         raise ValueError(f"snapshot evidence kind must be {_SNAPSHOT_KIND}")
     sport_key = _text(evidence, "sport_key", context="snapshot evidence")
-    if sport_key != ParlayApiTableTennisProvider.sport_key:
-        raise ValueError("snapshot evidence sport_key must be table_tennis")
+    try:
+        sport_key = _canonical_sport_key(sport_key)
+    except ValueError as exc:
+        raise ValueError(
+            "snapshot evidence sport_key must be one canonical Parlay sport identity"
+        ) from exc
     if evidence.get("has_data") is not True:
         raise ValueError("snapshot evidence must prove has_data=true")
     if evidence.get("point_in_time_snapshot_contains_odds") is not True:
@@ -465,7 +469,7 @@ def _snapshot(
     provider = _text(evidence, "provider", context="snapshot evidence")
     if provider != "parlayapi":
         raise ValueError("snapshot evidence provider must be parlayapi")
-    canonical_source_id = ParlayApiTableTennisProvider.source_id
+    canonical_source_id = f"parlayapi:{sport_key}"
 
     expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
     market_bytes = _read_bytes(market_path, context="snapshot market")
@@ -614,6 +618,10 @@ def assemble_historical_corpus(
                 "requested_at": str(evidence["requested_at"]),
                 "snapshot_at": str(evidence["snapshot_at"]),
                 "captured_at": captured_at,
+                "sport_key": str(evidence["sport_key"]),
+                "source_id": f"parlayapi:{evidence['sport_key']}",
+                "product_kind": "POINT_IN_TIME_ODDS",
+                "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
                 "quote_count": int(evidence["quote_count"]),
                 "snapshot_timestamp_fallback_count": int(
                     evidence.get("snapshot_timestamp_fallback_count", 0)
@@ -667,15 +675,24 @@ def assemble_historical_corpus(
     if source_ids != proof["source_ids"]:
         raise ValueError("governance proof.source_ids do not match historical snapshot source_ids")
     event_sports = {event.sport for event, _ in events}
-    if event_sports == {ParlayApiTableTennisProvider.sport_key}:
-        corpus_schema_version = 3
-    elif event_sports == {None}:
-        # Preserve old captured evidence as legacy schema-v2 truth. Do not infer
-        # event sport from manifest/evidence after the fact.
+    if event_sports == {None}:
+        # Preserve old captured evidence as legacy schema-v2 table-tennis truth.
+        # Do not infer event sport from manifest/evidence after the fact.
         corpus_schema_version = 2
+        manifest_sport = "table_tennis"
+    elif None not in event_sports and len(event_sports) == 1:
+        explicit_sport = next(iter(event_sports))
+        assert explicit_sport is not None
+        try:
+            manifest_sport = _canonical_sport_key(explicit_sport)
+        except ValueError as exc:
+            raise ValueError(
+                "historical snapshot events must use one canonical explicit Parlay sport identity"
+            ) from exc
+        corpus_schema_version = 3
     else:
         raise ValueError(
-            "historical snapshots mix legacy/unproven and explicit sport identities"
+            "historical snapshots mix legacy/unproven or multiple explicit sport identities"
         )
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
 
@@ -813,6 +830,53 @@ def assemble_historical_corpus(
                 }
             )
 
+        content_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_content_identity",
+                "product_kind": "POINT_IN_TIME_ODDS",
+                "sport": manifest_sport,
+                "source_ids": list(source_ids),
+                "market_sha256": market_sha,
+                "market_types": list(market_types),
+                "event_count": len(events),
+            }
+        )
+        acquisition_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_acquisition_identity",
+                "content_identity": content_identity,
+                "scope": "selected_point_in_time_snapshots_only",
+                "snapshots": evidence_rows,
+            }
+        )
+        governance_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_governance_identity",
+                "governance_proof_sha256": governance_proof_sha256,
+                "authority_record_sha256": binding.authority_record_sha256,
+                "source_identity": proof["source_identity"],
+                "source_ids": list(proof["source_ids"]),
+                "terms_reference": proof["terms_reference"],
+                "retention_expires_at": proof["retention_expires_at"],
+                "authorization_valid_through": proof["authorization_valid_through"],
+                "redistribution_policy": effective_redistribution_policy,
+            }
+        )
+        qualified_corpus_identity = _canonical_json_sha256(
+            {
+                "schema_version": 1,
+                "kind": "parlay_historical_qualified_corpus_identity",
+                "content_identity": content_identity,
+                "acquisition_identity": acquisition_identity,
+                "governance_identity": governance_identity,
+                "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
+                "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
+            }
+        )
+
         governance = {
             "source_identity": proof["source_identity"],
             "terms_reference": proof["terms_reference"],
@@ -855,6 +919,20 @@ def assemble_historical_corpus(
                 ],
                 "verified_at": proof["verified_at"],
                 "redistribution_verified": proof["redistribution_verified"],
+                "provenance": {
+                    "schema_version": 1,
+                    "product_kind": "POINT_IN_TIME_ODDS",
+                    "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
+                    "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
+                    "content_identity": content_identity,
+                    "acquisition_identity": acquisition_identity,
+                    "governance_identity": governance_identity,
+                    "qualified_corpus_identity": qualified_corpus_identity,
+                    "provider_response_metadata_bound": False,
+                    "prospective_authority": False,
+                    "raw_redistribution_authority": proof["redistribution_verified"] is True
+                    and effective_redistribution_policy == "permitted",
+                },
             },
             "outcome_evidence": outcome_evidence,
         }
@@ -862,7 +940,7 @@ def assemble_historical_corpus(
             "schema_version": corpus_schema_version,
             "dataset_kind": "historical",
             "name": name.strip(),
-            "sport": "table_tennis",
+            "sport": manifest_sport,
             "market_file": market_destination.name,
             "results_file": results_destination.name,
             "market_sha256": market_sha,
@@ -904,8 +982,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-build-historical-corpus",
         description=(
-            "Assemble selected authenticated table-tennis historical snapshots and separate sealed "
-            "outcomes into a governed replay corpus; new explicit-sport captures use schema-v3 while "
+            "Assemble selected authenticated Parlay historical snapshots for one exact sport and separate sealed "
+            "outcomes into a governed replay corpus; explicit-sport captures use schema-v3 while "
             "legacy captures remain schema-v2 without inventing event-level sport truth."
         ),
     )

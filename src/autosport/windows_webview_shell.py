@@ -1237,6 +1237,7 @@ class AutosportWebController:
             self.replay_worker,
             self.live_worker,
             self.recovery_worker,
+            self.evidence_export_worker,
         ):
             self._wait_for_terminal_worker(worker)
 

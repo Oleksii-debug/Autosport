@@ -385,6 +385,41 @@ def test_stale_and_future_process_clock_fail_closed(monkeypatch):
     assert "UTC_CLOCK_PRECEDES_CAPTURE" in future.reasons
 
 
+def test_caller_clock_cannot_redefine_product_assessment_time(monkeypatch):
+    evidence, _ = _network_capture(monkeypatch)
+    observed = datetime.fromisoformat(evidence.observed_at)
+    caller_utc = observed + timedelta(seconds=1)
+    caller_monotonic_ns = evidence.received_monotonic_ns + 1_000_000_000
+
+    assessment = evidence.assess(
+        now_utc=caller_utc,
+        now_monotonic_ns=caller_monotonic_ns,
+        max_age_seconds=Decimal("5"),
+    )
+
+    assessment.assert_authoritative()
+    assert assessment.decision_eligible is True
+    assert assessment.assessed_at != caller_utc.astimezone(timezone.utc).isoformat()
+    assert assessment.assessed_monotonic_ns != caller_monotonic_ns
+    assert assessment.utc_age_seconds >= Decimal("1")
+    assert assessment.monotonic_age_seconds >= Decimal("1")
+
+
+def test_caller_cannot_widen_product_freshness_ceiling(monkeypatch):
+    evidence, _ = _network_capture(monkeypatch)
+    observed = datetime.fromisoformat(evidence.observed_at)
+
+    with pytest.raises(
+        BetfairDecisionQuoteError,
+        match="max_age_seconds exceeds product freshness ceiling",
+    ):
+        evidence.assess(
+            now_utc=observed,
+            now_monotonic_ns=evidence.received_monotonic_ns,
+            max_age_seconds=Decimal("86400"),
+        )
+
+
 def test_bet_delay_is_preserved_as_execution_risk_not_data_staleness(monkeypatch):
     evidence, _ = _network_capture(
         monkeypatch,

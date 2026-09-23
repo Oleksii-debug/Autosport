@@ -235,4 +235,51 @@ def test_attempt_without_outcome_is_insufficient_not_a_fill():
     assert report.outcome_observation_rows == 0
     assert report.quality_status is EvidenceReadinessStatus.INSUFFICIENT_DATA
     assert report.price_observation_count == 0
+    assert report.price_observation_missing_count == 1
+    assert report.fill_observation_count == 0
+    assert report.fill_observation_missing_count == 1
     assert report.samples == ()
+
+
+def test_unresolved_attempt_remains_missing_when_another_attempt_has_outcome():
+    rows = (_row(1), _row(2))
+    attempts = (
+        _attempt(
+            1,
+            PaperAttemptOutcome.ACCEPTED,
+            execution_odds="2.1",
+            execution_stake="10",
+        ),
+        _attempt(
+            2,
+            PaperAttemptOutcome.ACCEPTED,
+            execution_odds="2.2",
+            execution_stake="10",
+        ),
+    )
+    ledger = object.__new__(_FixtureLedger)
+    object.__setattr__(
+        ledger,
+        "universe",
+        SimpleNamespace(rows=rows, universe_sha256="b" * 64),
+    )
+    object.__setattr__(
+        ledger,
+        "events",
+        (
+            _event(rows[0], FunnelStage.ATTEMPTED, 1),
+            _event(rows[0], FunnelStage.ACCEPTED, 1),
+            _event(rows[1], FunnelStage.ATTEMPTED, 2),
+        ),
+    )
+    object.__setattr__(ledger, "paper_resolver", _Resolver(attempts))
+
+    report = project_paper_execution_quality(ledger)
+
+    assert report.attempted_rows == 2
+    assert report.outcome_observation_rows == 1
+    assert report.price_observation_count == 1
+    assert report.price_observation_missing_count == 1
+    assert report.fill_observation_count == 1
+    assert report.fill_observation_missing_count == 1
+    assert len(report.samples) == 1

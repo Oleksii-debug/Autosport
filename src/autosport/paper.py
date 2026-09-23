@@ -32,6 +32,7 @@ _PAPER_SNAPSHOT_WITNESS_SCHEMA_VERSION = 1
 _PAPER_SNAPSHOT_WITNESS_SUFFIX = ".paper-book-snapshot-witness.jsonl"
 _PAPER_SNAPSHOT_WITNESS_PREPARE = "PREPARE"
 _PAPER_SNAPSHOT_WITNESS_COMMIT = "COMMIT"
+_PAPER_SNAPSHOT_WITNESS_ABORT = "ABORT"
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
@@ -132,6 +133,7 @@ def _read_snapshot_witnesses(
     previous_witness_sha256: str | None = None
     committed: tuple[int, str] | None = None
     pending: tuple[int, str] | None = None
+    last_generation = 0
 
     for sequence, line in enumerate(lines, start=1):
         if not line:
@@ -173,14 +175,20 @@ def _read_snapshot_witnesses(
             raise ValueError("PaperBook snapshot witness generation is invalid")
         event = record["event"]
         if event == _PAPER_SNAPSHOT_WITNESS_PREPARE:
-            expected_generation = 1 if committed is None else committed[0] + 1
-            if pending is not None or generation != expected_generation:
+            if pending is not None or generation != last_generation + 1:
                 raise ValueError("PaperBook snapshot witness PREPARE order is invalid")
             pending = (generation, snapshot_sha)
-        elif event == _PAPER_SNAPSHOT_WITNESS_COMMIT:
+            last_generation = generation
+        elif event in {
+            _PAPER_SNAPSHOT_WITNESS_COMMIT,
+            _PAPER_SNAPSHOT_WITNESS_ABORT,
+        }:
             if pending != (generation, snapshot_sha):
-                raise ValueError("PaperBook snapshot witness COMMIT has no matching PREPARE")
-            committed = pending
+                raise ValueError(
+                    f"PaperBook snapshot witness {event} has no matching PREPARE"
+                )
+            if event == _PAPER_SNAPSHOT_WITNESS_COMMIT:
+                committed = pending
             pending = None
         else:
             raise ValueError("PaperBook snapshot witness event is invalid")
@@ -255,21 +263,35 @@ def _recover_snapshot_witness_if_possible(
     _, committed, pending = _read_snapshot_witnesses(snapshot_path)
     if pending is None:
         return committed
+
     generation, pending_sha256 = pending
-    if pending_sha256 != snapshot_sha256:
+    if pending_sha256 == snapshot_sha256:
+        # The replacement reached durable snapshot bytes but COMMIT publication
+        # was interrupted. Complete that exact generation.
+        _append_snapshot_witness(
+            snapshot_path,
+            event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
+            generation=generation,
+            snapshot_sha256=pending_sha256,
+        )
+    elif committed is not None and committed[1] == snapshot_sha256:
+        # PREPARE was durable but os.replace did not publish the candidate.
+        # Preserve the last committed snapshot and close the failed attempt.
+        _append_snapshot_witness(
+            snapshot_path,
+            event=_PAPER_SNAPSHOT_WITNESS_ABORT,
+            generation=generation,
+            snapshot_sha256=pending_sha256,
+        )
+    else:
         raise ValueError(
             "PaperBook snapshot witness has an incomplete generation for different bytes"
         )
-    _append_snapshot_witness(
-        snapshot_path,
-        event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
-        generation=generation,
-        snapshot_sha256=pending_sha256,
-    )
-    _, committed, pending = _read_snapshot_witnesses(snapshot_path)
-    if pending is not None or committed != (generation, pending_sha256):
-        raise ValueError("PaperBook snapshot witness recovery did not commit exactly")
-    return committed
+
+    _, committed_after, pending_after = _read_snapshot_witnesses(snapshot_path)
+    if pending_after is not None:
+        raise ValueError("PaperBook snapshot witness recovery did not close pending state")
+    return committed_after
 
 
 def _verify_snapshot_witness(snapshot_path: Path, payload: bytes) -> None:
@@ -304,6 +326,16 @@ class PaperBook:
         # lifecycle tuple used by rollback/state hashes while making timestamp
         # mutation mechanically detectable.
         self._settlement_times: dict[str, str | None] = {}
+        # Fresh in-memory books originate from product-owned admission. Books
+        # decoded from arbitrary bytes are read-only until a path-bound external
+        # snapshot witness is verified by load().
+        self._snapshot_authority_verified = True
+
+    def _require_snapshot_authority_for_economic_mutation(self) -> None:
+        if not self._snapshot_authority_verified:
+            raise ValueError(
+                "PaperBook byte-loaded snapshot lacks independent durable witness authority"
+            )
 
     @property
     def committed_stake(self) -> Decimal:
@@ -338,6 +370,7 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
+        self._require_snapshot_authority_for_economic_mutation()
         amount = Decimal(str(stake))
         new_balance = self._debit_balance(self.balance, amount)
 
@@ -445,6 +478,7 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
+        self._require_snapshot_authority_for_economic_mutation()
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -508,6 +542,7 @@ class PaperBook:
         return payload
 
     def save(self, path: str | Path) -> None:
+        self._require_snapshot_authority_for_economic_mutation()
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
         # Revalidate the complete economic/identity state immediately before any
         # durable replacement so caller/agent mutation cannot persist a snapshot
@@ -577,12 +612,13 @@ class PaperBook:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            _, committed, pending = _read_snapshot_witnesses(destination)
+            records, committed, pending = _read_snapshot_witnesses(destination)
             current_sha = _file_sha256(destination)
 
-            # Recover an interrupted PREPARE if the exact prepared bytes are now
-            # durable, or complete that same prepared generation using this exact
-            # retry payload. Any different pending bytes fail closed.
+            # Close an interrupted attempt before starting another generation.
+            # A failed replace may leave PREPARE ahead of the still-good committed
+            # file; ABORT preserves that last good snapshot without pretending
+            # the candidate ever became durable.
             if pending is not None:
                 generation, pending_sha = pending
                 if current_sha == pending_sha:
@@ -592,35 +628,41 @@ class PaperBook:
                         generation=generation,
                         snapshot_sha256=pending_sha,
                     )
-                    committed = (generation, pending_sha)
-                    pending = None
-                    if snapshot_sha == current_sha:
-                        return
-                elif snapshot_sha == pending_sha:
-                    os.replace(temporary, destination)
-                    temporary = None
+                elif committed is not None and current_sha == committed[1]:
                     _append_snapshot_witness(
                         destination,
-                        event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
+                        event=_PAPER_SNAPSHOT_WITNESS_ABORT,
                         generation=generation,
                         snapshot_sha256=pending_sha,
                     )
-                    return
+                elif committed is None and current_sha is None:
+                    _append_snapshot_witness(
+                        destination,
+                        event=_PAPER_SNAPSHOT_WITNESS_ABORT,
+                        generation=generation,
+                        snapshot_sha256=pending_sha,
+                    )
                 else:
                     raise ValueError(
                         "PaperBook snapshot witness has an unresolved different PREPARE"
                     )
+                records, committed, pending = _read_snapshot_witnesses(destination)
+                if pending is not None:
+                    raise ValueError(
+                        "PaperBook snapshot witness pending state did not close"
+                    )
 
             # Existing witnessed state must still match its independent authority
             # before a new generation can extend it.
+            current_sha = _file_sha256(destination)
             if committed is not None and current_sha != committed[1]:
                 raise ValueError(
                     "PaperBook current snapshot differs from independent durable witness"
                 )
-            if committed is not None and snapshot_sha == current_sha == committed[1]:
-                return
 
-            generation = 1 if committed is None else committed[0] + 1
+            # Preserve save() publication semantics even when bytes are unchanged:
+            # each call performs a new PREPARE -> replace -> COMMIT attempt.
+            generation = 1 if not records else int(records[-1]["generation"]) + 1
             _append_snapshot_witness(
                 destination,
                 event=_PAPER_SNAPSHOT_WITNESS_PREPARE,
@@ -629,6 +671,10 @@ class PaperBook:
             )
             os.replace(temporary, destination)
             temporary = None
+            if os.name != "nt":
+                from ._paper_execution_anti_rollback import _sync_authority_directory
+
+                _sync_authority_directory(destination.parent)
             _append_snapshot_witness(
                 destination,
                 event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
@@ -1343,6 +1389,7 @@ class PaperBook:
             )
 
         cls._validate_loaded_state(book)
+        book._snapshot_authority_verified = False
         return book
 
     @classmethod
@@ -1365,13 +1412,10 @@ class PaperBook:
 
     @classmethod
     def load_bytes(cls, payload: bytes) -> "PaperBook":
-        book = cls._decode_snapshot_bytes(payload)
-        if book.tickets:
-            raise ValueError(
-                "PaperBook.load_bytes cannot establish independent durable opening witness; "
-                "use PaperBook.load(path) for ticket-bearing snapshots"
-            )
-        return book
+        # Byte ingestion remains available for structural/forensic parsing, but
+        # without a path-bound external witness it cannot authorize economic
+        # mutation, persistence, or settlement.
+        return cls._decode_snapshot_bytes(payload)
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
@@ -1380,4 +1424,5 @@ class PaperBook:
         book = cls._decode_snapshot_bytes(payload)
         if book.tickets:
             _verify_snapshot_witness(source, payload)
+        book._snapshot_authority_verified = True
         return book

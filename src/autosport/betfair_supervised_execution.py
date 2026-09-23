@@ -78,6 +78,9 @@ _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER = (
 _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE = (
     _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__code__
 )
+_CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER = (
+    _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__globals__["HTTPRedirectHandler"]
+)
 _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR = (
     _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS["OpenerDirector"]
 )
@@ -189,6 +192,27 @@ def _capture_private_opener_method_dispatch(
                         getattr(method, "__code__", None),
                     )
                 )
+    for _, _, handlers in dispatch:
+        for handler in handlers:
+            identity = (id(handler), "redirect_request")
+            if identity in seen:
+                continue
+            handler_dict = getattr(handler, "__dict__", None)
+            if (
+                type(handler_dict) is not dict
+                or "redirect_request" not in handler_dict
+            ):
+                continue
+            method = handler_dict["redirect_request"]
+            seen.add(identity)
+            records.append(
+                (
+                    handler,
+                    "redirect_request",
+                    method,
+                    getattr(method, "__code__", None),
+                )
+            )
     return tuple(records)
 
 
@@ -279,6 +303,31 @@ def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
     """Build a private urllib opener that ambient process state cannot replace."""
 
     private_opener = _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER()
+    redirect_handler_type = _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
+    redirect_handlers = [
+        handler
+        for handler in private_opener.handlers
+        if type(handler) is redirect_handler_type
+    ]
+    if len(redirect_handlers) != 1:
+        raise RuntimeError(
+            "canonical Betfair private opener redirect policy is invalid"
+        )
+
+    def reject_authenticated_redirect(
+        request,
+        response,
+        code,
+        message,
+        headers,
+        new_url,
+    ):
+        # Never follow an authenticated provider-write redirect.  Returning
+        # None keeps urllib on the original origin and lets its normal error
+        # chain fail closed for 30x responses.
+        return None
+
+    redirect_handlers[0].redirect_request = reject_authenticated_redirect
     opener_type = _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
     opener_open = _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
     opener_internal_open = _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN

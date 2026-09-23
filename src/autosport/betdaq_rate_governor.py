@@ -35,6 +35,8 @@ from .providers import ProviderUnavailableError
 
 
 _CALLS_AND_FEES_URL: Final = "https://api.betdaq.com/v2.0/Docs/CallsAndFees.aspx"
+_PLACEMENT_METHODS_URL: Final = "https://api.betdaq.com/v2.0/Docs/PlacementMethods.aspx"
+_SECURE_SERVICE_URL: Final = "https://api.betdaq.com/v2.0/Secure/SecureService.asmx"
 _POLICY_SCHEMA: Final = "autosport.betdaq.rate-governor.v2"
 _BLACKLIST_SCHEMA: Final = "autosport.betdaq.rate-governor.blacklist.v2"
 _BLACKLIST_AUTHORITY_DOMAIN: Final = "autosport.betdaq-rate-governor.blacklist.v2"
@@ -62,14 +64,24 @@ _OPERATION_TO_RATE_POLICY_KEY: Final[dict[str, str]] = {
     "ListOrdersChangedSince": "ListOrdersChangedSince",
 }
 _PROVIDER_API_NAME_TO_OPERATION_ID: Final[dict[str, str]] = {
-    alias.casefold(): operation_id
-    for operation_id, rate_policy_key in _OPERATION_TO_RATE_POLICY_KEY.items()
-    for alias in (operation_id, rate_policy_key)
+    "placeordersnoreceipt": "PlaceOrdersNoReceipt",
+    "placeorderswithreceipt": "PlaceOrdersWithReceipt",
+    "updateordersnoreceipt": "UpdateOrdersNoReceipt",
+    "changeordernoreceipt": "UpdateOrdersNoReceipt",
+    "geteventsubtreenoselections": "GetEventSubTreeNoSelections",
+    "geteventsubtreewithselections": "GetEventSubTreeWithSelections",
+    "listbootstraporders": "ListBootstrapOrders",
+    "getprices": "GetPrices",
+    "listorderschangedsince": "ListOrdersChangedSince",
 }
 _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
     json.dumps(
         {
-            "source": _CALLS_AND_FEES_URL,
+            "rate_source": _CALLS_AND_FEES_URL,
+            "operation_sources": [
+                _PLACEMENT_METHODS_URL,
+                _SECURE_SERVICE_URL,
+            ],
             "tier": "DEFAULT",
             "rate_policy": _DEFAULT_RATE_POLICY_PER_MINUTE,
             "operation_to_rate_policy_key": _OPERATION_TO_RATE_POLICY_KEY,
@@ -352,7 +364,7 @@ class BetdaqRatePolicy:
 
 def default_betdaq_rate_policy(
     *,
-    policy_revision: str = "betdaq-default-documented-v1",
+    policy_revision: str = "betdaq-default-documented-v2",
     safety_reserve_by_method: Mapping[str, int] | None = None,
     combined_safety_reserve: int = 0,
 ) -> BetdaqRatePolicy:
@@ -925,18 +937,32 @@ class BetdaqRateGovernor:
             blocked_until=_utc_text(blocked),
             provider_observation_sha256=digest,
         )
-        persisted = self._blacklist_store.extend(observation)
-        if operation_id is not None:
-            with _REGISTRY_LOCK:
-                now = self._now(operation_id)
-                relative_until = now + (remaining_ms / 1000.0)
-                self._runtime.blacklist_blocked_until[operation_id] = max(
-                    self._runtime.blacklist_blocked_until.get(
-                        operation_id, relative_until
-                    ),
-                    relative_until,
-                )
-        return persisted
+        if operation_id is None:
+            return self._blacklist_store.extend(observation)
+
+        with _REGISTRY_LOCK:
+            now = self._now(operation_id)
+            persisted = self._blacklist_store.extend(observation)
+            persisted_remaining = max(
+                0.0,
+                (
+                    _parse_utc_text(
+                        persisted.blocked_until, "blocked_until"
+                    )
+                    - observed
+                ).total_seconds(),
+            )
+            relative_until = now + max(
+                remaining_ms / 1000.0,
+                persisted_remaining,
+            )
+            self._runtime.blacklist_blocked_until[operation_id] = max(
+                self._runtime.blacklist_blocked_until.get(
+                    operation_id, relative_until
+                ),
+                relative_until,
+            )
+            return persisted
 
     def admit(
         self,

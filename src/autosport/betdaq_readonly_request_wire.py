@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import xml.etree.ElementTree as ET
 
+from .betdaq_account_readonly import BetdaqCredentials
 from .betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
 from .betdaq_readonly_provider import (
     BETDAQ_GET_PRICES_ENDPOINT,
@@ -14,106 +15,38 @@ from .betdaq_readonly_provider import (
 _MAX_HEADER_TEXT_CHARS = 4096
 
 
-def _xml_attribute_text(
-    value: object,
-    field: str,
-    *,
-    allow_empty: bool = False,
-) -> str:
-    """Validate an opaque SOAP-header value without ever echoing it in errors."""
+def _xml_attribute_text(value: object, field: str) -> str:
+    """Validate opaque credential/header text without echoing it in errors."""
 
-    if not isinstance(value, str):
-        raise TypeError(f"{field} must be str")
-    if not value and not allow_empty:
-        raise ValueError(f"{field} must be non-empty")
+    if type(value) is not str or not value:
+        raise ValueError(f"{field} must be non-empty text")
     if len(value) > _MAX_HEADER_TEXT_CHARS:
         raise ValueError(f"{field} is too long")
     for character in value:
         codepoint = ord(character)
-        if character in "\t\r\n" or not (
-            codepoint == 0x20
+        if not (
+            character in "\t\r\n"
+            or codepoint == 0x20
             or 0x21 <= codepoint <= 0xD7FF
             or 0xE000 <= codepoint <= 0xFFFD
             or 0x10000 <= codepoint <= 0x10FFFF
         ):
-            raise ValueError(f"{field} contains a character unsafe for an XML attribute")
+            raise ValueError(f"{field} contains a character unsafe for XML")
     return value
 
 
-class BetdaqExternalApiHeader:
-    """Ephemeral BETDAQ SOAP header material.
-
-    BETDAQ's read-only documentation says those methods require only a username,
-    while the live ASMX schema sample still exposes password and applicationIdentifier
-    attributes. The latter therefore remain optional/empty here rather than becoming
-    fabricated read-only requirements.
-
-    Username, password and application identifier are intentionally excluded from
-    ``repr``. This object is an in-memory request input, not durable provider
-    evidence and not proof of API entitlement.
-    """
-
-    __slots__ = (
-        "_version",
-        "_language_code",
-        "_username",
-        "_password",
-        "_application_identifier",
-    )
-
-    def __init__(
-        self,
-        *,
-        username: str,
-        language_code: str,
-        password: str = "",
-        application_identifier: str = "",
-        version: Decimal = Decimal("2.0"),
-    ) -> None:
-        if not isinstance(version, Decimal) or not version.is_finite() or version <= 0:
-            raise ValueError("version must be a positive finite Decimal")
-        _fixed_decimal_text(version, "version")
-        self._version = version
-        self._language_code = _xml_attribute_text(language_code, "language_code")
-        self._username = _xml_attribute_text(username, "username")
-        self._password = _xml_attribute_text(
-            password,
-            "password",
-            allow_empty=True,
-        )
-        self._application_identifier = _xml_attribute_text(
-            application_identifier,
-            "application_identifier",
-            allow_empty=True,
-        )
-
-    @property
-    def version(self) -> Decimal:
-        return self._version
-
-    @property
-    def language_code(self) -> str:
-        return self._language_code
-
-    @property
-    def username(self) -> str:
-        return self._username
-
-    @property
-    def password(self) -> str:
-        return self._password
-
-    @property
-    def application_identifier(self) -> str:
-        return self._application_identifier
-
-    def __repr__(self) -> str:
-        return (
-            "BetdaqExternalApiHeader("
-            f"version={self._version!r}, "
-            f"language_code={self._language_code!r}, "
-            "credentials=<redacted>)"
-        )
+def _version_text(value: str) -> str:
+    _xml_attribute_text(value, "version")
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError):
+        raise ValueError("version must be finite decimal text") from None
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError("version must be positive finite decimal text")
+    rendered = _fixed_decimal_text(parsed, "version")
+    if rendered != value:
+        raise ValueError("version must use canonical fixed-point decimal text")
+    return value
 
 
 class BetdaqSoap11WireRequest:
@@ -160,19 +93,29 @@ def _xml_bool(value: bool) -> str:
 
 
 def build_get_prices_soap11_request(
-    header: BetdaqExternalApiHeader,
+    credentials: BetdaqCredentials,
     request: BetdaqGetPricesRequest,
 ) -> BetdaqSoap11WireRequest:
-    """Serialize the documented BETDAQ GetPrices SOAP 1.1 request exactly once.
+    """Serialize documented BETDAQ GetPrices using the canonical credential bundle.
 
-    The function performs no network I/O and emits no durable/loggable credential
-    evidence. The caller owns transport, rate-budget and entitlement decisions.
+    This is network-free. Credentials are present only in the ephemeral wire body;
+    callers must not persist/log that body. Transport, rate and entitlement authority
+    remain outside this serializer.
     """
 
-    if type(header) is not BetdaqExternalApiHeader:
-        raise TypeError("header must be BetdaqExternalApiHeader")
+    if type(credentials) is not BetdaqCredentials:
+        raise TypeError("credentials must be canonical BetdaqCredentials")
     if type(request) is not BetdaqGetPricesRequest:
         raise TypeError("request must be BetdaqGetPricesRequest")
+
+    version = _version_text(credentials.version)
+    language_code = _xml_attribute_text(credentials.language_code, "language_code")
+    username = _xml_attribute_text(credentials.username, "username")
+    password = _xml_attribute_text(credentials.password, "password")
+    application_identifier = _xml_attribute_text(
+        credentials.application_identifier,
+        "application_identifier",
+    )
 
     envelope = ET.Element(_tag(SOAP11_NS, "Envelope"))
     soap_header = ET.SubElement(envelope, _tag(SOAP11_NS, "Header"))
@@ -180,11 +123,11 @@ def build_get_prices_soap11_request(
         soap_header,
         _tag(EXTERNAL_API_NS, "ExternalApiHeader"),
         {
-            "version": _fixed_decimal_text(header.version, "version"),
-            "languageCode": header.language_code,
-            "username": header.username,
-            "password": header.password,
-            "applicationIdentifier": header.application_identifier,
+            "version": version,
+            "languageCode": language_code,
+            "username": username,
+            "password": password,
+            "applicationIdentifier": application_identifier,
         },
     )
     soap_body = ET.SubElement(envelope, _tag(SOAP11_NS, "Body"))

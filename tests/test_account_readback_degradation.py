@@ -26,6 +26,8 @@ def _signal(**overrides: object) -> ReadbackFailureSignal:
         "adapter_id": "betfair-readonly",
         "operation": "listCurrentOrders",
         "scope_sha256": TEST_SCOPE_SHA256,
+        "attempt_id": "attempt-0001",
+        "observed_at": "2026-09-23T01:30:00Z",
         "kind": ReadbackFailureKind.PROVIDER_ERROR,
         "provider_code": "TIMEOUT_ERROR",
     }
@@ -201,6 +203,46 @@ def test_digest_is_deterministic_and_changes_with_authority_bearing_inputs() -> 
     assert re.fullmatch(r"[0-9a-f]{64}", a.evidence_sha256)
 
 
+def test_failure_identity_is_bound_to_concrete_attempt_and_causal_time() -> None:
+    first = classify_account_readback_degradation(_signal())
+    next_attempt = classify_account_readback_degradation(
+        _signal(attempt_id="attempt-0002")
+    )
+    later_same_shape = classify_account_readback_degradation(
+        _signal(
+            attempt_id="attempt-0003",
+            observed_at="2026-09-23T01:31:00Z",
+        )
+    )
+
+    assert first.attempt_id == "attempt-0001"
+    assert first.observed_at == "2026-09-23T01:30:00Z"
+    assert first.evidence_sha256 != next_attempt.evidence_sha256
+    assert first.evidence_sha256 != later_same_shape.evidence_sha256
+    assert next_attempt.evidence_sha256 != later_same_shape.evidence_sha256
+
+
+def test_observed_at_is_timezone_aware_and_canonicalized_to_utc() -> None:
+    utc = classify_account_readback_degradation(
+        _signal(observed_at="2026-09-23T01:30:00Z")
+    )
+    offset = classify_account_readback_degradation(
+        _signal(observed_at="2026-09-23T03:30:00+02:00")
+    )
+    assert offset.observed_at == "2026-09-23T01:30:00Z"
+    assert offset.evidence_sha256 == utc.evidence_sha256
+
+    with pytest.raises(ReadbackDegradationError):
+        _signal(observed_at="2026-09-23T01:30:00")
+
+
+def test_attempt_identity_must_be_explicit_canonical_token() -> None:
+    with pytest.raises(ReadbackDegradationError):
+        _signal(attempt_id="")
+    with pytest.raises(ReadbackDegradationError):
+        _signal(attempt_id="attempt id with spaces")
+
+
 def test_frozen_evidence_cannot_be_mutated_into_positive_truth() -> None:
     result = classify_account_readback_degradation(_signal())
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -241,6 +283,8 @@ def test_direct_evidence_construction_cannot_mint_classifier_result() -> None:
             adapter_id="betfair-readonly",
             operation="listCurrentOrders",
             scope_sha256=TEST_SCOPE_SHA256,
+            attempt_id="attempt-forged",
+            observed_at="2026-09-23T01:30:00Z",
             provider_code=None,
             http_status=None,
             partial_observation_present=False,
@@ -258,6 +302,8 @@ def test_direct_non_exact_signal_subclass_is_rejected() -> None:
         adapter_id="betfair-readonly",
         operation="listCurrentOrders",
         scope_sha256=TEST_SCOPE_SHA256,
+        attempt_id="attempt-forged",
+        observed_at="2026-09-23T01:30:00Z",
         kind=ReadbackFailureKind.PROVIDER_ERROR,
         provider_code="TIMEOUT_ERROR",
     )

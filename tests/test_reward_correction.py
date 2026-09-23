@@ -443,6 +443,7 @@ def test_reopen_rejects_noncanonical_decimal_storage_even_with_parseable_value(t
     with pytest.raises(RewardCorrectionError, match="canonical Decimal"):
         RewardCorrectionLedger.open(path)
 
+
 def test_create_race_cannot_unlink_existing_winner(tmp_path, monkeypatch):
     path = tmp_path / "corrections.sqlite3"
     path_type = type(path)

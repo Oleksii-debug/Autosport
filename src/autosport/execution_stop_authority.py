@@ -313,13 +313,13 @@ class ExecutionStopAuthority:
         return MonotonicWorkspaceAuthority(
             workspace=absolute.parent,
             domain=_MONOTONIC_DOMAIN,
-            key=self._monotonic_key(absolute),
+            key=_CANONICAL_ADMISSION_MONOTONIC_KEY(absolute),
         )
 
     def _stable_serialization_lock_path(self) -> Path:
         """Return the machine-root lock shared by every STOP authority instance."""
 
-        authority = self._monotonic_authority()
+        authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY(self)
         return (
             authority.authority_root
             / "consumer-locks"
@@ -332,7 +332,7 @@ class ExecutionStopAuthority:
         """Serialize STOP operations outside replaceable workspace pathnames."""
 
         with self._thread_lock:
-            stable_lock_path = self._stable_serialization_lock_path()
+            stable_lock_path = _CANONICAL_ADMISSION_STABLE_SERIALIZATION_LOCK_PATH(self)
             with _exclusive_file_lock(stable_lock_path):
                 with _exclusive_file_lock(
                     self._lock_path,
@@ -345,7 +345,7 @@ class ExecutionStopAuthority:
             {
                 "schema": _MONOTONIC_BINDING_SCHEMA,
                 "schema_version": _MONOTONIC_BINDING_VERSION,
-                "state_key": self._monotonic_key(self.path),
+                "state_key": _CANONICAL_ADMISSION_MONOTONIC_KEY(self.path),
                 "journal_schema_version": _JOURNAL_SCHEMA_VERSION,
                 "anchor_schema_version": _ANCHOR_SCHEMA_VERSION,
             }
@@ -385,7 +385,7 @@ class ExecutionStopAuthority:
         *,
         semantic_binding_sha256: str,
     ) -> bool:
-        path = self._monotonic_receipt_path(authority)
+        path = _CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PATH(authority)
         if not path.exists():
             return False
         try:
@@ -411,7 +411,8 @@ class ExecutionStopAuthority:
             raise ExecutionStopIntegrityError(
                 "STOP monotonic binding receipt schema is invalid"
             )
-        expected = self._monotonic_receipt_payload(
+        expected = _CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PAYLOAD(
+            self,
             authority,
             semantic_binding_sha256=semantic_binding_sha256,
         )
@@ -427,13 +428,15 @@ class ExecutionStopAuthority:
         *,
         semantic_binding_sha256: str,
     ) -> None:
-        if self._read_monotonic_receipt_unlocked(
+        if _CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED(
+            self,
             authority,
             semantic_binding_sha256=semantic_binding_sha256,
         ):
             return
-        path = self._monotonic_receipt_path(authority)
-        payload = self._monotonic_receipt_payload(
+        path = _CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PATH(authority)
+        payload = _CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PAYLOAD(
+            self,
             authority,
             semantic_binding_sha256=semantic_binding_sha256,
         )
@@ -468,7 +471,8 @@ class ExecutionStopAuthority:
                 _sync_directory(path.parent.parent)
             _sync_directory(authority.authority_root)
         except FileExistsError:
-            if not self._read_monotonic_receipt_unlocked(
+            if not _CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED(
+                self,
                 authority,
                 semantic_binding_sha256=semantic_binding_sha256,
             ):
@@ -487,7 +491,7 @@ class ExecutionStopAuthority:
             {
                 "schema": _MONOTONIC_STATE_SCHEMA,
                 "schema_version": _MONOTONIC_STATE_VERSION,
-                "state_key": self._monotonic_key(self.path),
+                "state_key": _CANONICAL_ADMISSION_MONOTONIC_KEY(self.path),
                 "revision": record["revision"],
                 "mode": record["mode"],
                 "record_sha256": record["record_sha256"],
@@ -526,13 +530,14 @@ class ExecutionStopAuthority:
         adopt_if_missing: bool,
     ) -> None:
         observed = (
-            None if not records else self._monotonic_state_digest(records[-1])
+            None if not records else _CANONICAL_ADMISSION_MONOTONIC_STATE_DIGEST(self, records[-1])
         )
-        binding = self._monotonic_binding()
+        binding = _CANONICAL_ADMISSION_MONOTONIC_BINDING(self)
         try:
-            authority = self._monotonic_authority()
+            authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY(self)
             history = authority.read_history()
-            receipt_exists = self._read_monotonic_receipt_unlocked(
+            receipt_exists = _CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED(
+                self,
                 authority,
                 semantic_binding_sha256=binding,
             )
@@ -547,7 +552,7 @@ class ExecutionStopAuthority:
                     raise ExecutionStopIntegrityError(
                         "STOP state exists without independent monotonic authority"
                     )
-                tx_id = self._monotonic_tx_id(
+                tx_id = _CANONICAL_ADMISSION_MONOTONIC_TX_ID(
                     operation="ADOPT_VALIDATED_BASELINE",
                     observed_state_sha256=None,
                     intended_state_sha256=observed,
@@ -560,7 +565,8 @@ class ExecutionStopAuthority:
                     intended_state_sha256=observed,
                     semantic_binding_sha256=binding,
                 )
-                self._ensure_monotonic_receipt_unlocked(
+                _CANONICAL_ADMISSION_ENSURE_MONOTONIC_RECEIPT_UNLOCKED(
+                    self,
                     authority,
                     semantic_binding_sha256=binding,
                 )
@@ -572,7 +578,8 @@ class ExecutionStopAuthority:
                 return
 
             if not receipt_exists:
-                self._ensure_monotonic_receipt_unlocked(
+                _CANONICAL_ADMISSION_ENSURE_MONOTONIC_RECEIPT_UNLOCKED(
+                    self,
                     authority,
                     semantic_binding_sha256=binding,
                 )
@@ -589,7 +596,7 @@ class ExecutionStopAuthority:
             else:
                 authority.recover(observed_state_sha256=observed)
         except MonotonicWorkspaceAuthorityError as exc:
-            self._raise_monotonic_error(exc)
+            _CANONICAL_ADMISSION_RAISE_MONOTONIC_ERROR(exc)
 
     def _prepare_monotonic_transition_unlocked(
         self,
@@ -789,7 +796,7 @@ class ExecutionStopAuthority:
         if not anchor_exists:
             return records
 
-        anchor = self._read_anchor_unlocked()
+        anchor = _CANONICAL_ADMISSION_READ_ANCHOR_UNLOCKED(self)
         latest = records[-1]
         if require_anchor_match and (
             anchor["revision"] != latest["revision"]
@@ -1120,20 +1127,22 @@ class ExecutionStopAuthority:
     def _current_unlocked(self) -> ExecutionAuthorityState:
         """Return current durable STOP state while the canonical locks are held."""
 
-        records = self._read_journal_unlocked()
+        records = _CANONICAL_ADMISSION_READ_JOURNAL_UNLOCKED(self)
         if not records:
-            self._ensure_monotonic_current_unlocked(
+            _CANONICAL_ADMISSION_ENSURE_MONOTONIC_CURRENT_UNLOCKED(
+                self,
                 records,
                 adopt_if_missing=False,
             )
             raise ExecutionStopStateError(
                 "STOP authority is missing; execution remains stopped"
             )
-        self._ensure_monotonic_current_unlocked(
+        _CANONICAL_ADMISSION_ENSURE_MONOTONIC_CURRENT_UNLOCKED(
+            self,
             records,
             adopt_if_missing=True,
         )
-        return self._state_from_record(records[-1])
+        return _CANONICAL_ADMISSION_STATE_FROM_RECORD(records[-1])
 
     def current(self) -> ExecutionAuthorityState:
         with self._authority_operation_lock():
@@ -1149,6 +1158,7 @@ class ExecutionStopAuthority:
         the positive ARMED check and the protected provider-write boundary.
         """
 
+        _require_canonical_admission_graph()
         if ExecutionStopAuthority is not _CANONICAL_ADMISSION_AUTHORITY_CLASS:
             raise ExecutionStopIntegrityError(
                 "canonical execution admission authority class changed"
@@ -1281,20 +1291,142 @@ class ExecutionStopAuthority:
         return state
 
 
-# admission_lease is consumed across irreversible provider effects. Freeze the lower
-# class dispatch that establishes its linearization lock and re-resolves current STOP
-# state, so replacing those methods cannot preserve the public lease surface while
-# bypassing durable authority or the STOP-vs-write ordering.
+# admission_lease is consumed across irreversible provider effects. Capture the
+# complete class-level helper graph reachable from its linearization lock and durable
+# current-state verification. Security-critical edges below the lease invoke these
+# exact unbound callables rather than re-resolving self.<helper> dynamically.
 _CANONICAL_ADMISSION_AUTHORITY_CLASS = ExecutionStopAuthority
+_CANONICAL_ADMISSION_MONOTONIC_KEY = ExecutionStopAuthority._monotonic_key
+_CANONICAL_ADMISSION_MONOTONIC_AUTHORITY = ExecutionStopAuthority._monotonic_authority
+_CANONICAL_ADMISSION_STABLE_SERIALIZATION_LOCK_PATH = (
+    ExecutionStopAuthority._stable_serialization_lock_path
+)
 _CANONICAL_ADMISSION_OPERATION_LOCK = ExecutionStopAuthority._authority_operation_lock
-_CANONICAL_ADMISSION_OPERATION_LOCK_CODE = getattr(
-    _CANONICAL_ADMISSION_OPERATION_LOCK,
-    "__code__",
-    None,
+_CANONICAL_ADMISSION_MONOTONIC_BINDING = ExecutionStopAuthority._monotonic_binding
+_CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PATH = (
+    ExecutionStopAuthority._monotonic_receipt_path
 )
+_CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PAYLOAD = (
+    ExecutionStopAuthority._monotonic_receipt_payload
+)
+_CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED = (
+    ExecutionStopAuthority._read_monotonic_receipt_unlocked
+)
+_CANONICAL_ADMISSION_ENSURE_MONOTONIC_RECEIPT_UNLOCKED = (
+    ExecutionStopAuthority._ensure_monotonic_receipt_unlocked
+)
+_CANONICAL_ADMISSION_MONOTONIC_STATE_DIGEST = (
+    ExecutionStopAuthority._monotonic_state_digest
+)
+_CANONICAL_ADMISSION_MONOTONIC_TX_ID = ExecutionStopAuthority._monotonic_tx_id
+_CANONICAL_ADMISSION_RAISE_MONOTONIC_ERROR = (
+    ExecutionStopAuthority._raise_monotonic_error
+)
+_CANONICAL_ADMISSION_ENSURE_MONOTONIC_CURRENT_UNLOCKED = (
+    ExecutionStopAuthority._ensure_monotonic_current_unlocked
+)
+_CANONICAL_ADMISSION_READ_JOURNAL_UNLOCKED = (
+    ExecutionStopAuthority._read_journal_unlocked
+)
+_CANONICAL_ADMISSION_READ_ANCHOR_UNLOCKED = (
+    ExecutionStopAuthority._read_anchor_unlocked
+)
+_CANONICAL_ADMISSION_STATE_FROM_RECORD = ExecutionStopAuthority._state_from_record
 _CANONICAL_ADMISSION_CURRENT_UNLOCKED = ExecutionStopAuthority._current_unlocked
-_CANONICAL_ADMISSION_CURRENT_UNLOCKED_CODE = getattr(
-    _CANONICAL_ADMISSION_CURRENT_UNLOCKED,
+
+_CANONICAL_ADMISSION_GRAPH = (
+    ("_monotonic_key", _CANONICAL_ADMISSION_MONOTONIC_KEY),
+    ("_monotonic_authority", _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY),
+    (
+        "_stable_serialization_lock_path",
+        _CANONICAL_ADMISSION_STABLE_SERIALIZATION_LOCK_PATH,
+    ),
+    ("_authority_operation_lock", _CANONICAL_ADMISSION_OPERATION_LOCK),
+    ("_monotonic_binding", _CANONICAL_ADMISSION_MONOTONIC_BINDING),
+    ("_monotonic_receipt_path", _CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PATH),
+    (
+        "_monotonic_receipt_payload",
+        _CANONICAL_ADMISSION_MONOTONIC_RECEIPT_PAYLOAD,
+    ),
+    (
+        "_read_monotonic_receipt_unlocked",
+        _CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED,
+    ),
+    (
+        "_ensure_monotonic_receipt_unlocked",
+        _CANONICAL_ADMISSION_ENSURE_MONOTONIC_RECEIPT_UNLOCKED,
+    ),
+    (
+        "_monotonic_state_digest",
+        _CANONICAL_ADMISSION_MONOTONIC_STATE_DIGEST,
+    ),
+    ("_monotonic_tx_id", _CANONICAL_ADMISSION_MONOTONIC_TX_ID),
+    ("_raise_monotonic_error", _CANONICAL_ADMISSION_RAISE_MONOTONIC_ERROR),
+    (
+        "_ensure_monotonic_current_unlocked",
+        _CANONICAL_ADMISSION_ENSURE_MONOTONIC_CURRENT_UNLOCKED,
+    ),
+    (
+        "_read_journal_unlocked",
+        _CANONICAL_ADMISSION_READ_JOURNAL_UNLOCKED,
+    ),
+    (
+        "_read_anchor_unlocked",
+        _CANONICAL_ADMISSION_READ_ANCHOR_UNLOCKED,
+    ),
+    ("_state_from_record", _CANONICAL_ADMISSION_STATE_FROM_RECORD),
+    ("_current_unlocked", _CANONICAL_ADMISSION_CURRENT_UNLOCKED),
+)
+_CANONICAL_ADMISSION_GRAPH_CODES = tuple(
+    (name, getattr(method, "__code__", None))
+    for name, method in _CANONICAL_ADMISSION_GRAPH
+)
+_CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR = getattr(
+    _CANONICAL_ADMISSION_OPERATION_LOCK,
+    "__wrapped__",
+    None,
+)
+_CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR_CODE = getattr(
+    _CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR,
     "__code__",
     None,
 )
+
+
+def _require_canonical_admission_graph() -> None:
+    if ExecutionStopAuthority is not _CANONICAL_ADMISSION_AUTHORITY_CLASS:
+        raise ExecutionStopIntegrityError(
+            "canonical execution admission authority class changed"
+        )
+    expected_codes = dict(_CANONICAL_ADMISSION_GRAPH_CODES)
+    for method_name, expected_method in _CANONICAL_ADMISSION_GRAPH:
+        live_method = getattr(
+            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
+            method_name,
+            None,
+        )
+        if (
+            live_method is not expected_method
+            or getattr(live_method, "__code__", None)
+            is not expected_codes[method_name]
+        ):
+            raise ExecutionStopIntegrityError(
+                "canonical execution admission helper graph changed"
+            )
+
+    live_operation_generator = getattr(
+        _CANONICAL_ADMISSION_OPERATION_LOCK,
+        "__wrapped__",
+        None,
+    )
+    if (
+        _CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR is None
+        or _CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR_CODE is None
+        or live_operation_generator
+        is not _CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR
+        or getattr(live_operation_generator, "__code__", None)
+        is not _CANONICAL_ADMISSION_OPERATION_LOCK_GENERATOR_CODE
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical execution admission lock generator changed"
+        )

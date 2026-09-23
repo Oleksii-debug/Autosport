@@ -183,6 +183,14 @@ def _xsd_decimal(
     return _decimal(value, field, nonnegative=nonnegative)
 
 
+def _trimmed_xsd_string(value: str, field: str) -> str:
+    if value != value.strip():
+        raise BetdaqSoapProtocolError(
+            f"{field} must not contain leading or trailing whitespace"
+        )
+    return _safe_text(value, field)
+
+
 def _reject_unknown_attributes(
     element: ET.Element,
     allowed: frozenset[str],
@@ -314,7 +322,7 @@ def _parse_settlement_information(
             "SettlementInformation RightSideFactor",
             nonnegative=True,
         ),
-        settlement_result_string=_safe_text(
+        settlement_result_string=_trimmed_xsd_string(
             _required_attr(element, "SettlementResultString"),
             "SettlementInformation SettlementResultString",
         ),
@@ -346,7 +354,10 @@ def _parse_changed_selection(element: ET.Element) -> BetdaqChangedSelection:
             minimum=0,
             maximum=_XSD_LONG_MAX,
         ),
-        name=_safe_text(_required_attr(element, "Name"), "selection Name"),
+        name=_trimmed_xsd_string(
+            _required_attr(element, "Name"),
+            "selection Name",
+        ),
         display_order=_xsd_integer(
             _required_attr(element, "DisplayOrder"),
             "selection DisplayOrder",

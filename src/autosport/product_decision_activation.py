@@ -51,6 +51,24 @@ _CANONICAL_EXECUTION_FINGERPRINT_GETTER_CODE: Final = getattr(
     None,
 )
 
+# START's durable owner-goal re-resolution must not dispatch through a caller-rebound
+# module class or class method. Capture the canonical EconomicGoalStore construction
+# and read authority at product-module composition and invoke those callables
+# non-virtually after verifying their identity/code is still intact.
+_CANONICAL_ECONOMIC_GOAL_STORE_CLASS: Final = EconomicGoalStore
+_CANONICAL_ECONOMIC_GOAL_STORE_INIT: Final = EconomicGoalStore.__init__
+_CANONICAL_ECONOMIC_GOAL_STORE_INIT_CODE: Final = getattr(
+    _CANONICAL_ECONOMIC_GOAL_STORE_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_ECONOMIC_GOAL_STORE_LOAD: Final = EconomicGoalStore.load
+_CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE: Final = getattr(
+    _CANONICAL_ECONOMIC_GOAL_STORE_LOAD,
+    "__code__",
+    None,
+)
+
 
 def _product_machine_state_base() -> Path:
     """Resolve machine state without caller/process trust-root overrides."""
@@ -590,8 +608,54 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "economic_goal must be the exact canonical EconomicGoalContract"
             )
+        if EconomicGoalStore is not _CANONICAL_ECONOMIC_GOAL_STORE_CLASS:
+            raise ProductDecisionActivationError(
+                "canonical EconomicGoalStore authority changed"
+            )
+        live_store_init = getattr(
+            _CANONICAL_ECONOMIC_GOAL_STORE_CLASS,
+            "__init__",
+            None,
+        )
+        live_store_load = getattr(
+            _CANONICAL_ECONOMIC_GOAL_STORE_CLASS,
+            "load",
+            None,
+        )
+        if (
+            _CANONICAL_ECONOMIC_GOAL_STORE_INIT_CODE is None
+            or _CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE is None
+            or live_store_init is not _CANONICAL_ECONOMIC_GOAL_STORE_INIT
+            or getattr(live_store_init, "__code__", None)
+            is not _CANONICAL_ECONOMIC_GOAL_STORE_INIT_CODE
+            or live_store_load is not _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
+            or getattr(live_store_load, "__code__", None)
+            is not _CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE
+        ):
+            raise ProductDecisionActivationError(
+                "canonical EconomicGoalStore dispatch changed"
+            )
+
+        durable_goal_store = object.__new__(
+            _CANONICAL_ECONOMIC_GOAL_STORE_CLASS
+        )
+        _CANONICAL_ECONOMIC_GOAL_STORE_INIT(
+            durable_goal_store,
+            self.workspace,
+        )
+        bound_store_load = getattr(durable_goal_store, "load", None)
+        if (
+            getattr(bound_store_load, "__self__", None) is not durable_goal_store
+            or getattr(bound_store_load, "__func__", None)
+            is not _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
+        ):
+            raise ProductDecisionActivationError(
+                "canonical EconomicGoalStore instance dispatch changed"
+            )
         try:
-            durable_economic_goal = EconomicGoalStore(self.workspace).load()
+            durable_economic_goal = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(
+                durable_goal_store
+            )
         except EconomicGoalContractError as exc:
             raise ProductDecisionActivationError(
                 "cannot resolve durable owner EconomicGoalContract"

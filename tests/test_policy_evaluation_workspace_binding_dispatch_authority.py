@@ -169,3 +169,43 @@ def test_workspace_validate_existing_rebind_cannot_mint_bound_truth(
             expected_workspace_instance_id=binding.workspace_instance_id,
         )
     assert called is False
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_workspace_locator",
+        "_read_strict_object",
+        "_verify_binding_hash",
+        "_payload_hash",
+    ),
+)
+def test_workspace_binding_transitive_helper_rebind_fails_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    workspace, binding = _bound_workspace(tmp_path, monkeypatch)
+    binding_globals = WorkspaceIdentityBinding.resolve.__func__.__globals__
+    called = False
+
+    def redirected_helper(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("redirected binding helper executed")
+
+    monkeypatch.setitem(
+        binding_globals,
+        helper_name,
+        redirected_helper,
+    )
+
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="binding transitive authority was rebound",
+    ):
+        ProductPolicyEvaluationWorkspace.open(
+            workspace,
+            expected_workspace_instance_id=binding.workspace_instance_id,
+        )
+    assert called is False

@@ -153,6 +153,76 @@ def test_admission_lease_rejects_operation_lock_class_rebind(
     assert forged_lock_entries == []
 
 
+def test_admission_lease_rejects_second_order_lock_path_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority, _armed = _armed_authority(tmp_path)
+    forged_calls: list[str] = []
+
+    def forged_stable_lock_path(_self):
+        forged_calls.append("called")
+        return tmp_path / "attacker-selected.lock"
+
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "_stable_serialization_lock_path",
+        forged_stable_lock_path,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="admission helper graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("rebound lock-path helper yielded an execution lease")
+
+    assert forged_calls == []
+
+
+def test_admission_lease_rejects_second_order_journal_reader_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority = _authority(tmp_path)
+    stopped = authority.initialize_stopped(
+        operator_id="owner",
+        reason="durable operator STOP",
+        command_id="lease-graph-journal-init",
+    )
+    forged_calls: list[str] = []
+
+    def forged_journal(_self, **_kwargs):
+        forged_calls.append("called")
+        return [
+            {
+                "revision": stopped.revision,
+                "mode": ExecutionAuthorityMode.ARMED.value,
+                "command_id": stopped.command_id,
+                "operator_id": stopped.operator_id,
+                "reason": "forged ARMED record",
+                "created_at": stopped.created_at,
+                "confirmation_id": "forged-confirmation",
+                "record_sha256": stopped.record_sha256,
+            }
+        ]
+
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "_read_journal_unlocked",
+        forged_journal,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="admission helper graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("rebound journal reader yielded an execution lease")
+
+    assert forged_calls == []
+
+
 def test_admission_lease_holds_same_file_lock_until_effect_boundary(
     tmp_path,
     monkeypatch,

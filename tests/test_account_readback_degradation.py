@@ -27,6 +27,7 @@ def _signal(**overrides: object) -> ReadbackFailureSignal:
 
 
 def _assert_never_positive(result: AccountReadbackDegradationEvidence) -> None:
+    assert result.freshness_proven is False
     assert result.fresh_complete_proven is False
     assert result.empty_scope_proven is False
     assert result.current_balance_proven is False
@@ -86,7 +87,7 @@ def test_mid_pagination_failure_preserves_partial_observation_without_completene
             pages_completed=1,
         )
     )
-    assert result.state is ReadbackDegradationState.FRESH_PARTIAL
+    assert result.state is ReadbackDegradationState.INCOMPLETE_PARTIAL
     assert result.partial_observation_present is True
     _assert_never_positive(result)
 
@@ -203,6 +204,25 @@ def test_unbounded_or_secret_shaped_tokens_are_rejected() -> None:
         _signal(provider_id="betfair session-token=secret")
     with pytest.raises(ReadbackDegradationError):
         _signal(provider_code="TIMEOUT ERROR raw payload")
+
+
+def test_provider_id_case_alias_is_rejected_not_normalized() -> None:
+    with pytest.raises(ReadbackDegradationError):
+        _signal(provider_id="Betfair")
+
+
+def test_direct_evidence_construction_cannot_mint_classifier_result() -> None:
+    with pytest.raises(ReadbackDegradationError):
+        AccountReadbackDegradationEvidence(
+            state=ReadbackDegradationState.UNKNOWN,
+            provider_id="betfair",
+            operation="listCurrentOrders",
+            provider_code=None,
+            http_status=None,
+            partial_observation_present=False,
+            prior_snapshot_id=None,
+            evidence_sha256="0" * 64,
+        )
 
 
 def test_direct_non_exact_signal_subclass_is_rejected() -> None:

@@ -589,6 +589,148 @@ def _validated_scientific_registry_records(
     return records
 
 
+
+def _validated_strategy_version_payload(
+    entry: dict[str, object],
+    wanted_strategy_version_id: str,
+) -> dict[str, object]:
+    payload = entry.get("payload")
+    required = frozenset(
+        {
+            "strategy_version_id",
+            "canonical_strategy_id",
+            "source_sha256",
+            "environment_sha256",
+            "config_sha256",
+            "created_at",
+            "model_version_id",
+            "predecessor_strategy_version_id",
+        }
+    )
+    if type(payload) is not dict or frozenset(payload) != required:
+        raise ProductDecisionActivationError(
+            "activation StrategyVersion typed payload fields mismatch"
+        )
+    envelope_id = _text(
+        entry.get("record_id"),
+        "activation StrategyVersion envelope identity",
+    )
+    payload_id = _text(
+        payload.get("strategy_version_id"),
+        "activation StrategyVersion payload identity",
+    )
+    wanted = _text(
+        wanted_strategy_version_id,
+        "strategy_version_id",
+    )
+    if envelope_id != wanted or payload_id != wanted:
+        raise ProductDecisionActivationError(
+            "activation StrategyVersion payload identity does not match durable envelope"
+        )
+    envelope_available_at = _text(
+        entry.get("available_at"),
+        "activation StrategyVersion envelope available_at",
+    )
+    payload_created_at = _text(
+        payload.get("created_at"),
+        "activation StrategyVersion payload created_at",
+    )
+    if payload_created_at != envelope_available_at:
+        raise ProductDecisionActivationError(
+            "activation StrategyVersion payload timestamp does not match durable envelope"
+        )
+    _text(
+        payload.get("canonical_strategy_id"),
+        "activation canonical_strategy_id",
+    )
+    for field in ("source_sha256", "environment_sha256", "config_sha256"):
+        _sha256(payload.get(field), f"activation StrategyVersion {field}")
+    for field in ("model_version_id", "predecessor_strategy_version_id"):
+        value = payload.get(field)
+        if value is not None:
+            _text(value, f"activation StrategyVersion {field}")
+    return dict(payload)
+
+
+def _validated_model_version_payload(
+    entry: dict[str, object],
+    wanted_model_version_id: str,
+) -> dict[str, object]:
+    payload = entry.get("payload")
+    required = frozenset(
+        {
+            "model_version_id",
+            "model_family",
+            "artifact_sha256",
+            "source_sha256",
+            "environment_sha256",
+            "dataset_snapshot_id",
+            "feature_set_id",
+            "research_protocol_id",
+            "seed",
+            "config_sha256",
+            "created_at",
+            "predecessor_model_version_id",
+        }
+    )
+    if type(payload) is not dict or frozenset(payload) != required:
+        raise ProductDecisionActivationError(
+            "activation ModelVersion typed payload fields mismatch"
+        )
+    envelope_id = _text(
+        entry.get("record_id"),
+        "activation ModelVersion envelope identity",
+    )
+    payload_id = _text(
+        payload.get("model_version_id"),
+        "activation ModelVersion payload identity",
+    )
+    wanted = _text(
+        wanted_model_version_id,
+        "strategy model_version_id",
+    )
+    if envelope_id != wanted or payload_id != wanted:
+        raise ProductDecisionActivationError(
+            "activation ModelVersion payload identity does not match durable envelope"
+        )
+    envelope_available_at = _text(
+        entry.get("available_at"),
+        "activation ModelVersion envelope available_at",
+    )
+    payload_created_at = _text(
+        payload.get("created_at"),
+        "activation ModelVersion payload created_at",
+    )
+    if payload_created_at != envelope_available_at:
+        raise ProductDecisionActivationError(
+            "activation ModelVersion payload timestamp does not match durable envelope"
+        )
+    for field in (
+        "model_family",
+        "dataset_snapshot_id",
+        "feature_set_id",
+        "research_protocol_id",
+    ):
+        _text(payload.get(field), f"activation ModelVersion {field}")
+    for field in (
+        "artifact_sha256",
+        "source_sha256",
+        "environment_sha256",
+        "config_sha256",
+    ):
+        _sha256(payload.get(field), f"activation ModelVersion {field}")
+    if type(payload.get("seed")) is not int:
+        raise ProductDecisionActivationError(
+            "activation ModelVersion seed must be an integer"
+        )
+    predecessor = payload.get("predecessor_model_version_id")
+    if predecessor is not None:
+        _text(
+            predecessor,
+            "activation ModelVersion predecessor_model_version_id",
+        )
+    return dict(payload)
+
 def _registry_strategy_prefix(
     workspace: Path,
     registry: ScientificRegistry,
@@ -624,12 +766,10 @@ def _registry_strategy_prefix(
         )
 
     strategy_entry = records[index]
-    strategy_payload_raw = strategy_entry["payload"]
-    if type(strategy_payload_raw) is not dict:
-        raise ProductDecisionActivationError(
-            "activation StrategyVersion payload is invalid"
-        )
-    strategy_payload = dict(strategy_payload_raw)
+    strategy_payload = _validated_strategy_version_payload(
+        strategy_entry,
+        wanted,
+    )
     strategy_record_sha256 = _sha256(
         strategy_entry["record_sha256"],
         "strategy record_sha256",
@@ -659,8 +799,13 @@ def _registry_strategy_prefix(
             raise ProductDecisionActivationError(
                 "activation ModelVersion was not durable before StrategyVersion"
             )
+        model_entry = records[model_index]
+        _validated_model_version_payload(
+            model_entry,
+            model_version_id,
+        )
         model_record_sha256 = _sha256(
-            records[model_index]["record_sha256"],
+            model_entry["record_sha256"],
             "strategy model record_sha256",
         )
 

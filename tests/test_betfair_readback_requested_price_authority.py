@@ -116,24 +116,25 @@ def _capture(
                 "size": 10.0,
             }
         current_orders.append(row)
-    elif surface == "cleared":
+    elif surface in {"cleared", "cleared_conflict"}:
         assert provider_requested_price is not None
-        cleared_by_status["SETTLED"].append(
-            {
-                "betId": "bet-cleared-requested-price",
-                "eventId": action.event_id,
-                "marketId": action.market_id,
-                "selectionId": int(action.selection_id),
-                "side": action.side,
-                "placedDate": "2026-09-21T18:00:01+00:00",
-                "settledDate": "2026-09-21T18:00:02+00:00",
-                "priceRequested": provider_requested_price,
-                "priceMatched": matched_price,
-                "sizeSettled": 10.0,
-                "profit": 25.0,
-                "customerOrderRef": PROVIDER_REF,
-            }
-        )
+        cleared_row = {
+            "betId": "bet-cleared-requested-price",
+            "eventId": action.event_id,
+            "marketId": action.market_id,
+            "selectionId": int(action.selection_id),
+            "side": action.side,
+            "placedDate": "2026-09-21T18:00:01+00:00",
+            "settledDate": "2026-09-21T18:00:02+00:00",
+            "priceRequested": provider_requested_price,
+            "priceMatched": matched_price,
+            "sizeSettled": 10.0,
+            "profit": 25.0,
+            "customerOrderRef": PROVIDER_REF,
+        }
+        cleared_by_status["SETTLED"].append(dict(cleared_row))
+        if surface == "cleared_conflict":
+            cleared_by_status["VOIDED"].append(dict(cleared_row))
     else:  # pragma: no cover - tests below exhaust the supported surfaces.
         raise AssertionError(f"unsupported surface {surface}")
 
@@ -268,3 +269,18 @@ def test_back_match_at_submitted_limit_remains_authoritative(surface: str) -> No
 
     assert isinstance(evidence, VerifiedProviderEffectEvidence)
     assert evidence.accepted_odds == Decimal("2.0")
+
+
+def test_same_receipt_in_multiple_cleared_statuses_fails_closed() -> None:
+    action = _action()
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="contradictory cleared terminal statuses",
+    ):
+        _verify(
+            action,
+            surface="cleared_conflict",
+            requested_price=2.0,
+            matched_price=2.0,
+        )

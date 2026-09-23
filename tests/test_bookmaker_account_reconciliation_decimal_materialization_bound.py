@@ -198,6 +198,50 @@ def test_authority_binding_field_drift_is_rejected_before_publication(tmp_path) 
     assert not path.exists()
 
 
+
+
+def test_caller_mutable_baseline_fields_cannot_authorize_alternate_root(
+    tmp_path,
+) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority-a",
+    )
+    replacement = MonotonicWorkspaceAuthority(
+        workspace=store._workspace,
+        domain="provider.account-snapshot-reconciliation-v1",
+        key=f"account-reconciliation:{path.name}",
+        authority_root=tmp_path / "authority-b",
+    )
+    replacement_binding = (
+        replacement.authority_root,
+        replacement.workspace,
+        replacement.workspace_instance_id,
+        replacement.domain,
+        replacement.key,
+        replacement.namespace_sha256,
+        replacement.journal_dir,
+        replacement.namespace_marker_path,
+        replacement.workspace_binding_path,
+    )
+
+    # This exactly reconstructs the predecessor bypass: all three caller-visible
+    # fields agree on root B. The constructor-issued root-A baseline must live
+    # outside mutable store state, so these decoy assignments grant no authority.
+    store._authority = replacement
+    store._authority_identity = replacement
+    store._authority_binding = replacement_binding
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="monotonic authority identity or binding changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert not path.exists()
+
+
 def test_exact_ordinary_high_precision_decimal_remains_unrounded() -> None:
     amount = Decimal("1234567890.123456789012345678901234567890")
     canonical = snapshot_to_canonical_dict(_snapshot(amount))

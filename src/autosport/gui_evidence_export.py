@@ -69,11 +69,11 @@ class EvidenceExportMessage:
 
 
 class OneShotEvidenceExportWorker:
-    """Export one canonical evidence manifest away from the Tk/UIA event thread.
+    """Export one canonical manifest without abandoning committed work on shutdown.
 
     The canonical exporter owns destination fencing, manifest semantics and
     secret-safety. This adapter only serializes one export at a time and reports
-    one terminal message for Tk polling.
+    one terminal message for GUI polling.
     """
 
     def __init__(self) -> None:
@@ -104,11 +104,14 @@ class OneShotEvidenceExportWorker:
         try:
             start_gate = threading.Event()
             cancelled = threading.Event()
+            # Once start() commits an export, normal interpreter shutdown must not
+            # abandon canonical publication at an arbitrary point. This matches the
+            # existing replay/recovery worker rule for committed durable work.
             thread = threading.Thread(
                 target=self._run_when_committed,
                 args=(workspace_path, output_path, start_gate, cancelled),
                 name="autosport-evidence-export",
-                daemon=True,
+                daemon=False,
             )
         except BaseException as exc:
             self._release_unstarted_slot()

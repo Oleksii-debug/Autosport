@@ -9,7 +9,7 @@ account-snapshot authorities.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from enum import Enum
 import hashlib
 import json
@@ -27,7 +27,7 @@ class ReadbackDegradationError(ValueError):
 class ReadbackDegradationState(str, Enum):
     """Closed set of non-positive account-readback states."""
 
-    FRESH_PARTIAL = "fresh_partial"
+    INCOMPLETE_PARTIAL = "incomplete_partial"
     STALE_LAST_KNOWN = "stale_last_known"
     UNAVAILABLE_TRANSIENT = "unavailable_transient"
     UNAUTHORIZED_OR_SESSION_EXPIRED = "unauthorized_or_session_expired"
@@ -73,12 +73,20 @@ _BETFAIR_TRANSIENT_CODES = frozenset(
 )
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _UNAUTHORIZED_HTTP_STATUSES = frozenset({401, 403})
+_ISSUANCE_TOKEN = object()
 
 
 def _require_token(value: object, *, field: str) -> str:
     if type(value) is not str or not _TOKEN_RE.fullmatch(value):
         raise ReadbackDegradationError(f"{field} must be a bounded canonical token")
     return value
+
+
+def _require_provider_id(value: object) -> str:
+    provider_id = _require_token(value, field="provider_id")
+    if provider_id != provider_id.lower():
+        raise ReadbackDegradationError("provider_id must use canonical lowercase form")
+    return provider_id
 
 
 def _require_provider_code(value: object | None) -> str | None:
@@ -120,7 +128,7 @@ class ReadbackFailureSignal:
         object.__setattr__(
             self,
             "provider_id",
-            _require_token(self.provider_id, field="provider_id").lower(),
+            _require_provider_id(self.provider_id),
         )
         object.__setattr__(
             self,
@@ -157,6 +165,17 @@ class AccountReadbackDegradationEvidence:
     partial_observation_present: bool
     prior_snapshot_id: str | None
     evidence_sha256: str
+    _issuance_token: InitVar[object] = None
+
+    def __post_init__(self, _issuance_token: object) -> None:
+        if _issuance_token is not _ISSUANCE_TOKEN:
+            raise ReadbackDegradationError(
+                "degradation evidence must be issued by the classifier"
+            )
+
+    @property
+    def freshness_proven(self) -> bool:
+        return False
 
     @property
     def fresh_complete_proven(self) -> bool:
@@ -210,7 +229,7 @@ def _classify_state(signal: ReadbackFailureSignal) -> ReadbackDegradationState:
     if status in _TRANSIENT_HTTP_STATUSES:
         return ReadbackDegradationState.UNAVAILABLE_TRANSIENT
     if signal.kind is ReadbackFailureKind.INCOMPLETE_PAGINATION:
-        return ReadbackDegradationState.FRESH_PARTIAL
+        return ReadbackDegradationState.INCOMPLETE_PARTIAL
     if signal.kind is ReadbackFailureKind.STALE_CACHE:
         if signal.prior_snapshot_id is None:
             return ReadbackDegradationState.UNKNOWN
@@ -235,6 +254,7 @@ def classify_account_readback_degradation(
 
     state = _classify_state(signal)
     core = {
+        "schema": "autosport.account-readback-degradation.v1",
         "schema_version": 1,
         "state": state.value,
         "provider_id": signal.provider_id,
@@ -260,4 +280,5 @@ def classify_account_readback_degradation(
         partial_observation_present=signal.pages_completed > 0,
         prior_snapshot_id=signal.prior_snapshot_id,
         evidence_sha256=hashlib.sha256(canonical).hexdigest(),
+        _issuance_token=_ISSUANCE_TOKEN,
     )

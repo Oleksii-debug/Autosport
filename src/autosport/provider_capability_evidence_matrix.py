@@ -472,6 +472,64 @@ class ProviderCapabilityEvidenceMatrix:
             return False
         return fact.grade in accepted_grades and fact.is_current(at_time)
 
+    def qualifies_scoped(
+        self,
+        capability: BookmakerCapability,
+        *,
+        accepted_grades: frozenset[ProviderCapabilityTruthGrade],
+        at_time: str,
+        sport: str | None = None,
+        market_family: str | None = None,
+    ) -> bool:
+        """Qualify one capability without discarding sport/market restrictions.
+
+        At least one scope axis must be explicit. A fact restricted on an axis can
+        qualify only when that axis is supplied and matches. An empty fact scope is
+        intentionally provider-wide on that axis and may satisfy a narrower query.
+        """
+        if sport is None and market_family is None:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "scoped qualification requires sport or market_family"
+            )
+        if sport is not None:
+            _text(sport, "sport")
+        if market_family is not None:
+            _text(market_family, "market_family")
+        if type(accepted_grades) is not frozenset or not accepted_grades:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "accepted_grades must be non-empty frozenset"
+            )
+        if any(type(grade) is not ProviderCapabilityTruthGrade for grade in accepted_grades):
+            raise ProviderCapabilityEvidenceMatrixError("accepted_grades must be exact enums")
+        requested_at = _time(at_time, "at_time")
+        if not _is_product_issued_matrix(self):
+            return False
+        if requested_at > _time(self.as_of, "as_of"):
+            return False
+        fact = self.fact_for(capability)
+        if (
+            fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+            and (
+                fact.environment != self.environment
+                or fact.application_mode != self.application_mode
+            )
+        ):
+            return False
+        if (
+            fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+            and not _is_product_issued(fact)
+        ):
+            return False
+        if fact.sport_scope and (sport is None or sport not in fact.sport_scope):
+            return False
+        if fact.market_scope and (
+            market_family is None or market_family not in fact.market_scope
+        ):
+            return False
+        if fact.grade is ProviderCapabilityTruthGrade.REVOKED_OR_UNAVAILABLE:
+            return False
+        return fact.grade in accepted_grades and fact.is_current(at_time)
+
     def to_canonical_dict(self) -> dict[str, object]:
         return {
             "profile_id": self.profile.profile_id,

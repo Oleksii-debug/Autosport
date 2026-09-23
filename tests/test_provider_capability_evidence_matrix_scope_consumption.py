@@ -131,3 +131,60 @@ def test_sport_and_market_scoped_fact_cannot_qualify_as_provider_wide() -> None:
     matrix = _matrix((("tennis",), ("match_odds",)))
 
     assert not _qualifies_unscoped(matrix)
+
+
+def _qualifies_scoped(matrix, *, sport=None, market_family=None) -> bool:
+    return matrix.qualifies_scoped(
+        BookmakerCapability.LIVE_QUOTES_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T3,
+        sport=sport,
+        market_family=market_family,
+    )
+
+
+def test_explicit_scoped_query_matches_all_restricted_axes() -> None:
+    matrix = _matrix((("tennis",), ("match_odds",)))
+
+    assert _qualifies_scoped(
+        matrix,
+        sport="tennis",
+        market_family="match_odds",
+    )
+    assert not _qualifies_scoped(
+        matrix,
+        sport="football",
+        market_family="match_odds",
+    )
+    assert not _qualifies_scoped(
+        matrix,
+        sport="tennis",
+        market_family="winner",
+    )
+
+
+def test_explicit_scoped_query_cannot_drop_a_restricted_axis() -> None:
+    matrix = _matrix((("tennis",), ("match_odds",)))
+
+    assert not _qualifies_scoped(matrix, sport="tennis")
+    assert not _qualifies_scoped(matrix, market_family="match_odds")
+
+
+def test_single_axis_restrictions_are_consumable_without_overgeneralization() -> None:
+    sport_matrix = _matrix((("tennis",), ()))
+    market_matrix = _matrix(((), ("match_odds",)))
+
+    assert _qualifies_scoped(sport_matrix, sport="tennis")
+    assert not _qualifies_scoped(sport_matrix, sport="football")
+    assert _qualifies_scoped(market_matrix, market_family="match_odds")
+    assert not _qualifies_scoped(market_matrix, market_family="winner")
+
+
+def test_provider_wide_fact_can_satisfy_an_explicit_narrower_scope() -> None:
+    matrix = _matrix(((), ()))
+
+    assert _qualifies_scoped(
+        matrix,
+        sport="tennis",
+        market_family="match_odds",
+    )

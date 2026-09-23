@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -190,3 +191,38 @@ def test_settle_rejects_lay_in_mutated_multi_leg_ticket_before_payout() -> None:
         balance=balance_before,
         lifecycle=lifecycle_before,
     )
+
+
+def test_load_rejects_preload_locked_odds_rebaseline(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("back", odds="2")], "10", placed_at=_PLACED_AT)
+    book.save(path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["tickets"][0]["legs"][0]["locked_odds"] = "100"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic|commitment|witness",
+    ):
+        PaperBook.load(path)
+
+
+def test_load_rejects_preload_stake_and_balance_rebaseline(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("back", odds="2")], "10", placed_at=_PLACED_AT)
+    book.save(path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["tickets"][0]["stake"] = "20"
+    payload["balance"] = "80"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic|commitment|witness",
+    ):
+        PaperBook.load(path)

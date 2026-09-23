@@ -69,7 +69,10 @@ from autosport.supervised_execution import (
     supervised_execution_terms_sha256,
     verify_betfair_provider_state,
 )
-from autosport.supervised_provider_evidence import ProviderEvidenceError
+from autosport.supervised_provider_evidence import (
+    ProviderEvidenceError,
+    _evaluate_betfair_provider_state_semantics,
+)
 from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 DECISION_TS = "2026-09-19T08:00:00+00:00"
@@ -1178,7 +1181,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
             ProviderEvidenceError,
             match="expected durable binding",
         ):
-            verify_betfair_provider_state(
+            _evaluate_betfair_provider_state_semantics(
                 action,
                 profile,
                 expected_profile_sha256=profile.profile_id,
@@ -1186,7 +1189,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
                 expected_provider_order_ref=owned_ref,
             )
 
-        foreign_effect = verify_betfair_provider_state(
+        foreign_effect = _evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,
@@ -1195,7 +1198,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
         assert foreign_effect.provider_order_ref == foreign_ref
         with pytest.raises(
             SupervisedExecutionError,
-            match="provider order reference mismatches durable attempt binding",
+            match="verified canonical provider evidence is not authoritative",
         ):
             reconcile_provider_readback(
                 ledger,
@@ -1247,7 +1250,7 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
             provider_order_ref=foreign_ref,
             market_id=action.market_id,
         )
-        foreign_absence = verify_betfair_provider_state(
+        foreign_absence = _evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,
@@ -1315,7 +1318,7 @@ def test_not_found_consumer_rejects_rebound_authority_dispatch(
             provider_order_ref=foreign_ref,
             market_id=action.market_id,
         )
-        foreign_absence = verify_betfair_provider_state(
+        foreign_absence = _evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,

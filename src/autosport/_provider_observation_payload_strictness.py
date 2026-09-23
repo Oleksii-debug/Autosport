@@ -52,6 +52,32 @@ def _strict_snapshot_from_payload(cls, payload: Mapping[str, object]):
     return _ORIGINAL_SNAPSHOT_FROM_PAYLOAD(payload)
 
 
+def _outcome_identity(row: Mapping[str, object]) -> str | None:
+    """Resolve documented per-outcome aliases without trusting malformed types."""
+
+    team = row.get("team")
+    outcome = row.get("outcome")
+    for name, value in (("team", team), ("outcome", outcome)):
+        if value is not None and (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or "\x00" in value
+        ):
+            raise authority.ProviderObservationIntegrityError(
+                f"provider snapshot {name} identity must be non-empty canonical text"
+            )
+    if team is not None and outcome is not None and team != outcome:
+        raise authority.ProviderObservationIntegrityError(
+            "provider snapshot carries conflicting per-outcome identity aliases"
+        )
+    if isinstance(team, str):
+        return team
+    if isinstance(outcome, str):
+        return outcome
+    return None
+
+
 def _strict_snapshot_validate_frame(self, frame: Mapping[str, object]) -> None:
     """Reject distinct current values for one exact provider row identity."""
 
@@ -60,7 +86,7 @@ def _strict_snapshot_validate_frame(self, frame: Mapping[str, object]) -> None:
     if not isinstance(rows, list):
         return
 
-    logical_rows: set[tuple[object, object, object, object, object]] = set()
+    logical_rows: set[tuple[object, object, object, object, str | None]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -69,7 +95,7 @@ def _strict_snapshot_validate_frame(self, frame: Mapping[str, object]) -> None:
             row.get("bookmaker"),
             row.get("kind"),
             row.get("market_key"),
-            row.get("outcome"),
+            _outcome_identity(row),
         )
         if logical_identity in logical_rows:
             raise authority.ProviderObservationIntegrityError(

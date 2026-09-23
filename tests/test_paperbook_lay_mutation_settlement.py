@@ -226,3 +226,98 @@ def test_load_rejects_preload_stake_and_balance_rebaseline(tmp_path) -> None:
         match="opening economic|commitment|witness",
     ):
         PaperBook.load(path)
+
+def test_load_bytes_ticket_snapshot_is_read_only_without_path_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path / "authority"),
+    )
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    original = _leg("back", odds="2")
+    book.open_ticket([original], "10", placed_at=_PLACED_AT)
+    book.save(path)
+
+    decoded = PaperBook.load_bytes(path.read_bytes())
+    ticket = next(iter(decoded.tickets.values()))
+
+    with pytest.raises(ValueError, match="lacks independent durable witness authority"):
+        decoded.settle(
+            ticket.ticket_id,
+            {original.quote_key},
+            settled_at=_SETTLED_AT,
+        )
+    with pytest.raises(ValueError, match="lacks independent durable witness authority"):
+        decoded.open_ticket([_leg("back", selection_id="selection-2")], "1")
+    with pytest.raises(ValueError, match="lacks independent durable witness authority"):
+        decoded.save(tmp_path / "copy.json")
+
+
+def test_path_load_rejects_whole_snapshot_rollback_behind_external_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path / "authority"),
+    )
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("back", selection_id="selection-1", odds="2")], "10", placed_at=_PLACED_AT)
+    book.save(path)
+    first_generation = path.read_bytes()
+
+    book.open_ticket(
+        [_leg("back", selection_id="selection-2", odds="3")],
+        "5",
+        placed_at="2026-09-23T01:00:30+00:00",
+    )
+    book.save(path)
+
+    path.write_bytes(first_generation)
+
+    with pytest.raises(ValueError, match="independent durable opening witness"):
+        PaperBook.load(path)
+
+
+def test_failed_replace_keeps_last_good_snapshot_loadable_and_aborts_prepare(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path / "authority"),
+    )
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    first = _leg("back", selection_id="selection-1", odds="2")
+    first_ticket = book.open_ticket([first], "10", placed_at=_PLACED_AT)
+    book.save(path)
+    last_good = path.read_bytes()
+
+    book.open_ticket(
+        [_leg("back", selection_id="selection-2", odds="3")],
+        "5",
+        placed_at="2026-09-23T01:00:30+00:00",
+    )
+
+    import autosport.paper as paper_module
+
+    original_replace = paper_module.os.replace
+
+    def _fail_replace(*_args, **_kwargs):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(paper_module.os, "replace", _fail_replace)
+    with pytest.raises(OSError, match="injected replace failure"):
+        book.save(path)
+    monkeypatch.setattr(paper_module.os, "replace", original_replace)
+
+    assert path.read_bytes() == last_good
+    restored = PaperBook.load(path)
+    assert tuple(restored.tickets) == (first_ticket.ticket_id,)
+    assert restored.balance == Decimal("90")
+

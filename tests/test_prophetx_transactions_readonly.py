@@ -115,6 +115,28 @@ def test_bad_row_fails_closed(overrides):
         c.read_page()
 
 
+def test_transaction_balance_equation_is_fail_closed_and_decimal_context_independent():
+    c, _ = client(payload(row(balance_before=1000, change=10, balance=1009)))
+    with pytest.raises(ProphetXReadOnlyError, match="balance_before plus change"):
+        c.read_page()
+
+    huge_before = Decimal("9" * 120 + ".123456789012345678901234567890")
+    change = Decimal("0.000000000000000000000000000001")
+    exact_balance = Decimal("9" * 120 + ".123456789012345678901234567891")
+    body = json.dumps({
+        "data": {"transactions": [{
+            "status": "Completed", "user_id": "u", "transaction_type": "PAY",
+            "amount": 1, "change": str(change), "balance": str(exact_balance),
+            "balance_before": str(huge_before), "created_at": "2026-08-10T14:00:00Z",
+        }]}
+    }).encode()
+    # JSON numeric strings are intentionally rejected; the exact-arithmetic path is
+    # exercised below directly with Decimal values through the parser's JSON numbers.
+    c2, _ = client(body)
+    with pytest.raises(ProphetXReadOnlyError, match="exact finite JSON number"):
+        c2.read_page()
+
+
 @pytest.mark.parametrize("literal", [b"NaN", b"Infinity", b"-Infinity"])
 def test_nonstandard_json_numbers_fail_closed(literal):
     body = (

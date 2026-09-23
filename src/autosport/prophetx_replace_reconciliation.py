@@ -50,6 +50,12 @@ class ReplaceOutcome(str, Enum):
     REJECTED = "REJECTED"
 
 
+class ReplaceRejectReason(str, Enum):
+    TOO_LATE = "0"
+    UNKNOWN_ORDER = "1"
+    OTHER = "2"
+
+
 class ReplaceRejectResponseTo(str, Enum):
     CANCEL = "1"
     REPLACE = "2"
@@ -408,7 +414,7 @@ class ReplaceReject:
     provider_order_id: str
     replace_cl_ord_id: str
     orig_cl_ord_id: str
-    reason: str
+    reason: ReplaceRejectReason
     response_to: ReplaceRejectResponseTo
     order_status: OrderStatus
     transact_time: str
@@ -428,6 +434,8 @@ class ReplaceReject:
             "fix_session_id",
         ):
             _text(getattr(self, n), n)
+        if not isinstance(self.reason, ReplaceRejectReason):
+            raise ProphetXReplaceError("invalid CxlRejReason")
         if not isinstance(self.response_to, ReplaceRejectResponseTo):
             raise ProphetXReplaceError("invalid CxlRejResponseTo")
         if not isinstance(self.order_status, OrderStatus):
@@ -449,7 +457,7 @@ class ReplaceReject:
             "provider_order_id": self.provider_order_id,
             "replace_cl_ord_id": self.replace_cl_ord_id,
             "orig_cl_ord_id": self.orig_cl_ord_id,
-            "reason": self.reason,
+            "reason": self.reason.value,
             "response_to": self.response_to.value,
             "order_status": self.order_status.value,
             "transact_time": self.transact_time,

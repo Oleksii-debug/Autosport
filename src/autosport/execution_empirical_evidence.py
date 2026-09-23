@@ -18,6 +18,7 @@ from .real_execution_ledger import (
 SCHEMA_VERSION = 4
 
 SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
+EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_PROTOCOL_DIGEST"
 
 TIMING_STATUS_UNKNOWN = "UNKNOWN"
 TIMING_REASON_NO_MONOTONIC_WITNESS = "NO_MONOTONIC_WITNESS"
@@ -938,7 +939,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 3
+POPULATION_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -959,6 +960,8 @@ class EmpiricalExecutionPopulationEvidence:
     source_product_authority_verified: bool
     source_root_authority_status: str
     evaluation_protocol_sha256: str
+    evaluation_protocol_authority_verified: bool
+    evaluation_protocol_authority_status: str
     samples: tuple[EmpiricalExecutionEvidence, ...]
     schema_version: int = POPULATION_SCHEMA_VERSION
 
@@ -1004,6 +1007,23 @@ class EmpiricalExecutionPopulationEvidence:
                 "ledger/workspace authority"
             )
         _sha256(self.evaluation_protocol_sha256, "evaluation_protocol_sha256")
+        if type(self.evaluation_protocol_authority_verified) is not bool:
+            raise EmpiricalExecutionEvidenceError(
+                "evaluation_protocol_authority_verified must be bool"
+            )
+        _text(
+            self.evaluation_protocol_authority_status,
+            "evaluation_protocol_authority_status",
+        )
+        if (
+            self.evaluation_protocol_authority_verified is not False
+            or self.evaluation_protocol_authority_status
+            != EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "current empirical population does not verify product/scientific "
+                "evaluation protocol authority"
+            )
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError(
                 "source_event_count must be positive int"
@@ -1244,6 +1264,12 @@ class EmpiricalExecutionPopulationEvidence:
             "source_product_authority_verified": self.source_product_authority_verified,
             "source_root_authority_status": self.source_root_authority_status,
             "evaluation_protocol_sha256": self.evaluation_protocol_sha256,
+            "evaluation_protocol_authority_verified": (
+                self.evaluation_protocol_authority_verified
+            ),
+            "evaluation_protocol_authority_status": (
+                self.evaluation_protocol_authority_status
+            ),
             "denominator_sha256": self.denominator_sha256,
             "attempt_ids": [sample.attempt_id for sample in self.samples],
             "sample_evidence_sha256s": [
@@ -1355,6 +1381,16 @@ def _issue_empirical_execution_population_evidence(
         "evaluation_protocol_sha256",
         evaluation_protocol_sha256,
     )
+    object.__setattr__(
+        evidence,
+        "evaluation_protocol_authority_verified",
+        False,
+    )
+    object.__setattr__(
+        evidence,
+        "evaluation_protocol_authority_status",
+        EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED,
+    )
     object.__setattr__(evidence, "samples", samples)
     object.__setattr__(evidence, "schema_version", POPULATION_SCHEMA_VERSION)
     evidence.__post_init__()
@@ -1374,6 +1410,9 @@ def build_empirical_execution_population_evidence(
     concurrent ledger mutation fails closed rather than silently mixing snapshots.
     The aggregate is still explicitly unqualified as product-owned root provenance
     until a separate durable workspace authority is composed on this lineage.
+    The supplied evaluation protocol digest is likewise a binding label only and
+    carries explicit negative product/scientific authority until independently
+    qualified protocol evidence is composed.
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be canonical RealExecutionLedger")

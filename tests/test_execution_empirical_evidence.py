@@ -672,6 +672,37 @@ def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
 
 
 
+def test_attempt_projection_ignores_rebound_ledger_snapshot_seams(tmp_path):
+    canonical = _ledger(
+        tmp_path / "canonical-attempt",
+        action=_action(selection_id="canonical-selection"),
+    )
+    _bind_provider(canonical)
+    _ack(canonical)
+    decoy = _ledger(
+        tmp_path / "decoy-attempt",
+        action=_action(selection_id="decoy-selection"),
+    )
+    _bind_provider(decoy)
+    _ack(decoy)
+
+    canonical_snapshot = RealExecutionLedger.verified_snapshot(canonical)
+    decoy_snapshot = RealExecutionLedger.verified_snapshot(decoy)
+    assert canonical_snapshot.sha256 != decoy_snapshot.sha256
+
+    canonical.verified_snapshot = decoy.verified_snapshot
+    canonical._parse = lambda _raw: RealExecutionLedger._parse(decoy.path.read_bytes())
+
+    evidence = build_empirical_execution_evidence(
+        canonical,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.selection_id == "canonical-selection"
+    assert evidence.source_ledger_sha256 == canonical_snapshot.sha256
+    assert evidence.source_event_count == canonical_snapshot.event_count
+
+
 def _population_ledger(tmp_path) -> RealExecutionLedger:
     ledger = RealExecutionLedger(tmp_path / "execution-population.jsonl")
     specs = (
@@ -768,6 +799,31 @@ def _population_ledger(tmp_path) -> RealExecutionLedger:
             )
         )
     return ledger
+
+
+def test_population_projection_ignores_rebound_ledger_snapshot_seams(tmp_path):
+    canonical = _population_ledger(tmp_path / "canonical-population")
+    decoy = _population_ledger(tmp_path / "decoy-population")
+
+    canonical_snapshot = RealExecutionLedger.verified_snapshot(canonical)
+    decoy_snapshot = RealExecutionLedger.verified_snapshot(decoy)
+    assert canonical_snapshot.sha256 != decoy_snapshot.sha256
+
+    canonical.verified_snapshot = decoy.verified_snapshot
+    canonical._parse = lambda _raw: RealExecutionLedger._parse(decoy.path.read_bytes())
+
+    aggregate = build_empirical_execution_population_evidence(
+        canonical,
+        evaluation_protocol_sha256="7" * 64,
+    )
+
+    assert aggregate.source_ledger_sha256 == canonical_snapshot.sha256
+    assert aggregate.source_event_count == canonical_snapshot.event_count
+    assert all(
+        sample.source_ledger_sha256 == canonical_snapshot.sha256
+        and sample.source_event_count == canonical_snapshot.event_count
+        for sample in aggregate.samples
+    )
 
 
 def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):

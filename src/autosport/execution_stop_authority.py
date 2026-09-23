@@ -308,12 +308,61 @@ class ExecutionStopAuthority:
         name = os.path.normcase(Path(path).name)
         return "execution-stop-" + hashlib.sha256(name.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _product_monotonic_authority_root() -> Path:
+        """Resolve the supported STOP machine-state root without env retargeting."""
+
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                buffer = ctypes.create_unicode_buffer(32768)
+                result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+                    None,
+                    0x001C,  # CSIDL_LOCAL_APPDATA
+                    None,
+                    0,
+                    buffer,
+                )
+            except (AttributeError, OSError, ValueError) as exc:
+                raise ExecutionStopIntegrityError(
+                    "cannot resolve product-owned Windows STOP authority root"
+                ) from exc
+            if result != 0 or not buffer.value:
+                raise ExecutionStopIntegrityError(
+                    "cannot resolve product-owned Windows STOP authority root"
+                )
+            base = Path(buffer.value)
+            relative = (
+                Path("Autosport")
+                / "application-state"
+                / "monotonic-authority-v1"
+            )
+        else:
+            try:
+                import pwd
+
+                home = pwd.getpwuid(os.getuid()).pw_dir
+            except (AttributeError, ImportError, KeyError, OSError) as exc:
+                raise ExecutionStopIntegrityError(
+                    "cannot resolve product-owned POSIX STOP authority root"
+                ) from exc
+            base = Path(home) / ".local" / "state"
+            relative = Path("autosport") / "monotonic-authority-v1"
+
+        if not base.is_absolute():
+            raise ExecutionStopIntegrityError(
+                "product-owned STOP authority root must be absolute"
+            )
+        return base / relative
+
     def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
         absolute = Path(os.path.abspath(os.fspath(self.path)))
         return MonotonicWorkspaceAuthority(
             workspace=absolute.parent,
             domain=_MONOTONIC_DOMAIN,
             key=_CANONICAL_ADMISSION_MONOTONIC_KEY(absolute),
+            authority_root=_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT(),
         )
 
     def _stable_serialization_lock_path(self) -> Path:
@@ -1271,6 +1320,9 @@ class ExecutionStopAuthority:
 # exact unbound callables rather than re-resolving self.<helper> dynamically.
 _CANONICAL_ADMISSION_AUTHORITY_CLASS = ExecutionStopAuthority
 _CANONICAL_ADMISSION_MONOTONIC_KEY = ExecutionStopAuthority._monotonic_key
+_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT = (
+    ExecutionStopAuthority._product_monotonic_authority_root
+)
 _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY = ExecutionStopAuthority._monotonic_authority
 _CANONICAL_ADMISSION_STABLE_SERIALIZATION_LOCK_PATH = (
     ExecutionStopAuthority._stable_serialization_lock_path
@@ -1310,6 +1362,10 @@ _CANONICAL_ADMISSION_CURRENT_UNLOCKED = ExecutionStopAuthority._current_unlocked
 
 _CANONICAL_ADMISSION_GRAPH = (
     ("_monotonic_key", _CANONICAL_ADMISSION_MONOTONIC_KEY),
+    (
+        "_product_monotonic_authority_root",
+        _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT,
+    ),
     ("_monotonic_authority", _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY),
     (
         "_stable_serialization_lock_path",

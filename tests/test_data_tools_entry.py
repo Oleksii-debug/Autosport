@@ -194,8 +194,8 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 3)
         self.assertEqual(
             stderr.getvalue().strip(),
-            "Autosport-Data: verify-dataset=FAIL_CLOSED error=BrokenStringValueError: "
-            "BrokenStringValueError",
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError: "
+            "exception details unavailable",
         )
         self.assertNotIn("Traceback", stderr.getvalue())
 
@@ -221,8 +221,8 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 3)
         self.assertEqual(
             stderr.getvalue().strip(),
-            "Autosport-Data: verify-dataset=FAIL_CLOSED error=BrokenMetadataValueError: "
-            "BrokenMetadataValueError",
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError: "
+            "exception details unavailable",
         )
         self.assertNotIn("Traceback", stderr.getvalue())
 
@@ -249,7 +249,7 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 3)
         self.assertEqual(
             stderr.getvalue().strip(),
-            "Autosport-Data: verify-dataset=FAIL_CLOSED error=HostileRenderedValueError: "
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError: "
             "invalid dataset second diagnostic line",
         )
         self.assertNotIn("Traceback", stderr.getvalue())

@@ -25,6 +25,9 @@ MICROSOFT_WOW64_REGISTRY_VIEW_DOC = (
     "https://learn.microsoft.com/windows/win32/winprog64/accessing-an-alternate-registry-view"
 )
 
+# The final two names are debugger controls rather than CoreWebView2 option
+# overrides. They are still forbidden on the supported release path because they
+# can pause or expose the packaged WebView to external debugging.
 WEBVIEW2_RELEASE_ENVIRONMENT_OVERRIDES = (
     "PYWEBVIEW_GUI",
     "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
@@ -201,7 +204,7 @@ def require_webview2_release_environment(
     if not result.safe:
         names = ", ".join(result.blocked_names)
         raise WebView2ReleaseEnvironmentError(
-            "Unsupported WebView2 release environment override(s): " + names
+            "Unsupported WebView2 release environment variable(s): " + names
         )
     return result
 
@@ -467,6 +470,7 @@ def probe_webview2_runtime(
 ) -> WebView2RuntimePreflight:
     """Probe WebView2 Evergreen Runtime registration using documented locations."""
 
+    require_webview2_release_environment()
     if sys.platform != "win32":
         if minimum_version is not None:
             _parse_version(minimum_version, allow_zero=True)

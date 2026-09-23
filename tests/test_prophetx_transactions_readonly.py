@@ -325,70 +325,80 @@ def test_pagination_preserves_filters_and_rejects_cursor_cycle_or_partial_comple
         partial.read_all(max_pages=1)
 
 
-def test_provider_transaction_identity_and_evidence_digest_are_explicit():
-    c, _ = client(payload(row(details="provider-id-1")))
+def test_client_transaction_id_and_local_evidence_digest_are_explicit():
+    c, _ = client(payload(row(details="client-id-1")))
     tx = c.read_page().transactions[0]
-    assert tx.provider_transaction_id == "provider-id-1"
+    assert tx.client_transaction_id == "client-id-1"
     assert len(tx.evidence_sha256) == 64
 
     c2, _ = client(payload(row(details=None)))
     tx2 = c2.read_page().transactions[0]
-    assert tx2.provider_transaction_id is None
+    assert tx2.client_transaction_id is None
     assert len(tx2.evidence_sha256) == 64
 
     c3, _ = client(payload(row(details="")))
     tx3 = c3.read_page().transactions[0]
-    assert tx3.provider_transaction_id is None
+    assert tx3.client_transaction_id is None
     assert len(tx3.evidence_sha256) == 64
 
 
-def test_read_history_collapses_exact_provider_id_replay_across_pages():
-    duplicate = row(details="tx-id-1")
+def test_read_history_preserves_repeated_client_id_rows():
+    duplicate_shape = row(details="client-id-1")
     c, transport = client(
-        payload(duplicate, cursor="c2"),
-        payload(duplicate),
+        payload(duplicate_shape, cursor="c2"),
+        payload(duplicate_shape),
     )
     history = c.read_history(ProphetXTransactionQuery(limit=1), max_pages=2)
-    assert len(history) == 1
-    assert history[0].provider_transaction_id == "tx-id-1"
+    assert len(history) == 2
+    assert [item.client_transaction_id for item in history] == [
+        "client-id-1",
+        "client-id-1",
+    ]
     assert len(transport.calls) == 2
 
 
-def test_same_provider_transaction_id_with_conflicting_economics_fails_closed():
+def test_same_client_id_can_label_distinct_lifecycle_rows_without_provider_conflict():
     c, _ = client(
-        payload(row(details="tx-id-1"), cursor="c2"),
+        payload(row(details="client-id-1"), cursor="c2"),
         payload(
             row(
-                details="tx-id-1",
-                amount=151,
-                change=151,
-                balance_before=1000,
-                balance=1151,
+                details="client-id-1",
+                transaction_type="COMMISSION",
+                amount=10,
+                change=-10,
+                balance_before=1150,
+                balance=1140,
+                description="commission",
+                created_at="2026-08-10T14:01:00Z",
             )
         ),
     )
-    with pytest.raises(
-        ProphetXReadOnlyError, match="conflicting lifecycle/economics"
-    ):
-        c.read_all(ProphetXTransactionQuery(limit=1), max_pages=2)
+    history = c.read_history(ProphetXTransactionQuery(limit=1), max_pages=2)
+    assert len(history) == 2
+    assert history[0].transaction_type == "PAY"
+    assert history[1].transaction_type == "COMMISSION"
+    assert history[0].client_transaction_id == history[1].client_transaction_id
 
 
-def test_description_only_change_does_not_mint_second_economic_effect():
+def test_description_change_is_preserved_as_distinct_lifecycle_evidence():
     c, _ = client(
-        payload(row(details="tx-id-1", description="first"), cursor="c2"),
-        payload(row(details="tx-id-1", description="provider wording changed")),
+        payload(row(details="client-id-1", description="first"), cursor="c2"),
+        payload(row(details="client-id-1", description="provider wording changed")),
     )
     history = c.read_history(ProphetXTransactionQuery(limit=1), max_pages=2)
-    assert len(history) == 1
-    assert history[0].description == "first"
+    assert len(history) == 2
+    assert [item.description for item in history] == [
+        "first",
+        "provider wording changed",
+    ]
 
 
-def test_missing_provider_id_is_not_deduplicated_as_provider_identity():
+def test_missing_client_id_is_preserved_without_fabricated_row_identity():
     no_id = row(details=None)
     c, _ = client(payload(no_id, cursor="c2"), payload(no_id))
     history = c.read_history(ProphetXTransactionQuery(limit=1), max_pages=2)
     assert len(history) == 2
-    assert all(item.provider_transaction_id is None for item in history)
+    assert all(item.client_transaction_id is None for item in history)
 
 
 def test_complete_history_must_begin_at_first_page_but_read_all_can_continue():

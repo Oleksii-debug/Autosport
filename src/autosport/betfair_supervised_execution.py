@@ -50,6 +50,7 @@ from .supervised_execution import (
 PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
+_MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -526,17 +527,26 @@ def _validate_betfair_place_action(action: ExecutionAction) -> int:
         raise BetfairSupervisedExecutionError(
             "Betfair supervised write seam currently supports BACK only"
         )
-    try:
-        selection_id = int(action.selection_id)
-    except (TypeError, ValueError) as exc:
-        raise BetfairSupervisedExecutionError(
-            "Betfair selection_id must be canonical positive integer text"
-        ) from exc
-    if str(selection_id) != action.selection_id or selection_id <= 0:
+    raw_selection_id = action.selection_id
+    if (
+        not raw_selection_id.isascii()
+        or not raw_selection_id.isdigit()
+        or raw_selection_id.startswith("0")
+    ):
         raise BetfairSupervisedExecutionError(
             "Betfair selection_id must be canonical positive integer text"
         )
-    return selection_id
+    if (
+        len(raw_selection_id) > len(_MAX_BETFAIR_SELECTION_ID)
+        or (
+            len(raw_selection_id) == len(_MAX_BETFAIR_SELECTION_ID)
+            and raw_selection_id > _MAX_BETFAIR_SELECTION_ID
+        )
+    ):
+        raise BetfairSupervisedExecutionError(
+            "Betfair selection_id exceeds signed-long provider domain"
+        )
+    return int(raw_selection_id)
 
 
 class BetfairSupervisedPlaceOrdersClient:

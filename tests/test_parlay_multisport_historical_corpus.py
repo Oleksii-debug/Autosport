@@ -29,10 +29,11 @@ def _write_snapshot(
     suffix: str,
     requested_at: str = "2026-01-01T10:00:20+00:00",
     source_id: str | None = None,
+    event_id: str | None = None,
 ) -> tuple[Path, Path, MarketEvent]:
     source = source_id or f"parlayapi:{sport}"
     event = MarketEvent(
-        event_id=f"event-{suffix}",
+        event_id=event_id or f"event-{suffix}",
         market_id="winner",
         selection_id="home",
         decimal_odds=Decimal("1.80"),
@@ -298,12 +299,14 @@ def test_acquisition_drift_changes_only_acquisition_and_qualified_identity(tmp_p
         sport="basketball",
         suffix="identity-a",
         requested_at="2026-01-01T10:00:20+00:00",
+        event_id="event-identity-stable",
     )
     second = _write_snapshot(
         tmp_path,
         sport="basketball",
         suffix="identity-b",
         requested_at="2026-01-01T10:00:30+00:00",
+        event_id="event-identity-stable",
     )
 
     first_manifest = _assemble(

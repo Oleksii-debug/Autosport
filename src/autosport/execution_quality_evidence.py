@@ -16,12 +16,12 @@ from .evaluation_universe import (
 from .paper_execution_reality import PaperAttemptOutcome
 
 
-PROTOCOL = "autosport-execution-quality-evidence/v2"
+PROTOCOL = "autosport-execution-quality-evidence/v3"
 DERIVED_DECIMAL_PRECISION = 50
 DERIVED_DECIMAL_ROUNDING = "ROUND_HALF_EVEN"
 DERIVED_DECIMAL_EMIN = -999_999
 DERIVED_DECIMAL_EMAX = 999_999
-ADVERSE_PRICE_SLIPPAGE_BASIS = "BACK_ODDS_RATIO__LAY_LIABILITY_ODDS_MINUS_ONE_RATIO"
+ADVERSE_PRICE_SLIPPAGE_BASIS = "NONNEGATIVE_HARM__BACK_ODDS_RATIO__LAY_LIABILITY_ODDS_MINUS_ONE_RATIO"
 _DERIVED_DECIMAL_CONTEXT = Context(
     prec=DERIVED_DECIMAL_PRECISION,
     rounding=ROUND_HALF_EVEN,
@@ -330,7 +330,7 @@ def _price_metrics(
         delta = execution_odds - decision_odds
         spread_bps = ((execution_odds / decision_odds) - Decimal(1)) * Decimal(10_000)
         if side == "BACK":
-            adverse_slippage_bps = -spread_bps
+            signed_harm_bps = -spread_bps
         elif side == "LAY":
             decision_liability_factor = decision_odds - Decimal(1)
             execution_liability_factor = execution_odds - Decimal(1)
@@ -338,13 +338,14 @@ def _price_metrics(
                 raise EvaluationUniverseIntegrityError(
                     "LAY execution-quality odds must be greater than one"
                 )
-            adverse_slippage_bps = (
+            signed_harm_bps = (
                 (execution_liability_factor / decision_liability_factor) - Decimal(1)
             ) * Decimal(10_000)
         else:
             raise EvaluationUniverseIntegrityError(
                 "execution-quality PAPER attempt has unsupported bet side"
             )
+        adverse_slippage_bps = max(Decimal(0), signed_harm_bps)
     if delta > 0:
         movement = PriceMovement.HIGHER_ODDS
     elif delta < 0:

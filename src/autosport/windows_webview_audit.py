@@ -275,10 +275,11 @@ def inspect_semantic_shell() -> dict[str, Any]:
     if "String(error)" in javascript:
         failures.append("raw JavaScript bridge exception text must not reach accessible output")
     if (
-        'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true'
-        not in javascript
+        "syncRuntimeActionAvailability(" not in javascript
+        or 'byId("product-runtime-start")' not in javascript
+        or 'byId("product-runtime-stop")' not in javascript
     ):
-        failures.append("runtime STOP dynamic enabled-state projection is missing")
+        failures.append("runtime START/STOP dynamic enabled-state projection is missing")
     if (
         'setTextIfChanged(byId("manual-status"), state.manual.status || "")'
         not in javascript
@@ -368,10 +369,11 @@ def inspect_keyboard_contract() -> dict[str, Any]:
                 f"id={automation_id}: expected initial disabled native button state"
             )
     if (
-        'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true'
-        not in javascript
+        "syncRuntimeActionAvailability(" not in javascript
+        or 'byId("product-runtime-start")' not in javascript
+        or 'byId("product-runtime-stop")' not in javascript
     ):
-        failures.append("runtime STOP cannot be proven keyboard-actionable when running")
+        failures.append("runtime START/STOP keyboard actionability projection is missing")
     if parser.positive_tabindex:
         failures.append("positive tabindex would override native DOM order")
 

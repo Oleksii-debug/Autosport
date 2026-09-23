@@ -17,6 +17,7 @@ from decimal import (
     localcontext,
 )
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
@@ -82,6 +83,50 @@ def _snapshot_witness_path(snapshot_path: Path) -> Path:
     return _authority_root(snapshot_path) / f"{identity}{_PAPER_SNAPSHOT_WITNESS_SUFFIX}"
 
 
+def _canonical_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _make_snapshot_authority_registry():
+    # Authority is intentionally kept in an installation-private weak registry.
+    # A caller-visible attribute on PaperBook is not authority: byte-loaded books
+    # must not become mutable merely by flipping a boolean field.
+    bindings = WeakKeyDictionary()
+
+    def register_fresh(book: object) -> None:
+        bindings[book] = ("FRESH", "", "", "")
+
+    def revoke(book: object) -> None:
+        bindings.pop(book, None)
+
+    def current(book: object):
+        return bindings.get(book)
+
+    def bind(book: object, snapshot_path: Path, witness_path: Path) -> None:
+        candidate = (
+            "BOUND",
+            _snapshot_identity(snapshot_path),
+            _canonical_path_key(snapshot_path),
+            _canonical_path_key(witness_path),
+        )
+        existing = bindings.get(book)
+        if existing is not None and existing[0] == "BOUND" and existing != candidate:
+            raise ValueError("PaperBook snapshot authority cannot be rebound to another path")
+        if existing is not None and existing[0] not in {"FRESH", "BOUND"}:
+            raise ValueError("PaperBook snapshot authority state is invalid")
+        bindings[book] = candidate
+
+    return register_fresh, revoke, current, bind
+
+
+(
+    _register_fresh_snapshot_authority,
+    _revoke_snapshot_authority,
+    _snapshot_authority_binding,
+    _bind_snapshot_authority,
+) = _make_snapshot_authority_registry()
+
+
 def _snapshot_witness_digest(payload: dict[str, object]) -> str:
     try:
         encoded = json.dumps(
@@ -108,8 +153,14 @@ def _require_snapshot_sha256(value: object, label: str) -> str:
 
 def _read_snapshot_witnesses(
     snapshot_path: Path,
+    *,
+    witness_path: Path | None = None,
 ) -> tuple[list[dict[str, object]], tuple[int, str] | None, tuple[int, str] | None]:
-    witness_path = _snapshot_witness_path(snapshot_path)
+    witness_path = (
+        _snapshot_witness_path(snapshot_path)
+        if witness_path is None
+        else Path(witness_path)
+    )
     if not witness_path.exists():
         return [], None, None
     try:
@@ -204,8 +255,17 @@ def _append_snapshot_witness(
     event: str,
     generation: int,
     snapshot_sha256: str,
+    witness_path: Path | None = None,
 ) -> None:
-    records, _, _ = _read_snapshot_witnesses(snapshot_path)
+    witness_path = (
+        _snapshot_witness_path(snapshot_path)
+        if witness_path is None
+        else Path(witness_path)
+    )
+    records, _, _ = _read_snapshot_witnesses(
+        snapshot_path,
+        witness_path=witness_path,
+    )
     previous_witness_sha256 = (
         None if not records else str(records[-1]["witness_sha256"])
     )
@@ -223,7 +283,6 @@ def _append_snapshot_witness(
         "previous_witness_sha256": previous_witness_sha256,
     }
     record = {**body, "witness_sha256": _snapshot_witness_digest(body)}
-    witness_path = _snapshot_witness_path(snapshot_path)
     existed = witness_path.exists()
     try:
         with witness_path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -259,8 +318,18 @@ def _file_sha256(path: Path) -> str | None:
 def _recover_snapshot_witness_if_possible(
     snapshot_path: Path,
     snapshot_sha256: str,
+    *,
+    witness_path: Path | None = None,
 ) -> tuple[int, str] | None:
-    _, committed, pending = _read_snapshot_witnesses(snapshot_path)
+    witness_path = (
+        _snapshot_witness_path(snapshot_path)
+        if witness_path is None
+        else Path(witness_path)
+    )
+    _, committed, pending = _read_snapshot_witnesses(
+        snapshot_path,
+        witness_path=witness_path,
+    )
     if pending is None:
         return committed
 
@@ -273,6 +342,7 @@ def _recover_snapshot_witness_if_possible(
             event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
             generation=generation,
             snapshot_sha256=pending_sha256,
+            witness_path=witness_path,
         )
     elif committed is not None and committed[1] == snapshot_sha256:
         # PREPARE was durable but os.replace did not publish the candidate.
@@ -282,21 +352,39 @@ def _recover_snapshot_witness_if_possible(
             event=_PAPER_SNAPSHOT_WITNESS_ABORT,
             generation=generation,
             snapshot_sha256=pending_sha256,
+            witness_path=witness_path,
         )
     else:
         raise ValueError(
             "PaperBook snapshot witness has an incomplete generation for different bytes"
         )
 
-    _, committed_after, pending_after = _read_snapshot_witnesses(snapshot_path)
+    _, committed_after, pending_after = _read_snapshot_witnesses(
+        snapshot_path,
+        witness_path=witness_path,
+    )
     if pending_after is not None:
         raise ValueError("PaperBook snapshot witness recovery did not close pending state")
     return committed_after
 
 
-def _verify_snapshot_witness(snapshot_path: Path, payload: bytes) -> None:
+def _verify_snapshot_witness(
+    snapshot_path: Path,
+    payload: bytes,
+    *,
+    witness_path: Path | None = None,
+) -> None:
+    witness_path = (
+        _snapshot_witness_path(snapshot_path)
+        if witness_path is None
+        else Path(witness_path)
+    )
     snapshot_sha = _snapshot_sha256(payload)
-    committed = _recover_snapshot_witness_if_possible(snapshot_path, snapshot_sha)
+    committed = _recover_snapshot_witness_if_possible(
+        snapshot_path,
+        snapshot_sha,
+        witness_path=witness_path,
+    )
     if committed is None:
         raise ValueError(
             "PaperBook ticket snapshot is missing independent durable opening witness"
@@ -326,17 +414,26 @@ class PaperBook:
         # lifecycle tuple used by rollback/state hashes while making timestamp
         # mutation mechanically detectable.
         self._settlement_times: dict[str, str | None] = {}
-        # Fresh in-memory books originate from product-owned admission. Books
-        # decoded from arbitrary bytes are read-only until a path-bound external
-        # snapshot witness is verified by load().
-        self._snapshot_authority_verified = True
+        # Fresh in-memory books may build one virgin PAPER snapshot. After the
+        # first durable save, authority is bound to that exact snapshot identity
+        # and external witness path. Byte-decoded books are explicitly revoked
+        # until load() verifies and binds an existing durable witness.
+        _register_fresh_snapshot_authority(self)
         self._snapshot_schema_version: int | None = _PAPER_SNAPSHOT_SCHEMA_VERSION
 
     def _require_snapshot_authority_for_economic_mutation(self) -> None:
-        if not self._snapshot_authority_verified:
+        binding = _snapshot_authority_binding(self)
+        if binding is None:
             raise ValueError(
                 "PaperBook byte-loaded snapshot lacks independent durable witness authority"
             )
+        if binding[0] == "BOUND":
+            snapshot_path = Path(binding[2])
+            current_witness_path = _snapshot_witness_path(snapshot_path)
+            if _canonical_path_key(current_witness_path) != binding[3]:
+                raise ValueError(
+                    "PaperBook independent snapshot authority root changed after binding"
+                )
 
     @property
     def committed_stake(self) -> Decimal:
@@ -551,6 +648,33 @@ class PaperBook:
         self._validate_loaded_state(self)
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        witness_path = _snapshot_witness_path(destination)
+        binding = _snapshot_authority_binding(self)
+        if binding is None:
+            raise ValueError(
+                "PaperBook byte-loaded snapshot lacks independent durable witness authority"
+            )
+        was_fresh = binding[0] == "FRESH"
+        if was_fresh:
+            if destination.exists() or witness_path.exists():
+                raise ValueError(
+                    "fresh PaperBook cannot overwrite an existing snapshot authority; "
+                    "load the existing PaperBook first"
+                )
+            # Bind before PREPARE so even an interrupted first save cannot later
+            # retry against a different path or authority root.
+            _bind_snapshot_authority(self, destination, witness_path)
+        else:
+            expected = (
+                "BOUND",
+                _snapshot_identity(destination),
+                _canonical_path_key(destination),
+                _canonical_path_key(witness_path),
+            )
+            if binding != expected:
+                raise ValueError(
+                    "PaperBook snapshot authority is bound to another path or witness root"
+                )
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
@@ -613,8 +737,12 @@ class PaperBook:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            records, committed, pending = _read_snapshot_witnesses(destination)
+            records, committed, pending = _read_snapshot_witnesses(destination, witness_path=witness_path)
             current_sha = _file_sha256(destination)
+            if was_fresh and (records or current_sha is not None):
+                raise ValueError(
+                    "fresh PaperBook lost virgin first-save authority before publication"
+                )
 
             # Close an interrupted attempt before starting another generation.
             # A failed replace may leave PREPARE ahead of the still-good committed
@@ -628,6 +756,7 @@ class PaperBook:
                         event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
                         generation=generation,
                         snapshot_sha256=pending_sha,
+                        witness_path=witness_path,
                     )
                 elif committed is not None and current_sha == committed[1]:
                     _append_snapshot_witness(
@@ -635,6 +764,7 @@ class PaperBook:
                         event=_PAPER_SNAPSHOT_WITNESS_ABORT,
                         generation=generation,
                         snapshot_sha256=pending_sha,
+                        witness_path=witness_path,
                     )
                 elif committed is None and current_sha is None:
                     _append_snapshot_witness(
@@ -642,12 +772,13 @@ class PaperBook:
                         event=_PAPER_SNAPSHOT_WITNESS_ABORT,
                         generation=generation,
                         snapshot_sha256=pending_sha,
+                        witness_path=witness_path,
                     )
                 else:
                     raise ValueError(
                         "PaperBook snapshot witness has an unresolved different PREPARE"
                     )
-                records, committed, pending = _read_snapshot_witnesses(destination)
+                records, committed, pending = _read_snapshot_witnesses(destination, witness_path=witness_path)
                 if pending is not None:
                     raise ValueError(
                         "PaperBook snapshot witness pending state did not close"
@@ -669,6 +800,7 @@ class PaperBook:
                 event=_PAPER_SNAPSHOT_WITNESS_PREPARE,
                 generation=generation,
                 snapshot_sha256=snapshot_sha,
+                witness_path=witness_path,
             )
             os.replace(temporary, destination)
             temporary = None
@@ -681,6 +813,7 @@ class PaperBook:
                 event=_PAPER_SNAPSHOT_WITNESS_COMMIT,
                 generation=generation,
                 snapshot_sha256=snapshot_sha,
+                witness_path=witness_path,
             )
         finally:
             if temporary is not None:
@@ -1391,7 +1524,7 @@ class PaperBook:
             )
 
         cls._validate_loaded_state(book)
-        book._snapshot_authority_verified = False
+        _revoke_snapshot_authority(book)
         return book
 
     @classmethod
@@ -1424,12 +1557,17 @@ class PaperBook:
         source = Path(path)
         payload = source.read_bytes()
         book = cls._decode_snapshot_bytes(payload)
+        witness_path = _snapshot_witness_path(source)
         if (
             book.tickets
             or book._snapshot_schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
         ):
             try:
-                _verify_snapshot_witness(source, payload)
+                _verify_snapshot_witness(
+                    source,
+                    payload,
+                    witness_path=witness_path,
+                )
             except ValueError as exc:
                 # Pre-witness legacy schemas remain available for forensic/read-only
                 # inspection, but cannot be promoted to trusted economics by save(),
@@ -1442,5 +1580,5 @@ class PaperBook:
                 ) and "missing independent durable opening witness" in str(exc):
                     return book
                 raise
-        book._snapshot_authority_verified = True
+        _bind_snapshot_authority(book, source, witness_path)
         return book

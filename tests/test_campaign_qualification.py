@@ -368,6 +368,26 @@ class CampaignQualificationTests(unittest.TestCase):
             "episode identities must be unique",
         )
 
+    def test_reused_anchor_across_episodes_blocks_replay(self):
+        evidence = self.complete()
+        broken = replace(
+            evidence.episodes[1],
+            denominator_member=evidence.episodes[0].observation,
+        )
+        changed = replace(evidence, episodes=(evidence.episodes[0], broken))
+        self.assert_blocked(
+            self.rebind_bundle(changed),
+            "reuses evidence anchor",
+        )
+
+    def test_uppercase_hash_is_rejected_as_noncanonical(self):
+        with self.assertRaises(CampaignQualificationError):
+            anchor(
+                "uppercase",
+                "A" * 64,
+                "2026-09-20T00:00:00Z",
+            )
+
     def test_malformed_hash_is_rejected_before_assessment(self):
         with self.assertRaises(CampaignQualificationError):
             anchor(

@@ -254,7 +254,16 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
 
     for index in range(section_count):
         off = section_table + index * _SECTION_HEADER_SIZE
-        raw_name = data[off : off + 8].split(b"\0", 1)[0]
+        raw_name_field = data[off : off + 8]
+        nul = raw_name_field.find(b"\0")
+        if nul >= 0:
+            if any(raw_name_field[nul + 1 :]):
+                _fail(f"section#{index + 1} name has nonzero bytes after NUL")
+            raw_name = raw_name_field[:nul]
+        else:
+            raw_name = raw_name_field
+        if raw_name.startswith(b"/") and raw_name[1:].isdigit():
+            _fail(f"section#{index + 1} uses unsupported COFF string-table name")
         try:
             name = raw_name.decode("utf-8") or f"section#{index + 1}"
         except UnicodeDecodeError:

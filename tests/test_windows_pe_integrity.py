@@ -467,3 +467,24 @@ def test_entry_point_must_be_backed_by_file_bytes():
     candidate = mutate_u32(candidate, opt + 16, 0x1200)
     assert_rejected(candidate, "not backed by file bytes")
 
+def test_section_name_requires_zero_padding_after_first_nul():
+    blob = bytearray(build_valid_pe())
+    _, _, _, sec = offsets(blob)
+    blob[sec : sec + 8] = b".t\0X\0\0\0\0"
+    assert_rejected(bytes(blob), "nonzero bytes after NUL")
+
+
+def test_executable_section_name_rejects_coff_string_table_indirection():
+    blob = bytearray(build_valid_pe())
+    _, _, _, sec = offsets(blob)
+    blob[sec : sec + 8] = b"/123\0\0\0\0"
+    assert_rejected(bytes(blob), "string-table name")
+
+
+def test_exact_eight_byte_section_name_remains_valid():
+    blob = bytearray(build_valid_pe())
+    _, _, _, sec = offsets(blob)
+    blob[sec : sec + 8] = b"TEXTCODE"
+    info = validate_pe32plus_amd64(bytes(blob))
+    assert info.sections[0].name == "TEXTCODE"
+

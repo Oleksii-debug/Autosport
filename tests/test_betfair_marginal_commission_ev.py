@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal, getcontext, setcontext
 
 import pytest
@@ -225,3 +226,71 @@ def test_calculation_identity_binds_evidence_and_market_scope():
     assert first.marginal_after_commission_ev == changed_market.marginal_after_commission_ev
     assert first.calculation_sha256 != changed_evidence.calculation_sha256
     assert first.calculation_sha256 != changed_market.calculation_sha256
+
+
+def test_derived_projection_fields_cannot_be_replaced_independently():
+    result = calculate((scenario("only", "1", "1.00", "0.25"),))
+
+    for field_name, forged in (
+        ("gross_candidate_ev", Decimal("999")),
+        ("marginal_after_commission_ev", Decimal("999")),
+        ("candidate_standalone_after_commission_ev", Decimal("999")),
+        ("calculation_sha256", "f" * 64),
+    ):
+        with pytest.raises(ValueError):
+            replace(result, **{field_name: forged})
+
+
+def test_derived_outcome_fields_cannot_be_replaced_independently():
+    row = calculate((scenario("only", "1", "1.00", "0.25"),)).outcomes[0]
+
+    for field_name in (
+        "combined_gross_pnl",
+        "base_after_commission_pnl",
+        "combined_after_commission_pnl",
+        "marginal_after_commission_pnl",
+    ):
+        with pytest.raises(ValueError):
+            replace(row, **{field_name: Decimal("999")})
+
+
+def test_replacing_projection_rate_recomputes_all_derived_values():
+    original = calculate((scenario("only", "1", "1.00", "0.25"),), rate="0.05")
+    changed = replace(
+        original,
+        effective_commission_rate=Decimal("0.10"),
+    )
+    expected = calculate(
+        (scenario("only", "1", "1.00", "0.25"),),
+        rate="0.10",
+    )
+
+    assert changed == expected
+    assert changed.calculation_sha256 != original.calculation_sha256
+    assert changed.outcomes[0].base_after_commission_pnl == Decimal("0.90")
+
+
+def test_replacing_outcome_input_recomputes_projection_identity_and_economics():
+    original = calculate(
+        (
+            scenario("a", "0.5", "1.00", "0.25"),
+            scenario("b", "0.5", "-1.00", "-0.25"),
+        )
+    )
+    changed_row = replace(
+        original.outcomes[0],
+        candidate_gross_pnl=Decimal("0.50"),
+    )
+    changed = replace(
+        original,
+        outcomes=(changed_row, original.outcomes[1]),
+    )
+    expected = calculate(
+        (
+            scenario("a", "0.5", "1.00", "0.50"),
+            scenario("b", "0.5", "-1.00", "-0.25"),
+        )
+    )
+
+    assert changed == expected
+    assert changed.calculation_sha256 != original.calculation_sha256

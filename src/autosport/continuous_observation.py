@@ -321,17 +321,27 @@ def run_continuous_observation(
             and previous.get("source_id") == state.source_id
             and previous.get("last_error_kind") == "provider_unavailable"
         ):
+            persisted_streak = previous.get("provider_unavailable_streak")
+            if type(persisted_streak) is not int or persisted_streak <= 0:
+                raise ValueError(
+                    "provider-unavailable restart status has invalid streak"
+                )
             durable_health = health_store.get(state.source_id)
             if (
                 durable_health.status == "failed"
                 and durable_health.consecutive_failures > 0
             ):
-                # The durable source-health projection is the restart authority for
-                # the outage streak. The status file only proves that the prior
-                # continuous-loop failure was provider unavailability for this exact
-                # source; it cannot make another source or failure kind inherit
-                # provider backoff.
-                state.provider_unavailable_streak = durable_health.consecutive_failures
+                if persisted_streak > durable_health.consecutive_failures:
+                    raise ValueError(
+                        "provider-unavailable restart streak exceeds durable "
+                        "source-health failure count"
+                    )
+                # SourceHealthStore counts every consecutive failure class, so it
+                # cannot itself supply the provider-unavailable streak. The loop
+                # status owns that typed streak; durable health only corroborates
+                # that the source is still failed and that the typed count does not
+                # exceed the durable consecutive-failure history.
+                state.provider_unavailable_streak = persisted_streak
         mirror = MarketMirror.from_store(store)
         mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         publish("running")

@@ -9,6 +9,7 @@ from autosport.webview2_runtime_preflight import (
     WEBVIEW2_RELEASE_ENVIRONMENT_OVERRIDES,
     WebView2ReleaseEnvironmentError,
     evaluate_webview2_release_environment,
+    probe_webview2_runtime,
     require_webview2_release_environment,
 )
 
@@ -71,6 +72,19 @@ def test_non_text_override_value_is_rejected_by_pure_evaluator() -> None:
         evaluate_webview2_release_environment(  # type: ignore[arg-type]
             {"PYWEBVIEW_GUI": 7}
         )
+
+
+def test_canonical_live_probe_rejects_override_before_platform_or_registry(
+    monkeypatch,
+) -> None:
+    secret_value = r"C:\\secret-bearing-runtime"
+    monkeypatch.setenv("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", secret_value)
+
+    with pytest.raises(WebView2ReleaseEnvironmentError) as caught:
+        probe_webview2_runtime()
+
+    assert "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER" in str(caught.value)
+    assert secret_value not in str(caught.value)
 
 
 def test_deployment_rejects_override_before_runtime_probe_or_installer(

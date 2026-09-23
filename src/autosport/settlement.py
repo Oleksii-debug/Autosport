@@ -61,69 +61,73 @@ class SettlementEngine:
         # directly, so record() is not the only ingress to this economic truth boundary.
         # Serialize this official reader with record() so it cannot observe an
         # in-progress multi-key publication from another official engine call.
+        # Keep the same serialization boundary through canonical PaperBook
+        # preflight and the complete economic commit. PaperBook.settle() is a
+        # multi-step mutable transition, so releasing after the outcomes snapshot
+        # would let two settle_ready() calls both pass the OPEN-ticket check.
         with _SETTLEMENT_OUTCOME_LOCK:
             outcomes = self._validated_outcomes_snapshot(self.outcomes)
 
-        # The commit phase must not dispatch through caller-overridable PaperBook
-        # mutation behavior after a successful canonical preflight. A subclass can
-        # otherwise apply an earlier ticket and fail a later settle() call, recreating
-        # the partial-batch state this boundary exists to prevent.
-        if type(book) is not PaperBook:
-            raise ValueError("settlement book must be an exact PaperBook")
+            # The commit phase must not dispatch through caller-overridable PaperBook
+            # mutation behavior after a successful canonical preflight. A subclass can
+            # otherwise apply an earlier ticket and fail a later settle() call, recreating
+            # the partial-batch state this boundary exists to prevent.
+            if type(book) is not PaperBook:
+                raise ValueError("settlement book must be an exact PaperBook")
 
-        # PaperBook instances have an instance dictionary even when their runtime
-        # type is exact. PaperBook.settle() dynamically resolves these two helpers,
-        # so instance-level shadows could succeed for an earlier ticket and fail a
-        # later one after the batch preflight. Reject that caller-controlled apply
-        # dispatch before any economic mutation.
-        if any(
-            helper in vars(book)
-            for helper in ("_normalize_resolution_keys", "_settlement_result")
-        ):
-            raise ValueError("settlement book mutation helpers must not be shadowed")
+            # PaperBook instances have an instance dictionary even when their runtime
+            # type is exact. PaperBook.settle() dynamically resolves these two helpers,
+            # so instance-level shadows could succeed for an earlier ticket and fail a
+            # later one after the batch preflight. Reject that caller-controlled apply
+            # dispatch before any economic mutation.
+            if any(
+                helper in vars(book)
+                for helper in ("_normalize_resolution_keys", "_settlement_result")
+            ):
+                raise ValueError("settlement book mutation helpers must not be shadowed")
 
-        # The commit phase below relies on stable canonical ticket identity and
-        # lifecycle state. Reject caller-mutated PaperBook state before any
-        # settlement mutation instead of discovering it after an earlier ticket
-        # has already been applied.
-        PaperBook._validate_loaded_state(book)
+            # The commit phase below relies on stable canonical ticket identity and
+            # lifecycle state. Reject caller-mutated PaperBook state before any
+            # settlement mutation instead of discovering it after an earlier ticket
+            # has already been applied.
+            PaperBook._validate_loaded_state(book)
 
-        # Build and economically preflight the complete ready batch before
-        # mutating the PaperBook. A later ticket can fail deterministic payout
-        # validation even when an earlier ticket is valid; applying tickets as
-        # they are discovered would leave a partially settled book.
-        plan: list[tuple[str, set[str], set[str]]] = []
-        simulated_balance = book.balance
+            # Build and economically preflight the complete ready batch before
+            # mutating the PaperBook. A later ticket can fail deterministic payout
+            # validation even when an earlier ticket is valid; applying tickets as
+            # they are discovered would leave a partially settled book.
+            plan: list[tuple[str, set[str], set[str]]] = []
+            simulated_balance = book.balance
 
-        for ticket in list(book.tickets.values()):
-            if ticket.status is not TicketStatus.OPEN:
-                continue
-            states = [outcomes.get(leg.quote_key) for leg in ticket.legs]
-            if "loss" not in states and any(state is None for state in states):
-                continue
-            winning = {
-                leg.quote_key
-                for leg in ticket.legs
-                if outcomes.get(leg.quote_key) == "win"
-            }
-            voids = {
-                leg.quote_key
-                for leg in ticket.legs
-                if outcomes.get(leg.quote_key) == "void"
-            }
-            _, _, simulated_balance = PaperBook._settlement_result(
-                ticket,
-                simulated_balance,
-                winning,
-                voids,
-            )
-            plan.append((ticket.ticket_id, winning, voids))
+            for ticket in list(book.tickets.values()):
+                if ticket.status is not TicketStatus.OPEN:
+                    continue
+                states = [outcomes.get(leg.quote_key) for leg in ticket.legs]
+                if "loss" not in states and any(state is None for state in states):
+                    continue
+                winning = {
+                    leg.quote_key
+                    for leg in ticket.legs
+                    if outcomes.get(leg.quote_key) == "win"
+                }
+                voids = {
+                    leg.quote_key
+                    for leg in ticket.legs
+                    if outcomes.get(leg.quote_key) == "void"
+                }
+                _, _, simulated_balance = PaperBook._settlement_result(
+                    ticket,
+                    simulated_balance,
+                    winning,
+                    voids,
+                )
+                plan.append((ticket.ticket_id, winning, voids))
 
-        settled: list[str] = []
-        for ticket_id, winning, voids in plan:
-            # Dispatch through the canonical class boundary so an exact PaperBook
-            # instance cannot shadow ``settle`` in ``__dict__`` after preflight and
-            # reintroduce a partial batch during apply.
-            PaperBook.settle(book, ticket_id, winning, voids)
-            settled.append(ticket_id)
-        return settled
+            settled: list[str] = []
+            for ticket_id, winning, voids in plan:
+                # Dispatch through the canonical class boundary so an exact PaperBook
+                # instance cannot shadow ``settle`` in ``__dict__`` after preflight and
+                # reintroduce a partial batch during apply.
+                PaperBook.settle(book, ticket_id, winning, voids)
+                settled.append(ticket_id)
+            return settled

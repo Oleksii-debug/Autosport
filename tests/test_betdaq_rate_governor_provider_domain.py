@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import autosport.betdaq_rate_governor as rate_governor_module
 from autosport.betdaq_rate_governor import (
     BetdaqBlacklistObservation,
     BetdaqBlacklistStatus,
@@ -104,3 +105,80 @@ def test_blacklist_remaining_ms_accepts_max_provider_int(tmp_path) -> None:
 
     assert observation.operation_id == "GetPrices"
     assert governor.blacklist_status("GetPrices") is BetdaqBlacklistStatus.BLACKLISTED
+
+def test_documented_policy_lookup_tables_reject_runtime_item_mutation() -> None:
+    original_limit = rate_governor_module._DEFAULT_RATE_POLICY_PER_MINUTE["GetPrices"]
+    original_rate_key = rate_governor_module._OPERATION_TO_RATE_POLICY_KEY["GetPrices"]
+    original_blacklist_identity = (
+        rate_governor_module._PROVIDER_API_NAME_TO_OPERATION_ID["getprices"]
+    )
+
+    with pytest.raises(TypeError):
+        rate_governor_module._DEFAULT_RATE_POLICY_PER_MINUTE["GetPrices"] = 10_000
+    with pytest.raises(TypeError):
+        rate_governor_module._OPERATION_TO_RATE_POLICY_KEY["GetPrices"] = (
+            "PlaceOrdersNoReceipt"
+        )
+    with pytest.raises(TypeError):
+        rate_governor_module._PROVIDER_API_NAME_TO_OPERATION_ID["getprices"] = (
+            "PlaceOrdersNoReceipt"
+        )
+
+    assert (
+        rate_governor_module._DEFAULT_RATE_POLICY_PER_MINUTE["GetPrices"]
+        == original_limit
+    )
+    assert (
+        rate_governor_module._OPERATION_TO_RATE_POLICY_KEY["GetPrices"]
+        == original_rate_key
+    )
+    assert (
+        rate_governor_module._PROVIDER_API_NAME_TO_OPERATION_ID["getprices"]
+        == original_blacklist_identity
+    )
+
+
+def test_resolved_governor_rejects_post_resolution_method_capacity_tamper(
+    tmp_path,
+) -> None:
+    clock = _Clock()
+    wall_clock = _WallClock()
+    policy = default_betdaq_rate_policy()
+    governor = resolve_betdaq_rate_governor(
+        tmp_path.resolve(),
+        policy,
+        clock=clock,
+        wall_clock=wall_clock,
+    )
+    method = policy.by_method()["GetPrices"]
+
+    object.__setattr__(method, "capacity", 10_000)
+
+    with pytest.raises(
+        BetdaqRateGovernorError,
+        match="rate policy changed after governor resolution",
+    ):
+        governor.admit("GetPrices")
+
+
+def test_resolved_governor_rejects_post_resolution_combined_capacity_tamper(
+    tmp_path,
+) -> None:
+    clock = _Clock()
+    wall_clock = _WallClock()
+    policy = default_betdaq_rate_policy()
+    governor = resolve_betdaq_rate_governor(
+        tmp_path.resolve(),
+        policy,
+        clock=clock,
+        wall_clock=wall_clock,
+    )
+
+    object.__setattr__(policy, "combined_capacity", 10_000)
+
+    with pytest.raises(
+        BetdaqRateGovernorError,
+        match="rate policy changed after governor resolution",
+    ):
+        governor.admit("GetPrices")
+

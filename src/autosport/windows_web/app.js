@@ -43,6 +43,15 @@
     }
   }
 
+  function clearErrorStatusWithFocusHandoff() {
+    if (document.activeElement === errorNode) {
+      statusNode.tabIndex = -1;
+      statusNode.focus();
+    }
+    setHiddenIfChanged(errorNode, true);
+    setTextIfChanged(errorNode, "");
+  }
+
   function focusOperatorTarget(target) {
     if (!(target instanceof HTMLElement)) return false;
     const unavailable = (
@@ -119,8 +128,7 @@
       setTextIfChanged(errorNode, value);
       return;
     }
-    setHiddenIfChanged(errorNode, true);
-    setTextIfChanged(errorNode, "");
+    clearErrorStatusWithFocusHandoff();
     setTextIfChanged(statusNode, value);
   }
 
@@ -131,8 +139,7 @@
       setTextIfChanged(errorNode, errorValue);
       return;
     }
-    setHiddenIfChanged(errorNode, true);
-    setTextIfChanged(errorNode, "");
+    clearErrorStatusWithFocusHandoff();
     setTextIfChanged(statusNode, status || "Готово.");
   }
 

@@ -105,6 +105,26 @@ def test_poll_driven_disable_moves_focus_to_status_or_error() -> None:
     assert 'byId("research-plan-path").disabled = true;' not in source
 
 
+def test_focused_error_hands_off_before_the_live_region_is_hidden() -> None:
+    source = _source()
+
+    helper_start = source.index("function clearErrorStatusWithFocusHandoff()")
+    helper_end = source.index("\n  function focusOperatorTarget", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "if (document.activeElement === errorNode)" in helper
+    assert "statusNode.tabIndex = -1;" in helper
+    assert "statusNode.focus();" in helper
+    assert "setHiddenIfChanged(errorNode, true);" in helper
+    assert "setTextIfChanged(errorNode, \"\");" in helper
+    assert helper.index("statusNode.focus();") < helper.index(
+        "setHiddenIfChanged(errorNode, true);"
+    )
+
+    assert source.count("clearErrorStatusWithFocusHandoff();") == 2
+    assert source.count("setHiddenIfChanged(errorNode, true);") == 1
+
+
 def test_programmatic_focus_routes_away_from_unavailable_targets() -> None:
     source = _source()
 

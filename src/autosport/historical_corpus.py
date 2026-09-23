@@ -534,8 +534,17 @@ def _snapshot(
         rows.append((event, raw))
 
     quote_count = evidence.get("quote_count")
-    if not isinstance(quote_count, int) or quote_count != len(rows):
+    if type(quote_count) is not int or quote_count != len(rows):
         raise ValueError("snapshot evidence quote_count does not match captured market rows")
+    fallback_count = evidence.get("snapshot_timestamp_fallback_count", 0)
+    if (
+        type(fallback_count) is not int
+        or fallback_count < 0
+        or fallback_count > quote_count
+    ):
+        raise ValueError(
+            "snapshot evidence snapshot_timestamp_fallback_count must be an exact bounded integer"
+        )
     if not rows:
         raise ValueError("historical snapshot market file is empty")
     return rows, evidence
@@ -710,6 +719,17 @@ def assemble_historical_corpus(
             "historical snapshots mix legacy/unproven or multiple explicit sport identities"
         )
     market_types = tuple(sorted({event.market_type.value for event, _ in events}))
+    upstream_bookmaker_keys = tuple(
+        sorted(
+            {
+                bookmaker
+                for event, _ in events
+                if (
+                    bookmaker := str(event.metadata.get("bookmaker_key") or "").strip()
+                )
+            }
+        )
+    )
 
     results_path_obj = Path(results_path)
     results = _json_object(results_path_obj, context="sealed results")
@@ -854,6 +874,7 @@ def assemble_historical_corpus(
                 "source_ids": list(source_ids),
                 "market_sha256": market_sha,
                 "market_types": list(market_types),
+                "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
                 "event_count": len(events),
             }
         )
@@ -943,6 +964,7 @@ def assemble_historical_corpus(
                     "acquisition_identity": acquisition_identity,
                     "governance_identity": governance_identity,
                     "qualified_corpus_identity": qualified_corpus_identity,
+                    "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
                     "provider_response_metadata_bound": False,
                     "prospective_authority": False,
                     "raw_redistribution_authority": proof["redistribution_verified"] is True

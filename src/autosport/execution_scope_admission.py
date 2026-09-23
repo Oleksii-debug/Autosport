@@ -411,7 +411,8 @@ def assess_execution_scope_pre_admission(
 
     action_state = profile.state_of(BookmakerCapability.PLACE_BET)
     provider_action_documented = (
-        action_state is BookmakerCapabilityState.SUPPORTED
+        scope.action_kind == "PLACE_BET"
+        and action_state is BookmakerCapabilityState.SUPPORTED
     )
     governance_permitted = (
         governance.automation_permission

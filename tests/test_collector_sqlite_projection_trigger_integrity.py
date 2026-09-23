@@ -22,8 +22,13 @@ def _install_noop_same_name_trigger(path, *, remove_marker: bool) -> None:
         )
         if remove_marker:
             connection.execute(
-                "DELETE FROM collector_meta WHERE key=?",
-                (_MARKER_KEY,),
+                "DELETE FROM collector_meta "
+                "WHERE key=? OR key=? OR key LIKE ?",
+                (
+                    _MARKER_KEY,
+                    _ORDER_MARKER_KEY,
+                    f"{_ORDER_UNVERIFIED_PREFIX}%",
+                ),
             )
         connection.commit()
     finally:

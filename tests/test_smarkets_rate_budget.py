@@ -39,12 +39,17 @@ def obs(
     )
 
 
-def store(path: Path, *, approved_limit: int = 1200) -> SmarketsAccountRateBudget:
+def store(
+    path: Path,
+    *,
+    approved_limit: int = 1200,
+    approved_window_seconds: int = 60,
+) -> SmarketsAccountRateBudget:
     return SmarketsAccountRateBudget(
         path,
         account_id="acct-1",
         approved_limit=approved_limit,
-        approved_window_seconds=60,
+        approved_window_seconds=approved_window_seconds,
     )
 
 
@@ -141,6 +146,108 @@ def test_approved_limit_is_stricter_than_provider_default(tmp_path: Path) -> Non
     assert first.request_budget_available
     assert first.effective_remaining_before == 300
     assert first.effective_remaining_after == 299
+
+
+def test_durable_approved_limit_cannot_be_widened_by_second_instance(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite3"
+    strict = store(path, approved_limit=1)
+    strict.record_observation(obs(limit=1200, remaining=1200))
+    first = strict.reserve_request(
+        account_id="acct-1", session_generation="strict", now=T0
+    )
+    assert first.request_budget_available
+    assert first.effective_remaining_before == 1
+
+    wider = store(path, approved_limit=1200)
+    denied = wider.reserve_request(
+        account_id="acct-1", session_generation="wider", now=T0
+    )
+    assert not denied.request_budget_available
+    assert denied.reason == "budget_exhausted"
+
+
+def test_existing_wide_instance_observes_later_durable_tightening(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite3"
+    wide = store(path, approved_limit=1200)
+    wide.record_observation(obs(limit=1200, remaining=1200))
+
+    store(path, approved_limit=1)
+    first = wide.reserve_request(
+        account_id="acct-1", session_generation="stale-wide", now=T0
+    )
+    assert first.request_budget_available
+    assert first.effective_remaining_before == 1
+    denied = wide.reserve_request(
+        account_id="acct-1", session_generation="stale-wide-2", now=T0
+    )
+    assert not denied.request_budget_available
+
+
+def test_restart_with_wider_configuration_preserves_stricter_durable_limit(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite3"
+    store(path, approved_limit=1)
+    restarted = store(path, approved_limit=1200)
+    restarted.record_observation(obs(limit=1200, remaining=1200))
+
+    assert restarted.reserve_request(
+        account_id="acct-1", session_generation="one", now=T0
+    ).request_budget_available
+    denied = restarted.reserve_request(
+        account_id="acct-1", session_generation="two", now=T0
+    )
+    assert not denied.request_budget_available
+
+
+def test_conflicting_durable_approved_window_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite3"
+    store(path, approved_window_seconds=60)
+    with pytest.raises(SmarketsRateBudgetError, match="window conflicts"):
+        store(path, approved_window_seconds=30)
+
+
+def test_tightening_below_already_observed_usage_denies_new_reservation(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite3"
+    wide = store(path, approved_limit=1200)
+    wide.record_observation(obs(limit=1200, remaining=1198))
+
+    store(path, approved_limit=1)
+    denied = wide.reserve_request(
+        account_id="acct-1", session_generation="stale-wide", now=T0
+    )
+    assert not denied.request_budget_available
+    assert denied.reason == "budget_exhausted"
+    assert denied.effective_remaining_before == 0
+
+
+def test_new_provider_window_does_not_relax_durable_approved_limit(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite3"
+    budget = store(path, approved_limit=1)
+    budget.record_observation(
+        obs(limit=1200, remaining=1200, reset_at=T0 + timedelta(seconds=1))
+    )
+    assert budget.reserve_request(
+        account_id="acct-1", session_generation="old", now=T0
+    ).request_budget_available
+
+    budget.record_observation(
+        obs(
+            limit=1200,
+            remaining=1200,
+            observed_at=T0 + timedelta(seconds=1),
+            reset_at=T0 + timedelta(seconds=61),
+        )
+    )
+    assert budget.reserve_request(
+        account_id="acct-1",
+        session_generation="new-window",
+        now=T0 + timedelta(seconds=1),
+    ).request_budget_available
+    denied = budget.reserve_request(
+        account_id="acct-1",
+        session_generation="new-window-2",
+        now=T0 + timedelta(seconds=1),
+    )
+    assert not denied.request_budget_available
 
 
 def test_unknown_or_mismatched_approval_window_fails_closed(tmp_path: Path) -> None:

@@ -434,22 +434,108 @@ class BetfairSettlementRevisionStore:
                 "settlement monotonic authority rejected append"
             ) from exc
 
+    def _refresh_committed_reader_state(self) -> None:
+        """Refresh only when an independently COMMITTED durable state advanced.
+
+        Read paths must not recover PREPARE. A writer may have published its local
+        journal append but not yet committed monotonic authority; exposing that tail
+        here would violate the store's existing crash protocol. With the settlement
+        writer lock held, a non-pending authority tip is stable for the duration of
+        the comparison/reload.
+        """
+
+        observed = self._monotonic_state_digest()
+        binding = self._monotonic_binding()
+        try:
+            history = self._monotonic_authority().read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise BetfairSettlementRevisionError(
+                "settlement reader cannot validate monotonic authority"
+            ) from exc
+
+        if not history:
+            if observed is not None:
+                raise BetfairSettlementRevisionError(
+                    "settlement reader has state without monotonic authority"
+                )
+            return
+
+        if any(item.semantic_binding_sha256 != binding for item in history):
+            raise BetfairSettlementRevisionError(
+                "settlement reader monotonic semantic binding mismatch"
+            )
+
+        latest = history[-1]
+        if latest.phase is AuthorityPhase.PREPARE:
+            if observed != latest.previous_committed_state_sha256:
+                raise BetfairSettlementRevisionError(
+                    "settlement reader is stale while an append is pending"
+                )
+            return
+
+        committed = (
+            latest.intended_state_sha256
+            if latest.phase is AuthorityPhase.COMMIT
+            else latest.previous_committed_state_sha256
+        )
+        if observed == committed:
+            return
+
+        # No PREPARE exists and the writer lock prevents a new one from starting.
+        # A full reload can therefore validate the advanced committed journal
+        # without this read path deciding the fate of an in-flight transaction.
+        self._reload()
+        if self._monotonic_state_digest() != committed:
+            raise BetfairSettlementRevisionError(
+                "settlement reader failed to reach committed monotonic state"
+            )
+
+    def _refresh_for_positive_read(self) -> None:
+        with self._writer_lock():
+            self._refresh_committed_reader_state()
+
     @property
     def revisions(self) -> tuple[BetfairSettlementRevision, ...]:
         with self._thread_lock:
+            self._refresh_for_positive_read()
             return tuple(self._revisions)
 
-    def current(self, bookmaker_id: str, account_id: str, external_bet_id: str) -> BetfairSettlementRevision | None:
-        key = (_text(bookmaker_id, "bookmaker_id"), _text(account_id, "account_id"), _text(external_bet_id, "external_bet_id"))
+    def current(
+        self,
+        bookmaker_id: str,
+        account_id: str,
+        external_bet_id: str,
+    ) -> BetfairSettlementRevision | None:
+        key = (
+            _text(bookmaker_id, "bookmaker_id"),
+            _text(account_id, "account_id"),
+            _text(external_bet_id, "external_bet_id"),
+        )
         with self._thread_lock:
+            self._refresh_for_positive_read()
             chain = self._by_bet.get(key, ())
             return chain[-1] if chain else None
 
-    def as_of(self, bookmaker_id: str, account_id: str, external_bet_id: str, cutoff: str) -> BetfairSettlementRevision | None:
-        key = (_text(bookmaker_id, "bookmaker_id"), _text(account_id, "account_id"), _text(external_bet_id, "external_bet_id"))
+    def as_of(
+        self,
+        bookmaker_id: str,
+        account_id: str,
+        external_bet_id: str,
+        cutoff: str,
+    ) -> BetfairSettlementRevision | None:
+        key = (
+            _text(bookmaker_id, "bookmaker_id"),
+            _text(account_id, "account_id"),
+            _text(external_bet_id, "external_bet_id"),
+        )
         limit = _time(cutoff, "cutoff")
         with self._thread_lock:
-            visible = [item for item in self._by_bet.get(key, ()) if _time(item.available_at, "available_at") <= limit]
+            self._refresh_for_positive_read()
+            visible = [
+                item
+                for item in self._by_bet.get(key, ())
+                if _time(item.available_at, "available_at") <= limit
+            ]
             return visible[-1] if visible else None
 
     def ingest(

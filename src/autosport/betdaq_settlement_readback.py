@@ -34,6 +34,7 @@ _REQUEST_ELEMENT = {
     "ListAccountPostingsById": "listAccountPostingsByIdRequest",
 }
 _INTEGER_RE = re.compile(r"[0-9]+\Z")
+_DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 
 
 class BetdaqEconomicReadbackError(RuntimeError):
@@ -118,8 +119,9 @@ class BetdaqOrderSettlementObservation:
     def __post_init__(self) -> None:
         for field in ("order_id", "market_id", "selection_id", "punter_reference_number"):
             _provider_id(getattr(self, field), field)
-        for field in ("order_status_code", "sequence_number", "polarity_code"):
-            _nonnegative_int(getattr(self, field), field)
+        _unsigned_byte(self.order_status_code, "order_status_code")
+        _nonnegative_int(self.sequence_number, "sequence_number")
+        _unsigned_byte(self.polarity_code, "polarity_code")
         for field in ("issued_at", "last_changed_at", "matching_timestamp"):
             _timestamp(getattr(self, field), field)
         for field in (
@@ -230,7 +232,7 @@ class BetdaqPostingObservation:
             raise BetdaqEconomicReadbackError("description must be text")
         _finite_decimal(self.amount, "amount")
         _finite_decimal(self.resulting_balance, "resulting_balance")
-        _nonnegative_int(self.posting_category, "posting_category")
+        _unsigned_byte(self.posting_category, "posting_category")
         if self.order_id is not None:
             _provider_id(self.order_id, "order_id")
         if self.market_id is not None:
@@ -381,7 +383,7 @@ class BetdaqEconomicReadbackClient:
             if settlement is None
             else _optional_timestamp_attr(settlement, "MarketSettledDate")
         )
-        status = _integer_attr(result, "OrderStatus")
+        status = _unsigned_byte_attr(result, "OrderStatus")
         final = (
             status in {4, 5}
             and gross is not None
@@ -409,7 +411,7 @@ class BetdaqEconomicReadbackClient:
             matching_timestamp=_timestamp(
                 _required_attr(result, "MatchingTimeStamp"), "MatchingTimeStamp"
             ),
-            polarity_code=_integer_attr(result, "Polarity"),
+            polarity_code=_unsigned_byte_attr(result, "Polarity"),
             punter_reference_number=_provider_id(
                 _required_attr(result, "PunterReferenceNumber"),
                 "PunterReferenceNumber",
@@ -418,7 +420,6 @@ class BetdaqEconomicReadbackClient:
             order_commission=order_commission,
             market_commission=market_commission,
             market_settled_at=market_settled_at,
-            # GetOrderDetails has no Currency field in the generated settlement shape.
             currency=None,
             denomination_proven=False,
             scalar_economic_use_proven=False,
@@ -453,8 +454,6 @@ class BetdaqEconomicReadbackClient:
         result, evidence = self._call(
             "ListAccountPostingsById", {"TransactionId": transaction}
         )
-        # Provider contract has no HaveAllPostingsBeenReturned here. Existence of a
-        # row can be authoritative for that row; sibling/window absence stays unknown.
         if "HaveAllPostingsBeenReturned" in result.attrib:
             raise BetdaqEconomicReadbackError(
                 "ById response unexpectedly tries to mint window completeness"
@@ -562,14 +561,7 @@ def _request_xml(
 
 
 def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
-    """Parse generated BETDAQ SOAP results without inventing ReturnStatus.
-
-    Current generated SecureService examples for these methods contain the method
-    Result directly and no ReturnStatus child. If a provider deployment does include
-    ReturnStatus, it is only an additional failure gate: exactly one integer Code=0
-    is accepted; nonzero, duplicate, or malformed status fails closed.
-    """
-
+    """Parse generated BETDAQ SOAP results without inventing ReturnStatus."""
     upper = payload.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise BetdaqEconomicReadbackError(
@@ -599,25 +591,20 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         child_namespace, child_local = _split_tag(child.tag)
         if child_namespace == namespace and child_local == "Fault":
             raise BetdaqEconomicReadbackError("BETDAQ economic SOAP Fault")
-    responses = [
-        child
-        for child in body
-        if child.tag == f"{{{_account._EXTERNAL_NS}}}{method}Response"
-    ]
-    if len(responses) != 1:
+    expected_response_tag = f"{{{_account._EXTERNAL_NS}}}{method}Response"
+    body_children = list(body)
+    if len(body_children) != 1 or body_children[0].tag != expected_response_tag:
         raise BetdaqEconomicReadbackError(
-            f"BETDAQ economic response is missing exact {method}Response"
+            f"BETDAQ economic response is not the exact {method}Response body"
         )
-    results = [
-        child
-        for child in responses[0]
-        if child.tag == f"{{{_account._EXTERNAL_NS}}}{method}Result"
-    ]
-    if len(results) != 1:
+    response = body_children[0]
+    expected_result_tag = f"{{{_account._EXTERNAL_NS}}}{method}Result"
+    response_children = list(response)
+    if len(response_children) != 1 or response_children[0].tag != expected_result_tag:
         raise BetdaqEconomicReadbackError(
-            f"BETDAQ economic response is missing exact {method}Result"
+            f"BETDAQ economic response is not the exact {method}Result wrapper"
         )
-    result = results[0]
+    result = response_children[0]
     statuses = [
         child
         for child in result
@@ -690,7 +677,7 @@ def _parse_postings_result(
             description=_required_attr(child, "Description", allow_empty=True),
             amount=_decimal_attr(child, "Amount"),
             resulting_balance=_decimal_attr(child, "ResultingBalance"),
-            posting_category=_integer_attr(child, "PostingCategory"),
+            posting_category=_unsigned_byte_attr(child, "PostingCategory"),
             order_id=_optional_provider_attr(child, "OrderId"),
             market_id=_optional_provider_attr(child, "MarketId"),
             transaction_id=transaction_id,
@@ -762,8 +749,16 @@ def _integer_attr(element: ET.Element, name: str) -> int:
     return int(_provider_id(_required_attr(element, name), name))
 
 
+def _unsigned_byte_attr(element: ET.Element, name: str) -> int:
+    return _unsigned_byte(_integer_attr(element, name), name)
+
+
 def _decimal_attr(element: ET.Element, name: str) -> Decimal:
     raw = _required_attr(element, name)
+    if _DECIMAL_RE.fullmatch(raw) is None:
+        raise BetdaqEconomicReadbackError(
+            f"{name} is not canonical provider xsd:decimal text"
+        )
     try:
         value = Decimal(raw)
     except (InvalidOperation, ValueError):
@@ -777,6 +772,10 @@ def _optional_decimal_attr(element: ET.Element, name: str) -> Decimal | None:
         return None
     if type(raw) is not str or not raw or raw != raw.strip():
         raise BetdaqEconomicReadbackError(f"{name} must be provider Decimal text")
+    if _DECIMAL_RE.fullmatch(raw) is None:
+        raise BetdaqEconomicReadbackError(
+            f"{name} is not canonical provider xsd:decimal text"
+        )
     try:
         value = Decimal(raw)
     except (InvalidOperation, ValueError):
@@ -834,6 +833,14 @@ def _request_time(value: datetime, field: str) -> str:
 def _nonnegative_int(value: int, field: str) -> int:
     if type(value) is not int or value < 0:
         raise BetdaqEconomicReadbackError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _unsigned_byte(value: int, field: str) -> int:
+    if type(value) is not int or value < 0 or value > 255:
+        raise BetdaqEconomicReadbackError(
+            f"{field} must be an unsigned-byte provider value"
+        )
     return value
 
 

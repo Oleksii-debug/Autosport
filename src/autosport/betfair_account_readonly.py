@@ -142,7 +142,7 @@ class BetfairCurrentOrderObservation:
         _required_text(self.market_id, "market_id")
         _positive_int(self.selection_id, "selection_id")
         _enum_text(self.side, "side", {"BACK", "LAY"})
-        _required_text(self.status, "status")
+        _enum_text(self.status, "status", {"EXECUTABLE", "EXECUTION_COMPLETE"})
         _iso_timestamp(self.placed_date, "placed_date")
         if self.price is not None:
             _positive_decimal(self.price, "price")
@@ -477,7 +477,6 @@ class BetfairReadOnlyClient:
             _number(result, "exposureLimit", "exposure_limit"),
             response.evidence,
         )
-
     def read_account_details(self) -> BetfairAccountDetailsObservation:
         response = self._rpc(_GET_ACCOUNT_DETAILS, {})
         result = _mapping(response.result, "getAccountDetails result")
@@ -1137,7 +1136,6 @@ def _install_execution_readback_authority() -> None:
             max_pages=max_pages,
         )
         capture_id = id(capture)
-
         def forget(_weakref: object, *, key: int = capture_id) -> None:
             issued.pop(key, None)
 
@@ -1167,4 +1165,3 @@ def _install_execution_readback_authority() -> None:
 
 _install_execution_readback_authority()
 del _install_execution_readback_authority
-

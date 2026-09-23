@@ -326,3 +326,33 @@ def test_failed_replace_keeps_last_good_snapshot_loadable_and_aborts_prepare(
     assert tuple(restored.tickets) == (first_ticket.ticket_id,)
     assert restored.balance == Decimal("90")
 
+def test_empty_current_schema_snapshot_cannot_bypass_external_witness(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-authority"),
+    )
+    path = tmp_path / "paper-book-empty.json"
+    book = PaperBook("100")
+    book.save(path)
+
+    restored = PaperBook.load(path)
+    assert restored.balance == Decimal("100")
+    assert restored.tickets == {}
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 8
+    assert payload["tickets"] == []
+    assert payload["lifecycle"] == []
+    payload["initial_bankroll"] = "1000"
+    payload["balance"] = "1000"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="snapshot bytes do not match independent durable opening witness",
+    ):
+        PaperBook.load(path)
+

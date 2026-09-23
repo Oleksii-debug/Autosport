@@ -9,6 +9,7 @@
   let latestState = null;
   let pollHandle = null;
   let ownerDefaultsApplied = false;
+  let ownerReviewFresh = false;
   let refreshInFlight = null;
   let refreshPending = false;
 
@@ -76,6 +77,28 @@
     } else if (focused === stopButton && stopButton.disabled && !startButton.disabled) {
       startButton.focus();
     }
+  }
+
+  function syncOwnerConfirmationAvailability(canInitialize) {
+    const disabled = canInitialize !== true || ownerReviewFresh !== true;
+    setDisabledWithFocusFallback(byId("owner-confirm-checkbox"), disabled);
+    setDisabledWithFocusFallback(byId("owner-confirm"), disabled);
+  }
+
+  function invalidateOwnerReview() {
+    ownerReviewFresh = false;
+    byId("owner-confirm-checkbox").checked = false;
+    syncOwnerConfirmationAvailability(
+      Boolean(latestState && latestState.owner && latestState.owner.can_initialize),
+    );
+  }
+
+  function markOwnerReviewFresh() {
+    ownerReviewFresh = true;
+    byId("owner-confirm-checkbox").checked = false;
+    syncOwnerConfirmationAvailability(
+      Boolean(latestState && latestState.owner && latestState.owner.can_initialize),
+    );
   }
 
   function requestId() {
@@ -256,10 +279,11 @@
     renderList(byId(307), state.owner.lines || []);
     renderList(byId("owner-review-list"), state.owner.review_lines || []);
     applyOwnerDefaults(state.owner.defaults);
-    document.querySelectorAll("[data-owner-field], #327, #328, #owner-confirm-checkbox, #owner-confirm")
+    document.querySelectorAll("[data-owner-field], #327, #328")
       .forEach((node) => {
         setDisabledWithFocusFallback(node, !state.owner.can_initialize);
       });
+    syncOwnerConfirmationAvailability(state.owner.can_initialize);
 
     const operations = byId(331);
     if (operations.options.length === 0) {
@@ -336,9 +360,11 @@
     dispatch("dataset.select", { path: byId("dataset-path").value });
   });
   byId(106).addEventListener("change", () => {
+    invalidateOwnerReview();
     dispatch("strategy.set", { strategy_id: byId(106).value });
   });
   byId(107).addEventListener("click", () => {
+    invalidateOwnerReview();
     dispatch("research_plan.select", { path: byId("research-plan-path").value });
   });
   byId(103).addEventListener("change", () => {
@@ -382,18 +408,33 @@
     byId(305).setAttribute("aria-expanded", "false");
     byId(305).focus();
   });
-  byId(328).addEventListener("click", () => {
-    dispatch("owner.preview", {
-      values: ownerValues(),
-      emergency_stop: byId(327).checked,
-    });
+  document.querySelectorAll("[data-owner-field]").forEach((node) => {
+    node.addEventListener("input", invalidateOwnerReview);
+    node.addEventListener("change", invalidateOwnerReview);
   });
-  byId("owner-confirm").addEventListener("click", () => {
-    dispatch("owner.initialize", {
+  byId(327).addEventListener("change", invalidateOwnerReview);
+  byId(328).addEventListener("click", async () => {
+    invalidateOwnerReview();
+    const result = await dispatch("owner.preview", {
       values: ownerValues(),
       emergency_stop: byId(327).checked,
-      confirmed: byId("owner-confirm-checkbox").checked,
     });
+    if (result && result.status === "completed") {
+      markOwnerReviewFresh();
+    }
+  });
+  byId("owner-confirm").addEventListener("click", async () => {
+    if (ownerReviewFresh !== true || byId("owner-confirm-checkbox").checked !== true) {
+      return;
+    }
+    const result = await dispatch("owner.initialize", {
+      values: ownerValues(),
+      emergency_stop: byId(327).checked,
+      confirmed: true,
+    });
+    if (result && result.status === "completed") {
+      invalidateOwnerReview();
+    }
   });
 
   byId(330).addEventListener("click", () => {

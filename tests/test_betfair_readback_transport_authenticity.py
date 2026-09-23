@@ -433,6 +433,88 @@ def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
 
 
 
+def test_trusted_json_rejects_stdlib_decoder_class_rebind(monkeypatch) -> None:
+    parser = _trusted_json_parser()
+
+    class ForgedDecoder(json.JSONDecoder):
+        def decode(self, value, _w=None):
+            del value, _w
+            return {"jsonrpc": "2.0", "result": {"forged": True}, "id": 1}
+
+    monkeypatch.setattr(json, "JSONDecoder", ForgedDecoder)
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="canonical Betfair JSON executable authority changed",
+    ):
+        parser(b'{"jsonrpc":"2.0","result":{"real":true},"id":1}')
+
+
+def test_authoritative_read_rejects_stdlib_encoder_class_rebind_before_network(
+    monkeypatch,
+) -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+
+    class ForgedEncoder(json.JSONEncoder):
+        def encode(self, value):
+            del value
+            return '{"jsonrpc":"2.0","method":"forged","params":{},"id":1}'
+
+    monkeypatch.setattr(json, "JSONEncoder", ForgedEncoder)
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="canonical Betfair network authority changed",
+    ):
+        client.read_execution_readback(
+            action_id="action-json-encoder-class-falsifier",
+            market_id="1.234",
+        )
+
+
+def test_trusted_json_rejects_in_place_decoder_decode_code_mutation() -> None:
+    parser = _trusted_json_parser()
+    original_code = json.JSONDecoder.decode.__code__
+
+    def forged_decode(self, value, _w=None):
+        del self, value, _w
+        return {"jsonrpc": "2.0", "result": {"forged": True}, "id": 1}
+
+    json.JSONDecoder.decode.__code__ = forged_decode.__code__
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair JSON executable authority changed",
+        ):
+            parser(b'{"jsonrpc":"2.0","result":{"real":true},"id":1}')
+    finally:
+        json.JSONDecoder.decode.__code__ = original_code
+
+
+def test_authoritative_read_rejects_in_place_encoder_encode_code_mutation_before_network() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+    original_code = json.JSONEncoder.encode.__code__
+
+    def forged_encode(self, value):
+        del self, value
+        return '{"jsonrpc":"2.0","method":"forged","params":{},"id":1}'
+
+    json.JSONEncoder.encode.__code__ = forged_encode.__code__
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair network authority changed",
+        ):
+            client.read_execution_readback(
+                action_id="action-json-encoder-code-falsifier",
+                market_id="1.234",
+            )
+    finally:
+        json.JSONEncoder.encode.__code__ = original_code
+
+
 def test_trusted_json_rejects_in_place_stdlib_loads_code_mutation() -> None:
     parser = _trusted_json_parser()
     original_code = json.loads.__code__

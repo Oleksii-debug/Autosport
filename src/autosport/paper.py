@@ -330,6 +330,73 @@ def _serialize_paperbook_state(method):
     return serialized
 
 
+def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
+    return (
+        ticket.stake,
+        ticket.legs,
+        ticket.placed_at,
+        ticket.provider_source_ids,
+        ticket.provider_accounts,
+        ticket.bankroll_id,
+        ticket.currency,
+    )
+
+
+def _make_ticket_opening_authority_registry():
+    authorities = WeakKeyDictionary()
+    guard = threading.Lock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            authorities[book] = {}
+
+    def record(book: object, ticket: PaperTicket) -> None:
+        commitment = _ticket_opening_commitment(ticket)
+        with guard:
+            current = authorities.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            existing = current.get(ticket.ticket_id)
+            if existing is not None and existing != commitment:
+                raise ValueError(
+                    "PaperBook ticket opening authority cannot be rebound"
+                )
+            current[ticket.ticket_id] = commitment
+
+    def install_verified_snapshot(book: object) -> None:
+        commitments = {
+            ticket_id: _ticket_opening_commitment(ticket)
+            for ticket_id, ticket in book.tickets.items()
+        }
+        with guard:
+            if book not in authorities:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            authorities[book] = commitments
+
+    def require(book: object, ticket: PaperTicket) -> None:
+        with guard:
+            current = authorities.get(book)
+            expected = None if current is None else current.get(ticket.ticket_id)
+        if expected is None:
+            raise ValueError(
+                "PaperBook ticket lacks product-issued opening economic authority"
+            )
+        if _ticket_opening_commitment(ticket) != expected:
+            raise ValueError(
+                "PaperBook ticket opening economic identity changed after admission"
+            )
+
+    return register_book, record, install_verified_snapshot, require
+
+
+(
+    _register_ticket_opening_authority_book,
+    _record_ticket_opening_authority,
+    _install_verified_ticket_opening_authority,
+    _require_ticket_opening_authority,
+) = _make_ticket_opening_authority_registry()
+
+
 def _snapshot_witness_digest(payload: dict[str, object]) -> str:
     try:
         encoded = json.dumps(
@@ -604,6 +671,7 @@ class PaperBook:
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
         _register_paperbook_state_lock(self)
+        _register_ticket_opening_authority_book(self)
         initial = Decimal(str(initial_bankroll))
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
@@ -748,6 +816,7 @@ class PaperBook:
             bankroll_id=bankroll_id,
             currency=currency,
         )
+        _record_ticket_opening_authority(self, ticket)
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
@@ -831,6 +900,7 @@ class PaperBook:
         for leg in ticket.legs:
             self._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
         self._validate_ticket_opening_economics(ticket)
+        _require_ticket_opening_authority(self, ticket)
 
         winners = self._normalize_resolution_keys(winning_quote_keys, "winning_quote_keys")
         voids = (
@@ -1455,7 +1525,12 @@ class PaperBook:
             )
 
     @classmethod
-    def _validate_loaded_state(cls, book: "PaperBook") -> None:
+    def _validate_loaded_state(
+        cls,
+        book: "PaperBook",
+        *,
+        require_private_opening_authority: bool = True,
+    ) -> None:
         cls._require_finite(book.initial_bankroll, "initial_bankroll")
         cls._require_finite(book.balance, "balance")
         if book.initial_bankroll <= 0:
@@ -1504,6 +1579,8 @@ class PaperBook:
             if len(quote_keys) != len(set(quote_keys)):
                 raise ValueError("PaperBook snapshot ticket contains duplicate quote_key leg")
             cls._validate_ticket_opening_economics(ticket)
+            if require_private_opening_authority:
+                _require_ticket_opening_authority(book, ticket)
 
             if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
                 raise ValueError("PaperBook snapshot open/lost ticket payout must be zero")
@@ -1825,7 +1902,10 @@ class PaperBook:
                 schema_version,
             )
 
-        cls._validate_loaded_state(book)
+        cls._validate_loaded_state(
+            book,
+            require_private_opening_authority=False,
+        )
         _revoke_snapshot_authority(book)
         return book
 
@@ -1887,6 +1967,8 @@ class PaperBook:
                 ) and "missing independent durable opening witness" in str(exc):
                     return book
                 raise
+            _install_verified_ticket_opening_authority(book)
+            cls._validate_loaded_state(book)
             _bind_snapshot_authority(
                 book,
                 source,

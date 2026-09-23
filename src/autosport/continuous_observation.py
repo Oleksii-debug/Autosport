@@ -316,6 +316,22 @@ def run_continuous_observation(
     try:
         store = SQLiteMarketStore(root / "market.db")
         health_store = SourceHealthStore(root / "source_health.json")
+        if (
+            previous is not None
+            and previous.get("source_id") == state.source_id
+            and previous.get("last_error_kind") == "provider_unavailable"
+        ):
+            durable_health = health_store.get(state.source_id)
+            if (
+                durable_health.status == "failed"
+                and durable_health.consecutive_failures > 0
+            ):
+                # The durable source-health projection is the restart authority for
+                # the outage streak. The status file only proves that the prior
+                # continuous-loop failure was provider unavailability for this exact
+                # source; it cannot make another source or failure kind inherit
+                # provider backoff.
+                state.provider_unavailable_streak = durable_health.consecutive_failures
         mirror = MarketMirror.from_store(store)
         mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         publish("running")

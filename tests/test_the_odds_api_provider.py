@@ -733,6 +733,41 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertIn("UNVERIFIED_RECEIPT_CLOCK", batch.quality_flags)
         self.assertEqual(request["response_sha256"], digest)
 
+    def test_mutated_module_authority_symbols_cannot_launder_injected_seams(self):
+        digest = "b" * 64
+
+        def fake_transport(url, timeout):
+            del timeout
+            return HttpJsonResponse(
+                [event()],
+                200,
+                {},
+                final_url=url,
+                body_sha256=digest,
+            )
+
+        def fake_clock():
+            return "2026-09-22T14:00:00+00:00"
+
+        with (
+            patch.object(odds_api_module, "_default_transport", fake_transport),
+            patch.object(odds_api_module, "utc_now_iso", fake_clock),
+        ):
+            provider = TheOddsApiProvider(
+                "secret",
+                sport="soccer_epl",
+                transport=fake_transport,
+                clock=fake_clock,
+            )
+            batch = provider.read_batch()
+
+        request = batch.quotes[0].metadata["request"]
+        self.assertFalse(request["provider_origin_verified"])
+        self.assertFalse(request["receipt_clock_verified"])
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
+        self.assertIn("UNVERIFIED_RECEIPT_CLOCK", batch.quality_flags)
+        self.assertEqual(request["response_sha256"], digest)
+
     def test_response_rejects_event_outside_explicit_event_ids_scope(self):
         provider = TheOddsApiProvider(
             "k",

@@ -314,3 +314,28 @@ def test_cli_writes_canonical_evidence(
     )
     assert evidence_payload["status"] == "PASS"
     assert evidence_payload["whole_product_complete"] is False
+
+def test_transform_windows_start_guide_rejects_unknown_product_identity() -> None:
+    with pytest.raises(ValueError, match="unrecognized product identity"):
+        stage_release._transform_windows_start_guide(
+            "АВТОСПОРТ — UNKNOWN STAGE\n".encode("utf-8")
+        )
+
+
+def test_transform_windows_start_guide_accepts_stage_neutral_source() -> None:
+    payload = (
+        f"{stage_release.STAGE_NEUTRAL_GUIDE_TITLE}\n"
+        f"ZIP: {stage_release.LEGACY_ARCHIVE_NAME}\n"
+        f"{stage_release.LEGACY_READY_LABEL}\n"
+    ).encode("utf-8")
+
+    transformed = stage_release._transform_windows_start_guide(payload).decode(
+        "utf-8"
+    )
+
+    assert transformed.startswith(f"{stage_release.STAGE_NEUTRAL_GUIDE_TITLE}\n")
+    assert stage_release.LEGACY_ARCHIVE_NAME not in transformed
+    assert stage_release.STAGE_NEUTRAL_ARCHIVE_NAME in transformed
+    assert stage_release.LEGACY_READY_LABEL not in transformed
+    assert stage_release.STAGE_NEUTRAL_READY_LABEL in transformed
+

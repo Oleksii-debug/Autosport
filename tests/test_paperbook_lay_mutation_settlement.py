@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from autosport.domain import TicketLeg
-from autosport.paper import PaperBook, TicketStatus
+from autosport.domain import TicketLeg, TicketStatus
+from autosport.paper import PaperBook
 
 
 _PLACED_AT = "2026-09-23T01:00:00+00:00"

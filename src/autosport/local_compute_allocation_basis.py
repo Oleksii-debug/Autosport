@@ -41,6 +41,13 @@ _MAX_FRACTIONAL_DIGITS: Final = 18
 _MAX_DENOMINATOR: Final = 1_000_000_000
 _MAX_MEASUREMENT_DOCUMENT_BYTES: Final = 262_144
 
+# Owner-goal authority must remain anchored to the import-time durable store
+# contract. Module globals are writable and therefore cannot decide which goal
+# store or serializer grants positive monetary basis authority.
+_CANONICAL_ECONOMIC_GOAL_STORE_CLASS: Final = EconomicGoalStore
+_CANONICAL_ECONOMIC_GOAL_STORE_LOAD: Final = EconomicGoalStore.load
+_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD: Final = economic_goal_to_payload
+
 
 class LocalComputeAllocationBasisError(ValueError):
     """The reviewed allocation basis or durable state is malformed."""
@@ -274,7 +281,9 @@ def _decode_document(value: object) -> bytes:
 
 
 def _goal_sha256(goal: object) -> str:
-    return _digest(economic_goal_to_payload(goal))  # type: ignore[arg-type]
+    return _digest(
+        _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD(goal)  # type: ignore[arg-type]
+    )
 
 
 def _authority_now() -> str:
@@ -728,7 +737,8 @@ class LocalComputeAllocationBasisAuthorityStore:
 
     def _current_goal(self):
         try:
-            goal = EconomicGoalStore(self.workspace).load()
+            goal_store = _CANONICAL_ECONOMIC_GOAL_STORE_CLASS(self.workspace)
+            goal = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(goal_store)
         except Exception as exc:
             raise LocalComputeAllocationBasisError(
                 "current durable EconomicGoal is required"

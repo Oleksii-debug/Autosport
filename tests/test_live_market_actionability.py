@@ -1,10 +1,10 @@
 from copy import deepcopy
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
+import autosport.live_market_actionability as live_actionability
 from autosport.domain import MarketEvent
 from autosport.live_market_actionability import (
     LiveInputCurrentViewOutcome,
@@ -86,16 +86,18 @@ def _evaluate(
     )
 
 
-def test_fresh_open_registered_input_gets_only_current_view_eligibility() -> None:
+def test_fresh_open_registered_input_waits_without_product_origin() -> None:
     updates, dependencies = _runtime(_event())
     result = _evaluate(updates, dependencies)
 
-    assert result.outcome is LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE
-    assert result.current_view_eligible is True
-    assert result.wait_reasons == ()
+    assert result.outcome is LiveInputCurrentViewOutcome.WAIT
+    assert result.current_view_eligible is False
+    assert result.wait_reasons == (
+        LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN,
+    )
     assert len(result.components) == 1
     assert result.components[0].wait_reasons == ()
-    assert result.is_product_issued is True
+    assert result.is_product_issued is False
 
     # This bounded child is deliberately not a final trade/action authority.
     assert result.continuity_proven is False
@@ -187,7 +189,10 @@ def test_exact_freshness_boundary_is_inclusive_but_fractional_excess_waits() -> 
         exact_dependencies,
         max_age=timedelta(seconds=60),
     )
-    assert exact.current_view_eligible is True
+    assert exact.current_view_eligible is False
+    assert exact.wait_reasons == (
+        LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN,
+    )
 
     stale_updates, stale_dependencies = _runtime(
         _event(observed_at=AS_OF - timedelta(seconds=60, microseconds=1))
@@ -244,54 +249,54 @@ def test_repeated_evaluation_is_deterministic_until_canonical_mirror_changes() -
     assert successor.components[0].sequence == 2
 
 
-def test_result_cannot_be_dataclasses_replace_forged_into_new_authority() -> None:
+def test_caller_constructed_result_cannot_mint_positive_authority() -> None:
     updates, dependencies = _runtime(_event())
     result = _evaluate(updates, dependencies)
 
-    with pytest.raises(TypeError):
-        replace(result, evidence_sha256="0" * 64)
-
-    with pytest.raises(LiveMarketActionabilityError):
-        RegisteredLiveInputCurrentView(
-            _issuer=None,
-            input_id=result.input_id,
-            as_of=result.as_of,
-            max_age_microseconds=result.max_age_microseconds,
-            mirror_revision=result.mirror_revision,
-            outcome=result.outcome,
-            wait_reasons=result.wait_reasons,
-            components=result.components,
-            evidence_sha256=result.evidence_sha256,
-        )
+    forged = RegisteredLiveInputCurrentView(
+        input_id=result.input_id,
+        as_of=result.as_of,
+        max_age_microseconds=result.max_age_microseconds,
+        mirror_revision=result.mirror_revision,
+        outcome=LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE,
+        wait_reasons=(),
+        components=result.components,
+        evidence_sha256=result.evidence_sha256,
+    )
+    assert forged.is_product_issued is False
+    assert forged.current_view_eligible is False
 
 
-def test_deepcopied_result_cannot_replay_process_local_positive_authority() -> None:
+def test_standalone_module_exposes_no_positive_mint_registry() -> None:
+    assert not hasattr(live_actionability, "_RESULT_ISSUER")
+    assert not hasattr(live_actionability, "_ISSUED_RESULTS")
+    assert not hasattr(live_actionability, "_register_product_issued")
+
+
+def test_deepcopied_diagnostic_cannot_gain_positive_authority() -> None:
     updates, dependencies = _runtime(_event())
     result = _evaluate(updates, dependencies)
 
     copied = deepcopy(result)
     assert copied == result
     assert copied.is_product_issued is False
-    with pytest.raises(
-        LiveMarketActionabilityError,
-        match="not current process-issued evidence",
-    ):
-        _ = copied.current_view_eligible
+    assert copied.current_view_eligible is False
 
 
-def test_low_level_field_mutation_revokes_issued_positive_result() -> None:
+def test_low_level_field_mutation_cannot_mint_positive_result() -> None:
     updates, dependencies = _runtime(_event())
     result = _evaluate(updates, dependencies)
-    assert result.current_view_eligible is True
+    assert result.current_view_eligible is False
 
-    object.__setattr__(result, "outcome", LiveInputCurrentViewOutcome.WAIT)
+    object.__setattr__(
+        result,
+        "outcome",
+        LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE,
+    )
+    object.__setattr__(result, "wait_reasons", ())
 
     assert result.is_product_issued is False
-    with pytest.raises(
-        LiveMarketActionabilityError,
-        match="not current process-issued evidence",
-    ):
-        _ = result.current_view_eligible
+    assert result.current_view_eligible is False
 
 
 def test_dependency_index_from_different_mirror_is_rejected() -> None:

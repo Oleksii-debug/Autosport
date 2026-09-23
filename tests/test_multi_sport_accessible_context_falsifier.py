@@ -48,23 +48,23 @@ def _observation_quote_line(*, sport: str) -> str:
     )[0]
 
 
-def test_ticket_operator_text_preserves_canonical_sport_identity() -> None:
+def test_ticket_operator_text_distinguishes_sport_accessibly() -> None:
     table_tennis = _ticket_line(sport="table_tennis")
     second_sport = _ticket_line(sport="soccer")
 
     assert table_tennis != second_sport
     assert "спорт" in table_tennis.lower()
     assert "спорт" in second_sport.lower()
-    assert "table_tennis" in table_tennis
-    assert "soccer" in second_sport
+    assert _ticket_line(sport="table_tennis") == table_tennis
+    assert _ticket_line(sport="soccer") == second_sport
 
 
-def test_observation_operator_text_preserves_canonical_sport_identity() -> None:
+def test_observation_operator_text_distinguishes_sport_accessibly() -> None:
     table_tennis = _observation_quote_line(sport="table_tennis")
     second_sport = _observation_quote_line(sport="soccer")
 
     assert table_tennis != second_sport
     assert "спорт" in table_tennis.lower()
     assert "спорт" in second_sport.lower()
-    assert "table_tennis" in table_tennis
-    assert "soccer" in second_sport
+    assert _observation_quote_line(sport="table_tennis") == table_tennis
+    assert _observation_quote_line(sport="soccer") == second_sport

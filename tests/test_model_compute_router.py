@@ -1151,6 +1151,43 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(deadline.tier, ComputeTier.WAIT)
 
+        exact_deadline = self.route_compute(
+            request(
+                request_id="req-deadline-exact",
+                decision_deadline=T1,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+        )
+        self.assertEqual(exact_deadline.tier, ComputeTier.WAIT)
+        self.assertIn("deadline", exact_deadline.reason)
+
+        boundary_candidate = candidate(
+            "deadline-boundary-local",
+            backend_id="local-cpu",
+            model_id="baseline-v1",
+            config_sha256=SHA_A,
+            cost="0",
+            latency="10",
+        )
+        exact_estimated_completion = self.route_compute(
+            request(
+                request_id="req-deadline-estimate-exact",
+                decision_deadline=T1,
+                max_cost=Decimal("1"),
+                baseline_candidate_id="deadline-boundary-local",
+                cloud_candidate_id=None,
+            ),
+            (boundary_candidate,),
+            policy(),
+            as_of=T0,
+        )
+        self.assertEqual(
+            exact_estimated_completion.tier,
+            ComputeTier.WAIT,
+        )
+
         over_budget_baseline = self.route_compute(
             request(
                 request_id="req-budget",
@@ -2332,6 +2369,24 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 availability_late.disposition,
+                ExecutionDisposition.REJECTED_LATE,
+            )
+
+            exact_deadline = store.record_execution(
+                execution_id="exec-deadline-exact",
+                request_id="req-exec",
+                completed_at=T2,
+                available_at=T3,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0"),
+                actual_latency_seconds=Decimal("10"),
+                evidence_sha256=SHA_C,
+                as_of=T3,
+            )
+            self.assertEqual(
+                exact_deadline.disposition,
                 ExecutionDisposition.REJECTED_LATE,
             )
 

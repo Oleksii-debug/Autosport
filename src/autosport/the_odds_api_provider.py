@@ -295,6 +295,10 @@ def _perform_http_json_response(
     bounded_body_reader: Callable[[object], bytes] = _bounded_response_body,
     json_decoder: Callable[[bytes], Any] = _decode_provider_json,
     digest_factory: Callable[[bytes], Any] = hashlib.sha256,
+    failure_evidence_builder: Callable[
+        [object, Mapping[str, str]],
+        tuple[str | None, int | None, int | None, int | None],
+    ] = _failure_evidence,
 ) -> HttpJsonResponse:
     """Perform one bounded HTTPS read through explicit, captured dependencies.
 
@@ -360,7 +364,7 @@ def _perform_http_json_response(
             quota_remaining,
             quota_used,
             quota_last,
-        ) = _failure_evidence(failure_payload, failure_headers)
+        ) = failure_evidence_builder(failure_payload, failure_headers)
     except (URLError, TimeoutError, OSError):
         transport_failed = True
 

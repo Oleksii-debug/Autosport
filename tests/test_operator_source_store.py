@@ -13,6 +13,14 @@ from autosport.operator_source_store import (
 )
 
 
+class _FailingPathLock:
+    def __enter__(self):
+        raise PermissionError("sidecar lock denied")
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 def test_missing_store_is_configuration_required(tmp_path: Path):
     store = OperatorSourceConfigStore(tmp_path / "operator-source.json")
     assert store.read() is None
@@ -96,6 +104,42 @@ def test_oversized_file_fails_before_json_decode(tmp_path: Path):
     path.write_bytes(b"x" * 4097)
     with pytest.raises(OperatorSourceStoreError, match="size"):
         OperatorSourceConfigStore(path).read()
+
+
+def test_lock_acquisition_failure_is_store_error_and_invalid_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    store = OperatorSourceConfigStore(tmp_path / "operator-source.json")
+    monkeypatch.setattr(
+        operator_source_store,
+        "durable_path_lock",
+        lambda _: _FailingPathLock(),
+    )
+
+    with pytest.raises(OperatorSourceStoreError, match="cannot be read"):
+        store.read()
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert result.runtime_authorized is False
+
+
+def test_write_lock_acquisition_failure_is_store_error(
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    monkeypatch.setattr(
+        operator_source_store,
+        "durable_path_lock",
+        lambda _: _FailingPathLock(),
+    )
+
+    with pytest.raises(OperatorSourceStoreError, match="could not be published"):
+        store.write_source_id("betfair-exchange")
+    assert not path.exists()
 
 
 def test_strict_json_recursion_failure_is_corruption_not_crash(

@@ -10,8 +10,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
-from .economic_goal import EconomicGoalContract
+from .economic_goal import EconomicGoalContract, EconomicGoalContractError
 from .economic_goal_provenance import provenance_for
+from .economic_goal_store import EconomicGoalStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
@@ -589,6 +590,19 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "economic_goal must be the exact canonical EconomicGoalContract"
             )
+        try:
+            durable_economic_goal = EconomicGoalStore(self.workspace).load()
+        except EconomicGoalContractError as exc:
+            raise ProductDecisionActivationError(
+                "cannot resolve durable owner EconomicGoalContract"
+            ) from exc
+        if (
+            type(durable_economic_goal) is not EconomicGoalContract
+            or durable_economic_goal != economic_goal
+        ):
+            raise ProductDecisionActivationError(
+                "economic_goal no longer matches durable authority owner EconomicGoalContract"
+            )
         if type(risk_policy) is not PaperRiskPolicy:
             raise ProductDecisionActivationError(
                 "risk_policy must be the canonical PaperRiskPolicy"
@@ -661,7 +675,7 @@ class ProductDecisionActivationStore:
             strategy.get("model_version_id"), "strategy model_version_id"
         )
 
-        goal = provenance_for(economic_goal)
+        goal = provenance_for(durable_economic_goal)
         composition_sha, source_id, initial_bankroll = _product_composition(
             self.workspace
         )
@@ -686,10 +700,10 @@ class ProductDecisionActivationStore:
             registry_prefix_record_count=prefix_count,
             registry_prefix_sha256=prefix_sha,
             economic_goal_contract_sha256=goal.contract_sha256,
-            goal_id=economic_goal.goal_id,
-            goal_revision=economic_goal.revision,
-            bankroll_id=economic_goal.bankroll_id,
-            currency=economic_goal.currency,
+            goal_id=durable_economic_goal.goal_id,
+            goal_revision=durable_economic_goal.revision,
+            bankroll_id=durable_economic_goal.bankroll_id,
+            currency=durable_economic_goal.currency,
             risk_policy_provenance_sha256=_sha256(
                 risk_policy.provenance_sha256,
                 "risk_policy_provenance_sha256",

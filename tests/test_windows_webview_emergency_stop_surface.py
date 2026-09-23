@@ -142,13 +142,19 @@ def test_emergency_stop_is_a_distinct_keyboard_reachable_semantic_control():
     assert "worker або feed" not in html
 
 
-def test_emergency_stop_frontend_dispatches_only_the_dedicated_authority_command():
+def test_emergency_stop_frontend_reuses_shared_ordered_dispatch():
+    app_script = _asset("app.js")
     script = _asset("emergency_stop.js")
 
-    assert 'action_id: "emergency_stop.activate"' in script
-    assert "payload: {}" in script
+    assert "globalThis.autosportDispatch = dispatch;" in app_script
+    assert "const dispatch = globalThis.autosportDispatch;" in script
+    assert 'await dispatch("emergency_stop.activate", {});' in script
     assert 'getElementById("emergency-stop-action")' in script
     assert 'getElementById("emergency-stop-status")' in script
+    assert "globalThis.pywebview.api.dispatch" not in script
+    assert "globalThis.pywebview.api.get_state" not in script
+    assert "readEmergencyState" not in script
+    assert "result.message" not in script
     assert "product_runtime.stop" not in script
     assert "disabled =" not in script
     assert "Ctrl+Shift+S" not in script

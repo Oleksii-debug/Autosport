@@ -508,6 +508,26 @@ def test_extreme_decimal_scale_is_rejected_before_fixed_point_materialization(
         ) is None
 
 
+def test_positive_zero_exponent_does_not_false_trigger_resource_bound(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    candidate = correction(
+        superseded=reward0,
+        corrected=reward1,
+        value="0E+100000000",
+    )
+
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_correction(candidate)
+
+    raw = sqlite3.connect(path)
+    assert raw.execute(
+        "SELECT corrected_reward_value FROM corrections"
+    ).fetchone()[0] == "0"
+    raw.close()
+
+
 def test_decimal_resource_bound_preserves_normal_canonicalization(tmp_path):
     path = tmp_path / "corrections.sqlite3"
     reward0 = ref("learning.reward", "reward-0")

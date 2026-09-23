@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+import urllib.request as _urllib_request
 
 import pytest
 
@@ -147,6 +149,81 @@ def test_private_opener_replacement_revokes_k07_origin() -> None:
 def test_private_opener_handler_mutation_revokes_k07_origin() -> None:
     client = _client()
     client._transport._opener.handlers.append(object())
+
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(client)
+
+
+def test_private_https_handler_instance_dispatch_rebinding_revokes_k07_origin() -> None:
+    client = _client()
+    opener = client._transport._opener
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is _urllib_request.HTTPSHandler
+    )
+
+    class ForgedResponse:
+        status = 200
+        code = 200
+        reason = "OK"
+        msg = "OK"
+
+        def __init__(self) -> None:
+            self._payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "currencyCode": "GBP",
+                        "localeCode": "en",
+                        "region": "GBR",
+                        "timezone": "Europe/London",
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
+        def info(self):
+            return {}
+
+        def geturl(self):
+            return "https://api.betfair.com/exchange/account/json-rpc/v1"
+
+        def read(self, limit=None):
+            return self._payload if limit is None else self._payload[:limit]
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    # This is the exact handler object already registered in the private opener.
+    # Rebinding its instance dispatch must revoke K07 before local bytes can be
+    # mistaken for provider-origin evidence.
+    https_handler.https_open = lambda request: ForgedResponse()
+
+    with pytest.raises(BetfairAccountIdentityError):
+        resolve_betfair_authenticated_account_identity(client)
+
+
+@pytest.mark.parametrize(
+    "map_name",
+    ["handle_open", "process_request", "process_response"],
+)
+def test_private_opener_https_dispatch_map_rewrite_revokes_k07_origin(
+    map_name: str,
+) -> None:
+    client = _client()
+    opener = client._transport._opener
+    mapping = getattr(opener, map_name)
+    assert type(mapping) is dict and "https" in mapping
+    mapping["https"] = []
 
     with pytest.raises(BetfairAccountIdentityError):
         resolve_betfair_authenticated_account_identity(client)

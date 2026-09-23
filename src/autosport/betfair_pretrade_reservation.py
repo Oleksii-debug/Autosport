@@ -5,12 +5,12 @@ canonical RealExecutionLedger. It does not acquire provider funds and does not
 write to Betfair.
 
 Before a provider mutation, one exact execution attempt must atomically reserve
-its full worst-case incremental exposure. SUBMITTED, UNKNOWN, ACCEPTED and
-PARTIAL attempts remain fully reserved. Capital is released here only when the
-execution ledger proves RECONCILED_NOT_FOUND. A generic ledger REJECTED state
-is intentionally not sufficient because the ledger can record rejection
-without independently proving provider-origin zero-effect authority. A provider funds
-snapshot therefore cannot be double-spent by concurrent Autosport workers.
+its full worst-case incremental exposure. SUBMITTED, UNKNOWN, ACCEPTED,
+PARTIAL, and generic RECONCILED_NOT_FOUND attempts remain fully reserved. The
+generic ledger state proves chronology/state only; it does not prove
+provider-origin zero effect. Release stays fail-closed until an exact Betfair
+absence authority is composed. A provider funds snapshot therefore cannot be
+double-spent by concurrent Autosport workers.
 """
 from __future__ import annotations
 
@@ -50,7 +50,10 @@ _ACTIVE_STATES = frozenset(
         AttemptState.PARTIAL,
     }
 )
-_RELEASE_STATES = frozenset({AttemptState.RECONCILED_NOT_FOUND})
+# Generic ledger RECONCILED_NOT_FOUND is not provider-origin absence
+# authority. Keep all local capital held until a stronger Betfair witness is
+# composed into this serialized transition.
+_RELEASE_STATES: frozenset[AttemptState] = frozenset()
 _RESERVATION_FIELDS = frozenset(
     {
         "schema_version",
@@ -351,7 +354,7 @@ class BetfairPreTradeReservationStore:
         attempt_id: str,
         execution_ledger: RealExecutionLedger,
     ) -> BetfairExposureReservation:
-        """Update reservation state from one exact canonical ledger snapshot."""
+        """Update ledger chronology without treating generic not-found as release proof."""
 
         attempt_id = _text(attempt_id, "attempt_id")
         ledger_view = _ledger_view(execution_ledger)

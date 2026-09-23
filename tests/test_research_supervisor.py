@@ -14,10 +14,20 @@ from autosport.research_supervisor import (
     SupervisorStatus,
 )
 from autosport.scientific_registry import (
+    DatasetSnapshot,
+    EvaluationBundleRef,
+    ExperimentRecord,
+    FeatureSet,
     Hypothesis,
+    ModelVersion,
+    Postmortem,
+    PromotionAction,
+    PromotionDecision,
+    ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
     ScientificRegistry,
+    StrategyVersion,
 )
 from autosport.strategy_experiment import ScientificProtocolBinding
 
@@ -637,5 +647,280 @@ def test_restart_rejects_self_consistent_cross_linked_scientific_binding(tmp_pat
     with pytest.raises(
         ResearchSupervisorError,
         match="hypothesis research question does not match supervisor run",
+    ):
+        ResearchSupervisor(supervisor.path, registry)
+
+
+def _append_downstream_chain(registry, protocol, *, suffix: str):
+    dataset = DatasetSnapshot(
+        dataset_snapshot_id=f"dataset-{suffix}",
+        manifest_sha256=SOURCE_SHA,
+        source_identity=f"source-{suffix}",
+        license_identity="licensed",
+        causal_cutoff="2026-09-17T12:09:00Z",
+        available_at_utc="2026-09-17T12:10:00Z",
+    )
+    feature = FeatureSet(
+        feature_set_id=f"feature-{suffix}",
+        version="v1",
+        definition_sha256="2" * 64,
+        source_sha256=SOURCE_SHA,
+        available_at_utc="2026-09-17T12:10:00Z",
+    )
+    model = ModelVersion(
+        model_version_id=f"model-{suffix}",
+        model_family="baseline",
+        artifact_sha256="3" * 64,
+        source_sha256=SOURCE_SHA,
+        environment_sha256=SOURCE_SHA,
+        dataset_snapshot_id=dataset.record_id,
+        feature_set_id=feature.record_id,
+        research_protocol_id=protocol.record_id,
+        seed=7,
+        config_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:11:00Z",
+    )
+    strategy = StrategyVersion(
+        strategy_version_id=f"strategy-{suffix}",
+        canonical_strategy_id="research-supervisor-test",
+        source_sha256=SOURCE_SHA,
+        environment_sha256=SOURCE_SHA,
+        config_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:12:00Z",
+        model_version_id=model.record_id,
+    )
+    bundle = EvaluationBundleRef(
+        evaluation_bundle_id=f"evaluation-{suffix}",
+        bundle_sha256="4" * 64,
+        evaluator_source_sha256=SOURCE_SHA,
+        dataset_snapshot_id=dataset.record_id,
+        protocol_sha256=protocol.protocol_sha256,
+        artifact_hashes=("5" * 64,),
+        created_at="2026-09-17T12:13:00Z",
+        evaluated_strategy_version_id=strategy.record_id,
+        evaluated_model_version_id=model.record_id,
+    )
+    experiment = ExperimentRecord(
+        experiment_id=f"experiment-{suffix}",
+        research_protocol_id=protocol.record_id,
+        dataset_snapshot_id=dataset.record_id,
+        feature_set_id=feature.record_id,
+        model_version_id=model.record_id,
+        strategy_version_id=strategy.record_id,
+        evaluation_bundle_id=bundle.record_id,
+        seed=7,
+        config_sha256=SOURCE_SHA,
+        outcome=ResearchOutcome.NULL,
+        created_at="2026-09-17T12:12:30Z",
+        completed_at="2026-09-17T12:14:00Z",
+    )
+    for record in (dataset, feature, model, strategy, bundle, experiment):
+        registry.append(record)
+    decision = PromotionDecision(
+        promotion_decision_id=f"decision-{suffix}",
+        action=PromotionAction.RETAIN,
+        candidate_strategy_version_id=strategy.record_id,
+        candidate_model_version_id=model.record_id,
+        research_protocol_id=protocol.record_id,
+        protocol_sha256=protocol.protocol_sha256,
+        evaluation_bundle_id=bundle.record_id,
+        evaluation_bundle_sha256=bundle.bundle_sha256,
+        decided_at="2026-09-17T12:15:00Z",
+        reason="retain after null result",
+    )
+    registry.record_promotion(decision)
+    postmortem = Postmortem(
+        postmortem_id=f"postmortem-{suffix}",
+        experiment_id=experiment.record_id,
+        classification=ResearchOutcome.NULL,
+        finding="No material improvement.",
+        retest_conditions=("new independent data",),
+        created_at="2026-09-17T12:16:00Z",
+    )
+    registry.append(postmortem)
+    return {
+        "dataset": dataset.record_id,
+        "feature": feature.record_id,
+        "model": model.record_id,
+        "strategy": strategy.record_id,
+        "evaluation": bundle.record_id,
+        "experiment": experiment.record_id,
+        "decision": decision.record_id,
+        "postmortem": postmortem.record_id,
+    }
+
+
+def test_downstream_scientific_bindings_must_stay_on_one_durable_lineage(tmp_path):
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    protocol = _protocol(question, hypothesis, protocol_id="protocol-1")
+    registry.append(protocol)
+    first = _append_downstream_chain(registry, protocol, suffix="one")
+    second = _append_downstream_chain(registry, protocol, suffix="two")
+
+    state = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", hypothesis.record_id),),
+    )
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", protocol.record_id),),
+    )
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.SOURCE_SEARCH,
+        at="2026-09-17T12:14:00Z",
+        bindings=(
+            ("dataset_snapshot_id", first["dataset"]),
+            ("evaluation_bundle_id", first["evaluation"]),
+            ("feature_set_id", first["feature"]),
+            ("model_version_id", first["model"]),
+            ("strategy_version_id", first["strategy"]),
+        ),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="experiment dataset_snapshot_id does not match supervisor binding",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.PROTOCOL_FREEZE,
+            at="2026-09-17T12:14:30Z",
+            bindings=(("experiment_id", second["experiment"]),),
+        )
+
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.PROTOCOL_FREEZE,
+        at="2026-09-17T12:14:30Z",
+        bindings=(("experiment_id", first["experiment"]),),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match=(
+            "promotion decision candidate_strategy_version_id "
+            "does not match supervisor binding"
+        ),
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.DATASET_SNAPSHOT,
+            at="2026-09-17T12:15:00Z",
+            bindings=(("promotion_decision_id", second["decision"]),),
+        )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="postmortem experiment does not match supervisor binding",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.DATASET_SNAPSHOT,
+            at="2026-09-17T12:16:00Z",
+            bindings=(("postmortem_id", second["postmortem"]),),
+        )
+
+
+def test_restart_rejects_rehashed_cross_linked_downstream_experiment(tmp_path):
+    import hashlib
+
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    protocol = _protocol(question, hypothesis, protocol_id="protocol-1")
+    registry.append(protocol)
+    first = _append_downstream_chain(registry, protocol, suffix="one")
+    second = _append_downstream_chain(registry, protocol, suffix="two")
+
+    state = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", hypothesis.record_id),),
+    )
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", protocol.record_id),),
+    )
+    supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.SOURCE_SEARCH,
+        at="2026-09-17T12:14:00Z",
+        bindings=(
+            ("dataset_snapshot_id", first["dataset"]),
+            ("evaluation_bundle_id", first["evaluation"]),
+            ("experiment_id", first["experiment"]),
+            ("feature_set_id", first["feature"]),
+            ("model_version_id", first["model"]),
+            ("strategy_version_id", first["strategy"]),
+        ),
+    )
+
+    payload = json.loads(supervisor.path.read_text(encoding="utf-8"))
+    run = payload["runs"][0]
+    run["bindings"]["experiment_id"] = second["experiment"]
+
+    def digest(value):
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    run["run_sha256"] = digest(
+        {key: value for key, value in run.items() if key != "run_sha256"}
+    )
+    payload["state_sha256"] = digest(
+        {key: value for key, value in payload.items() if key != "state_sha256"}
+    )
+    supervisor.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="experiment dataset_snapshot_id does not match supervisor binding",
     ):
         ResearchSupervisor(supervisor.path, registry)

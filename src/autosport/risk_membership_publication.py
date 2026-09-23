@@ -236,7 +236,14 @@ def _read_stable_state_bytes(path: Path) -> bytes:
         value.st_ctime_ns,
         value.st_nlink,
     )
-    if identity(before) != identity(after_open) or identity(before) != identity(after):
+    # Keep filesystem-view comparisons within the same API family.  Windows may
+    # expose timestamp metadata with different representation through path stat()
+    # and handle fstat() even when dev/ino/nlink prove that both views name the
+    # same file.  Cross-comparing those timestamps therefore creates a false
+    # TOCTOU failure.  We already bind path -> opened handle above by exact
+    # dev/ino/nlink; now require both the path view and the opened-handle view to
+    # remain internally stable across the read.
+    if identity(before) != identity(after) or identity(opened) != identity(after_open):
         raise RiskMembershipPublicationError(
             "fixed-N membership publication state changed during stable read"
         )

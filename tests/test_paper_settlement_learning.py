@@ -1659,7 +1659,10 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 invalidation["reason"],
                 "ACKED_REWARD_CONTRADICTED_BY_LATER_SETTLEMENT",
             )
-            self.assertEqual(invalidation["prior_outbox_id"], binding["outbox"]["outbox_id"])
+            self.assertEqual(
+                invalidation["prior_outbox_id"],
+                binding["outbox"]["outbox_id"],
+            )
             self.assertEqual(invalidation["prior_reward_id"], before.reward_id)
             self.assertEqual(
                 invalidation["prior_settlement_bundle_sha256"],
@@ -1736,6 +1739,31 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 PaperSettlementLearningBridgeError,
                 "invalidation digest mismatch",
+            ):
+                PaperSettlementLearningBridge(
+                    state_path,
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+            state_path.write_bytes(frozen_invalidated_state)
+            resigned = json.loads(state_path.read_text(encoding="utf-8"))
+            resigned_invalidation = resigned["bindings"][ticket.ticket_id]["invalidation"]
+            resigned_invalidation["conflicts"][0]["replacement_outcome"] = "void"
+            resigned_invalidation["invalidation_id"] = _canonical_digest(
+                {
+                    key: value
+                    for key, value in resigned_invalidation.items()
+                    if key != "invalidation_id"
+                }
+            )
+            _rewrite_bridge_state(root, resigned)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "conflicts differ from source evidence",
             ):
                 PaperSettlementLearningBridge(
                     state_path,

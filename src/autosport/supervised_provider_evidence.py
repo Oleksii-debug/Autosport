@@ -445,11 +445,21 @@ def verify_betfair_provider_state(
             raise ProviderEvidenceError(
                 "provider order identity conflicts with execution action"
             )
+        if kind == "current":
+            assert isinstance(order, BetfairCurrentOrderObservation)
+            if order.price is None or order.price != action.requested_odds:
+                raise ProviderEvidenceError(
+                    "provider current order requested price conflicts with execution action"
+                )
         if kind == "cleared":
             assert isinstance(order, BetfairClearedOrderObservation)
             if order.event_id != action.event_id:
                 raise ProviderEvidenceError(
                     "provider cleared order event conflicts with execution action"
+                )
+            if order.price_requested != action.requested_odds:
+                raise ProviderEvidenceError(
+                    "provider cleared order requested price conflicts with execution action"
                 )
     receipt_ids = {order.bet_id for _, _, order in candidates}
     if len(receipt_ids) > 1:

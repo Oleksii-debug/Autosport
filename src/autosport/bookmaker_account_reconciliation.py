@@ -41,6 +41,16 @@ _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
 _RECONCILIATION_TRANSITION_SCHEMA = (
     "autosport.account-reconciliation-transition-v1"
 )
+
+_CANONICAL_AUTHORITY_METHOD_NAMES = ("read_history", "prepare", "recover")
+_CANONICAL_AUTHORITY_METHODS = {
+    name: getattr(MonotonicWorkspaceAuthority, name)
+    for name in _CANONICAL_AUTHORITY_METHOD_NAMES
+}
+_CANONICAL_AUTHORITY_METHOD_CODES = {
+    name: getattr(method, "__code__", None)
+    for name, method in _CANONICAL_AUTHORITY_METHODS.items()
+}
 _MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
 
 
@@ -576,12 +586,71 @@ class BookmakerAccountReconciliationStore:
     ) -> None:
         self.path = Path(path)
         self._workspace = self.path.parent.resolve(strict=False)
-        self._authority = MonotonicWorkspaceAuthority(
+        authority = MonotonicWorkspaceAuthority(
             workspace=self._workspace,
             domain=_RECONCILIATION_AUTHORITY_DOMAIN,
             key=f"account-reconciliation:{self.path.name}",
             authority_root=authority_root,
         )
+        self._authority = authority
+        self._authority_identity = authority
+        self._authority_binding = (
+            authority.authority_root,
+            authority.workspace,
+            authority.workspace_instance_id,
+            authority.domain,
+            authority.key,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.namespace_marker_path,
+            authority.workspace_binding_path,
+        )
+
+    def _require_canonical_authority(self) -> MonotonicWorkspaceAuthority:
+        authority = self._authority
+        expected_binding = self._authority_binding
+        current_binding = (
+            getattr(authority, "authority_root", None),
+            getattr(authority, "workspace", None),
+            getattr(authority, "workspace_instance_id", None),
+            getattr(authority, "domain", None),
+            getattr(authority, "key", None),
+            getattr(authority, "namespace_sha256", None),
+            getattr(authority, "journal_dir", None),
+            getattr(authority, "namespace_marker_path", None),
+            getattr(authority, "workspace_binding_path", None),
+        )
+        if (
+            type(authority) is not MonotonicWorkspaceAuthority
+            or authority is not self._authority_identity
+            or current_binding != expected_binding
+            or authority.workspace != self._workspace
+            or authority.domain != _RECONCILIATION_AUTHORITY_DOMAIN
+            or authority.key != f"account-reconciliation:{self.path.name}"
+        ):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority identity or binding changed"
+            )
+
+        for method_name in _CANONICAL_AUTHORITY_METHOD_NAMES:
+            expected_method = _CANONICAL_AUTHORITY_METHODS[method_name]
+            current_class_method = getattr(
+                MonotonicWorkspaceAuthority,
+                method_name,
+                None,
+            )
+            bound_method = getattr(authority, method_name, None)
+            if (
+                current_class_method is not expected_method
+                or getattr(current_class_method, "__code__", None)
+                is not _CANONICAL_AUTHORITY_METHOD_CODES[method_name]
+                or getattr(bound_method, "__self__", None) is not authority
+                or getattr(bound_method, "__func__", None) is not expected_method
+            ):
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation monotonic authority dispatch changed"
+                )
+        return authority
 
     def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
         if not isinstance(snapshot, BookmakerAccountSnapshot):
@@ -823,8 +892,9 @@ class BookmakerAccountReconciliationStore:
         *,
         history: list[BookmakerAccountSnapshot] | None = None,
     ) -> None:
+        authority = self._require_canonical_authority()
         try:
-            records = self._authority.read_history()
+            records = authority.read_history()
             pending = (
                 records[-1]
                 if records and records[-1].phase is AuthorityPhase.PREPARE
@@ -858,13 +928,13 @@ class BookmakerAccountReconciliationStore:
                     raise AccountReconciliationIntegrityError(
                         "account reconciliation authority semantic binding mismatch"
                     )
-                self._authority.recover(
+                authority.recover(
                     observed_state_sha256=observed_state_sha256,
                     tx_id=pending.tx_id,
                     semantic_binding_sha256=expected_binding,
                 )
             else:
-                self._authority.recover(
+                authority.recover(
                     observed_state_sha256=observed_state_sha256,
                 )
         except MonotonicWorkspaceAuthorityError as exc:
@@ -874,8 +944,9 @@ class BookmakerAccountReconciliationStore:
 
     def _next_authority_tx_id(self, snapshot_id: str) -> str:
         prefix = _authority_tx_prefix(snapshot_id)
+        authority = self._require_canonical_authority()
         try:
-            records = self._authority.read_history()
+            records = authority.read_history()
         except MonotonicWorkspaceAuthorityError as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation monotonic authority history is unreadable"
@@ -999,6 +1070,7 @@ class BookmakerAccountReconciliationStore:
     def _write_history(
         self, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
     ) -> None:
+        authority = self._require_canonical_authority()
         encoded = self._encode_history(history)
         intended_state_sha256 = sha256(encoded).hexdigest()
         previous_state_sha256: str | None = None
@@ -1018,7 +1090,7 @@ class BookmakerAccountReconciliationStore:
             tx_id=tx_id,
         )
         try:
-            self._authority.prepare(
+            authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=previous_state_sha256,
                 intended_state_sha256=intended_state_sha256,

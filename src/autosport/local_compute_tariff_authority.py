@@ -422,14 +422,22 @@ class LocalComputeAllocationBasisRecord:
             raise LocalComputeTariffError("allocation basis components must be a list")
         if any(not isinstance(item, dict) for item in raw_components):
             raise LocalComputeTariffError("allocation basis component must be an object")
+        if type(raw["total_allocable_cost"]) is not str:
+            raise LocalComputeTariffError(
+                "total_allocable_cost must be canonical Decimal text"
+            )
+        if type(raw["amount_per_request"]) is not str:
+            raise LocalComputeTariffError(
+                "amount_per_request must be canonical Decimal text"
+            )
         try:
             components = tuple(
                 LocalComputeCostComponent.from_dict(item)
                 for item in raw_components
             )
             denominator_unit = LocalComputeDenominatorUnit(raw["denominator_unit"])  # type: ignore[arg-type]
-            persisted_total = Decimal(raw["total_allocable_cost"])  # type: ignore[arg-type]
-            persisted_amount = Decimal(raw["amount_per_request"])  # type: ignore[arg-type]
+            persisted_total = Decimal(raw["total_allocable_cost"])
+            persisted_amount = Decimal(raw["amount_per_request"])
         except (InvalidOperation, TypeError, ValueError) as exc:
             raise LocalComputeTariffError("invalid allocation basis record") from exc
         item = cls(
@@ -574,16 +582,22 @@ class LocalComputeAllocationBasisAuthorityStore:
             raise LocalComputeTariffError(
                 "components must be a sequence of cost components"
             )
-        canonical_components = tuple(
-            sorted(tuple(components), key=lambda item: item.component_id)
-        )
+        try:
+            raw_components = tuple(components)
+        except TypeError as exc:
+            raise LocalComputeTariffError(
+                "components must be a sequence of cost components"
+            ) from exc
         if (
-            not canonical_components
-            or any(type(item) is not LocalComputeCostComponent for item in canonical_components)
+            not raw_components
+            or any(type(item) is not LocalComputeCostComponent for item in raw_components)
         ):
             raise LocalComputeTariffError(
                 "components must contain exact LocalComputeCostComponent values"
             )
+        canonical_components = tuple(
+            sorted(raw_components, key=lambda item: item.component_id)
+        )
         canonical_denominator = _positive_request_count(denominator_request_count)
         total = sum((item.amount for item in canonical_components), Decimal("0"))
         _exact_per_request_amount(total, canonical_denominator)

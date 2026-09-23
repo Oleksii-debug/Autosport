@@ -51,6 +51,34 @@ _CANONICAL_EXECUTION_FINGERPRINT_GETTER_CODE: Final = getattr(
     None,
 )
 
+# Supported START must bind the exact executable risk policy rather than trusting a
+# caller-rebindable provenance property. Freeze the import-time class, provenance
+# descriptor/getter and slot descriptors needed to reconstruct its canonical
+# executable identity without virtual attribute dispatch.
+_CANONICAL_RISK_POLICY_CLASS: Final = PaperRiskPolicy
+_CANONICAL_RISK_POLICY_PROVENANCE_PROPERTY: Final = (
+    _CANONICAL_RISK_POLICY_CLASS.provenance_sha256
+)
+_CANONICAL_RISK_POLICY_PROVENANCE_GETTER: Final = (
+    _CANONICAL_RISK_POLICY_PROVENANCE_PROPERTY.fget
+    if isinstance(_CANONICAL_RISK_POLICY_PROVENANCE_PROPERTY, property)
+    else None
+)
+_CANONICAL_RISK_POLICY_PROVENANCE_GETTER_CODE: Final = getattr(
+    _CANONICAL_RISK_POLICY_PROVENANCE_GETTER,
+    "__code__",
+    None,
+)
+_CANONICAL_RISK_POLICY_FIELD_DESCRIPTORS: Final = tuple(
+    (name, getattr(_CANONICAL_RISK_POLICY_CLASS, name))
+    for name in (
+        "max_ticket_fraction",
+        "max_committed_fraction",
+        "minimum_cash_reserve_fraction",
+        "economic_goal",
+    )
+)
+
 # START's durable owner-goal re-resolution must not dispatch through a caller-rebound
 # module class or class method. Capture the canonical EconomicGoalStore construction
 # and read authority at product-module composition and invoke those callables
@@ -327,11 +355,103 @@ def _product_composition(workspace: Path) -> tuple[str, str, str]:
     return hashlib.sha256(raw).hexdigest(), source_id, initial_bankroll
 
 
+def _canonical_risk_policy_authority(
+    risk_policy: PaperRiskPolicy,
+    *,
+    durable_economic_goal: EconomicGoalContract,
+    goal_sha256: str,
+) -> tuple[str, dict[str, object]]:
+    if (
+        PaperRiskPolicy is not _CANONICAL_RISK_POLICY_CLASS
+        or type(risk_policy) is not _CANONICAL_RISK_POLICY_CLASS
+    ):
+        raise ProductDecisionActivationError(
+            "risk_policy must be the exact canonical PaperRiskPolicy"
+        )
+
+    live_provenance_property = getattr(
+        _CANONICAL_RISK_POLICY_CLASS,
+        "provenance_sha256",
+        None,
+    )
+    if (
+        not isinstance(_CANONICAL_RISK_POLICY_PROVENANCE_PROPERTY, property)
+        or _CANONICAL_RISK_POLICY_PROVENANCE_GETTER is None
+        or _CANONICAL_RISK_POLICY_PROVENANCE_GETTER_CODE is None
+        or live_provenance_property
+        is not _CANONICAL_RISK_POLICY_PROVENANCE_PROPERTY
+        or live_provenance_property.fget
+        is not _CANONICAL_RISK_POLICY_PROVENANCE_GETTER
+        or getattr(
+            _CANONICAL_RISK_POLICY_PROVENANCE_GETTER,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_RISK_POLICY_PROVENANCE_GETTER_CODE
+    ):
+        raise ProductDecisionActivationError(
+            "canonical PaperRiskPolicy provenance authority changed"
+        )
+
+    values: dict[str, object] = {}
+    for name, descriptor in _CANONICAL_RISK_POLICY_FIELD_DESCRIPTORS:
+        if getattr(_CANONICAL_RISK_POLICY_CLASS, name, None) is not descriptor:
+            raise ProductDecisionActivationError(
+                "canonical PaperRiskPolicy field authority changed"
+            )
+        values[name] = descriptor.__get__(
+            risk_policy,
+            _CANONICAL_RISK_POLICY_CLASS,
+        )
+
+    bound_goal = values["economic_goal"]
+    if (
+        type(bound_goal) is not EconomicGoalContract
+        or bound_goal != durable_economic_goal
+    ):
+        raise ProductDecisionActivationError(
+            "risk policy must be bound to the exact EconomicGoalContract"
+        )
+
+    fractions: dict[str, Decimal] = {}
+    for name in (
+        "max_ticket_fraction",
+        "max_committed_fraction",
+        "minimum_cash_reserve_fraction",
+    ):
+        value = values[name]
+        if (
+            type(value) is not Decimal
+            or not value.is_finite()
+            or value < Decimal("0")
+            or value > Decimal("1")
+        ):
+            raise ProductDecisionActivationError(
+                "risk policy executable fractions are invalid"
+            )
+        fractions[name] = value
+
+    policy_payload: dict[str, object] = {
+        "max_ticket_fraction": str(fractions["max_ticket_fraction"]),
+        "max_committed_fraction": str(fractions["max_committed_fraction"]),
+        "minimum_cash_reserve_fraction": str(
+            fractions["minimum_cash_reserve_fraction"]
+        ),
+        "economic_goal_contract_sha256": goal_sha256,
+    }
+    provenance_payload = {
+        "schema": "autosport.paper_risk_policy_provenance",
+        "schema_version": 1,
+        **policy_payload,
+    }
+    return _digest(provenance_payload), policy_payload
+
+
 def _risk_policy_file_digest(
     workspace: Path,
     *,
-    risk_policy: PaperRiskPolicy,
-    goal_sha256: str,
+    expected_policy: dict[str, object],
+    expected_provenance_sha256: str,
 ) -> str:
     path = _require_workspace_path(
         workspace,
@@ -347,16 +467,16 @@ def _risk_policy_file_digest(
         or payload.get("schema_version") != 1
     ):
         raise ProductDecisionActivationError("paper risk policy schema mismatch")
-    if payload.get("policy_provenance_sha256") != risk_policy.provenance_sha256:
+    if payload.get("policy_provenance_sha256") != expected_provenance_sha256:
         raise ProductDecisionActivationError(
             "paper risk policy file does not match executable risk provenance"
         )
     policy = payload.get("policy")
     if type(policy) is not dict:
         raise ProductDecisionActivationError("paper risk policy body is invalid")
-    if policy.get("economic_goal_contract_sha256") != goal_sha256:
+    if policy != expected_policy:
         raise ProductDecisionActivationError(
-            "paper risk policy file is not bound to the exact EconomicGoalContract"
+            "paper risk policy file does not match exact executable risk policy"
         )
     return hashlib.sha256(raw).hexdigest()
 
@@ -703,14 +823,15 @@ class ProductDecisionActivationStore:
                 "economic_goal no longer matches exact durable authority owner bytes"
             )
         durable_economic_goal = economic_goal
-        if type(risk_policy) is not PaperRiskPolicy:
-            raise ProductDecisionActivationError(
-                "risk_policy must be the canonical PaperRiskPolicy"
-            )
-        if risk_policy.economic_goal != economic_goal:
-            raise ProductDecisionActivationError(
-                "risk policy must be bound to the exact EconomicGoalContract"
-            )
+        goal = provenance_for(durable_economic_goal)
+        (
+            risk_policy_provenance_sha256,
+            risk_policy_payload,
+        ) = _canonical_risk_policy_authority(
+            risk_policy,
+            durable_economic_goal=durable_economic_goal,
+            goal_sha256=goal.contract_sha256,
+        )
         if (
             PaperExecutionModelConfig is not _CANONICAL_EXECUTION_CONFIG_CLASS
             or type(execution_config) is not _CANONICAL_EXECUTION_CONFIG_CLASS
@@ -790,14 +911,13 @@ class ProductDecisionActivationStore:
             strategy.get("model_version_id"), "strategy model_version_id"
         )
 
-        goal = provenance_for(durable_economic_goal)
         composition_sha, source_id, initial_bankroll = _product_composition(
             self.workspace
         )
         risk_file_sha = _risk_policy_file_digest(
             self.workspace,
-            risk_policy=risk_policy,
-            goal_sha256=goal.contract_sha256,
+            expected_policy=risk_policy_payload,
+            expected_provenance_sha256=risk_policy_provenance_sha256,
         )
 
         return ProductDecisionActivationBinding(
@@ -820,7 +940,7 @@ class ProductDecisionActivationStore:
             bankroll_id=durable_economic_goal.bankroll_id,
             currency=durable_economic_goal.currency,
             risk_policy_provenance_sha256=_sha256(
-                risk_policy.provenance_sha256,
+                risk_policy_provenance_sha256,
                 "risk_policy_provenance_sha256",
             ),
             risk_policy_file_sha256=risk_file_sha,

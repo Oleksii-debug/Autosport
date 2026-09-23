@@ -241,15 +241,15 @@ class FamilywiseAlphaRegistry:
         if total >= 1:
             raise ForwardEconomicEvidenceError("total_alpha must be less than one")
         sealed_at = _instant(self.sealed_at, "sealed_at")
-        if not self.allocations:
-            raise ForwardEconomicEvidenceError("alpha registry must allocate at least one challenger")
-        if any(type(item) is not AlphaAllocation for item in self.allocations):
-            raise ForwardEconomicEvidenceError("alpha allocations must be exact AlphaAllocation values")
 
-        # Freeze caller-owned containers/items at the seal boundary. A list that
-        # is mutated after construction, or a later object.__setattr__ on a caller's
-        # AlphaAllocation, must not rewrite this registry's scientific family.
+        # Snapshot caller-owned container/items exactly once before validating
+        # them. Validation must not iterate a caller-mutable collection and then
+        # trust a later, potentially different iteration as the sealed family.
         allocations = tuple(deepcopy(item) for item in self.allocations)
+        if not allocations:
+            raise ForwardEconomicEvidenceError("alpha registry must allocate at least one challenger")
+        if any(type(item) is not AlphaAllocation for item in allocations):
+            raise ForwardEconomicEvidenceError("alpha allocations must be exact AlphaAllocation values")
         challenger_ids = tuple(item.challenger_id for item in allocations)
         if challenger_ids != tuple(sorted(challenger_ids)):
             raise ForwardEconomicEvidenceError("alpha allocations must be sorted by challenger_id")

@@ -143,6 +143,18 @@
     setTextIfChanged(statusNode, status || "Готово.");
   }
 
+  function projectEmergencyStopState(emergency) {
+    const node = byId("emergency-stop-status");
+    const value = (
+      emergency
+      && typeof emergency.status === "string"
+      && emergency.status
+    )
+      ? emergency.status
+      : "Аварійний STOP: стан не підтверджено.";
+    setTextIfChanged(node, value);
+  }
+
   function syncTextChildren(node, values, tagName) {
     const projected = Array.from(values || [], (value) => String(value));
     while (node.children.length > projected.length) {
@@ -253,6 +265,7 @@
   function renderState(state) {
     latestState = state;
     projectLiveState(state.status, state.last_error);
+    projectEmergencyStopState(state.emergency_stop);
 
     byId("workspace-value").textContent = state.workspace || "—";
     byId("active-workspace-value").textContent = state.active_workspace || "—";

@@ -30,6 +30,7 @@ def _write_snapshot(
     requested_at: str = "2026-01-01T10:00:20+00:00",
     source_id: str | None = None,
     event_id: str | None = None,
+    explicit_event_sport: bool = True,
 ) -> tuple[Path, Path, MarketEvent]:
     source = source_id or f"parlayapi:{sport}"
     event = MarketEvent(
@@ -42,7 +43,7 @@ def _write_snapshot(
         sequence=1,
         source_ts="2026-01-01T09:59:59+00:00",
         ingest_ts=CAPTURED_AT,
-        sport=sport,
+        sport=sport if explicit_event_sport else None,
         metadata={
             "bookmaker_key": "book-a",
             "source_time_semantics": "provider_quote_last_update",
@@ -391,6 +392,35 @@ def test_invalid_provider_response_digest_cannot_enter_acquisition_identity(tmp_
             ),
             governance_proof_path=proof,
             output_dir=tmp_path / "blocked-response-digest",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_non_table_tennis_legacy_unproven_event_sport_is_rejected(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="basketball-unproven-sport",
+        explicit_event_sport=False,
+    )
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="basketball-unproven-sport",
+    )
+
+    with pytest.raises(ValueError, match="require explicit event sport"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="basketball-unproven-sport",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-unproven-basketball",
             name="blocked",
             outcome_reveal_after=REVEAL_AT,
             imported_at=IMPORTED_AT,

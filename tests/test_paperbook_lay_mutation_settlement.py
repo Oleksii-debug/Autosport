@@ -106,6 +106,34 @@ def test_save_rejects_post_open_valid_back_odds_replacement(tmp_path) -> None:
     assert not path.exists()
 
 
+def test_restart_reconstructs_opening_economic_witness(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    original = _leg("back", odds="2")
+    book.open_ticket([original], "10", placed_at=_PLACED_AT)
+    book.save(path)
+
+    restored = PaperBook.load(path)
+    ticket = next(iter(restored.tickets.values()))
+    balance_before = restored.balance
+    lifecycle_before = tuple(restored._lifecycle)
+    ticket.stake = Decimal("20")
+
+    with pytest.raises(ValueError, match="opening economic identity changed"):
+        restored.settle(
+            ticket.ticket_id,
+            {original.quote_key},
+            settled_at=_SETTLED_AT,
+        )
+
+    _assert_open_state_unchanged(
+        restored,
+        ticket.ticket_id,
+        balance=balance_before,
+        lifecycle=lifecycle_before,
+    )
+
+
 def test_settle_revalidates_mutated_ticket_side_before_economic_mutation() -> None:
     book = PaperBook("100")
     ticket = book.open_ticket(

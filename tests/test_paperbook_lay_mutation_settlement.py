@@ -537,3 +537,48 @@ def test_empty_prewitness_legacy_snapshot_remains_read_only(
         match="byte-loaded snapshot lacks independent durable witness authority",
     ):
         legacy.save(path)
+
+
+
+def test_interrupted_first_save_cannot_rebootstrap_over_foreign_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-authority-first-save"),
+    )
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+
+    import autosport.paper as paper_module
+
+    original_append = paper_module._append_snapshot_witness
+
+    def _fail_before_prepare(*_args, **_kwargs):
+        raise RuntimeError("injected witness publication failure")
+
+    monkeypatch.setattr(
+        paper_module,
+        "_append_snapshot_witness",
+        _fail_before_prepare,
+    )
+    with pytest.raises(RuntimeError, match="injected witness publication failure"):
+        book.save(path)
+    monkeypatch.setattr(
+        paper_module,
+        "_append_snapshot_witness",
+        original_append,
+    )
+
+    assert not path.exists()
+    foreign_bytes = b'{"foreign":"snapshot"}'
+    path.write_bytes(foreign_bytes)
+
+    with pytest.raises(
+        ValueError,
+        match="existing snapshot lacks independent durable witness",
+    ):
+        book.save(path)
+
+    assert path.read_bytes() == foreign_bytes

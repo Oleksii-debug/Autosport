@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .betdaq_account_readonly import (
+    BetdaqAccountReadOnlyError,
     BetdaqCredentials,
     BetdaqSoapTransport,
     UrllibBetdaqSoapTransport,
@@ -10,6 +11,7 @@ from .betdaq_readonly_provider import (
     BetdaqTransientTransportError,
 )
 from .betdaq_readonly_request_wire import build_get_prices_soap11_request
+from .providers import ProviderUnavailableError
 
 _CANONICAL_POST = UrllibBetdaqSoapTransport.post
 
@@ -20,6 +22,11 @@ class BetdaqReadOnlyLiveTransport:
     This object owns no retry, rate, entitlement, account, origin-proof or write
     authority. It only serializes one GetPrices call with the canonical credential
     bundle and delegates one HTTPS POST to the already product-owned transport.
+
+    Retryability is evidence, not a default. The current canonical #1610 transport
+    deliberately collapses HTTP/network failure classes to BetdaqAccountReadOnlyError,
+    so that opaque error is non-retryable here. Only a transport that preserves an
+    explicit transient signal may enter BetdaqReadOnlyProvider's bounded retry loop.
     """
 
     __slots__ = ("_credentials", "_transport")
@@ -66,14 +73,23 @@ class BetdaqReadOnlyLiveTransport:
                 body=wire.body,
                 timeout_seconds=timeout_seconds,
             )
+        except (BetdaqTransientTransportError, TimeoutError, ConnectionError):
+            # These are the only currently preserved signals whose retryability is
+            # explicit enough for the provider's bounded retry authority.
+            raise
+        except BetdaqAccountReadOnlyError:
+            # #1610 currently collapses HTTPError, URLError, OSError and TimeoutError
+            # into this one secret-safe type. Do not guess which member was transient.
+            raise ProviderUnavailableError(
+                "BETDAQ GetPrices transport failed without retryable classification"
+            ) from None
         except Exception:
-            # Never expose arbitrary transport/provider diagnostics because a custom
-            # transport could include credential-bearing request material in them.
-            raise BetdaqTransientTransportError(
-                "BETDAQ GetPrices transport failed"
+            # Unknown custom-transport failures are not silently upgraded to transient.
+            raise ProviderUnavailableError(
+                "BETDAQ GetPrices transport failed without retryable classification"
             ) from None
         if type(payload) is not bytes:
-            raise BetdaqTransientTransportError(
+            raise ProviderUnavailableError(
                 "BETDAQ GetPrices transport returned non-bytes payload"
             )
         return payload

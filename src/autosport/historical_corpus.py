@@ -143,6 +143,21 @@ def _text(raw: dict[str, Any], key: str, *, context: str) -> str:
     return value.strip()
 
 
+def _digest(raw: dict[str, Any], key: str, *, context: str) -> str:
+    value = raw.get(key)
+    if (
+        type(value) is not str
+        or value != value.strip()
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(
+            f"{context}.{key} must be a canonical lowercase SHA-256 digest"
+        )
+    return value
+
+
 def _governance_proof(path: Path, *, payload: bytes | None = None) -> dict[str, Any]:
     if payload is None:
         payload = _read_bytes(path, context="governance proof")
@@ -443,9 +458,9 @@ def _snapshot(
         raise ValueError("snapshot evidence schema_version must be 1")
     if evidence.get("kind") != _SNAPSHOT_KIND:
         raise ValueError(f"snapshot evidence kind must be {_SNAPSHOT_KIND}")
-    sport_key = _text(evidence, "sport_key", context="snapshot evidence")
+    raw_sport_key = evidence.get("sport_key")
     try:
-        sport_key = _canonical_sport_key(sport_key)
+        sport_key = _canonical_sport_key(raw_sport_key)
     except ValueError as exc:
         raise ValueError(
             "snapshot evidence sport_key must be one canonical Parlay sport identity"
@@ -471,16 +486,12 @@ def _snapshot(
         raise ValueError("snapshot evidence provider must be parlayapi")
     canonical_source_id = f"parlayapi:{sport_key}"
 
-    expected_sha = _text(evidence, "market_sha256", context="snapshot evidence")
-    response_sha256 = _text(evidence, "response_sha256", context="snapshot evidence")
-    if (
-        len(response_sha256) != 64
-        or response_sha256 != response_sha256.lower()
-        or any(character not in "0123456789abcdef" for character in response_sha256)
-    ):
-        raise ValueError(
-            "snapshot evidence.response_sha256 must be a canonical lowercase SHA-256 digest"
-        )
+    expected_sha = _digest(evidence, "market_sha256", context="snapshot evidence")
+    response_sha256 = _digest(
+        evidence,
+        "response_sha256",
+        context="snapshot evidence",
+    )
     market_bytes = _read_bytes(market_path, context="snapshot market")
     if _sha256_bytes(market_bytes) != expected_sha:
         raise ValueError("snapshot market_sha256 does not match captured market file")

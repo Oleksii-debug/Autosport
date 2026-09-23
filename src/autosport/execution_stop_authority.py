@@ -1149,8 +1149,34 @@ class ExecutionStopAuthority:
         the positive ARMED check and the protected provider-write boundary.
         """
 
-        with self._authority_operation_lock():
-            state = self._current_unlocked()
+        if ExecutionStopAuthority is not _CANONICAL_ADMISSION_AUTHORITY_CLASS:
+            raise ExecutionStopIntegrityError(
+                "canonical execution admission authority class changed"
+            )
+        live_operation_lock = getattr(
+            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
+            "_authority_operation_lock",
+            None,
+        )
+        live_current_unlocked = getattr(
+            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
+            "_current_unlocked",
+            None,
+        )
+        if (
+            live_operation_lock is not _CANONICAL_ADMISSION_OPERATION_LOCK
+            or getattr(live_operation_lock, "__code__", None)
+            is not _CANONICAL_ADMISSION_OPERATION_LOCK_CODE
+            or live_current_unlocked is not _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+            or getattr(live_current_unlocked, "__code__", None)
+            is not _CANONICAL_ADMISSION_CURRENT_UNLOCKED_CODE
+        ):
+            raise ExecutionStopIntegrityError(
+                "canonical execution admission lower dispatch changed"
+            )
+
+        with _CANONICAL_ADMISSION_OPERATION_LOCK(self):
+            state = _CANONICAL_ADMISSION_CURRENT_UNLOCKED(self)
             if state.mode is not ExecutionAuthorityMode.ARMED:
                 raise ExecutionStoppedError(
                     f"execution STOP is active at revision {state.revision}: "
@@ -1253,3 +1279,22 @@ class ExecutionStopAuthority:
                 f"{state.reason}"
             )
         return state
+
+
+# admission_lease is consumed across irreversible provider effects. Freeze the lower
+# class dispatch that establishes its linearization lock and re-resolves current STOP
+# state, so replacing those methods cannot preserve the public lease surface while
+# bypassing durable authority or the STOP-vs-write ordering.
+_CANONICAL_ADMISSION_AUTHORITY_CLASS = ExecutionStopAuthority
+_CANONICAL_ADMISSION_OPERATION_LOCK = ExecutionStopAuthority._authority_operation_lock
+_CANONICAL_ADMISSION_OPERATION_LOCK_CODE = getattr(
+    _CANONICAL_ADMISSION_OPERATION_LOCK,
+    "__code__",
+    None,
+)
+_CANONICAL_ADMISSION_CURRENT_UNLOCKED = ExecutionStopAuthority._current_unlocked
+_CANONICAL_ADMISSION_CURRENT_UNLOCKED_CODE = getattr(
+    _CANONICAL_ADMISSION_CURRENT_UNLOCKED,
+    "__code__",
+    None,
+)

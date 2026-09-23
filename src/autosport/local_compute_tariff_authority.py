@@ -155,10 +155,31 @@ def _goal_sha256(goal: object) -> str:
     return _digest(economic_goal_to_payload(goal))  # type: ignore[arg-type]
 
 
-def _authority_now() -> str:
-    """Product clock seam. Tests may patch this private function."""
+def _authoritative_utc_now() -> str:
+    """Read product-owned UTC wall time for tariff authority."""
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+_CANONICAL_AUTHORITY_NOW: Final = _authoritative_utc_now
+_CANONICAL_AUTHORITY_NOW_CODE: Final = _CANONICAL_AUTHORITY_NOW.__code__
+_CANONICAL_AUTHORITY_NOW_DATETIME: Final = datetime
+_CANONICAL_AUTHORITY_NOW_TIMEZONE: Final = timezone
+
+
+def _product_utc_now() -> datetime:
+    """Return current UTC only while the canonical clock executable is intact."""
+
+    clock_globals = getattr(_CANONICAL_AUTHORITY_NOW, "__globals__", {})
+    if (
+        _authoritative_utc_now is not _CANONICAL_AUTHORITY_NOW
+        or getattr(_CANONICAL_AUTHORITY_NOW, "__code__", None)
+        is not _CANONICAL_AUTHORITY_NOW_CODE
+        or clock_globals.get("datetime") is not _CANONICAL_AUTHORITY_NOW_DATETIME
+        or clock_globals.get("timezone") is not _CANONICAL_AUTHORITY_NOW_TIMEZONE
+    ):
+        raise LocalComputeTariffError("product clock authority changed")
+    return _instant(_CANONICAL_AUTHORITY_NOW(), "product_time")
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,16 +463,14 @@ class LocalComputeTariffAuthorityStore:
         )
         canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
         canonical_basis_id = _text(allocation_basis_id, "allocation_basis_id")
-        recorded_at = _time(_authority_now(), "recorded_at")
         goal_for_basis, _ = self._current_goal()
-        basis = LocalComputeAllocationBasisAuthorityStore.resolve(
+        basis = LocalComputeAllocationBasisAuthorityStore.resolve_current(
             self._basis_authority(),
             basis_id=canonical_basis_id,
             backend_id=canonical_backend,
             model_id=canonical_model,
             config_sha256=canonical_config,
             allocation_policy_id=canonical_policy,
-            decision_at=recorded_at,
             bankroll_id=goal_for_basis.bankroll_id,
             currency=goal_for_basis.currency,
         )
@@ -466,6 +485,22 @@ class LocalComputeTariffAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             self._records = self._load()
+            current_time = _product_utc_now()
+            previous_recorded_at = max(
+                (
+                    _instant(record.recorded_at, "recorded_at")
+                    for record in self._records
+                ),
+                default=None,
+            )
+            if (
+                previous_recorded_at is not None
+                and current_time <= previous_recorded_at
+            ):
+                raise LocalComputeTariffError(
+                    "product clock did not advance before tariff publication"
+                )
+            recorded_at = _time(current_time.isoformat(), "recorded_at")
             goal, goal_sha256 = self._current_goal()
             if (
                 basis.owner_goal_id != goal.goal_id
@@ -591,22 +626,26 @@ class LocalComputeTariffAuthorityStore:
             self._records = staged
             return record
 
-    def resolve(
+    def resolve_current(
         self,
         *,
         backend_id: str,
         model_id: str,
         config_sha256: str,
-        decision_at: str,
         bankroll_id: str,
         currency: str,
     ) -> LocalComputeTariffRecord | None:
-        """Resolve the unique causally available exact tariff for a LOCAL decision."""
+        """Resolve current tariff state for a new decision after this lookup.
+
+        This is deliberately not a historical-availability oracle. A successful
+        lookup proves that the exact tariff and allocation basis exist now under
+        the current EconomicGoal. Downstream decision authority must bind this
+        exact tariff identity before issuing the new decision.
+        """
 
         canonical_backend = _text(backend_id, "backend_id")
         canonical_model = _text(model_id, "model_id")
         canonical_config = _sha(config_sha256, "config_sha256")
-        cutoff = _instant(decision_at, "decision_at")
         canonical_bankroll = _text(bankroll_id, "bankroll_id")
         canonical_currency = _currency(currency)
 
@@ -618,6 +657,7 @@ class LocalComputeTariffAuthorityStore:
                 raise LocalComputeTariffError(
                     "intent bankroll/currency does not match current owner EconomicGoal"
                 )
+            cutoff = _product_utc_now()
 
             matches: list[LocalComputeTariffRecord] = []
             for record in records:
@@ -656,14 +696,13 @@ class LocalComputeTariffAuthorityStore:
 
         if resolved is None:
             return None
-        basis = LocalComputeAllocationBasisAuthorityStore.resolve(
+        basis = LocalComputeAllocationBasisAuthorityStore.resolve_current(
             self._basis_authority(),
             basis_id=resolved.allocation_basis_id,
             backend_id=resolved.backend_id,
             model_id=resolved.model_id,
             config_sha256=resolved.config_sha256,
             allocation_policy_id=resolved.allocation_policy_id,
-            decision_at=_time(cutoff.isoformat(), "decision_at"),
             bankroll_id=resolved.owner_bankroll_id,
             currency=resolved.currency,
         )
@@ -679,6 +718,29 @@ class LocalComputeTariffAuthorityStore:
                 "resolved allocation basis no longer matches tariff authority"
             )
         return resolved
+
+    def resolve(
+        self,
+        *,
+        backend_id: str,
+        model_id: str,
+        config_sha256: str,
+        decision_at: str,
+        bankroll_id: str,
+        currency: str,
+    ) -> LocalComputeTariffRecord | None:
+        """Fail closed for timestamp-only historical decision-time resolution."""
+
+        _text(backend_id, "backend_id")
+        _text(model_id, "model_id")
+        _sha(config_sha256, "config_sha256")
+        _instant(decision_at, "decision_at")
+        _text(bankroll_id, "bankroll_id")
+        _currency(currency)
+        raise LocalComputeTariffError(
+            "timestamp-only historical local compute tariff resolution requires "
+            "durable causal decision authority"
+        )
 
 
 __all__ = [

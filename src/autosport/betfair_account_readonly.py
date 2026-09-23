@@ -22,6 +22,7 @@ ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 ADAPTER_ID = "betfair-exchange-jsonrpc-readonly"
 ADAPTER_VERSION = "1"
+MARKET_BOOK_AUTHORITY_TRUST_BOUNDARY = "trusted-process-api-provenance-v1"
 _GET_ACCOUNT_FUNDS = "AccountAPING/v1.0/getAccountFunds"
 _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
@@ -1353,9 +1354,11 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
         target.append(order)
 
 # Bind MarketBook depth authority to receipts actually emitted by the canonical
-# adapter. Keep both the issuance registry and registration path closure-local so
-# importing this module exposes no callable mint or writable authority registry for
-# caller-constructed depth DTOs.
+# adapter. The ordinary module API exposes no callable receipt mint or module-level
+# writable authority registry for caller-constructed depth DTOs. This is an
+# in-process provenance fence inside a trusted Python process, not cryptographic
+# isolation: arbitrary same-interpreter reflection/object-graph/code mutation is
+# explicitly outside MARKET_BOOK_AUTHORITY_TRUST_BOUNDARY.
 def _install_market_book_depth_authority():
     issued: dict[int, tuple[object, str, object]] = {}
     raw_read = BetfairReadOnlyClient.read_market_book_depth
@@ -1422,7 +1425,12 @@ def _install_market_book_depth_authority():
     def assert_authoritative(
         observation: BetfairMarketBookDepthObservation,
     ) -> datetime:
-        """Reject noncanonical receipts and return the product-owned decision instant."""
+        """Enforce trusted-process API provenance and return the product decision instant.
+
+        This pure-Python fence detects supported API/object substitution and
+        post-issuance tamper. It does not claim resistance to arbitrary hostile
+        reflection or memory/code mutation inside the same interpreter.
+        """
 
         if type(observation) is not BetfairMarketBookDepthObservation:
             raise BetfairReadOnlyError(

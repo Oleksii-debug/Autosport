@@ -580,9 +580,16 @@ def test_urlopen_kwdefault_and_module_alias_substitution_cannot_mint_provider_or
             )
 
 
-def test_market_book_authority_exposes_no_callable_mint_or_writable_registry() -> None:
+def test_market_book_authority_exposes_no_module_level_mint_or_registry() -> None:
     assert not hasattr(betfair_account_readonly, "_issue_market_book_depth")
     assert not hasattr(betfair_account_readonly, "_MARKET_BOOK_DEPTH_ISSUED")
+
+
+def test_market_book_authority_declares_trusted_process_boundary() -> None:
+    assert (
+        betfair_account_readonly.MARKET_BOOK_AUTHORITY_TRUST_BOUNDARY
+        == "trusted-process-api-provenance-v1"
+    )
 
 def test_authoritative_decision_time_is_issued_by_product_clock() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(

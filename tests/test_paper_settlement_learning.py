@@ -1593,8 +1593,8 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 sport="table_tennis",
             )
             (
-                _goal,
-                _risk,
+                goal,
+                risk,
                 ticket,
                 decision,
                 environment,
@@ -1646,14 +1646,105 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             after = runtime.snapshot()
             self.assertEqual(after.transition_id, before.transition_id)
             self.assertEqual(after.reward_id, before.reward_id)
-            durable = json.loads(
-                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(durable["bindings"][ticket.ticket_id]["status"], "ACKED")
+            state_path = root / "paper_learning_bridge.json"
+            durable = json.loads(state_path.read_text(encoding="utf-8"))
+            binding = durable["bindings"][ticket.ticket_id]
+            self.assertEqual(binding["status"], "INVALIDATED")
             self.assertEqual(
-                durable["bindings"][ticket.ticket_id]["outbox"]["known_quote_outcomes"],
+                binding["outbox"]["known_quote_outcomes"],
                 {leg.quote_key: "win"},
             )
+            invalidation = binding["invalidation"]
+            self.assertEqual(
+                invalidation["reason"],
+                "ACKED_REWARD_CONTRADICTED_BY_LATER_SETTLEMENT",
+            )
+            self.assertEqual(invalidation["prior_outbox_id"], binding["outbox"]["outbox_id"])
+            self.assertEqual(invalidation["prior_reward_id"], before.reward_id)
+            self.assertEqual(
+                invalidation["prior_settlement_bundle_sha256"],
+                binding["outbox"]["settlement_bundle_sha256"],
+            )
+            self.assertEqual(
+                invalidation["conflicts"],
+                [
+                    {
+                        "quote_key": leg.quote_key,
+                        "previous_outcome": "win",
+                        "replacement_outcome": "loss",
+                    }
+                ],
+            )
+            self.assertEqual(
+                invalidation["invalidation_id"],
+                _canonical_digest(
+                    {
+                        key: value
+                        for key, value in invalidation.items()
+                        if key != "invalidation_id"
+                    }
+                ),
+            )
+            frozen_invalidated_state = state_path.read_bytes()
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                state_path,
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.resolution_witness(ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.next_checkpoint(ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:01+00:00",
+                )
+            self.assertEqual(state_path.read_bytes(), frozen_invalidated_state)
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(correction,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:02+00:00",
+                )
+            self.assertEqual(state_path.read_bytes(), frozen_invalidated_state)
+
+            tampered = json.loads(state_path.read_text(encoding="utf-8"))
+            tampered["bindings"][ticket.ticket_id]["invalidation"]["reason"] = "FORGED"
+            _rewrite_bridge_state(root, tampered)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "invalidation digest mismatch",
+            ):
+                PaperSettlementLearningBridge(
+                    state_path,
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
 
     def test_acked_reward_accepts_later_confirmatory_settlement_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

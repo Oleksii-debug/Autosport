@@ -61,6 +61,7 @@ def test_static_operator_copy_has_no_known_app_owned_english_leakage() -> None:
         "Human/NVDA verification",
         "PAPER replay",
         "PAPER runtime",
+        "PAPER",
         "Python runtime",
         " evidence",
         "preview",

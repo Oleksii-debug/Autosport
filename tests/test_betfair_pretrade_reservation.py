@@ -172,7 +172,7 @@ def _precheck(client, action: ExecutionAction):
 
 def _store(tmp_path) -> BetfairPreTradeReservationStore:
     return BetfairPreTradeReservationStore(
-        tmp_path / "pretrade.sqlite",
+        tmp_path,
         account_id="acct-1",
         currency_code="EUR",
     )
@@ -605,6 +605,30 @@ def test_refreshing_funds_evidence_in_same_context_is_idempotent(
 
     assert refreshed == first
     assert store.active_reserved_amount() == Decimal("25")
+
+
+
+def test_store_is_bound_to_canonical_execution_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    foreign = tmp_path / "foreign"
+    ledger = _ledger(foreign, action)
+    store = _store(tmp_path)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="different workspaces",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=_precheck(client, action),
+            execution_ledger=ledger,
+        )
 
 
 def test_copied_funds_precheck_cannot_mint_reservation(

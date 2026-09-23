@@ -237,13 +237,6 @@ def test_missing_or_negative_place_bet_capability_is_explicit_blocker(
     assert assessment.execution_admitted is False
 
 
-@pytest.mark.parametrize(
-    "permission",
-    [
-        GovernancePermissionState.UNKNOWN,
-        GovernancePermissionState.PROHIBITED,
-    ],
-)
 def test_other_action_kind_cannot_reuse_place_bet_capability() -> None:
     profile = _profile(BookmakerCapabilityState.SUPPORTED)
     governance = _governance()
@@ -270,6 +263,13 @@ def test_other_action_kind_cannot_reuse_place_bet_capability() -> None:
     assert assessment.execution_admitted is False
 
 
+@pytest.mark.parametrize(
+    "permission",
+    [
+        GovernancePermissionState.UNKNOWN,
+        GovernancePermissionState.PROHIBITED,
+    ],
+)
 def test_governance_never_substitutes_for_write_entitlement(
     permission: GovernancePermissionState,
 ) -> None:

@@ -51,8 +51,9 @@ def _fixed_decimal_length(value: Decimal) -> int:
         raise RewardCorrectionError("finite Decimal must have an integer exponent")
     digit_count = len(digits)
     sign_count = 1 if sign else 0
+    is_zero = all(digit == 0 for digit in digits)
     if exponent >= 0:
-        return sign_count + digit_count + exponent
+        return sign_count + 1 if is_zero else sign_count + digit_count + exponent
     return sign_count + max(digit_count + exponent, 1) + 1 + (-exponent)
 
 def _decimal_text(name: str, value: object) -> str:

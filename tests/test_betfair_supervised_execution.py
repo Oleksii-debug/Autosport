@@ -1090,6 +1090,67 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert ledger.verify_integrity() > 0
 
 
+def test_terminal_provider_observation_time_ignores_caller_client_clock() -> None:
+    forged_client_time = "2099-12-31T23:59:59+00:00"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(
+            profile,
+            transport,
+            store=goal_store,
+            observed_at=forged_client_time,
+        )
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-product-observation-clock",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+        binding = ledger.provider_evidence_binding(
+            "attempt-product-observation-clock"
+        )
+        assert binding is not None
+        assert binding["observed_at"] != forged_client_time
+        assert binding["observed_at"] != SUBMITTED_AT
+        datetime.fromisoformat(
+            binding["observed_at"].replace("Z", "+00:00")
+        )
+
+        records = [
+            json.loads(line)
+            for line in ledger.path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        acknowledgements = [
+            record
+            for record in records
+            if record["event_type"] == "EXTERNAL_ACKNOWLEDGEMENT"
+            and record["attempt_id"] == "attempt-product-observation-clock"
+        ]
+        assert len(acknowledgements) == 1
+        acknowledgement_time = acknowledgements[0]["payload"][
+            "acknowledged_at"
+        ]
+        assert acknowledgement_time == binding["observed_at"]
+        assert acknowledgement_time != forged_client_time
+
+
 def test_processed_with_errors_single_success_is_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

@@ -30,22 +30,23 @@ class EmergencyStopWebController(AutosportWebController):
         self._emergency_stop = emergency_stop or WindowsEmergencyStopBridge.for_workspace(
             self.workspace
         )
-        self.emergency_stop_status = (
-            "Аварійний STOP доступний. Активація блокує допуск нових виконань; "
-            "вона не доводить завершення вже запущеної роботи."
-        )
 
     def state(self) -> dict[str, Any]:
         state = super().state()
+        stop_status = self._emergency_stop.status()
         state["emergency_stop"] = {
-            "status": self.emergency_stop_status,
-            "available": True,
+            "status": stop_status.message_uk,
+            "available": stop_status.available,
+            "execution_blocked": stop_status.execution_blocked,
+            "mode": stop_status.mode,
+            "revision": stop_status.revision,
+            "integrity_confirmed": stop_status.integrity_confirmed,
+            "initialized": stop_status.initialized,
         }
         return state
 
     def _activate_emergency_stop(self) -> dict[str, Any]:
         result = self._emergency_stop.activate()
-        self.emergency_stop_status = result.message_uk
         if not result.stopped:
             return self._fail(result.message_uk)
         return self._ok(result.message_uk, focus_id="emergency-stop-status")

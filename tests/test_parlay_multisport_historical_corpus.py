@@ -223,7 +223,7 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
 
     assert dataset.schema_version == 3
     assert dataset.sport == "basketball"
-    assert {event.sport for event in dataset.events} == {"basketball"}
+    assert {event.sport for event in dataset.load_market_events()} == {"basketball"}
     assert manifest["governance"]["coverage"]["source_ids"] == ["parlayapi:basketball"]
     assert provenance["product_kind"] == "POINT_IN_TIME_ODDS"
     assert provenance["causal_classification"] == "RETROSPECTIVE_POINT_IN_TIME_PRICE"

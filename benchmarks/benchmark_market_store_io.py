@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import tempfile
 import time
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from autosport.domain import MarketEvent
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
 from autosport.providers import InMemoryProvider, ProviderQuote
@@ -57,6 +59,42 @@ def _positive_elapsed(name: str, value: float) -> float:
     if not math.isfinite(numeric) or numeric <= 0:
         raise ValueError(f"{name} must be a finite positive number")
     return numeric
+
+
+def _current_projection_snapshot(
+    current: dict[tuple[str, str], MarketEvent],
+) -> tuple[tuple[str, str, str], ...]:
+    """Detach exact current identity+payload for restart equality proof."""
+
+    rows: list[tuple[str, str, str]] = []
+    for key, event in current.items():
+        if (
+            type(key) is not tuple
+            or len(key) != 2
+            or type(key[0]) is not str
+            or type(key[1]) is not str
+            or type(event) is not MarketEvent
+        ):
+            raise RuntimeError("current projection contains a non-canonical entry")
+        source_id, quote_key = key
+        if (event.source_id, event.quote_key) != key:
+            raise RuntimeError(
+                "current projection key does not match canonical event identity"
+            )
+        try:
+            payload = json.dumps(
+                event.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "current projection payload is not canonical JSON"
+            ) from exc
+        rows.append((source_id, quote_key, payload))
+    return tuple(sorted(rows))
 
 
 def _build_quotes(count: int) -> list[ProviderQuote]:
@@ -125,7 +163,9 @@ def run_profile(count: int = 20_000, batch_size: int = 1_000) -> MarketStoreIOPr
                 rejected += stats.rejected
             ingest_elapsed = time.perf_counter() - ingest_started
 
-            current_before_close = len(store.current_by_source())
+            current_before_close = _current_projection_snapshot(
+                store.current_by_source()
+            )
         finally:
             store.close()
 
@@ -163,10 +203,10 @@ def run_profile(count: int = 20_000, batch_size: int = 1_000) -> MarketStoreIOPr
                 "reopened durable history count does not match accepted workload: "
                 f"accepted={accepted} history={len(history)}"
             )
-        if len(current) != current_before_close:
+        current_after_reopen = _current_projection_snapshot(current)
+        if current_after_reopen != current_before_close:
             raise RuntimeError(
-                "reopened current projection count changed across close/reopen: "
-                f"before={current_before_close} after={len(current)}"
+                "reopened current projection content changed across close/reopen"
             )
 
         result = MarketStoreIOProfile(

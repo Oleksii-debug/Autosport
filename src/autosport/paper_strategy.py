@@ -64,12 +64,14 @@ class PaperValueAgent:
         self._acted: set[str] = set()
 
     @staticmethod
-    def _forecast_matches_market_semantics(
+    def _forecast_matches_market_identity(
         forecast: ForecastLike,
         event: MarketEvent,
     ) -> bool:
-        """Require forecast probability to describe the event's exact rule identity."""
+        """Require forecast probability to describe the event's exact market identity."""
 
+        if forecast.quote_key != event.quote_key:
+            return False
         if isinstance(forecast, ForecastRecord):
             return forecast.market_semantics_id == event.market_semantics_id
         # Legacy Forecast has no rule-identity field. It remains valid only for
@@ -276,9 +278,9 @@ class PaperValueAgent:
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
             return
-        if not self._forecast_matches_market_semantics(forecast, event):
+        if not self._forecast_matches_market_identity(forecast, event):
             context.notes.append(
-                "paper-value forecast withheld: forecast market semantics do not "
+                "paper-value forecast withheld: forecast market identity does not "
                 "match the canonical market event"
             )
             return

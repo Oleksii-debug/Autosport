@@ -211,6 +211,42 @@ class ProductClockBoundaryTests(unittest.TestCase):
         self.assertTrue(day_window._is_product_clock(day_window._PRODUCT_TIME_NS))
         self.assertFalse(day_window._is_product_clock(lambda: 0))
 
+    def test_default_system_clock_evidence_passes_positive_revalidation(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            evidence = store.current()
+
+            self.assertTrue(evidence.product_clock_authoritative)
+            self.assertEqual(store.require_current(evidence), evidence)
+
+    def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
+        original = day_window._PRODUCT_TIME_NS
+        try:
+            day_window._PRODUCT_TIME_NS = lambda: _epoch_ns(
+                "2026-09-23T12:00:00Z"
+            )
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = ProductDayRiskWindowStore(
+                    root / "workspace",
+                    authority_root=root / "machine-authority",
+                )
+                evidence = store.current()
+
+                self.assertFalse(evidence.product_clock_authoritative)
+                with self.assertRaisesRegex(
+                    RiskDayWindowIntegrityError,
+                    "test/synthetic clock",
+                ):
+                    store.require_current(evidence)
+        finally:
+            day_window._PRODUCT_TIME_NS = original
+
 
 if __name__ == "__main__":
     unittest.main()

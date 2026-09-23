@@ -127,5 +127,86 @@ class ContinuousObservationRestartBackoffTests(unittest.TestCase):
             self.assertIsNone(recovered_status["last_error_kind"])
 
 
+    def test_restart_does_not_inherit_backoff_from_other_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            class _OtherSourceProvider(_SequenceProvider):
+                source_id = "other-restart-backoff-fixture"
+
+            first_provider = _SequenceProvider(
+                [ProviderUnavailableError("source A outage")]
+            )
+            with self.assertRaises(SystemExit):
+                run_continuous_observation(
+                    first_provider,
+                    self._config(workspace),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda seconds: (_ for _ in ()).throw(SystemExit("crash")),
+                    reporter=None,
+                    run_id="source-a-before-crash",
+                )
+
+            waits: list[float] = []
+            other_provider = _OtherSourceProvider(
+                [
+                    ProviderUnavailableError("source B outage"),
+                    ProviderBatch(_OtherSourceProvider.source_id, (), cursor="recovered"),
+                ]
+            )
+            result = run_continuous_observation(
+                other_provider,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: waits.append(seconds) or False,
+                reporter=None,
+                run_id="source-b-after-crash",
+            )
+
+            self.assertEqual(waits, [1.0])
+            self.assertEqual(result.exit_code, 0)
+
+    def test_restart_does_not_inherit_backoff_from_non_provider_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = _SequenceProvider([ValueError("invalid provider payload")])
+            first_result = run_continuous_observation(
+                first_provider,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: False,
+                reporter=None,
+                run_id="validation-failure-before-restart",
+            )
+            self.assertEqual(first_result.exit_code, 3)
+
+            waits: list[float] = []
+            second_provider = _SequenceProvider(
+                [
+                    ProviderUnavailableError("provider now unavailable"),
+                    _empty_batch("recovered-after-validation-failure"),
+                ]
+            )
+            second_result = run_continuous_observation(
+                second_provider,
+                self._config(workspace),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                wall_clock=lambda: _NOW,
+                waiter=lambda seconds: waits.append(seconds) or False,
+                reporter=None,
+                run_id="provider-outage-after-validation-failure",
+            )
+
+            self.assertEqual(waits, [1.0])
+            self.assertEqual(second_result.exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

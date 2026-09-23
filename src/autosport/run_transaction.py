@@ -141,6 +141,10 @@ class RunTransaction:
                 "decision_ledger_sha256": base_decision_ledger_sha256,
             },
             "new": {},
+            "retained": {
+                "base_paper_book": "paper_book.base.json",
+                "terminal_paper_book": "paper_book.terminal.json",
+            },
             "targets": {
                 "paper_book": "paper_book.json",
                 "decision_ledger": "decisions.jsonl",
@@ -258,6 +262,14 @@ class RunTransaction:
         if manifest.get("phase") not in {"canonical_committed", "completed"}:
             raise RunTransactionError(
                 "retained terminal PaperBook requires a terminal transaction"
+            )
+
+        if manifest.get("retained") != {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }:
+            raise RunTransactionError(
+                "transaction lacks retained terminal PaperBook evidence contract"
             )
 
         registry_item = self._completed_registry_item()
@@ -405,6 +417,14 @@ class RunTransaction:
             raise RunTransactionError("combined staged Decision Ledger changed after stage_outputs")
         if staged_snapshot.payload != canonical_snapshot.payload + run_snapshot.payload:
             raise RunTransactionError("combined staged Decision Ledger exact snapshot mismatch")
+
+        # A transaction that was still in staging when this evidence feature was
+        # introduced can be upgraded safely: it has not crossed the precommit
+        # boundary yet. Already-precommitted legacy manifests are never backfilled.
+        manifest["retained"] = {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }
 
         # Retain the exact already-verified NEW bytes before the transaction can
         # become precommitted. Never re-read mutable paper_book.json here: it is
@@ -840,6 +860,12 @@ class RunTransaction:
         }
         if manifest.get("targets") != expected_targets or manifest.get("staged") != expected_staged:
             raise RunTransactionError("transaction manifest paths are invalid")
+        retained = manifest.get("retained")
+        if retained is not None and retained != {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }:
+            raise RunTransactionError("transaction retained-evidence paths are invalid")
 
     @staticmethod
     def _hash_field(manifest: dict[str, Any], section: str, field: str) -> str:
@@ -1228,14 +1254,23 @@ class RunTransaction:
         expected_ledger_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
         expected_summary_hash = self._hash_field(manifest, "new", "summary_sha256")
 
-        terminal_snapshot = self._verified_canonical_paper_book_snapshot(
-            self.terminal_book_snapshot_path,
-            "retained terminal PaperBook",
-        )
-        if terminal_snapshot.sha256 != expected_book_hash:
-            raise RunTransactionError(
-                "retained terminal PaperBook SHA-256 does not match transaction NEW"
+        retained_contract = manifest.get("retained")
+        if retained_contract is not None:
+            if retained_contract != {
+                "base_paper_book": "paper_book.base.json",
+                "terminal_paper_book": "paper_book.terminal.json",
+            }:
+                raise RunTransactionError(
+                    "transaction retained-evidence paths are invalid"
+                )
+            terminal_snapshot = self._verified_canonical_paper_book_snapshot(
+                self.terminal_book_snapshot_path,
+                "retained terminal PaperBook",
             )
+            if terminal_snapshot.sha256 != expected_book_hash:
+                raise RunTransactionError(
+                    "retained terminal PaperBook SHA-256 does not match transaction NEW"
+                )
 
         summary_target = self.workspace / f"run-{self.run_id}.json"
 

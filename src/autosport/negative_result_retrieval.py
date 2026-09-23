@@ -7,6 +7,8 @@ records; it never authorizes a repeat, promotion, deployment, or execution.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -182,6 +184,16 @@ def _required_sha256(
     return lowered
 
 
+def _canonical_payload_sha256(payload: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def search_negative_results(
     registry: ScientificRegistry,
     query: str,
@@ -261,6 +273,24 @@ def search_negative_results(
         ):
             raise NegativeResultRetrievalError(
                 f"{context} has inconsistent question/hypothesis lineage"
+            )
+
+        protocol_context = f"ResearchProtocol:{protocol.record_id}"
+        if _required_sha256(
+            binding,
+            "research_question_sha256",
+            context=protocol_context,
+        ) != _canonical_payload_sha256(question.payload):
+            raise NegativeResultRetrievalError(
+                f"{protocol_context} research question hash does not match frozen binding"
+            )
+        if _required_sha256(
+            binding,
+            "hypothesis_sha256",
+            context=protocol_context,
+        ) != _canonical_payload_sha256(hypothesis.payload):
+            raise NegativeResultRetrievalError(
+                f"{protocol_context} hypothesis hash does not match frozen binding"
             )
 
         causal_lineage = (

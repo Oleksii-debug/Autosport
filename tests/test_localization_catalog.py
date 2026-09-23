@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -120,6 +121,73 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.status.replay.reopen_blocked",
     "ui.status.close.recovery_busy",
 }
+
+
+_LANGUAGE_NEUTRAL_CRITICAL_VALUES = {
+    "ui.speed.10x": "10×",
+    "ui.speed.100x": "100×",
+    "ui.speed.1000x": "1000×",
+}
+_FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
+_CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
+
+
+def _assert_critical_ukrainian_template(key: str, value: str) -> None:
+    stripped = value.strip()
+    assert stripped, f"{key} resolved to an empty/whitespace critical value"
+    assert stripped != key, f"{key} resolved by echoing its localization key"
+
+    neutral_value = _LANGUAGE_NEUTRAL_CRITICAL_VALUES.get(key)
+    if neutral_value is not None:
+        assert stripped == neutral_value, (
+            f"{key} changed from its exact language-neutral technical value: {value!r}"
+        )
+        return
+
+    language_text = _FORMAT_FIELD.sub("", stripped)
+    assert _CYRILLIC_LETTER.search(language_text), (
+        f"{key} has no Ukrainian/Cyrillic presentation signal: {value!r}"
+    )
+
+
+def test_critical_catalog_is_fail_closed_against_blank_key_echo_and_english_fallback() -> None:
+    messages = catalog()
+    guarded_keys = _CRITICAL_UI_KEYS | _RUNTIME_RECOVERY_KEYS
+    require_keys(guarded_keys)
+
+    # The bounded manifests deliberately include visible controls, UIA/NVDA
+    # presentation resources, and startup/recovery status/error text, so all of
+    # those critical paths share the same fail-closed language guard.
+    assert any(key.startswith("ui.button.") for key in guarded_keys)
+    assert any(key.startswith("ui.accessibility.") for key in guarded_keys)
+    assert any(key.startswith("ui.error.recovery.") for key in guarded_keys)
+    assert any(key.startswith("ui.status.recovery.") for key in guarded_keys)
+
+    for key in sorted(guarded_keys):
+        _assert_critical_ukrainian_template(key, messages[key])
+
+
+def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_context() -> None:
+    _assert_critical_ukrainian_template(
+        "ui.example.provider_status",
+        "Статус Betfair API: доступний; час UTC.",
+    )
+    _assert_critical_ukrainian_template(
+        "ui.example.technical_context",
+        "Betfair API UIA NVDA UTC SHA-256: стан доступний.",
+    )
+
+    with pytest.raises(AssertionError, match="no Ukrainian/Cyrillic presentation signal"):
+        _assert_critical_ukrainian_template(
+            "ui.example.provider_status",
+            "Betfair API status: ready; time UTC.",
+        )
+    with pytest.raises(AssertionError, match="empty/whitespace"):
+        _assert_critical_ukrainian_template("ui.example.blank", "   ")
+    with pytest.raises(AssertionError, match="echoing its localization key"):
+        _assert_critical_ukrainian_template("ui.example.echo", "ui.example.echo")
+    with pytest.raises(AssertionError, match="exact language-neutral technical value"):
+        _assert_critical_ukrainian_template("ui.speed.10x", "Fast")
 
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:

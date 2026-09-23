@@ -545,6 +545,42 @@ def test_out_of_domain_betfair_selection_fails_before_attempt_or_transport(
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
+def test_max_signed_long_betfair_selection_projects_exactly() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        maximum = "9223372036854775807"
+        profile, bound, approval, ledger, action, goal_store = _prepared(
+            tmp,
+            selection_id=maximum,
+        )
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-max-selection",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert len(transport.calls) == 1
+        request = transport.calls[0]["request"]
+        assert (
+            request["params"]["instructions"][0]["selectionId"]
+            == 9223372036854775807
+        )
+
+
 def test_default_gate_cannot_reach_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

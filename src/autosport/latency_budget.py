@@ -145,6 +145,12 @@ class LatencySummary:
             _non_negative_ns(value, field=field)
         if self.breach_count > self.sample_count:
             raise LatencyBudgetError("breach_count cannot exceed sample_count")
+        if self.max_ns <= self.budget.budget_ns and self.breach_count != 0:
+            raise LatencyBudgetError("breach_count contradicts all-within-budget samples")
+        if self.max_ns > self.budget.budget_ns and self.breach_count == 0:
+            raise LatencyBudgetError("breach_count contradicts max_ns budget breach")
+        if self.min_ns > self.budget.budget_ns and self.breach_count != self.sample_count:
+            raise LatencyBudgetError("breach_count contradicts all-over-budget samples")
         if not (
             self.min_ns
             <= self.p50_ns
@@ -153,8 +159,10 @@ class LatencySummary:
             <= self.max_ns
         ):
             raise LatencyBudgetError("latency summary ranks must be monotonic")
-        if self.total_ns < self.min_ns or self.total_ns < self.max_ns:
-            raise LatencyBudgetError("total_ns cannot be smaller than an observed sample")
+        minimum_total = self.sample_count * self.min_ns
+        maximum_total = self.sample_count * self.max_ns
+        if not minimum_total <= self.total_ns <= maximum_total:
+            raise LatencyBudgetError("total_ns contradicts sample_count/min_ns/max_ns bounds")
 
     @property
     def within_budget(self) -> bool:

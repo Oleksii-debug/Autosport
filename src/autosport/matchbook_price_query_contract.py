@@ -21,6 +21,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP", "AUD", "CAD", "HKD"})
 _INT32_MAX = (1 << 31) - 1
 _INT64_MAX = (1 << 63) - 1
+_MAX_DECIMAL_TEXT_CHARS = 512
 
 
 class MatchbookPriceQueryError(ValueError):
@@ -93,14 +94,49 @@ def _finite_non_negative_decimal(value: Decimal, name: str) -> Decimal:
         raise MatchbookPriceQueryError(
             f"{name} is outside the documented Matchbook double domain"
         )
+    _decimal_text(value)
     return value
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return "0" if text in {"-0", ""} else text
+    sign, raw_digits, exponent = value.as_tuple()
+    digits = list(raw_digits)
+    if not any(digits):
+        return "0"
+
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    coefficient = "".join(str(digit) for digit in digits)
+    sign_chars = 1 if sign else 0
+    if exponent >= 0:
+        projected_chars = sign_chars + len(coefficient) + exponent
+        if projected_chars > _MAX_DECIMAL_TEXT_CHARS:
+            raise MatchbookPriceQueryError(
+                "serialized Decimal exceeds safety bound"
+            )
+        text = coefficient + ("0" * exponent)
+    else:
+        point = len(coefficient) + exponent
+        if point > 0:
+            projected_chars = sign_chars + len(coefficient) + 1
+            if projected_chars > _MAX_DECIMAL_TEXT_CHARS:
+                raise MatchbookPriceQueryError(
+                    "serialized Decimal exceeds safety bound"
+                )
+            text = f"{coefficient[:point]}.{coefficient[point:]}"
+        else:
+            projected_chars = (
+                sign_chars + 2 + (-point) + len(coefficient)
+            )
+            if projected_chars > _MAX_DECIMAL_TEXT_CHARS:
+                raise MatchbookPriceQueryError(
+                    "serialized Decimal exceeds safety bound"
+                )
+            text = f"0.{('0' * -point)}{coefficient}"
+
+    return f"-{text}" if sign else text
 
 
 def _utc_text(value: datetime, name: str) -> str:

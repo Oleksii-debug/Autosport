@@ -11,6 +11,7 @@ from autosport.prophetx_replace_reconciliation import (
     Replaced,
     ReplaceOutcome,
     ReplaceReject,
+    ReplaceRejectResponseTo,
     ReplaceRequest,
     Transport,
     WorkingOrder,
@@ -109,6 +110,7 @@ def reject(**kw):
         replace_cl_ord_id="repl-1",
         orig_cl_ord_id="orig-1",
         reason="too late",
+        response_to=ReplaceRejectResponseTo.REPLACE,
         order_status=OrderStatus.PARTIALLY_FILLED,
         transact_time="2026-09-22T20:00:04Z",
         fix_session_id="sess",
@@ -303,6 +305,40 @@ def test_replace_reject_does_not_apply_requested_economics():
     assert p.active_price is None
     assert p.requires_readback is True
     assert p.replacement_open_quantity == 0
+
+
+def test_cancel_response_to_does_not_satisfy_replace_reject():
+    with pytest.raises(
+        ProphetXReplaceConflict,
+        match="CxlRejResponseTo does not identify replace",
+    ):
+        reconcile(
+            request(),
+            working(),
+            [reject(response_to=ReplaceRejectResponseTo.CANCEL)],
+        )
+
+
+def test_response_to_participates_in_replay_identity():
+    replace_reject = reject()
+    cancel_reject = replace(
+        replace_reject,
+        response_to=ReplaceRejectResponseTo.CANCEL,
+    )
+    with pytest.raises(
+        ProphetXReplaceConflict,
+        match="conflicting replay of provider evidence id",
+    ):
+        reconcile(
+            request(),
+            working(),
+            [replace_reject, cancel_reject],
+        )
+
+
+def test_replace_reject_requires_typed_response_to():
+    with pytest.raises(ProphetXReplaceError, match="CxlRejResponseTo"):
+        reject(response_to="2")
 
 
 def test_reject_after_old_fill_preserves_fill():

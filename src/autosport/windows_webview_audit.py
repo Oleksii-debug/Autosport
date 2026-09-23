@@ -69,19 +69,18 @@ _DYNAMICALLY_DISABLED_CONTROLS = {"product-runtime-stop"}
 _REQUIRED_LANDMARKS = {"header", "nav", "main"}
 _REQUIRED_SHORTCUT_MARKERS = (
     'event.key === "F2"',
-    'event.key === "F6"',
-    'event.key === "F7"',
     'event.key === "F8"',
-    'event.key === "F9"',
-    'event.key === "F10"',
-    'key === "o"',
-    'key === "e"',
-    'key === "l"',
-    'isEditable(event.target)',
 )
 _FORBIDDEN_SHORTCUT_MARKERS = (
     'event.ctrlKey && event.altKey',
     'key === "r"',
+    'key === "o"',
+    'key === "e"',
+    'key === "l"',
+    'event.key === "F6"',
+    'event.key === "F7"',
+    'event.key === "F9"',
+    'event.key === "F10"',
 )
 _REQUIRED_BRIDGE_MARKERS = (
     'window.addEventListener("pywebviewready"',
@@ -181,6 +180,19 @@ def inspect_semantic_shell() -> dict[str, Any]:
     if not any(region.get("aria-live") == "assertive" for region in parser.alert_regions):
         failures.append("semantic shell is missing an assertive alert live region")
 
+    live_status = parser.elements.get("live-status")
+    if live_status is None:
+        failures.append("live-status readback is missing")
+    else:
+        _, live_status_attrs = live_status
+        if (
+            live_status_attrs.get("role") == "status"
+            or live_status_attrs.get("aria-live") not in {None, "off"}
+        ):
+            failures.append(
+                "live-status must remain a non-announcing polled readback"
+            )
+
     for automation_id, expected_tag in _REQUIRED_CONTROLS.items():
         element = parser.elements.get(automation_id)
         if element is None:
@@ -195,8 +207,6 @@ def inspect_semantic_shell() -> dict[str, Any]:
             if automation_id not in parser.labels_for and not attrs.get("aria-label"):
                 failures.append(f"id={automation_id}: form control has no label")
         if tag in {"button", "ul"} and not attrs.get("aria-label"):
-            # Buttons obtain their accessible name from text content. Lists are
-            # required to carry an explicit label because their rows are dynamic.
             if tag == "ul":
                 failures.append(f"id={automation_id}: dynamic list has no aria-label")
         if automation_id in _READONLY_CONTROLS and "readonly" not in attrs:
@@ -229,6 +239,13 @@ def inspect_semantic_shell() -> dict[str, Any]:
         not in javascript
     ):
         failures.append("runtime STOP dynamic enabled-state projection is missing")
+    if (
+        'setTextIfChanged(byId("manual-status"), state.manual.status || "")'
+        not in javascript
+    ):
+        failures.append("manual-status live region projection is not change-only")
+    if 'byId("manual-status").textContent = state.manual.status || ""' in javascript:
+        failures.append("manual-status live region has an unconditional poll write")
 
     return {
         "status": "PASS" if not failures else "FAIL",

@@ -300,8 +300,12 @@
     const priorNav = nav.value;
     setSelectOptions(nav, state.surfaces || [], "key", "title");
     setValueUnlessFocused(nav, state.surface_key || priorNav);
-    setValueIfChanged(byId(302), state.surface_state || "");
-    renderList(byId(304), state.surface_details);
+    const surfaceDetails = Array.from(
+      state.surface_details || [],
+      (value) => String(value),
+    );
+    setValueIfChanged(byId(302), surfaceDetails[0] || "СТАН: невідомий");
+    renderList(byId(304), surfaceDetails);
 
     setValueIfChanged(byId(306), state.owner.summary || "");
     renderList(byId(307), state.owner.lines || []);

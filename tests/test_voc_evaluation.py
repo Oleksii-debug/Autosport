@@ -906,6 +906,15 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "contradiction_state": value.voc_contradiction_state,
             "routing_policy_id": active_policy.policy_id,
             "routing_policy_version": str(active_policy.policy_version),
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    active_policy.payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
             "cloud_permission": (
                 "ALLOW" if active_policy.cloud_enabled else "DENY"
             ),
@@ -989,6 +998,15 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "contradiction_state": production_request.voc_contradiction_state,
             "routing_policy_id": "policy-voc",
             "routing_policy_version": "1",
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    policy().payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
             "cloud_permission": "ALLOW",
             "cloud_backend_id": "permitted-cloud",
         }

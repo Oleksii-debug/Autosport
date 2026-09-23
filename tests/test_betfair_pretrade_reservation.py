@@ -616,6 +616,7 @@ def test_store_is_bound_to_canonical_execution_workspace(
     client = _client()
     action = _action("a1", stake="25")
     foreign = tmp_path / "foreign"
+    foreign.mkdir()
     ledger = _ledger(foreign, action)
     store = _store(tmp_path)
 

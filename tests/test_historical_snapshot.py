@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 import tempfile
 import threading
@@ -19,15 +20,36 @@ from autosport.parlayapi_provider import (
 
 
 class _Transport:
-    def __init__(self, payload: object) -> None:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        response_headers: dict[str, str] | None = None,
+        status_code: int = 200,
+    ) -> None:
         self.payload = payload
+        self.response_headers = (
+            {"x-api-version": "test"}
+            if response_headers is None
+            else dict(response_headers)
+        )
+        self.status_code = status_code
         self.urls: list[str] = []
         self.headers: list[dict[str, str]] = []
 
-    def __call__(self, url: str, headers: dict[str, str], timeout: float) -> HttpJsonResponse:
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> HttpJsonResponse:
         self.urls.append(url)
         self.headers.append(dict(headers))
-        return HttpJsonResponse(self.payload, 200, {"x-api-version": "test"})
+        return HttpJsonResponse(
+            self.payload,
+            self.status_code,
+            dict(self.response_headers),
+        )
 
 
 def _payload(
@@ -109,6 +131,43 @@ class HistoricalSnapshotTests(unittest.TestCase):
         self.assertFalse(evidence["replay_corpus_ready"])
         self.assertFalse(evidence["licensing_or_retention_verified"])
         self.assertFalse(evidence["real_money_execution"])
+        acquisition = evidence["acquisition_provenance"]
+        self.assertEqual(acquisition["schema_version"], 1)
+        self.assertEqual(
+            acquisition["kind"],
+            "parlayapi_point_in_time_historical_acquisition",
+        )
+        self.assertEqual(acquisition["product_kind"], "POINT_IN_TIME_ODDS")
+        self.assertEqual(acquisition["http_status"], 200)
+        self.assertTrue(acquisition["canonical_response_payload_bound"])
+        self.assertFalse(acquisition["raw_response_bytes_bound"])
+        self.assertEqual(
+            acquisition["response_payload_sha256"],
+            evidence["response_sha256"],
+        )
+        request = acquisition["request"]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["origin"], "https://parlay-api.com")
+        self.assertEqual(
+            request["endpoint_path"],
+            "/v1/historical/sports/table_tennis/odds",
+        )
+        self.assertEqual(request["query"]["date"], "2026-09-12T10:03:00Z")
+        self.assertEqual(request["query"]["markets"], "h2h,spreads,totals")
+        self.assertFalse(request["request_url_persisted"])
+        self.assertFalse(request["request_credentials_persisted"])
+        self.assertEqual(
+            request["request_url_sha256"],
+            hashlib.sha256(transport.urls[0].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(acquisition["response_headers"]["x-api-version"], "test")
+        self.assertIsNone(
+            acquisition["response_headers"]["x-api-release-date"]
+        )
+        self.assertEqual(
+            evidence["acquisition_sha256"],
+            historical_snapshot._canonical_sha256(acquisition),
+        )
         serialized = json.dumps(evidence) + json.dumps(rows)
         self.assertNotIn("secret-key-must-not-leak", serialized)
         self.assertEqual(transport.headers[0]["X-API-Key"], "secret-key-must-not-leak")
@@ -116,6 +175,166 @@ class HistoricalSnapshotTests(unittest.TestCase):
         self.assertEqual(query["date"], ["2026-09-12T10:03:00Z"])
         self.assertEqual(query["markets"], ["h2h,spreads,totals"])
         self.assertEqual(query["oddsFormat"], ["decimal"])
+
+    def test_acquisition_identity_binds_response_version_headers_without_secrets(self) -> None:
+        payload = _payload()
+        headers_a = {
+            "X-API-Version": "3.2.0",
+            "X-API-Release-Date": "2026-09-01",
+            "Deprecation": "false",
+            "X-Historical-Window-Hours": "720",
+            "X-Markets-Unservable": "outrights",
+            "Cache-Control": "private, max-age=60",
+            "Authorization": "response-secret-must-not-persist",
+        }
+        headers_b = dict(headers_a)
+        headers_b["X-API-Version"] = "3.2.1"
+        provider_a = self._provider(
+            _Transport(payload, response_headers=headers_a)
+        )
+        provider_b = self._provider(
+            _Transport(payload, response_headers=headers_b)
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence_a_path = root / "a.evidence.json"
+            evidence_b_path = root / "b.evidence.json"
+            capture_historical_snapshot(
+                provider_a,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=root / "a.jsonl",
+                evidence_path=evidence_a_path,
+            )
+            capture_historical_snapshot(
+                provider_b,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=root / "b.jsonl",
+                evidence_path=evidence_b_path,
+            )
+            evidence_a = json.loads(evidence_a_path.read_text(encoding="utf-8"))
+            evidence_b = json.loads(evidence_b_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(evidence_a["response_sha256"], evidence_b["response_sha256"])
+        self.assertNotEqual(
+            evidence_a["acquisition_sha256"],
+            evidence_b["acquisition_sha256"],
+        )
+        tracked = evidence_a["acquisition_provenance"]["response_headers"]
+        self.assertEqual(tracked["x-api-version"], "3.2.0")
+        self.assertEqual(tracked["x-api-release-date"], "2026-09-01")
+        self.assertEqual(tracked["deprecation"], "false")
+        self.assertEqual(tracked["x-historical-window-hours"], "720")
+        self.assertEqual(tracked["x-markets-unservable"], "outrights")
+        self.assertEqual(tracked["cache-control"], "private, max-age=60")
+        self.assertNotIn("authorization", tracked)
+        self.assertNotIn(
+            "response-secret-must-not-persist",
+            json.dumps(evidence_a),
+        )
+
+    def test_acquisition_identity_binds_exact_request_scope(self) -> None:
+        payload = _payload()
+        transport_a = _Transport(payload)
+        transport_b = _Transport(payload)
+        provider_a = self._provider(transport_a)
+        provider_b = ParlayApiTableTennisProvider(
+            "secret-key-must-not-leak",
+            regions=("us",),
+            markets=("h2h",),
+            transport=transport_b,
+            clock=lambda: "2026-09-13T02:00:00+00:00",
+            sleeper=lambda _: None,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            a_path = root / "a.evidence.json"
+            b_path = root / "b.evidence.json"
+            capture_historical_snapshot(
+                provider_a,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=root / "a.jsonl",
+                evidence_path=a_path,
+            )
+            capture_historical_snapshot(
+                provider_b,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=root / "b.jsonl",
+                evidence_path=b_path,
+            )
+            a = json.loads(a_path.read_text(encoding="utf-8"))
+            b = json.loads(b_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(a["response_sha256"], b["response_sha256"])
+        self.assertNotEqual(a["acquisition_sha256"], b["acquisition_sha256"])
+        self.assertEqual(
+            a["acquisition_provenance"]["request"]["query"]["markets"],
+            "h2h,spreads,totals",
+        )
+        self.assertEqual(
+            b["acquisition_provenance"]["request"]["query"]["markets"],
+            "h2h",
+        )
+
+    def test_duplicate_tracked_response_header_fails_closed(self) -> None:
+        transport = _Transport(
+            _payload(),
+            response_headers={
+                "X-API-Version": "3.2.0",
+                "x-api-version": "3.2.1",
+            },
+        )
+        provider = self._provider(transport)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "duplicate tracked response header",
+            ):
+                capture_historical_snapshot(
+                    provider,
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=root / "market.jsonl",
+                    evidence_path=root / "evidence.json",
+                )
+            self.assertFalse((root / "market.jsonl").exists())
+            self.assertFalse((root / "evidence.json").exists())
+
+    def test_non_200_transport_result_cannot_publish_success_evidence(self) -> None:
+        transport = _Transport(_payload(), status_code=206)
+        provider = self._provider(transport)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "requires HTTP 200",
+            ):
+                capture_historical_snapshot(
+                    provider,
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=root / "market.jsonl",
+                    evidence_path=root / "evidence.json",
+                )
+            self.assertFalse((root / "market.jsonl").exists())
+            self.assertFalse((root / "evidence.json").exists())
+
+    def test_request_provenance_rejects_credential_bearing_base_url(self) -> None:
+        transport = _Transport(_payload())
+        provider = ParlayApiTableTennisProvider(
+            "secret-key-must-not-leak",
+            base_url="https://user:embedded-secret@parlay-api.com",
+            transport=transport,
+            clock=lambda: "2026-09-13T02:00:00+00:00",
+            sleeper=lambda _: None,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "secret-free HTTPS"):
+                capture_historical_snapshot(
+                    provider,
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=Path(temp) / "market.jsonl",
+                )
+        self.assertEqual(transport.urls, [])
 
     def test_real_quote_last_update_is_preserved(self) -> None:
         transport = _Transport(_payload(last_update="2026-09-12T09:59:30Z"))

@@ -80,6 +80,13 @@
       <input id="product-runtime-status" type="text" readonly aria-label="Стан тривалої симуляційної роботи">
     </section>
 
+    <section id="emergency-stop-panel" aria-labelledby="emergency-stop-heading">
+      <h2 id="emergency-stop-heading">Аварійний STOP виконання</h2>
+      <p id="emergency-stop-boundary">Цей STOP блокує нові виконання через канонічну durable execution authority. Він не доводить, що вже запущений worker або feed завершився.</p>
+      <button id="emergency-stop-action" type="button" aria-describedby="emergency-stop-boundary emergency-stop-status">Активувати аварійний STOP</button>
+      <p id="emergency-stop-status" role="status" aria-live="assertive" aria-atomic="true" tabindex="-1">Аварійний STOP доступний. Активація блокує нові виконання.</p>
+    </section>
+
     <section id="live-market" aria-labelledby="live-heading">
       <h2 id="live-heading">Живі ринкові дані</h2>
       <label for="104">Режим живих даних</label>
@@ -199,7 +206,7 @@
 
     <section id="help-about" aria-labelledby="help-heading">
       <h2 id="help-heading" tabindex="-1">Клавіатура і межа доказів</h2>
-      <p>F2 — навігація екранами; F8 — оцінювання. Шляхи набору даних і доказів, оновлення котирувань, симуляційний повтор і відновлення доступні через звичайні семантичні елементи керування Tab + Enter/Space.</p>
+      <p>F2 — навігація екранами; F8 — оцінювання. Шляхи набору даних і доказів, оновлення котирувань, симуляційний повтор, відновлення та аварійний STOP доступні через звичайні семантичні елементи керування Tab + Enter/Space.</p>
       <p>Ctrl+O/Ctrl+E/Ctrl+L/Ctrl+R та F6/F7/F9/F10 залишаються браузеру/WebView2 і допоміжним технологіям; Автоспорт не перехоплює ці комбінації на рівні DOM.</p>
       <p>Машинні семантичні перевірки UIA не є фізичною перевіркою NVDA. NVDA_VERIFIED залишається false до людського тесту точного артефакту випуску.</p>
     </section>
@@ -207,5 +214,6 @@
 
   <noscript>Для керування Автоспортом у цій оболонці потрібен JavaScript WebView2.</noscript>
   <script src="app.js"></script>
+  <script src="emergency_stop.js"></script>
 </body>
 </html>

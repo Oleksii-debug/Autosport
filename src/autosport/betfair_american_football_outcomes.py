@@ -129,6 +129,13 @@ def assess_betfair_american_football_historical_market_definition_authority(
             raise ValueError(
                 f"marketDefinition.runners[{index}].id must be string or integer"
             )
+        if isinstance(raw_selection_id, int) and not (
+            0 < raw_selection_id <= (2**63 - 1)
+        ):
+            raise ValueError(
+                f"marketDefinition.runners[{index}].id integer must be "
+                "a positive signed-64-bit value"
+            )
         selection_ids.append(
             _canonical_text(
                 f"marketDefinition.runners[{index}].id",

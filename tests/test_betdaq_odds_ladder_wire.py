@@ -134,6 +134,7 @@ def test_duplicate_numeric_price_fails_closed_even_with_different_lexeme() -> No
             )
         )
 
+
 def test_invalid_or_empty_ladder_cannot_be_current_authority() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="at least one"):
         parse_get_odds_ladder_response(_response(entries=""))
@@ -162,15 +163,29 @@ def test_price_lexeme_must_follow_xml_schema_decimal_grammar() -> None:
         assert response.entries[0].price_text == price
 
 
-def test_price_lexeme_must_be_trimmed_and_representation_nonempty() -> None:
-    with pytest.raises(BetdaqSoapProtocolError, match="trimmed"):
+def test_price_and_representation_identity_text_must_be_trimmed() -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="price must be trimmed"):
         parse_get_odds_ladder_response(
             _response(entries='<Ladder price=" 2.00 " representation="Evens" />')
+        )
+    with pytest.raises(BetdaqSoapProtocolError, match="representation must be trimmed"):
+        parse_get_odds_ladder_response(
+            _response(entries='<Ladder price="2.00" representation=" Evens " />')
         )
     with pytest.raises(BetdaqSoapProtocolError):
         parse_get_odds_ladder_response(
             _response(entries='<Ladder price="2.00" representation="" />')
         )
+
+
+def test_representation_internal_whitespace_is_preserved_in_content_identity() -> None:
+    response = parse_get_odds_ladder_response(
+        _response(entries='<Ladder price="2.00" representation="Even Money" />')
+    )
+    assert response.entries[0].representation == "Even Money"
+    assert response.content_sha256 != parse_get_odds_ladder_response(
+        _response(entries='<Ladder price="2.00" representation="Evens" />')
+    ).content_sha256
 
 
 def test_unknown_ladder_attribute_cannot_alias_content_identity() -> None:
@@ -226,6 +241,7 @@ def test_dtd_and_multiple_body_payloads_are_rejected() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="exactly one"):
         parse_get_odds_ladder_response(payload)
 
+
 def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
     result_extra = _response().replace(
         "<GetOddsLadderResult>",
@@ -264,4 +280,3 @@ def test_return_status_child_content_fails_closed(return_status: str) -> None:
         parse_get_odds_ladder_response(
             _response(return_status=return_status)
         )
-

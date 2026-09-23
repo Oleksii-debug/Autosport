@@ -1,6 +1,6 @@
 """Fail-closed classification for degraded bookmaker account readback.
 
-This module intentionally owns *negative observability* only.  It can classify a
+This module intentionally owns *negative observability* only. It can classify a
 failed or incomplete readback into a conservative degradation state, but it has
 no API that can issue FRESH_COMPLETE or prove an account/position set empty.
 Positive completeness must come from the canonical provider acquisition and
@@ -10,6 +10,7 @@ account-snapshot authorities.
 from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
+from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
@@ -114,19 +115,43 @@ def _require_http_status(value: object | None) -> int | None:
     return value
 
 
+def _canonical_observed_at(value: object) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ReadbackDegradationError(
+            "observed_at must be a non-empty timezone-aware ISO-8601 string"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReadbackDegradationError(
+            "observed_at must be a timezone-aware ISO-8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReadbackDegradationError(
+            "observed_at must be a timezone-aware ISO-8601 timestamp"
+        )
+    utc = parsed.astimezone(timezone.utc)
+    timespec = "microseconds" if utc.microsecond else "seconds"
+    return utc.isoformat(timespec=timespec).replace("+00:00", "Z")
+
+
 @dataclass(frozen=True, slots=True)
 class ReadbackFailureSignal:
     """Sanitized adapter evidence for one failed/incomplete account read.
 
     Raw response bodies, exception text, credentials, session tokens and headers
-    are intentionally absent. pages_completed is bookkeeping only; it never
-    proves that the returned prefix is an authoritative complete account view.
+    are intentionally absent. `attempt_id` identifies the concrete acquisition
+    attempt while `observed_at` binds the failure to its causal observation time.
+    `pages_completed` is bookkeeping only; it never proves that the returned
+    prefix is an authoritative complete account view.
     """
 
     provider_id: str
     adapter_id: str
     operation: str
     scope_sha256: str
+    attempt_id: str
+    observed_at: str
     kind: ReadbackFailureKind
     provider_code: str | None = None
     http_status: int | None = None
@@ -154,12 +179,26 @@ class ReadbackFailureSignal:
             "scope_sha256",
             _require_sha256(self.scope_sha256, field="scope_sha256"),
         )
+        object.__setattr__(
+            self,
+            "attempt_id",
+            _require_token(self.attempt_id, field="attempt_id"),
+        )
+        object.__setattr__(
+            self,
+            "observed_at",
+            _canonical_observed_at(self.observed_at),
+        )
         if type(self.kind) is not ReadbackFailureKind:
             raise ReadbackDegradationError("kind must be an exact ReadbackFailureKind")
-        object.__setattr__(self, "provider_code", _require_provider_code(self.provider_code))
+        object.__setattr__(
+            self, "provider_code", _require_provider_code(self.provider_code)
+        )
         object.__setattr__(self, "http_status", _require_http_status(self.http_status))
         if type(self.pages_completed) is not int or self.pages_completed < 0:
-            raise ReadbackDegradationError("pages_completed must be a non-negative integer")
+            raise ReadbackDegradationError(
+                "pages_completed must be a non-negative integer"
+            )
         if (
             self.kind is ReadbackFailureKind.INCOMPLETE_PAGINATION
             and self.pages_completed == 0
@@ -186,7 +225,7 @@ class ReadbackFailureSignal:
 class AccountReadbackDegradationEvidence:
     """Conservative product result for a degraded account-readback attempt.
 
-    Every authority-bearing property is intentionally restrictive.  This type is
+    Every authority-bearing property is intentionally restrictive. This type is
     not a substitute for canonical account snapshot/acquisition evidence.
     """
 
@@ -195,6 +234,8 @@ class AccountReadbackDegradationEvidence:
     adapter_id: str
     operation: str
     scope_sha256: str
+    attempt_id: str
+    observed_at: str
     provider_code: str | None
     http_status: int | None
     partial_observation_present: bool
@@ -278,8 +319,10 @@ def classify_account_readback_degradation(
     """Classify one non-successful account read without granting positive truth.
 
     The caller cannot turn a timeout, HTTP/provider error, stale cache or partial
-    page chain into a zero balance/position result through this API.  A later
+    page chain into a zero balance/position result through this API. A later
     successful read must be re-issued by the canonical positive acquisition path.
+    Repeated failures are distinct evidence events when their attempt or causal
+    observation time differs.
     """
 
     if type(signal) is not ReadbackFailureSignal:
@@ -294,6 +337,8 @@ def classify_account_readback_degradation(
         "adapter_id": signal.adapter_id,
         "operation": signal.operation,
         "scope_sha256": signal.scope_sha256,
+        "attempt_id": signal.attempt_id,
+        "observed_at": signal.observed_at,
         "provider_code": signal.provider_code,
         "http_status": signal.http_status,
         "pages_completed": signal.pages_completed,
@@ -312,6 +357,8 @@ def classify_account_readback_degradation(
         adapter_id=signal.adapter_id,
         operation=signal.operation,
         scope_sha256=signal.scope_sha256,
+        attempt_id=signal.attempt_id,
+        observed_at=signal.observed_at,
         provider_code=signal.provider_code,
         http_status=signal.http_status,
         partial_observation_present=signal.pages_completed > 0,

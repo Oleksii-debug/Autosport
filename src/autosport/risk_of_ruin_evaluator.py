@@ -52,6 +52,9 @@ _AUTHORITY_KEY = "issued-results-v1"
 _JOURNAL_NAME = "risk-of-ruin-evaluator-v1.json"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+_CP_BASE_WORKING_PRECISION = 70
+_CP_INPUT_SCALE_GUARD_DIGITS = 16
+_CP_FINAL_PRECISION = 50
 
 
 class RiskTargetKind(StrEnum):
@@ -149,6 +152,22 @@ def _decimal_text(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+def _clopper_pearson_working_precision(confidence: Decimal) -> int:
+    """Bound CP arithmetic precision to the accepted canonical Decimal domain."""
+
+    text = _decimal_text(confidence)
+    _, separator, fractional = text.partition(".")
+    decimal_places = len(fractional) if separator else 0
+    # Near 0/1, subtraction in alpha=1-confidence and q=1-p must preserve
+    # the input's decimal scale *plus* the bisection working digits.  A fixed
+    # 70-digit context loses that tail for legal values such as 1E-69.
+    return (
+        _CP_BASE_WORKING_PRECISION
+        + decimal_places
+        + _CP_INPUT_SCALE_GUARD_DIGITS
+    )
 
 
 def _decimal_from_payload(value: object, name: str) -> Decimal:
@@ -320,6 +339,9 @@ class RiskOfRuinEvaluationRequest:
                 "causal_cutoff must not be after evaluated_at"
             )
         _probability(self.confidence_level, "confidence_level")
+        # Keep the public request and direct estimator on the same bounded
+        # canonical Decimal domain before any precision is allocated from scale.
+        _decimal_text(self.confidence_level)
         _decimal_text(self.ruin_threshold)
         if (
             isinstance(self.planned_independent_units, bool)
@@ -482,6 +504,7 @@ def clopper_pearson_upper_bound(
             "ruin_count must be an integer inside [0, independent_units]"
         )
     confidence = _probability(confidence_level, "confidence_level")
+    working_precision = _clopper_pearson_working_precision(confidence)
     if ruin_count == independent_units:
         return Decimal(1)
 
@@ -490,7 +513,7 @@ def clopper_pearson_upper_bound(
         # boundary.  A caller may legitimately change Decimal precision, rounding,
         # exponent limits or traps elsewhere in the process; none of those settings
         # may move an exact confidence endpoint inward.
-        context.prec = 70
+        context.prec = working_precision
         context.rounding = ROUND_HALF_EVEN
         context.Emin = MIN_EMIN
         context.Emax = MAX_EMAX
@@ -516,7 +539,7 @@ def clopper_pearson_upper_bound(
         # The bisection invariant keeps high on the conservative side.
         # Final public precision must therefore round outward, never back through
         # the mathematical endpoint.
-        context.prec = 50
+        context.prec = _CP_FINAL_PRECISION
         context.rounding = ROUND_CEILING
         return +high
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+import threading
 
 import pytest
 
@@ -74,6 +75,71 @@ def test_monotonic_clock_regression_fails_instead_of_clamping() -> None:
 
     with pytest.raises(ExecutionTimingEvidenceError, match="monotonic clock regressed"):
         session.mark("second")
+
+
+def test_concurrent_marker_commit_cannot_lower_monotonic_high_water() -> None:
+    high_wall_entered = threading.Event()
+    low_wall_entered = threading.Event()
+    release_high = threading.Event()
+    release_low = threading.Event()
+
+    def monotonic_ns() -> int:
+        name = threading.current_thread().name
+        if name == "high-worker":
+            return 200
+        if name == "low-worker":
+            return 100
+        return 150
+
+    def wall_now() -> datetime:
+        name = threading.current_thread().name
+        if name == "high-worker":
+            high_wall_entered.set()
+            assert release_high.wait(timeout=2)
+        elif name == "low-worker":
+            low_wall_entered.set()
+            assert release_low.wait(timeout=2)
+        return datetime(2026, 9, 23, 9, 0, tzinfo=timezone.utc)
+
+    session = _session(monotonic_ns=monotonic_ns, wall_now=wall_now)
+    outcomes: dict[str, object] = {}
+
+    def issue(key: str) -> None:
+        try:
+            outcomes[key] = session.mark(key)
+        except BaseException as exc:
+            outcomes[key] = exc
+
+    high = threading.Thread(target=issue, args=("high",), name="high-worker")
+    low = threading.Thread(target=issue, args=("low",), name="low-worker")
+
+    high.start()
+    assert high_wall_entered.wait(timeout=2)
+    low.start()
+    assert low_wall_entered.wait(timeout=2)
+
+    # Both calls have sampled their counters before either can commit. Force
+    # the higher sample to commit first, then let the stale lower sample try.
+    release_high.set()
+    high.join(timeout=2)
+    assert not high.is_alive()
+
+    release_low.set()
+    low.join(timeout=2)
+    assert not low.is_alive()
+
+    issued_high = outcomes["high"]
+    assert isinstance(issued_high, MonotonicTimingMarker)
+    assert issued_high.sequence == 1
+    assert issued_high.monotonic_ns == 200
+
+    rejected_low = outcomes["low"]
+    assert isinstance(rejected_low, ExecutionTimingEvidenceError)
+    assert "monotonic clock regressed" in str(rejected_low)
+
+    # The rejected lower sample must not lower the committed high-water mark.
+    with pytest.raises(ExecutionTimingEvidenceError, match="monotonic clock regressed"):
+        session.mark("after-race")
 
 
 def test_cross_session_markers_cannot_be_subtracted() -> None:

@@ -184,9 +184,9 @@ def resolve_voc_decision_context(
         raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
     resolved: dict[str, str] = {}
     for field in sorted(context_fields):
-        if field == "decision_input_sha256":
+        if field in {"decision_input_sha256", "routing_policy_sha256"}:
             resolved[field] = _sha256(
-                "canonical current VOC context decision_input_sha256",
+                f"canonical current VOC context {field}",
                 context.get(field),
             )
         else:

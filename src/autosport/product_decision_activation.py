@@ -68,6 +68,9 @@ _CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE: Final = getattr(
     "__code__",
     None,
 )
+_CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME: Final = (
+    _CANONICAL_ECONOMIC_GOAL_STORE_CLASS.FILE_NAME
+)
 
 
 def _product_machine_state_base() -> Path:
@@ -631,6 +634,8 @@ class ProductDecisionActivationStore:
             or live_store_load is not _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
             or getattr(live_store_load, "__code__", None)
             is not _CANONICAL_ECONOMIC_GOAL_STORE_LOAD_CODE
+            or _CANONICAL_ECONOMIC_GOAL_STORE_CLASS.FILE_NAME
+            != _CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME
         ):
             raise ProductDecisionActivationError(
                 "canonical EconomicGoalStore dispatch changed"
@@ -639,9 +644,13 @@ class ProductDecisionActivationStore:
         durable_goal_store = object.__new__(
             _CANONICAL_ECONOMIC_GOAL_STORE_CLASS
         )
-        _CANONICAL_ECONOMIC_GOAL_STORE_INIT(
-            durable_goal_store,
-            self.workspace,
+        # Do not call the otherwise-canonical constructor here: its implementation
+        # resolves self.FILE_NAME dynamically. Build the two canonical store fields
+        # from the already-owned workspace and the import-time frozen filename so a
+        # transient class-attribute rebind cannot redirect START authority.
+        durable_goal_store.workspace = self.workspace
+        durable_goal_store.path = (
+            self.workspace / _CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME
         )
         bound_store_load = getattr(durable_goal_store, "load", None)
         if (

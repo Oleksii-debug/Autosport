@@ -33,6 +33,7 @@ def ticket(
     stake: str = "10",
     odds: str = "2",
     currency: str = "GBP",
+    exchange_side: str | None = None,
 ) -> PaperTicket:
     return PaperTicket(
         ticket_id=ticket_id,
@@ -44,6 +45,7 @@ def ticket(
                 selection_id=selection_id,
                 locked_odds=Decimal(odds),
                 sport="soccer",
+                exchange_side=exchange_side,
             ),
         ),
         placed_at=NOW,
@@ -102,6 +104,40 @@ def protocol(
         relations=relations,
         scenarios=scenarios,
     )
+
+
+def test_lay_ticket_fails_closed_before_back_only_portfolio_settlement() -> None:
+    tickets = (
+        ticket(
+            "lay-ticket",
+            "home",
+            odds="3",
+            exchange_side="lay",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="LAY ticket economics"):
+        evaluate_joint_stress(
+            tickets=tickets,
+            protocol=protocol(tickets=tickets),
+        )
+
+
+def test_explicit_back_ticket_remains_supported() -> None:
+    tickets = (
+        ticket(
+            "back-ticket",
+            "home",
+            odds="3",
+            exchange_side="back",
+        ),
+    )
+    result = evaluate_joint_stress(
+        tickets=tickets,
+        protocol=protocol(tickets=tickets),
+    )
+
+    assert result.worst_observed_profit == Decimal("-10")
 
 
 def test_same_market_across_providers_is_structurally_linked() -> None:

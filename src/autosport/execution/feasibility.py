@@ -60,9 +60,9 @@ class ExecutionFeasibilityRequest:
     requested_stake: Decimal
     limit_price: Decimal
     decision_at: datetime
-    expected_market_version: int
-    expected_inplay: bool
-    expected_bet_delay_seconds: int
+    expected_market_version: int | None
+    expected_inplay: bool | None
+    expected_bet_delay_seconds: int | None
     side: str = "BACK"
     order_type: str = "LIMIT"
     leg_count: int = 1
@@ -88,9 +88,11 @@ class ExecutionFeasibilityRequest:
             raise ValueError("requested_stake must be positive")
         if self.limit_price <= 0:
             raise ValueError("limit_price must be positive")
-        if self.expected_market_version < 0:
+        if self.expected_market_version is not None and self.expected_market_version < 0:
             raise ValueError("expected_market_version must be non-negative")
-        if self.expected_bet_delay_seconds < 0:
+        if self.expected_inplay is not None and type(self.expected_inplay) is not bool:
+            raise ValueError("expected_inplay must be bool when supplied")
+        if self.expected_bet_delay_seconds is not None and self.expected_bet_delay_seconds < 0:
             raise ValueError("expected_bet_delay_seconds must be non-negative")
         _require_aware(self.decision_at, "decision_at")
 
@@ -319,9 +321,24 @@ def _assess_execution_feasibility(
     _append_if(reasons, snapshot.source_mode is not SourceMode.LIVE, "DELAYED_SOURCE")
     _append_if(reasons, snapshot.status.upper() != "OPEN", "MARKET_NOT_OPEN")
     _append_if(reasons, snapshot.selection_status.upper() != "ACTIVE", "SELECTION_NOT_ACTIVE")
-    _append_if(reasons, snapshot.market_version != request.expected_market_version, "MARKET_VERSION_MISMATCH")
-    _append_if(reasons, snapshot.inplay != request.expected_inplay, "INPLAY_MISMATCH")
-    _append_if(reasons, snapshot.bet_delay_seconds != request.expected_bet_delay_seconds, "BET_DELAY_MISMATCH")
+    _append_if(
+        reasons,
+        request.expected_market_version is not None
+        and snapshot.market_version != request.expected_market_version,
+        "MARKET_VERSION_MISMATCH",
+    )
+    _append_if(
+        reasons,
+        request.expected_inplay is not None
+        and snapshot.inplay != request.expected_inplay,
+        "INPLAY_MISMATCH",
+    )
+    _append_if(
+        reasons,
+        request.expected_bet_delay_seconds is not None
+        and snapshot.bet_delay_seconds != request.expected_bet_delay_seconds,
+        "BET_DELAY_MISMATCH",
+    )
     _append_if(reasons, snapshot.has_ordering_gap is True, "SNAPSHOT_ORDERING_GAP")
     _append_if(reasons, snapshot.received_at < snapshot.observed_at, "RECEIVED_BEFORE_OBSERVED")
     _append_if(reasons, snapshot.observed_at > request.decision_at, "FUTURE_SNAPSHOT")
@@ -496,9 +513,13 @@ def assess_authoritative_betfair_execution_feasibility(
         requested_stake=action.requested_stake,
         limit_price=action.requested_odds,
         decision_at=decision_at,
-        expected_market_version=receipt.market_version,
-        expected_inplay=receipt.inplay,
-        expected_bet_delay_seconds=receipt.bet_delay_seconds,
+        # No independent durable pre-snapshot market-state expectation is
+        # currently composed into this authority. Keep the provider-observed
+        # values bound in MarketBookSnapshot/evidence instead of copying them
+        # into "expected" fields and creating tautological mismatch checks.
+        expected_market_version=None,
+        expected_inplay=None,
+        expected_bet_delay_seconds=None,
         side=action.side,
         order_type="LIMIT",
     )

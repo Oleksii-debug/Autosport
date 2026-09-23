@@ -255,3 +255,26 @@ def test_overlap_key_is_snapshot_ladder_identity_not_wrapper_identity() -> None:
 
     assert first.liquidity_overlap_key == second.liquidity_overlap_key
     assert first.liquidity_overlap_key != changed.liquidity_overlap_key
+
+def test_unbound_market_state_expectations_do_not_create_tautological_checks() -> None:
+    result = assess(
+        req=replace(
+            request(),
+            expected_market_version=None,
+            expected_inplay=None,
+            expected_bet_delay_seconds=None,
+        ),
+        book=replace(
+            snapshot(),
+            market_version=18,
+            inplay=True,
+            bet_delay_seconds=5,
+        ),
+    )
+
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert "PRODUCT_OWNED_EVIDENCE_UNRESOLVED" in result.reasons
+    assert "MARKET_VERSION_MISMATCH" not in result.reasons
+    assert "INPLAY_MISMATCH" not in result.reasons
+    assert "BET_DELAY_MISMATCH" not in result.reasons
+

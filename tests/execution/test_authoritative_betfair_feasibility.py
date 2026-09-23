@@ -9,6 +9,7 @@ import urllib.request as urllib_request
 import pytest
 
 import autosport.betfair_account_readonly as betfair_account_readonly
+import autosport.execution.feasibility as feasibility_module
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -642,4 +643,48 @@ def test_expired_action_cannot_be_revived_by_historical_time() -> None:
                 action_id=ACTION_ID,
                 max_snapshot_age=timedelta(seconds=2),
             )
+
+def test_authoritative_path_leaves_market_state_expectations_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    captured: dict[str, object] = {}
+    original_assess = feasibility_module._assess_execution_feasibility
+
+    def capture_request(request, snapshot, limits, *, max_snapshot_age, product_owned):
+        captured["request"] = request
+        return original_assess(
+            request,
+            snapshot,
+            limits,
+            max_snapshot_age=max_snapshot_age,
+            product_owned=product_owned,
+        )
+
+    monkeypatch.setattr(
+        feasibility_module,
+        "_assess_execution_feasibility",
+        capture_request,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    request = captured["request"]
+    assert request.expected_market_version is None
+    assert request.expected_inplay is None
+    assert request.expected_bet_delay_seconds is None
+    assert result.market_version == receipt.market_version
+    assert result.inplay == receipt.inplay
+    assert result.bet_delay_seconds == receipt.bet_delay_seconds
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 

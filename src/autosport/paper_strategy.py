@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow, Underflow, localcontext
 
 from .agents import AgentContext
 from .decision_ledger import (
@@ -115,12 +115,7 @@ class PaperValueAgent:
         ):
             return False
         leg = ticket.legs[0]
-        return (
-            leg.event_id == event.event_id
-            and leg.market_id == event.market_id
-            and leg.selection_id == event.selection_id
-            and leg.locked_odds == event.decimal_odds
-        )
+        return leg.quote_key == event.quote_key and leg.locked_odds == event.decimal_odds
 
     def _derive_goal_stake(
         self,
@@ -135,6 +130,32 @@ class PaperValueAgent:
             context.paper_book,
             expected_profit_per_unit,
         )
+
+    @staticmethod
+    def _risk_amount(event: MarketEvent, chosen_stake: Decimal) -> Decimal | None:
+        """Return bankroll capital at risk while preserving the provider order-stake unit."""
+
+        if event.exchange_side != "lay":
+            return chosen_stake
+
+        # chosen_stake remains the LAY order-stake unit. PaperRiskPolicy receives
+        # committed bankroll capital, so LAY must present maximum-loss liability.
+        # Match the canonical paper-risk Decimal envelope and fail closed rather
+        # than silently rounding an exposure amount.
+        arithmetic = Context(prec=28, Emin=-999999, Emax=999999)
+        arithmetic.traps[Inexact] = True
+        arithmetic.traps[InvalidOperation] = True
+        arithmetic.traps[Overflow] = True
+        arithmetic.traps[Underflow] = True
+        arithmetic.clear_flags()
+        try:
+            with localcontext(arithmetic):
+                liability = chosen_stake * (event.decimal_odds - Decimal("1"))
+        except ArithmeticError:
+            return None
+        if not liability.is_finite() or liability <= 0:
+            return None
+        return liability
 
     def _reconcile_existing_economic_action(
         self,
@@ -245,7 +266,13 @@ class PaperValueAgent:
         if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
             return
         estimate = paper_value(event.quote_key, forecast.probability, event.decimal_odds)
-        if estimate.expected_profit_per_unit < self.minimum_edge:
+        expected_profit_per_unit = estimate.expected_profit_per_unit
+        if event.exchange_side == "lay":
+            # paper_value is the canonical BACK value p*O - 1. For a LAY quote
+            # the economic unit is one unit of lay stake: EV = 1 - p*O,
+            # exactly the negative of the BACK value before commission.
+            expected_profit_per_unit = -expected_profit_per_unit
+        if expected_profit_per_unit < self.minimum_edge:
             return
 
         # PaperValueAgent may decide/propose, but it no longer owns fill truth.
@@ -330,7 +357,7 @@ class PaperValueAgent:
                 if goal is None
                 else self._derive_goal_stake(
                     context,
-                    estimate.expected_profit_per_unit,
+                    expected_profit_per_unit,
                 )
             )
             if chosen_stake is None:
@@ -345,6 +372,7 @@ class PaperValueAgent:
             event.selection_id,
             event.decimal_odds,
             sport=event.sport,
+            exchange_side=event.exchange_side,
         )
         proposal_context = None
         if goal is not None:
@@ -361,13 +389,23 @@ class PaperValueAgent:
         # risk gate. Re-evaluating after an accepted/partial ticket would resize
         # against changed exposure and could mint a different #623 plan.
         if persisted is None:
+            risk_amount = self._risk_amount(event, chosen_stake)
+            if risk_amount is None:
+                return
             risk = self.risk_policy.evaluate(
                 context.paper_book,
-                chosen_stake,
+                risk_amount,
                 context=proposal_context,
             )
             if not risk.allowed:
                 return
+
+        if event.exchange_side == "lay":
+            context.notes.append(
+                "paper-value material action withheld: canonical #623 paper "
+                "execution bridge is BACK-only for LAY"
+            )
+            return
 
         prepared = runtime.prepare_paper_value_action(
             event=event,
@@ -385,7 +423,7 @@ class PaperValueAgent:
                     "quote_key": event.quote_key,
                     "forecast_model": forecast.model_id,
                     "probability": str(forecast.probability),
-                    "expected_profit_per_unit": str(estimate.expected_profit_per_unit),
+                    "expected_profit_per_unit": str(expected_profit_per_unit),
                     "stake": str(chosen_stake),
                     "requested_stake": str(chosen_stake),
                     "material_action_id": material_action_id,

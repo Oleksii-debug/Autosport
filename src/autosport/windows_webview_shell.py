@@ -1108,10 +1108,41 @@ class AutosportWebController:
                 del self._request_results[oldest]
             return result
 
+    @staticmethod
+    def _wait_for_terminal_worker(worker: Any) -> None:
+        """Wait until one committed non-daemon worker publishes terminal truth."""
+
+        if not worker.busy:
+            return
+        poll = getattr(worker, "poll", None)
+        if not callable(poll):
+            raise RuntimeError("non-daemon worker does not expose terminal polling")
+        pause = threading.Event()
+        while worker.busy:
+            if poll() is None:
+                pause.wait(0.01)
+
     def close(self) -> None:
         with self._lock:
             self._closing = True
+
+        # Request cooperative STOP first so the long-running product runtime can
+        # wind down while one-shot economic workers finish their committed tasks.
         self.product_worker.request_stop("app_close")
+
+        # These workers deliberately use daemon=False because replay/live/recovery
+        # can cross durable economic boundaries.  The only operator surface must
+        # therefore remain in close() until each committed task has terminalized.
+        for worker in (
+            self.replay_worker,
+            self.live_worker,
+            self.recovery_worker,
+        ):
+            self._wait_for_terminal_worker(worker)
+
+        join_product = getattr(self.product_worker, "join", None)
+        if callable(join_product):
+            join_product()
 
 
 class AutosportWebBridge:

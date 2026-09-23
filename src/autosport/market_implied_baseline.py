@@ -1,8 +1,11 @@
 """Causal market-implied forecast-baseline evidence.
 
-Positive evidence is issued only from canonical durable market replay plus a separately
-verified exhaustive market-outcome authority.  This module owns no scoring, promotion,
-execution, fill, liquidity, or profitability authority.
+Probability vectors are derived from canonical durable market replay and a typed outcome
+roster authority.  Current main does not prove the provider origin of the Betfair
+marketDefinition bytes used by the public roster issuer, so this layer explicitly keeps
+outcome-roster origin/completeness false while preserving fail-closed contradiction
+checks.  This module owns no scoring, promotion, execution, fill, liquidity, or
+profitability authority.
 """
 
 from __future__ import annotations
@@ -91,9 +94,10 @@ def market_implied_baseline_config_payload() -> dict[str, object]:
         "method_id": METHOD_ID,
         "odds_representation": "decimal",
         "implied_weight": "exact_reciprocal_decimal_odds",
-        "normalization": "exact_sum_to_one_over_complete_verified_roster",
+        "normalization": "exact_sum_to_one_over_typed_roster_after_durable_contradiction_checks",
         "quote_visibility": "MarketMirror.replay_view_from_store",
         "outcome_roster_authority": "MarketSettlementOutcomeAuthority",
+        "outcome_roster_origin_verified": False,
         "forecast_comparator_only": True,
         "execution_authority": False,
         "promotion_authority": False,
@@ -209,7 +213,10 @@ class MarketImpliedBaselineEvidence:
             },
             "probabilities": [p.to_dict() for p in self.probabilities],
             "truth": {
-                "complete_verified_outcome_roster": True,
+                "outcome_roster_schema_authority_present": True,
+                "outcome_roster_origin_verified": False,
+                "complete_verified_outcome_roster": False,
+                "durable_history_roster_contradiction_absent": True,
                 "decision_time_replay_visibility": True,
                 "fresh_open_quotes": True,
                 "source_stream_continuity_proven": False,
@@ -280,7 +287,7 @@ def build_market_implied_baseline_evidence(
     decision_cutoff: datetime,
     max_age: timedelta,
 ) -> MarketImpliedBaselineEvidence:
-    """Issue one complete decision-time probability vector from durable market replay."""
+    """Issue one decision-time probability vector; roster-origin truth remains false."""
 
     key = _text(cohort_key, "cohort_key")
     if not isinstance(store, SQLiteMarketStore):
@@ -447,6 +454,8 @@ class MarketImpliedBaselineCohortEvidence:
                 "same_frozen_cohort": False,
                 "same_frozen_cohort_labels": True,
                 "canonical_evaluation_universe_bound": False,
+                "outcome_roster_origin_verified": False,
+                "scientific_completeness_proven": False,
                 "same_frozen_market_evidence": True,
                 "source_stream_continuity_proven": False,
                 "forecast_comparator_only": True,
@@ -493,6 +502,7 @@ def bind_market_implied_baseline_cohort(
     This structural step is intentionally insufficient for positive same-cohort truth.
     Consumers that need canonical evaluation membership must additionally pass through
     ``market_implied_universe_binding.bind_market_implied_baseline_to_evaluation_universe``.
+    Outcome-roster provider origin also remains unproven on current main.
     """
 
     if not isinstance(protocol, FrozenBaselineProtocol):

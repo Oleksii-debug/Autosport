@@ -1200,7 +1200,7 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
         ):
             raise BetfairSupervisedExecutionError(
-                "terminal Betfair execution requires canonical client, transport, parser, and code authority"
+                "terminal Betfair execution requires canonical client, transport, and parser authority; executable code authority changed"
             )
         begin_supervised_attempt(
             ledger,

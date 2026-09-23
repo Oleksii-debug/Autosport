@@ -21,6 +21,11 @@
     if (node.hidden !== hidden) node.hidden = hidden;
   }
 
+  function setValueIfChanged(node, value) {
+    const text = String(value ?? "");
+    if (node.value !== text) node.value = text;
+  }
+
   function setValueUnlessFocused(node, value) {
     const text = String(value ?? "");
     if (document.activeElement !== node && node.value !== text) node.value = text;
@@ -171,7 +176,7 @@
 
     byId("workspace-value").textContent = state.workspace || "—";
     byId("active-workspace-value").textContent = state.active_workspace || "—";
-    byId(205).value = state.bank || "";
+    setValueIfChanged(byId(205), state.bank || "");
     byId("dataset-summary").textContent = state.dataset_summary || "";
     if (document.activeElement !== byId("dataset-path")) {
       byId("dataset-path").value = state.dataset_path || "";
@@ -192,16 +197,16 @@
     renderList(byId(203), state.live_quotes);
     renderSingleColumnTable(byId("tickets-table-body"), state.tickets);
     renderList(byId(204), state.evaluation);
-    byId(202).value = (state.log || []).join("\n");
+    setValueIfChanged(byId(202), (state.log || []).join("\n"));
 
     const nav = byId(301);
     const priorNav = nav.value;
     setSelectOptions(nav, state.surfaces || [], "key", "title");
     setValueUnlessFocused(nav, state.surface_key || priorNav);
-    byId(302).value = state.surface_state || "";
+    setValueIfChanged(byId(302), state.surface_state || "");
     renderList(byId(304), state.surface_details);
 
-    byId(306).value = state.owner.summary || "";
+    setValueIfChanged(byId(306), state.owner.summary || "");
     renderList(byId(307), state.owner.lines || []);
     renderList(byId("owner-review-list"), state.owner.review_lines || []);
     applyOwnerDefaults(state.owner.defaults);
@@ -215,10 +220,13 @@
       setSelectOptions(operations, state.manual.operations || []);
     }
     setTextIfChanged(byId("manual-status"), state.manual.status || "");
-    byId(334).value = state.manual.result || "";
+    setValueIfChanged(byId(334), state.manual.result || "");
 
     const productRuntime = state.product_runtime || {};
-    byId("product-runtime-status").value = productRuntime.status || "Тривала симуляційна робота не запущена.";
+    setValueIfChanged(
+      byId("product-runtime-status"),
+      productRuntime.status || "Тривала симуляційна робота не запущена.",
+    );
     byId("product-runtime-start").disabled = productRuntime.can_start !== true;
     byId("product-runtime-stop").disabled = productRuntime.can_stop !== true;
 

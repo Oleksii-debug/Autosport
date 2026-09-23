@@ -110,7 +110,12 @@ class BetdaqContinuousAccountEvidence:
     snapshot: BookmakerAccountSnapshot
     source_evidence: BetdaqAccountEvidence
     principal_context: BetdaqAuthenticatedPrincipalContext
-    _issuer_token: object | None = field(default=None, repr=False, compare=False)
+    _issuer_token: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if type(self.snapshot) is not BookmakerAccountSnapshot:
@@ -291,12 +296,13 @@ def _build_evidence_issuer():
         source_evidence: BetdaqAccountEvidence,
         principal_context: BetdaqAuthenticatedPrincipalContext,
     ) -> BetdaqContinuousAccountEvidence:
-        return BetdaqContinuousAccountEvidence(
+        value = BetdaqContinuousAccountEvidence(
             snapshot=snapshot,
             source_evidence=source_evidence,
             principal_context=principal_context,
-            _issuer_token=token,
         )
+        object.__setattr__(value, "_issuer_token", token)
+        return value
 
     def is_issued(value: object) -> bool:
         return (

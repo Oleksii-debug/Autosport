@@ -438,8 +438,8 @@ def parse_market_catalogue_result_for_request(
     repeated caller-supplied requested-scope assertions.
     """
 
-    if not isinstance(request, BetfairCatalogRequest):
-        raise BetfairCatalogError("request must be BetfairCatalogRequest")
+    if type(request) is not BetfairCatalogRequest:
+        raise BetfairCatalogError("request must be an exact BetfairCatalogRequest")
     if request.method != LIST_MARKET_CATALOGUE:
         raise BetfairCatalogError("request must target listMarketCatalogue")
 

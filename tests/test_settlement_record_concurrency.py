@@ -176,6 +176,22 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(settle_events), 1)
 
 
+    def test_constructor_snapshots_caller_owned_outcomes_dict(self) -> None:
+        caller_owned = {"event-1|winner|alice": "win"}
+        engine = SettlementEngine(caller_owned)
+
+        caller_owned["event-1|winner|alice"] = "loss"
+        caller_owned["event-2|winner|bob"] = "void"
+
+        self.assertEqual(
+            engine.outcomes,
+            {"event-1|winner|alice": "win"},
+        )
+
+        engine.record({"event-3|winner|carol": "void"})
+        self.assertNotIn("event-3|winner|carol", caller_owned)
+
+
     def test_same_outcome_concurrent_replay_remains_idempotent(self) -> None:
         engine = SettlementEngine()
         start = threading.Barrier(3)

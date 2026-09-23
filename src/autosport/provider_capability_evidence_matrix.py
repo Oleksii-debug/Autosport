@@ -12,7 +12,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 from typing import Iterable
-from weakref import WeakValueDictionary
+from weakref import WeakValueDictionary, finalize
 
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -234,6 +234,7 @@ class ProviderCapabilityEvidence:
 
 
 _ISSUED_EVIDENCE: WeakValueDictionary[int, ProviderCapabilityEvidence] = WeakValueDictionary()
+_ISSUED_EVIDENCE_SEALS: dict[int, str] = {}
 
 
 def issue_provider_capability_evidence(
@@ -297,12 +298,29 @@ def issue_provider_capability_evidence(
         raise ProviderCapabilityEvidenceMatrixError(
             "observed-operational current authority requires sealed upstream provider verification"
         )
-    _ISSUED_EVIDENCE[id(fact)] = fact
+    issuance_key = id(fact)
+    _ISSUED_EVIDENCE[issuance_key] = fact
+    _ISSUED_EVIDENCE_SEALS[issuance_key] = fact.evidence_id
+    finalize(fact, _ISSUED_EVIDENCE_SEALS.pop, issuance_key, None)
     return fact
 
 
 def _is_product_issued(fact: ProviderCapabilityEvidence) -> bool:
-    return _ISSUED_EVIDENCE.get(id(fact)) is fact
+    issuance_key = id(fact)
+    if _ISSUED_EVIDENCE.get(issuance_key) is not fact:
+        return False
+    original_seal = _ISSUED_EVIDENCE_SEALS.get(issuance_key)
+    if original_seal is None:
+        return False
+    try:
+        return fact.evidence_id == original_seal
+    except (
+        AttributeError,
+        ProviderCapabilityEvidenceMatrixError,
+        TypeError,
+        ValueError,
+    ):
+        return False
 
 
 @dataclass(frozen=True, slots=True)

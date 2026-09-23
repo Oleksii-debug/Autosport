@@ -273,6 +273,65 @@ def test_caller_constructed_or_copied_positive_fact_cannot_mint_matrix_authority
             matrix(p=p, facts=(forged,))
 
 
+def test_same_product_issued_object_mutation_revokes_authority():
+    p = profile()
+    issued = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.CONFIGURED,
+    )
+    original_evidence_id = issued.evidence_id
+    already_built = matrix(p=p, facts=(issued,))
+    assert already_built.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T3,
+    )
+
+    object.__setattr__(
+        issued,
+        "grade",
+        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+    )
+    object.__setattr__(issued, "expires_at", T4)
+
+    assert issued.evidence_id != original_evidence_id
+    assert not already_built.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset(
+            {ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}
+        ),
+        at_time=T3,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="product-issued exact object",
+    ):
+        matrix(p=p, facts=(issued,))
+
+
+def test_same_product_issued_object_payload_edit_revokes_weak_grade():
+    p = profile()
+    issued = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.CONFIGURED,
+    )
+    already_built = matrix(p=p, facts=(issued,))
+    object.__setattr__(issued, "evidence_ref", "evidence://tampered")
+
+    assert not already_built.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        at_time=T3,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="product-issued exact object",
+    ):
+        matrix(p=p, facts=(issued,))
+
+
 
 def test_pickle_replay_cannot_recreate_positive_qualification_authority():
     p = profile()

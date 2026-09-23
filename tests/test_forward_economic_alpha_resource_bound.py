@@ -131,6 +131,27 @@ def test_familywise_alpha_registry_snapshots_mutable_caller_collection() -> None
         registry.allocation_for("challenger-b")
 
 
+def test_familywise_alpha_registry_snapshots_caller_allocation_objects() -> None:
+    """Caller-held allocation objects cannot rewrite a sealed family."""
+
+    allocation = AlphaAllocation(
+        challenger_id="challenger-a",
+        alpha=Decimal("0.4"),
+    )
+    registry = FamilywiseAlphaRegistry(
+        family_id="family-a",
+        total_alpha=Decimal("0.5"),
+        allocations=(allocation,),
+        sealed_at=T0,
+    )
+    sealed_identity = registry.identity_sha256
+
+    object.__setattr__(allocation, "alpha", Decimal("0.49"))
+
+    assert registry.identity_sha256 == sealed_identity
+    assert registry.allocation_for("challenger-a") == Decimal("0.4")
+
+
 def test_familywise_alpha_registry_fails_closed_on_internal_identity_drift() -> None:
     """Low-level post-seal mutation cannot become a new scientific family."""
 

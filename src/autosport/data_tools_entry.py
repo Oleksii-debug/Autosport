@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from .secret_redaction import redact_operator_text, safe_exception_detail
+from .secret_redaction import redact_operator_text, safe_exception_text
 
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
@@ -108,19 +108,14 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
     # Formatting belongs to the same packaged fail-closed boundary as dispatch.
-    # Reuse the canonical presentation redactor while retaining the existing
-    # one-line diagnostic shape expected by the portable Windows CLI.
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    exception_type = redact_operator_text(exception_type)
-    detail = safe_exception_detail(exc, unavailable_detail=exception_type)
-    detail = " ".join(detail.splitlines()).strip()
-    if not detail:
-        detail = exception_type
+    # Reuse the canonical presentation renderer so caller/library-controlled
+    # exception type metadata and detail cannot bypass the shared redaction rules.
+    rendered = safe_exception_text(exc)
+    rendered = " ".join(rendered.splitlines()).strip()
+    if not rendered:
+        rendered = "BaseException: exception details unavailable"
     return redact_operator_text(
-        f"Autosport-Data: {command}=FAIL_CLOSED error={exception_type}: {detail}"
+        f"Autosport-Data: {command}=FAIL_CLOSED error={rendered}"
     )
 
 

@@ -175,6 +175,17 @@ def _immutable_ticket_projection(ticket: dict[str, Any]) -> dict[str, Any]:
     return {field: ticket.get(field) for field in _IMMUTABLE_TICKET_FIELDS}
 
 
+def _reject_unsupported_exchange_sides(book: PaperBook, *, label: str) -> None:
+    for ticket in book.tickets.values():
+        for leg in ticket.legs:
+            if leg.exchange_side == "lay":
+                raise RiskPathEquityReplayError(
+                    f"{label} contains LAY ticket {ticket.ticket_id}; "
+                    "risk-path equity replay is BACK-only until canonical "
+                    "side-aware PaperBook economics exist"
+                )
+
+
 def _parse_utc(value: str, *, label: str) -> datetime:
     if type(value) is not str or not value or value.strip() != value:
         raise RiskPathEquityReplayError(f"{label} must be a canonical timestamp")
@@ -226,6 +237,15 @@ def replay_paper_book_equity_path(
         raise RiskPathEquityReplayError(
             f"PaperBook semantic validation failed: {type(exc).__name__}"
         ) from exc
+
+    _reject_unsupported_exchange_sides(
+        base_book,
+        label="base PaperBook snapshot",
+    )
+    _reject_unsupported_exchange_sides(
+        final_book,
+        label="final PaperBook snapshot",
+    )
 
     base_raw = _strict_json(base_snapshot, label="base PaperBook snapshot")
     final_raw = _strict_json(final_snapshot, label="final PaperBook snapshot")

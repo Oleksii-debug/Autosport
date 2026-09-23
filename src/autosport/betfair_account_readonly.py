@@ -855,6 +855,7 @@ class BetfairReadOnlyClient:
         post: Callable[..., bytes],
         *,
         endpoint_map: Mapping[str, str] | None = None,
+        observed_at: Callable[[], str] | None = None,
     ) -> _RpcResult:
         endpoints = _READ_METHOD_ENDPOINT if endpoint_map is None else endpoint_map
         endpoint = endpoints.get(method)
@@ -871,7 +872,10 @@ class BetfairReadOnlyClient:
         )
         if not isinstance(payload, bytes):
             raise BetfairReadOnlyError("Betfair transport must return bytes")
-        evidence = BetfairEvidence(self._observed_at(), sha256(payload).hexdigest())
+        evidence = BetfairEvidence(
+            self._observed_at() if observed_at is None else observed_at(),
+            sha256(payload).hexdigest(),
+        )
         decoded = _decode_json(payload)
         envelope = _mapping(decoded, "JSON-RPC response")
         if envelope.get("jsonrpc") != "2.0":
@@ -1147,7 +1151,7 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
 # authority for caller-constructed DTOs.
 def _install_execution_readback_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
-    trusted_clients: dict[int, tuple[object, object]] = {}
+    trusted_clients: dict[int, tuple[object, object, object]] = {}
     active_capture_session: ContextVar[list[object] | None] = ContextVar(
         "betfair_authoritative_readback_capture",
         default=None,
@@ -1175,12 +1179,17 @@ def _install_execution_readback_authority() -> None:
 
     def trusted_record(
         self: BetfairReadOnlyClient,
-    ) -> tuple[object, object] | None:
+    ) -> tuple[object, object, object] | None:
         record = trusted_clients.get(id(self))
         if record is None or record[0]() is not self:
             return None
         transport = record[1]
-        if self._transport is not transport or type(transport) is not sealed_transport_type:
+        trusted_clock = record[2]
+        if (
+            self._transport is not transport
+            or type(transport) is not sealed_transport_type
+            or self._clock is not trusted_clock
+        ):
             return None
         return record
 
@@ -1258,6 +1267,7 @@ def _install_execution_readback_authority() -> None:
         trusted_clients[client_id] = (
             ref(self, forget_client),
             trusted_transport,
+            product_clock,
         )
 
     def has_trusted_transport(self: BetfairReadOnlyClient) -> bool:
@@ -1304,6 +1314,7 @@ def _install_execution_readback_authority() -> None:
                 session[3] = True
             return raw_rpc(self, method, params)
         transport = record[1]
+        trusted_clock = record[2]
         if (
             getattr(BetfairReadOnlyClient, "_rpc", None) is not authoritative_rpc
             or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
@@ -1335,6 +1346,7 @@ def _install_execution_readback_authority() -> None:
             params,
             post,
             endpoint_map=sealed_read_method_endpoint,
+            observed_at=lambda: trusted_clock().isoformat(),
         )
         if tracking:
             session[2] = int(session[2]) + 1

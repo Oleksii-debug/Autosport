@@ -51,6 +51,7 @@ _VOC_CURRENT_CONTEXT_FIELDS_V3 = {
     *_VOC_CURRENT_CONTEXT_FIELDS_V2,
     "routing_policy_id",
     "routing_policy_version",
+    "routing_policy_sha256",
     "cloud_permission",
     "cloud_backend_id",
 }

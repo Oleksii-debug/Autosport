@@ -15,6 +15,20 @@ _TIME_IN_FORCE = "FILL_OR_KILL"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_TEXT = 512
 _MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
+_BETFAIR_CLASSIC_MIN_ODDS = Decimal("1.01")
+_BETFAIR_CLASSIC_MAX_ODDS = Decimal("1000")
+_BETFAIR_CLASSIC_TICK_CENTS = (
+    (200, 1),
+    (300, 2),
+    (400, 5),
+    (600, 10),
+    (1000, 20),
+    (2000, 50),
+    (3000, 100),
+    (5000, 200),
+    (10000, 500),
+    (100000, 1000),
+)
 
 
 class BetfairFillOrKillError(RuntimeError):
@@ -121,6 +135,45 @@ def _decimal_digits_to_int(digits: tuple[int, ...]) -> int:
     for digit in digits:
         coefficient = coefficient * 10 + digit
     return coefficient
+
+
+def _exact_cents(value: Decimal) -> int | None:
+    """Return exact hundredths when representable without Decimal context arithmetic."""
+
+    sign, digits, exponent = value.as_tuple()
+    if sign or type(exponent) is not int:
+        return None
+    coefficient = _decimal_digits_to_int(digits)
+    if exponent >= -2:
+        return coefficient * (10 ** (exponent + 2))
+    divisor = 10 ** (-exponent - 2)
+    if coefficient % divisor:
+        return None
+    return coefficient // divisor
+
+
+def _betfair_classic_odds_price(value: Decimal) -> Decimal:
+    """Require one exact price on Betfair's documented odds-market tick ladder."""
+
+    if value < _BETFAIR_CLASSIC_MIN_ODDS or value > _BETFAIR_CLASSIC_MAX_ODDS:
+        raise BetfairFillOrKillError(
+            "limit_price must be on the Betfair Classic odds ladder from 1.01 to 1000"
+        )
+    cents = _exact_cents(value)
+    if cents is None:
+        raise BetfairFillOrKillError(
+            "limit_price must be on the Betfair Classic odds ladder"
+        )
+    for upper_cents, tick_cents in _BETFAIR_CLASSIC_TICK_CENTS:
+        if cents <= upper_cents:
+            if cents % tick_cents:
+                raise BetfairFillOrKillError(
+                    "limit_price must be on the Betfair Classic odds ladder"
+                )
+            return value
+    raise BetfairFillOrKillError(
+        "limit_price must be on the Betfair Classic odds ladder"
+    )
 
 
 def _exact_nonnegative_difference(total: Decimal, part: Decimal) -> Decimal:
@@ -236,9 +289,9 @@ class BetfairFillOrKillRequest:
             )
 
         size = _positive_decimal(self.requested_size, "requested_size")
-        price = _positive_decimal(self.limit_price, "limit_price")
-        if price <= 1:
-            raise BetfairFillOrKillError("limit_price must be > 1")
+        price = _betfair_classic_odds_price(
+            _positive_decimal(self.limit_price, "limit_price")
+        )
         object.__setattr__(self, "requested_size", size)
         object.__setattr__(self, "limit_price", price)
 

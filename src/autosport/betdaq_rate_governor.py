@@ -23,6 +23,7 @@ import math
 import os
 from pathlib import Path
 import threading
+from types import MappingProxyType
 from typing import Final
 
 from .integrity import atomic_write_json, durable_path_lock
@@ -49,40 +50,46 @@ _DEFAULT_COMBINED_PER_MINUTE: Final = 300
 # BETDAQ ListBlacklistInformation exposes RemainingMS as provider `int` milliseconds.
 # XML/WSDL `int` is the signed 32-bit domain; negative remaining time is invalid here.
 _BETDAQ_PROVIDER_INT_MAX: Final = 2_147_483_647
-_DEFAULT_RATE_POLICY_PER_MINUTE: Final[dict[str, int]] = {
-    "PlaceOrdersNoReceipt": 100,
-    "PlaceOrdersWithReceipt": 20,
-    "ChangeOrderNoReceipt": 100,
-    "GetEventSubTreeNoSelections": 25,
-    "GetEventSubTreeWithSelections": 25,
-    "ListBootstrapOrders": 50,
-    "GetPrices": 130,
-    "ListOrdersChangedSince": 130,
-    "ListSelectionTrades": 1,
-}
-_OPERATION_TO_RATE_POLICY_KEY: Final[dict[str, str]] = {
-    "PlaceOrdersNoReceipt": "PlaceOrdersNoReceipt",
-    "PlaceOrdersWithReceipt": "PlaceOrdersWithReceipt",
-    "UpdateOrdersNoReceipt": "ChangeOrderNoReceipt",
-    "GetEventSubTreeNoSelections": "GetEventSubTreeNoSelections",
-    "GetEventSubTreeWithSelections": "GetEventSubTreeWithSelections",
-    "ListBootstrapOrders": "ListBootstrapOrders",
-    "GetPrices": "GetPrices",
-    "ListOrdersChangedSince": "ListOrdersChangedSince",
-    "ListSelectionTrades": "ListSelectionTrades",
-}
-_PROVIDER_API_NAME_TO_OPERATION_ID: Final[dict[str, str]] = {
-    "placeordersnoreceipt": "PlaceOrdersNoReceipt",
-    "placeorderswithreceipt": "PlaceOrdersWithReceipt",
-    "updateordersnoreceipt": "UpdateOrdersNoReceipt",
-    "changeordernoreceipt": "UpdateOrdersNoReceipt",
-    "geteventsubtreenoselections": "GetEventSubTreeNoSelections",
-    "geteventsubtreewithselections": "GetEventSubTreeWithSelections",
-    "listbootstraporders": "ListBootstrapOrders",
-    "getprices": "GetPrices",
-    "listorderschangedsince": "ListOrdersChangedSince",
-    "listselectiontrades": "ListSelectionTrades",
-}
+_DEFAULT_RATE_POLICY_PER_MINUTE: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "PlaceOrdersNoReceipt": 100,
+        "PlaceOrdersWithReceipt": 20,
+        "ChangeOrderNoReceipt": 100,
+        "GetEventSubTreeNoSelections": 25,
+        "GetEventSubTreeWithSelections": 25,
+        "ListBootstrapOrders": 50,
+        "GetPrices": 130,
+        "ListOrdersChangedSince": 130,
+        "ListSelectionTrades": 1,
+    }
+)
+_OPERATION_TO_RATE_POLICY_KEY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "PlaceOrdersNoReceipt": "PlaceOrdersNoReceipt",
+        "PlaceOrdersWithReceipt": "PlaceOrdersWithReceipt",
+        "UpdateOrdersNoReceipt": "ChangeOrderNoReceipt",
+        "GetEventSubTreeNoSelections": "GetEventSubTreeNoSelections",
+        "GetEventSubTreeWithSelections": "GetEventSubTreeWithSelections",
+        "ListBootstrapOrders": "ListBootstrapOrders",
+        "GetPrices": "GetPrices",
+        "ListOrdersChangedSince": "ListOrdersChangedSince",
+        "ListSelectionTrades": "ListSelectionTrades",
+    }
+)
+_PROVIDER_API_NAME_TO_OPERATION_ID: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "placeordersnoreceipt": "PlaceOrdersNoReceipt",
+        "placeorderswithreceipt": "PlaceOrdersWithReceipt",
+        "updateordersnoreceipt": "UpdateOrdersNoReceipt",
+        "changeordernoreceipt": "UpdateOrdersNoReceipt",
+        "geteventsubtreenoselections": "GetEventSubTreeNoSelections",
+        "geteventsubtreewithselections": "GetEventSubTreeWithSelections",
+        "listbootstraporders": "ListBootstrapOrders",
+        "getprices": "GetPrices",
+        "listorderschangedsince": "ListOrdersChangedSince",
+        "listselectiontrades": "ListSelectionTrades",
+    }
+)
 _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
     json.dumps(
         {
@@ -96,8 +103,11 @@ _POLICY_SOURCE_SHA256: Final = hashlib.sha256(
                 _READONLY_SERVICE_URL,
             ],
             "tier": "DEFAULT",
-            "rate_policy": _DEFAULT_RATE_POLICY_PER_MINUTE,
-            "operation_to_rate_policy_key": _OPERATION_TO_RATE_POLICY_KEY,
+            "rate_policy": dict(_DEFAULT_RATE_POLICY_PER_MINUTE),
+            "operation_to_rate_policy_key": dict(_OPERATION_TO_RATE_POLICY_KEY),
+            "provider_api_name_to_operation_id": dict(
+                _PROVIDER_API_NAME_TO_OPERATION_ID
+            ),
             "combined": _DEFAULT_COMBINED_PER_MINUTE,
             "any_axis": "UNKNOWN_UNMODELED",
         },
@@ -856,16 +866,35 @@ class BetdaqRateGovernor:
             )
         self.workspace = workspace
         self.policy = policy
-        self._method_policies = policy.by_method()
         self._runtime = runtime
         self._blacklist_store = blacklist_store
         self.policy_fingerprint = policy.fingerprint()
+        if self.policy_fingerprint != runtime.policy_fingerprint:
+            raise BetdaqRateGovernorError(
+                "BETDAQ rate policy changed during governor resolution"
+            )
+        self._method_policies = MappingProxyType(policy.by_method())
         self.governor_id = "betdaq-rate:" + _digest(
             {
                 "workspace_key": runtime.workspace_key,
                 "policy_fingerprint": self.policy_fingerprint,
             }
         )
+
+    def _assert_policy_integrity(self) -> None:
+        try:
+            current_fingerprint = self.policy.fingerprint()
+        except Exception as exc:
+            raise BetdaqRateGovernorError(
+                "BETDAQ rate policy changed after governor resolution"
+            ) from exc
+        if (
+            current_fingerprint != self.policy_fingerprint
+            or self.policy_fingerprint != self._runtime.policy_fingerprint
+        ):
+            raise BetdaqRateGovernorError(
+                "BETDAQ rate policy changed after governor resolution"
+            )
 
     @property
     def multi_process_safe(self) -> bool:
@@ -986,6 +1015,7 @@ class BetdaqRateGovernor:
         *,
         priority: BetdaqRatePriority = BetdaqRatePriority.BACKGROUND_READ,
     ) -> BetdaqRateAdmission:
+        self._assert_policy_integrity()
         name = _canonical_text(method, "method")
         if type(priority) is not BetdaqRatePriority:
             raise BetdaqRateGovernorError(
@@ -1208,6 +1238,7 @@ def resolve_betdaq_rate_governor(
                 raise BetdaqRateGovernorError(
                     "BETDAQ governor registry is internally inconsistent"
                 )
+            existing._assert_policy_integrity()
             if runtime.policy_fingerprint != fingerprint:
                 raise BetdaqRateGovernorError(
                     "same BETDAQ workspace cannot be rebound to a different rate policy"

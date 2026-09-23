@@ -76,6 +76,10 @@ class BetfairDiscoveryExchange:
             raise BetfairDiscoveryProvenanceError("raw_response must be immutable bytes")
         if not self.raw_response:
             raise BetfairDiscoveryProvenanceError("raw_response must not be empty")
+        if type(self.observed_at) is not datetime:
+            raise BetfairDiscoveryProvenanceError(
+                "observed_at must be an exact datetime"
+            )
         _require_utc(self.observed_at, "observed_at")
 
         params = self.request.rpc_params()
@@ -195,12 +199,12 @@ class BetfairDiscoveryAcquisitionEvidence:
             raise BetfairDiscoveryProvenanceError(
                 "market-type observation cannot precede event-type observation"
             )
-        if not isinstance(self.event_types, tuple):
-            raise BetfairDiscoveryProvenanceError("event_types must be a tuple")
-        if not isinstance(self.market_types, tuple):
-            raise BetfairDiscoveryProvenanceError("market_types must be a tuple")
-        if not isinstance(self.competitions, tuple):
-            raise BetfairDiscoveryProvenanceError("competitions must be a tuple")
+        if type(self.event_types) is not tuple:
+            raise BetfairDiscoveryProvenanceError("event_types must be an exact tuple")
+        if type(self.market_types) is not tuple:
+            raise BetfairDiscoveryProvenanceError("market_types must be an exact tuple")
+        if type(self.competitions) is not tuple:
+            raise BetfairDiscoveryProvenanceError("competitions must be an exact tuple")
         if any(type(item) is not BetfairEventType for item in self.event_types):
             raise BetfairDiscoveryProvenanceError(
                 "event_types must contain canonical BetfairEventType values"

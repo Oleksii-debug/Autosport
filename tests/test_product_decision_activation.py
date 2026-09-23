@@ -27,6 +27,7 @@ from autosport.product_decision_activation import (
 )
 from autosport.risk import PaperRiskPolicy
 from autosport.scientific_registry import (
+    ModelVersion,
     ResearchQuestion,
     ScientificRegistry,
     StrategyVersion,
@@ -103,6 +104,52 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self, path: Path, payload: object, *, pretty: bool = False
     ) -> None:
         path.write_text(self._json(payload, pretty=pretty), encoding="utf-8")
+
+    @staticmethod
+    def _reseal_registry_record(record: dict[str, object]) -> None:
+        envelope = {
+            "record_type": record["record_type"],
+            "record_id": record["record_id"],
+            "available_at": record["available_at"],
+            "payload": record["payload"],
+        }
+        record["record_sha256"] = hashlib.sha256(
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _install_model_reference(
+        self,
+    ) -> tuple[Path, dict[str, object], dict[str, object]]:
+        path = self.workspace / "scientific_registry.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        strategy = state["records"][0]
+        model_id = "model-v1"
+        model_entry = ScientificRegistry._entry(
+            ModelVersion(
+                model_version_id=model_id,
+                model_family="paper-model",
+                artifact_sha256="4" * 64,
+                source_sha256="5" * 64,
+                environment_sha256="6" * 64,
+                dataset_snapshot_id="dataset-v1",
+                feature_set_id="features-v1",
+                research_protocol_id="protocol-v1",
+                seed=7,
+                config_sha256="7" * 64,
+                created_at="2026-09-23T11:00:00+00:00",
+            )
+        )
+        strategy["payload"]["model_version_id"] = model_id
+        self._reseal_registry_record(strategy)
+        state["records"].insert(0, model_entry)
+        self._write_json(path, state)
+        return path, model_entry, strategy
 
     def _write_composition(self, *, source_id: str, bankroll: str) -> None:
         self._write_json(
@@ -315,6 +362,68 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         with self.assertRaises((ProductDecisionActivationError, ValueError)):
             self._verify()
+
+    def test_resealed_strategy_payload_identity_must_match_envelope(self) -> None:
+        path = self.workspace / "scientific_registry.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        strategy = state["records"][0]
+        strategy["payload"]["strategy_version_id"] = "strategy-other"
+        self._reseal_registry_record(strategy)
+        self._write_json(path, state)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "StrategyVersion payload identity",
+        ):
+            self._initialize()
+        self.assertFalse(self.store.path.exists())
+
+    def test_resealed_strategy_payload_timestamp_must_match_envelope(self) -> None:
+        path = self.workspace / "scientific_registry.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        strategy = state["records"][0]
+        strategy["payload"]["created_at"] = "2026-09-23T11:59:59+00:00"
+        self._reseal_registry_record(strategy)
+        self._write_json(path, state)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "StrategyVersion payload timestamp",
+        ):
+            self._initialize()
+        self.assertFalse(self.store.path.exists())
+
+    def test_resealed_model_payload_identity_must_match_envelope(self) -> None:
+        path, model_entry, _strategy = self._install_model_reference()
+        state = json.loads(path.read_text(encoding="utf-8"))
+        model = state["records"][0]
+        self.assertEqual(model["record_id"], model_entry["record_id"])
+        model["payload"]["model_version_id"] = "model-other"
+        self._reseal_registry_record(model)
+        self._write_json(path, state)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "ModelVersion payload identity",
+        ):
+            self._initialize()
+        self.assertFalse(self.store.path.exists())
+
+    def test_resealed_model_payload_timestamp_must_match_envelope(self) -> None:
+        path, model_entry, _strategy = self._install_model_reference()
+        state = json.loads(path.read_text(encoding="utf-8"))
+        model = state["records"][0]
+        self.assertEqual(model["record_id"], model_entry["record_id"])
+        model["payload"]["created_at"] = "2026-09-23T10:59:59+00:00"
+        self._reseal_registry_record(model)
+        self._write_json(path, state)
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "ModelVersion payload timestamp",
+        ):
+            self._initialize()
+        self.assertFalse(self.store.path.exists())
 
     def test_registry_get_rebind_cannot_forge_durable_strategy_authority(
         self,

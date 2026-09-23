@@ -1,5 +1,6 @@
 from dataclasses import replace
 from decimal import Decimal
+import pickle
 import pytest
 from autosport.bookmaker_capability import BookmakerAccountSnapshot, BookmakerBalanceObservation, BookmakerCapability, BookmakerCapabilityFact, BookmakerCapabilityProfile, BookmakerCapabilityState, BookmakerPositionObservation, BookmakerPositionState
 from autosport.provider_readback_health import ProviderReadbackFailureClass, ProviderReadbackHealth, ProviderReadbackHealthError, ProviderReadbackHealthState, ProviderReadScopeEvidence, _issue_complete_provider_read_scope_evidence, canonical_snapshot_sha256, classify_provider_readback_health
@@ -104,6 +105,14 @@ def test_product_issued_scope_cannot_be_rebound_with_dataclass_replace() -> None
     issued = _scope(BookmakerCapability.OPEN_POSITIONS_READ, snapshot=snapshot)
     with pytest.raises(ProviderReadbackHealthError, match='product-issued'):
         replace(issued, snapshot_sha256=canonical_snapshot_sha256(other))
+
+def test_serialized_complete_scope_loses_process_local_issuer_authority() -> None:
+    snapshot = _snapshot(BookmakerCapability.BALANCE_READ)
+    issued = _scope(BookmakerCapability.BALANCE_READ, snapshot=snapshot)
+    replayed = pickle.loads(pickle.dumps(issued))
+    health = classify_provider_readback_health(required_capabilities=(BookmakerCapability.BALANCE_READ,), evaluated_at='2026-09-21T18:00:05+00:00', freshness_limit_seconds=30, snapshot=snapshot, successful_scopes=(replayed,))
+    assert health.state is ProviderReadbackHealthState.FRESH_PARTIAL
+    assert not health.can_authorize_current_state
 
 def test_public_partial_scope_stays_non_authoritative() -> None:
     snapshot = _snapshot(BookmakerCapability.BALANCE_READ)

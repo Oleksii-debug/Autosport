@@ -9,6 +9,8 @@
   let latestState = null;
   let pollHandle = null;
   let ownerDefaultsApplied = false;
+  let refreshInFlight = null;
+  let refreshPending = false;
 
   function setTextIfChanged(node, value) {
     const text = String(value ?? "");
@@ -234,10 +236,27 @@
   }
 
   async function refreshState() {
+    if (refreshInFlight !== null) {
+      refreshPending = true;
+      await refreshInFlight;
+      return;
+    }
+
+    refreshInFlight = (async () => {
+      do {
+        refreshPending = false;
+        try {
+          renderState(await apiState());
+        } catch (_error) {
+          announce("Не вдалося оновити стан продукту через Python bridge.", true);
+        }
+      } while (refreshPending);
+    })();
+
     try {
-      renderState(await apiState());
-    } catch (_error) {
-      announce("Не вдалося оновити стан продукту через Python bridge.", true);
+      await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
     }
   }
 

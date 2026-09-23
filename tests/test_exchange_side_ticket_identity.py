@@ -52,27 +52,71 @@ def test_market_event_and_ticket_leg_share_exact_side_bearing_quote_identity() -
     assert event.quote_key == leg.quote_key
 
 
-def test_paperbook_round_trip_preserves_exchange_side_and_side_identity(tmp_path) -> None:
+def test_paperbook_round_trip_preserves_supported_back_side_identity(tmp_path) -> None:
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
     back = _leg("back")
-    lay = _leg("lay")
-    ticket = book.open_ticket([back, lay], "10", placed_at=_TS)
+    ticket = book.open_ticket([back], "10", placed_at=_TS)
 
-    assert {item.quote_key for item in ticket.legs} == {back.quote_key, lay.quote_key}
+    assert [item.quote_key for item in ticket.legs] == [back.quote_key]
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 8
     assert [item["exchange_side"] for item in payload["tickets"][0]["legs"]] == [
         "back",
-        "lay",
     ]
 
     restored = PaperBook.load(path)
     restored_legs = next(iter(restored.tickets.values())).legs
-    assert [item.exchange_side for item in restored_legs] == ["back", "lay"]
-    assert {item.quote_key for item in restored_legs} == {back.quote_key, lay.quote_key}
+    assert [item.exchange_side for item in restored_legs] == ["back"]
+    assert [item.quote_key for item in restored_legs] == [back.quote_key]
+
+
+@pytest.mark.parametrize(
+    "legs",
+    [
+        (_leg("lay"),),
+        (_leg("back"), _leg("lay")),
+    ],
+)
+def test_paperbook_rejects_lay_before_economic_state_mutation(
+    legs: tuple[TicketLeg, ...],
+) -> None:
+    book = PaperBook("100")
+
+    with pytest.raises(ValueError, match="LAY materialization is unsupported"):
+        book.open_ticket(legs, "10", placed_at=_TS)
+
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
+def test_paperbook_save_rejects_caller_mutated_lay_ticket(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg("back")], "10", placed_at=_TS)
+    ticket.legs = (_leg("lay"),)
+
+    with pytest.raises(ValueError, match="LAY materialization is unsupported"):
+        book.save(path)
+
+    assert not path.exists()
+
+
+def test_schema8_lay_snapshot_is_not_trusted_as_back_economics(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("back")], "10", placed_at=_TS)
+    book.save(path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 8
+    payload["tickets"][0]["legs"][0]["exchange_side"] = "lay"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="LAY materialization is unsupported"):
+        PaperBook.load(path)
 
 
 def test_schema6_snapshot_keeps_sport_and_upgrades_legacy_no_side_to_none(tmp_path) -> None:

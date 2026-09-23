@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
@@ -29,6 +30,61 @@ ACTIVATION_SCHEMA_VERSION: Final = 1
 DECISION_CYCLE_CONTRACT: Final = "autosport.product-paper-decision-cycle.v1"
 PAPER_EXECUTION_MODE: Final = "PAPER"
 _ACTIVATION_AUTHORITY_DOMAIN: Final = "autosport.product-decision-activation.v1"
+_PRODUCT_AUTHORITY_ROOT_NAME: Final = "product-decision-activation-authority-v1"
+
+
+def _product_machine_state_base() -> Path:
+    """Resolve machine state without caller/process trust-root overrides."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            # CSIDL_LOCAL_APPDATA. Query the Windows shell rather than trusting
+            # the caller-editable LOCALAPPDATA environment variable.
+            result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+                None,
+                0x001C,
+                None,
+                0,
+                buffer,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise ProductDecisionActivationError(
+                "cannot resolve product-owned Windows machine-state root"
+            ) from exc
+        if result != 0 or not buffer.value:
+            raise ProductDecisionActivationError(
+                "cannot resolve product-owned Windows machine-state root"
+            )
+        base = Path(buffer.value)
+    else:
+        try:
+            import pwd
+
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as exc:
+            raise ProductDecisionActivationError(
+                "cannot resolve product-owned POSIX machine-state root"
+            ) from exc
+        base = Path(home) / ".local" / "state"
+
+    if not base.is_absolute():
+        raise ProductDecisionActivationError(
+            "product-owned machine-state root must be absolute"
+        )
+    return base
+
+
+def _product_activation_authority_root() -> Path:
+    """Return the fixed product-owned root for durable START activation."""
+
+    return (
+        _product_machine_state_base()
+        / "autosport"
+        / _PRODUCT_AUTHORITY_ROOT_NAME
+    )
 
 
 class ProductDecisionActivationError(ValueError):
@@ -461,6 +517,7 @@ class ProductDecisionActivationStore:
                 workspace=self.workspace,
                 domain=_ACTIVATION_AUTHORITY_DOMAIN,
                 key=self.FILE_NAME,
+                authority_root=_product_activation_authority_root(),
             )
         except MonotonicWorkspaceAuthorityError as exc:
             raise ProductDecisionActivationError(

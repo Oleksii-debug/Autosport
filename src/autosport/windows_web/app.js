@@ -478,7 +478,7 @@
 
   window.addEventListener("pywebviewready", async () => {
     await refreshState();
-    byId("main-content").focus();
+    byId(301).focus();
     pollHandle = window.setInterval(refreshState, 250);
   });
 

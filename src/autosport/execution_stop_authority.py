@@ -1159,32 +1159,6 @@ class ExecutionStopAuthority:
         """
 
         _require_canonical_admission_graph()
-        if ExecutionStopAuthority is not _CANONICAL_ADMISSION_AUTHORITY_CLASS:
-            raise ExecutionStopIntegrityError(
-                "canonical execution admission authority class changed"
-            )
-        live_operation_lock = getattr(
-            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
-            "_authority_operation_lock",
-            None,
-        )
-        live_current_unlocked = getattr(
-            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
-            "_current_unlocked",
-            None,
-        )
-        if (
-            live_operation_lock is not _CANONICAL_ADMISSION_OPERATION_LOCK
-            or getattr(live_operation_lock, "__code__", None)
-            is not _CANONICAL_ADMISSION_OPERATION_LOCK_CODE
-            or live_current_unlocked is not _CANONICAL_ADMISSION_CURRENT_UNLOCKED
-            or getattr(live_current_unlocked, "__code__", None)
-            is not _CANONICAL_ADMISSION_CURRENT_UNLOCKED_CODE
-        ):
-            raise ExecutionStopIntegrityError(
-                "canonical execution admission lower dispatch changed"
-            )
-
         with _CANONICAL_ADMISSION_OPERATION_LOCK(self):
             state = _CANONICAL_ADMISSION_CURRENT_UNLOCKED(self)
             if state.mode is not ExecutionAuthorityMode.ARMED:

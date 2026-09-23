@@ -330,10 +330,17 @@ def test_self_consistent_history_truncation_fails_closed_against_state_anchor() 
         scheduler = _scheduler_with_history(Path(directory), _SMALL_HISTORY)
         connection = sqlite3.connect(scheduler._cold_history_path)
         try:
+            # Simulate an out-of-band writer that bypassed the database guard, but
+            # restore the canonical trigger before reopen so anchor validation, not
+            # merely missing-schema validation, must still detect tail truncation.
+            connection.execute(
+                f"DROP TRIGGER {research_scheduler._COLD_HISTORY_DELETE_TRIGGER_NAME}"
+            )
             connection.execute(
                 "DELETE FROM cold_history WHERE sequence = "
                 "(SELECT MAX(sequence) FROM cold_history)"
             )
+            connection.execute(research_scheduler._COLD_HISTORY_DELETE_TRIGGER_SQL)
             connection.commit()
         finally:
             connection.close()
@@ -342,9 +349,47 @@ def test_self_consistent_history_truncation_fails_closed_against_state_anchor() 
             ResearchScheduler(scheduler.path, _UnusedSink())
 
 
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "DELETE FROM cold_history WHERE sequence = 2",
+        "UPDATE cold_history SET record_id = '"
+        + ("f" * 64)
+        + "' WHERE sequence = 2",
+        """
+        INSERT INTO cold_history(
+            sequence, record_kind, record_id, previous_entry_sha256,
+            record_json, entry_sha256
+        )
+        SELECT 999, record_kind, record_id, previous_entry_sha256,
+               record_json, entry_sha256
+        FROM cold_history
+        WHERE sequence = 2
+        """,
+    ),
+)
+def test_cold_history_sql_mutation_is_rejected_before_it_can_create_a_gap(
+    statement: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        scheduler = _scheduler_with_curriculum_history(
+            Path(directory),
+            _SMALL_HISTORY,
+        )
+        connection = sqlite3.connect(scheduler._cold_history_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement)
+            connection.rollback()
+        finally:
+            connection.close()
+
+        scheduler.pause()
+        snapshot = scheduler.snapshot()
+        assert len(snapshot["curriculum_wakes"]) == _SMALL_HISTORY
 
 
-def test_interior_cold_history_gap_fails_closed_on_hot_state_validation() -> None:
+def test_missing_cold_history_guard_fails_closed_on_hot_state_validation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         scheduler = _scheduler_with_curriculum_history(
             Path(directory),
@@ -353,16 +398,13 @@ def test_interior_cold_history_gap_fails_closed_on_hot_state_validation() -> Non
         connection = sqlite3.connect(scheduler._cold_history_path)
         try:
             connection.execute(
-                "DELETE FROM cold_history WHERE sequence = 2"
+                f"DROP TRIGGER {research_scheduler._COLD_HISTORY_DELETE_TRIGGER_NAME}"
             )
             connection.commit()
         finally:
             connection.close()
 
-        # A missing archived ACCEPTED wake must be detected before any ordinary
-        # hot-state mutation can proceed. Otherwise indexed history lookup could
-        # treat that wake as absent and permit resurrection before restart.
-        with pytest.raises(ResearchSchedulerError, match="cardinality"):
+        with pytest.raises(ResearchSchedulerError, match="trigger schema mismatch"):
             scheduler.pause()
 
 

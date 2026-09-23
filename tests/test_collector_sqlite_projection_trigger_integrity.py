@@ -1,12 +1,15 @@
+import hashlib
 import sqlite3
 
 import pytest
 
-from autosport.causal_collector import CollectorDeltaStore
+from autosport.causal_collector import CollectorDelta, CollectorDeltaStore
 
 
 _TRIGGER_NAME = "collector_deltas_projection_immutable_v1"
 _MARKER_KEY = "indexed_projection_integrity_v1"
+_ORDER_MARKER_KEY = "commit_order_integrity_v1"
+_ORDER_UNVERIFIED_PREFIX = "commit_order_unverified_source_v1:"
 
 
 def _install_noop_same_name_trigger(path, *, remove_marker: bool) -> None:
@@ -117,6 +120,10 @@ def _install_predecessor_projection_trigger(path) -> None:
     try:
         connection.execute(f"DROP TRIGGER IF EXISTS {_TRIGGER_NAME}")
         connection.execute(
+            "DELETE FROM collector_meta WHERE key=? OR key LIKE ?",
+            (_ORDER_MARKER_KEY, f"{_ORDER_UNVERIFIED_PREFIX}%"),
+        )
+        connection.execute(
             f"CREATE TRIGGER {_TRIGGER_NAME} BEFORE UPDATE OF "
             "delta_id, source_id, stream_epoch, cursor_position, revision_number, "
             "desktop_available_at, collector_committed_at "
@@ -138,3 +145,111 @@ def test_predecessor_canonical_trigger_upgrades_without_bricking_store(tmp_path)
     sql = " ".join(_trigger_sql(path).split())
     assert "BEFORE UPDATE OF commit_seq, delta_id, source_id" in sql
 
+
+
+def _delta(
+    delta_id: str,
+    cursor_position: int,
+    *,
+    revision_of: str | None = None,
+    revision_number: int = 0,
+    event_identity: str | None = None,
+) -> CollectorDelta:
+    identity = delta_id if event_identity is None else event_identity
+    digest_seed = f"{delta_id}:{cursor_position}:{revision_number}".encode("utf-8")
+    return CollectorDelta(
+        schema_version=1,
+        delta_id=delta_id,
+        source_id="source-x",
+        lawful_terms_ref="terms:source-x:v1",
+        retention_ref="retention:source-x:v1",
+        stream_epoch="epoch-1",
+        source_cursor=str(cursor_position),
+        cursor_position=cursor_position,
+        event_dedupe_key=f"dedupe-{identity}",
+        event_id=f"event-{identity}",
+        source_payload_digest=hashlib.sha256(b"source:" + digest_seed).hexdigest(),
+        canonical_event_digest=hashlib.sha256(
+            b"canonical:" + digest_seed
+        ).hexdigest(),
+        source_observed_at="2026-09-23T00:00:00+00:00",
+        collector_received_at="2026-09-23T00:00:01+00:00",
+        collector_committed_at="2026-09-23T00:00:02+00:00",
+        desktop_available_at="2026-09-23T00:00:03+00:00",
+        revision_of=revision_of,
+        revision_number=revision_number,
+    )
+
+
+def test_nonempty_predecessor_with_unique_order_upgrades_without_bricking_store(
+    tmp_path,
+) -> None:
+    path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta("d1", 1)) is True
+    assert store.append(_delta("d2", 2)) is True
+    _install_predecessor_projection_trigger(path)
+
+    reopened = CollectorDeltaStore(path)
+
+    assert tuple(
+        delta.delta_id
+        for delta in reopened.deltas_after_commit(source_id="source-x")
+    ) == ("d1", "d2")
+
+
+def test_predecessor_commit_order_tamper_fails_before_upgrade(tmp_path) -> None:
+    path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta("d1", 1)) is True
+    assert store.append(_delta("d2", 2)) is True
+    _install_predecessor_projection_trigger(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE collector_deltas SET commit_seq=100 WHERE delta_id='d1'"
+        )
+        connection.execute(
+            "UPDATE collector_deltas SET commit_seq=1 WHERE delta_id='d2'"
+        )
+        connection.execute(
+            "UPDATE collector_deltas SET commit_seq=2 WHERE delta_id='d1'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        ValueError,
+        match="commit order conflicts with immutable causal history",
+    ):
+        CollectorDeltaStore(path)
+
+
+def test_ambiguous_predecessor_order_stays_readable_but_cursor_fails_closed(
+    tmp_path,
+) -> None:
+    path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta("d1", 1)) is True
+    assert store.append(_delta("d2", 2)) is True
+    assert store.append(
+        _delta(
+            "d1-r1",
+            1,
+            revision_of="d1",
+            revision_number=1,
+            event_identity="d1",
+        )
+    ) is True
+    _install_predecessor_projection_trigger(path)
+
+    reopened = CollectorDeltaStore(path)
+
+    assert reopened.get("d1-r1") is not None
+    with pytest.raises(
+        ValueError,
+        match="commit order is not independently verified",
+    ):
+        reopened.deltas_after_commit(source_id="source-x")

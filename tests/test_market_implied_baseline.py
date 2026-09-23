@@ -393,7 +393,9 @@ class MarketImpliedBaselineTests(unittest.TestCase):
         )
         self.assertEqual(bound.row_evidence_sha256, (row.evidence_sha256,))
         truth = bound.to_dict()["truth"]
-        self.assertTrue(truth["same_frozen_cohort"])
+        self.assertFalse(truth["same_frozen_cohort"])
+        self.assertTrue(truth["same_frozen_cohort_labels"])
+        self.assertFalse(truth["canonical_evaluation_universe_bound"])
         self.assertFalse(truth["metric_computed"])
         self.assertFalse(truth["promotion_authority"])
 

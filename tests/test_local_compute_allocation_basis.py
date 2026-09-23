@@ -171,8 +171,12 @@ def test_measurement_period_cannot_end_after_owner_confirmation(
         store.publish_owner_basis(review, confirmed=True)
 
 
-def test_product_clock_rollback_cannot_backdate_later_owner_basis(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "later_clock",
+    ("2026-09-23T09:00:00Z", "2026-09-23T10:00:00Z"),
+)
+def test_product_clock_must_strictly_advance_for_later_owner_basis(
+    tmp_path, monkeypatch, later_clock
 ):
     _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
     first = store.publish_owner_basis(_review(store), confirmed=True)
@@ -181,7 +185,7 @@ def test_product_clock_rollback_cannot_backdate_later_owner_basis(
     monkeypatch.setattr(
         subject,
         "_authority_now",
-        lambda: "2026-09-23T09:00:00Z",
+        lambda: later_clock,
     )
     later_review = _review(
         store,
@@ -191,7 +195,7 @@ def test_product_clock_rollback_cannot_backdate_later_owner_basis(
 
     with pytest.raises(
         subject.LocalComputeAllocationBasisError,
-        match="product clock regressed",
+        match="product clock did not advance",
     ):
         store.publish_owner_basis(later_review, confirmed=True)
 

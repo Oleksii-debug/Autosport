@@ -4,6 +4,7 @@ import hashlib
 import json
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlencode
 
 import pytest
 
@@ -79,8 +80,73 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _write_snapshot(
-    root: Path,
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _acquisition_provenance(
+    *,
+    sport: str,
+    requested_at: str,
+    response_sha256: str,
+    api_version: str,
+) -> tuple[dict[str, object], str]:
+    request_query = {
+        "date": requested_at,
+        "regions": "us",
+        "markets": "h2h,spreads,totals",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso",
+    }
+    query_string = urlencode(request_query)
+    endpoint_path = f"/v1/historical/sports/{sport}/odds"
+    base_url = "https://parlay-api.com"
+    request_url = f"{base_url}{endpoint_path}?{query_string}"
+    response_headers = {
+        "x-api-version": api_version,
+        "x-api-release-date": "2026-09-01",
+        "deprecation": None,
+        "sunset": None,
+        "link": None,
+        "x-historical-window-hours": None,
+        "x-historical-window-from": None,
+        "x-markets-served": None,
+        "x-markets-unservable": None,
+        "x-markets-served-elsewhere": None,
+        "cache-control": "private, max-age=60",
+    }
+    provenance: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "parlayapi_point_in_time_historical_acquisition",
+        "product_kind": "POINT_IN_TIME_ODDS",
+        "request": {
+            "method": "GET",
+            "origin": base_url,
+            "base_url_sha256": hashlib.sha256(base_url.encode("utf-8")).hexdigest(),
+            "endpoint_path": endpoint_path,
+            "query": request_query,
+            "query_string": query_string,
+            "request_url_sha256": hashlib.sha256(request_url.encode("utf-8")).hexdigest(),
+            "request_url_persisted": False,
+            "request_credentials_persisted": False,
+        },
+        "http_status": 200,
+        "response_payload_sha256": response_sha256,
+        "response_headers": response_headers,
+        "canonical_response_payload_bound": True,
+        "raw_response_bytes_bound": False,
+    }
+    return provenance, _canonical_sha256(provenance)
+
+
+def _write_snapshot(    root: Path,
     *,
     sport: str,
     suffix: str,
@@ -88,6 +154,7 @@ def _write_snapshot(
     source_id: str | None = None,
     event_id: str | None = None,
     explicit_event_sport: bool = True,
+    acquisition_api_version: str | None = None,
 ) -> tuple[Path, Path, MarketEvent]:
     source = source_id or f"parlayapi:{sport}"
     event = MarketEvent(
@@ -112,9 +179,7 @@ def _write_snapshot(
         json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    evidence.write_text(
-        json.dumps(
-            {
+    evidence_payload = {
                 "schema_version": 1,
                 "kind": "parlayapi_point_in_time_historical_snapshot",
                 "provider": "parlayapi",
@@ -141,6 +206,18 @@ def _write_snapshot(
                 "human_tested": False,
                 "nvda_verified": False,
             },
+    if acquisition_api_version is not None:
+        acquisition, acquisition_sha256 = _acquisition_provenance(
+            sport=sport,
+            requested_at=requested_at,
+            response_sha256=str(evidence_payload["response_sha256"]),
+            api_version=acquisition_api_version,
+        )
+        evidence_payload["acquisition_provenance"] = acquisition
+        evidence_payload["acquisition_sha256"] = acquisition_sha256
+    evidence.write_text(
+        json.dumps(
+            evidence_payload,
             ensure_ascii=False,
             sort_keys=True,
         ),
@@ -315,6 +392,156 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
     ):
         assert len(provenance[key]) == 64
         int(provenance[key], 16)
+
+
+def test_validated_acquisition_provenance_is_bound_into_corpus_identity(tmp_path: Path) -> None:
+    snapshot = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="bound-acquisition",
+        acquisition_api_version="3.2.0",
+    )
+    manifest = _assemble(
+        tmp_path,
+        snapshot,
+        output_name="bound-acquisition-corpus",
+        governance_suffix="bound-acquisition",
+    )
+    acquisition_evidence = manifest["governance"]["acquisition_evidence"]
+    provenance = acquisition_evidence["provenance"]
+    snapshot_evidence = acquisition_evidence["snapshots"][0]
+
+    assert acquisition_evidence["validated_acquisition_provenance_count"] == 1
+    assert provenance["validated_acquisition_provenance_count"] == 1
+    assert provenance["normalized_request_scope_bound"] is True
+    assert provenance["provider_response_metadata_bound"] is True
+    assert provenance["raw_response_bytes_bound"] is False
+    assert len(snapshot_evidence["acquisition_provenance_sha256"]) == 64
+    assert (
+        snapshot_evidence["acquisition_provenance"]["response_headers"]["x-api-version"]
+        == "3.2.0"
+    )
+    assert (
+        snapshot_evidence["acquisition_provenance"]["request"]["endpoint_path"]
+        == "/v1/historical/sports/basketball/odds"
+    )
+
+
+def test_provider_metadata_drift_changes_acquisition_not_market_content_identity(tmp_path: Path) -> None:
+    first = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="header-drift-a",
+        event_id="event-header-stable",
+        acquisition_api_version="3.2.0",
+    )
+    second = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="header-drift-b",
+        event_id="event-header-stable",
+        acquisition_api_version="3.2.1",
+    )
+    first_manifest = _assemble(
+        tmp_path,
+        first,
+        output_name="header-drift-corpus-a",
+        governance_suffix="header-drift-shared",
+    )
+    second_manifest = _assemble(
+        tmp_path,
+        second,
+        output_name="header-drift-corpus-b",
+        governance_suffix="header-drift-shared",
+    )
+    a = first_manifest["governance"]["acquisition_evidence"]["provenance"]
+    b = second_manifest["governance"]["acquisition_evidence"]["provenance"]
+
+    assert a["content_identity"] == b["content_identity"]
+    assert a["acquisition_identity"] != b["acquisition_identity"]
+    assert a["normalized_request_scope_bound"] is True
+    assert b["provider_response_metadata_bound"] is True
+
+
+def test_tampered_acquisition_digest_fails_closed(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="bad-acquisition-digest",
+        acquisition_api_version="3.2.0",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload["acquisition_sha256"] = "2" * 64
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="bad-acquisition-digest",
+    )
+    with pytest.raises(ValueError, match="acquisition_sha256 does not match"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="bad-acquisition-digest",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-bad-acquisition-digest",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("sport", "endpoint_path contradicts sport_key"),
+        ("raw-bytes", "cannot claim raw response bytes"),
+        ("response-digest", "response payload digest contradicts"),
+    ],
+)
+def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+    match: str,
+) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix=f"false-acquisition-{mutation}",
+        acquisition_api_version="3.2.0",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    acquisition = payload["acquisition_provenance"]
+    if mutation == "sport":
+        acquisition["request"]["endpoint_path"] = "/v1/historical/sports/baseball/odds"
+    elif mutation == "raw-bytes":
+        acquisition["raw_response_bytes_bound"] = True
+    else:
+        acquisition["response_payload_sha256"] = "3" * 64
+    payload["acquisition_sha256"] = _canonical_sha256(acquisition)
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix=f"false-acquisition-{mutation}",
+    )
+    with pytest.raises(ValueError, match=match):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix=f"false-acquisition-{mutation}",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / f"blocked-false-acquisition-{mutation}",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
 
 
 def test_cross_sport_source_substitution_fails_closed(tmp_path: Path) -> None:

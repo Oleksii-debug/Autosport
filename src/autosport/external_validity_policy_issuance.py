@@ -153,7 +153,9 @@ _WORKSPACE_BINDING_READ_MARKER_CODE = (
     WorkspaceIdentityBinding._read_workspace_marker_id.__code__
 )
 _WORKSPACE_BINDING_READ_PATH = WorkspaceIdentityBinding._read_path_binding_id
-_WORKSPACE_BINDING_READ_PATH_CODE = WorkspaceIdentityBinding._read_path_binding_id.__code__
+_WORKSPACE_BINDING_READ_PATH_CODE = (
+    WorkspaceIdentityBinding._read_path_binding_id.__code__
+)
 
 
 def _require_workspace_binding_dispatch_authority() -> None:

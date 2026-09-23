@@ -54,7 +54,12 @@ from .supervised_execution import (
 PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
-EXECUTION_STOP_JOURNAL_FILENAME = "execution-stop.jsonl"
+
+_CANONICAL_EXECUTION_STOP_AUTHORITY = ExecutionStopAuthority
+_CANONICAL_EXECUTION_STOP_ADMISSION_LEASE = ExecutionStopAuthority.admission_lease
+_CANONICAL_EXECUTION_STOP_ADMISSION_LEASE_CODE = (
+    _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE.__code__
+)
 
 # Terminal provider-effect authority must not depend on caller-rebindable method
 # dispatch.  These product-owned implementations are captured once and are used
@@ -1099,11 +1104,25 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
-        stop_authority = ExecutionStopAuthority(
-            Path(execution_workspace) / EXECUTION_STOP_JOURNAL_FILENAME
+        if (
+            ExecutionStopAuthority is not _CANONICAL_EXECUTION_STOP_AUTHORITY
+            or _CANONICAL_EXECUTION_STOP_AUTHORITY.admission_lease
+            is not _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE
+            or getattr(
+                _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE_CODE
+        ):
+            raise BetfairSupervisedExecutionError(
+                "execution STOP admission authority changed"
+            )
+        stop_authority = _CANONICAL_EXECUTION_STOP_AUTHORITY(
+            Path(execution_workspace) / "execution-stop.jsonl"
         )
         try:
-            with stop_authority.admission_lease():
+            with _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE(stop_authority):
                 try:
                     if _transport_post is None:
                         payload = self._transport.post(

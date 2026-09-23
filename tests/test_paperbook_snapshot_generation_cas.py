@@ -401,3 +401,58 @@ def test_private_opening_authority_rejects_settlement_after_visible_leg_witness_
     assert ticket.status is status_before
     assert ticket.payout == payout_before
     assert ticket.settled_at == settled_at_before
+
+
+def test_exact_serialized_candidate_rejects_post_validation_opening_rewrite(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg("selection-1", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    book.save(path)
+    durable_before = path.read_bytes()
+
+    import autosport.paper as paper_module
+
+    original_binding = paper_module._snapshot_authority_binding
+    calls = 0
+
+    def _mutate_after_initial_validation(target):
+        nonlocal calls
+        binding = original_binding(target)
+        if target is book:
+            calls += 1
+            # save() calls the binding once in its opening authority check, then
+            # validates the whole live object, then calls it again immediately
+            # before raw snapshot collection. Mutate on that second call so the
+            # initial private-authority validation has already passed.
+            if calls == 2:
+                ticket.stake = Decimal("20")
+                ticket._opening_stake = Decimal("20")
+                book.balance = Decimal("80")
+        return binding
+
+    monkeypatch.setattr(
+        paper_module,
+        "_snapshot_authority_binding",
+        _mutate_after_initial_validation,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "serialized candidate opening economic identity differs "
+            "from product-issued authority"
+        ),
+    ):
+        book.save(path)
+
+    assert calls >= 2
+    assert path.read_bytes() == durable_before

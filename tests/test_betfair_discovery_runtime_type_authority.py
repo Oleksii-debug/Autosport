@@ -59,6 +59,10 @@ class TupleSubclass(tuple):
     pass
 
 
+class AcquisitionEvidenceSubclass(BetfairDiscoveryAcquisitionEvidence):
+    pass
+
+
 def _scope() -> BetfairDiscoveryVisibilityScope:
     return BetfairDiscoveryVisibilityScope(
         account_scope_ref="account-A",
@@ -125,10 +129,14 @@ def test_exchange_snapshots_request_authority_once() -> None:
         exchange.canonical_filter_json,
         exchange.request_sha256,
         exchange.filter_sha256,
+        exchange.raw_response_sha256,
+        exchange.raw_response_size_bytes,
+        exchange.observed_at_utc,
+        exchange.evidence_projection(),
     )
 
-    # Even an explicit frozen-dataclass bypass cannot make already-issued
-    # acquisition evidence re-dispatch through a later request projection.
+    # Even explicit frozen-dataclass bypasses cannot change already-issued
+    # acquisition evidence after its authority projection has been sealed.
     object.__setattr__(
         request,
         "params",
@@ -140,6 +148,8 @@ def test_exchange_snapshots_request_authority_once() -> None:
             }
         ),
     )
+    object.__setattr__(exchange, "raw_response", b"later-response")
+    object.__setattr__(exchange, "observed_at", T1)
 
     assert (
         exchange.method,
@@ -147,6 +157,10 @@ def test_exchange_snapshots_request_authority_once() -> None:
         exchange.canonical_filter_json,
         exchange.request_sha256,
         exchange.filter_sha256,
+        exchange.raw_response_sha256,
+        exchange.raw_response_size_bytes,
+        exchange.observed_at_utc,
+        exchange.evidence_projection(),
     ) == before
 
 
@@ -263,4 +277,63 @@ def test_acquisition_rejects_tuple_subclass() -> None:
             market_types=(BetfairMarketType("MATCH_ODDS", 1),),
             max_age_seconds=60,
         )
+
+def test_acquisition_rejects_runtime_subclass() -> None:
+    event_exchange = BetfairDiscoveryExchange(
+        build_list_event_types_request(),
+        b"event-types",
+        T0,
+    )
+    market_exchange = BetfairDiscoveryExchange(
+        build_list_market_types_request(event_type_ids=("1",)),
+        b"market-types",
+        T1,
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="exact canonical runtime type",
+    ):
+        AcquisitionEvidenceSubclass(
+            discovery_run_id="run-runtime-type",
+            visibility_scope=_scope(),
+            event_type_exchange=event_exchange,
+            event_types=(BetfairEventType("1", "Soccer", 1),),
+            selected_event_type_id="1",
+            market_type_exchange=market_exchange,
+            market_types=(BetfairMarketType("MATCH_ODDS", 1),),
+            max_age_seconds=60,
+        )
+
+
+def test_acquisition_authority_projection_is_stable_after_external_mutation() -> None:
+    evidence = _build_evidence()
+    before = (
+        evidence.semantic_identity_sha256,
+        evidence.acquisition_evidence_sha256,
+        evidence.event_type_inventory_projection(),
+        evidence.market_type_inventory_projection(),
+        evidence.projection(),
+    )
+
+    object.__setattr__(
+        evidence.visibility_scope,
+        "account_scope_ref",
+        "account-B",
+    )
+    object.__setattr__(evidence.event_types[0], "market_count", 999)
+    object.__setattr__(
+        evidence.event_type_exchange,
+        "raw_response",
+        b"later-event-types",
+    )
+    object.__setattr__(evidence, "selected_event_type_id", "late-relabel")
+
+    assert (
+        evidence.semantic_identity_sha256,
+        evidence.acquisition_evidence_sha256,
+        evidence.event_type_inventory_projection(),
+        evidence.market_type_inventory_projection(),
+        evidence.projection(),
+    ) == before
 

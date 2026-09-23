@@ -194,3 +194,56 @@ def test_familywise_alpha_registry_fails_closed_on_internal_identity_drift() -> 
     # The immutable seal itself remains unchanged even though the live object was
     # attacked; no recomputed post-mutation digest becomes trusted authority.
     assert registry._sealed_identity_sha256 == sealed_identity
+
+def test_familywise_alpha_registry_revalidates_preseal_tampered_allocation() -> None:
+    """Low-level caller mutation before sealing cannot mint invalid family alpha."""
+
+    allocation = AlphaAllocation(
+        challenger_id="challenger-a",
+        alpha=Decimal("0.4"),
+    )
+    object.__setattr__(allocation, "alpha", Decimal("-0.4"))
+
+    with pytest.raises(ForwardEconomicEvidenceError):
+        FamilywiseAlphaRegistry(
+            family_id="family-a",
+            total_alpha=Decimal("0.5"),
+            allocations=(allocation,),
+            sealed_at=T0,
+        )
+
+
+def test_familywise_alpha_registry_preseal_tamper_is_bounded_before_fraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tampered exact allocation must be revalidated before Fraction sees it."""
+
+    allocation = AlphaAllocation(
+        challenger_id="challenger-a",
+        alpha=Decimal("0.4"),
+    )
+    object.__setattr__(allocation, "alpha", Decimal("1E-6000"))
+
+    real_fraction = evidence.Fraction
+    oversized_fraction_seen = False
+
+    def guarded_fraction(value: object):
+        nonlocal oversized_fraction_seen
+        if type(value) is Decimal:
+            exponent = value.as_tuple().exponent
+            if type(exponent) is int and abs(exponent) > 512:
+                oversized_fraction_seen = True
+                raise RuntimeError("oversized Decimal reached Fraction materialization")
+        return real_fraction(value)
+
+    monkeypatch.setattr(evidence, "Fraction", guarded_fraction)
+
+    with pytest.raises(ForwardEconomicEvidenceError):
+        FamilywiseAlphaRegistry(
+            family_id="family-a",
+            total_alpha=Decimal("0.5"),
+            allocations=(allocation,),
+            sealed_at=T0,
+        )
+
+    assert oversized_fraction_seen is False

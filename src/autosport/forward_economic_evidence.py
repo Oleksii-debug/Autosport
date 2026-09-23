@@ -245,11 +245,24 @@ class FamilywiseAlphaRegistry:
         # Snapshot caller-owned container/items exactly once before validating
         # them. Validation must not iterate a caller-mutable collection and then
         # trust a later, potentially different iteration as the sealed family.
-        allocations = tuple(deepcopy(item) for item in self.allocations)
-        if not allocations:
+        raw_allocations = tuple(self.allocations)
+        if not raw_allocations:
             raise ForwardEconomicEvidenceError("alpha registry must allocate at least one challenger")
-        if any(type(item) is not AlphaAllocation for item in allocations):
+        if any(type(item) is not AlphaAllocation for item in raw_allocations):
             raise ForwardEconomicEvidenceError("alpha allocations must be exact AlphaAllocation values")
+
+        # An exact frozen dataclass can still be low-level mutated through
+        # object.__setattr__ before it reaches this sealing boundary. Snapshot
+        # only exact values, then reconstruct them through the canonical
+        # AlphaAllocation validator so pre-seal drift cannot bypass positivity
+        # or Decimal resource bounds before Fraction budget arithmetic.
+        allocations = tuple(
+            AlphaAllocation(
+                challenger_id=snapshot.challenger_id,
+                alpha=snapshot.alpha,
+            )
+            for snapshot in (deepcopy(item) for item in raw_allocations)
+        )
         challenger_ids = tuple(item.challenger_id for item in allocations)
         if challenger_ids != tuple(sorted(challenger_ids)):
             raise ForwardEconomicEvidenceError("alpha allocations must be sorted by challenger_id")

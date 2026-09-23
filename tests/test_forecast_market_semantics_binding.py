@@ -33,9 +33,9 @@ def _event(semantics: str | None) -> MarketEvent:
     )
 
 
-def _record(semantics: str | None) -> ForecastRecord:
+def _record(semantics: str | None, *, quote_key: str | None = None) -> ForecastRecord:
     return ForecastRecord(
-        quote_key=_event(semantics).quote_key,
+        quote_key=_event(semantics).quote_key if quote_key is None else quote_key,
         probability=Decimal("0.70"),
         model_id="model-1",
         model_version="1",
@@ -67,7 +67,26 @@ def test_same_quote_key_different_market_semantics_cannot_reuse_forecast() -> No
     ).on_market_event(second_event, context)
 
     assert context.notes == [
-        "paper-value forecast withheld: forecast market semantics do not "
+        "paper-value forecast withheld: forecast market identity does not "
+        "match the canonical market event"
+    ]
+    assert not context.paper_book.tickets
+
+
+
+
+def test_dictionary_key_cannot_launder_wrong_forecast_quote_identity() -> None:
+    event = _event(_S1)
+    wrong_quote_forecast = _record(_S1, quote_key="different|market|selection")
+    context = AgentContext(PaperBook("100"))
+
+    PaperValueAgent(
+        {event.quote_key: wrong_quote_forecast},
+        minimum_expected_profit_per_unit="0",
+    ).on_market_event(event, context)
+
+    assert context.notes == [
+        "paper-value forecast withheld: forecast market identity does not "
         "match the canonical market event"
     ]
     assert not context.paper_book.tickets
@@ -105,7 +124,7 @@ def test_legacy_forecast_cannot_authorize_semantics_bound_event() -> None:
     ).on_market_event(event, context)
 
     assert context.notes == [
-        "paper-value forecast withheld: forecast market semantics do not "
+        "paper-value forecast withheld: forecast market identity does not "
         "match the canonical market event"
     ]
 
@@ -119,7 +138,7 @@ def test_legacy_forecast_still_matches_legacy_event() -> None:
         as_of_ts="2026-09-23T11:59:00+00:00",
     )
 
-    assert PaperValueAgent._forecast_matches_market_semantics(legacy, event)
+    assert PaperValueAgent._forecast_matches_market_identity(legacy, event)
 
 
 def test_no_semantics_forecast_preserves_exact_legacy_serialization_and_digest() -> None:

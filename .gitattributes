@@ -1,0 +1,7 @@
+# Release source integrity compares raw worktree bytes with exact Git blobs.
+# Keep detected text byte-stable across Windows/Linux checkouts; binary files stay binary.
+* text=auto eol=lf
+
+# Replay dataset manifests hash exact bytes. Keep dataset text byte-stable on every checkout.
+*.json text eol=lf
+*.jsonl text eol=lf

@@ -37,6 +37,7 @@ from .real_execution_ledger import (
 
 _SCHEMA_VERSION = 1
 _VENUE_ID = "betfair"
+_DB_FILENAME = "betfair-pretrade-reservations.sqlite3"
 _ZERO = Decimal("0")
 _ACTIVE_STATES = frozenset(
     {
@@ -197,15 +198,16 @@ class BetfairPreTradeReservationStore:
 
     def __init__(
         self,
-        path: str | Path,
+        execution_workspace: str | Path,
         *,
         account_id: str,
         currency_code: str,
     ) -> None:
-        self.path = Path(path)
+        self.execution_workspace = Path(execution_workspace).resolve()
+        self.execution_workspace.mkdir(parents=True, exist_ok=True)
+        self.path = self.execution_workspace / _DB_FILENAME
         self.account_id = _text(account_id, "account_id")
         self.currency_code = _currency(currency_code)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def reserve(
@@ -228,6 +230,7 @@ class BetfairPreTradeReservationStore:
         )
 
         ledger_view = _ledger_view(execution_ledger)
+        self._require_workspace(ledger_view)
         attempt = ledger_view.require(plan_id=plan_id, attempt_id=attempt_id)
         action = attempt.action
         if attempt.state is not AttemptState.RESERVED:
@@ -352,6 +355,7 @@ class BetfairPreTradeReservationStore:
 
         attempt_id = _text(attempt_id, "attempt_id")
         ledger_view = _ledger_view(execution_ledger)
+        self._require_workspace(ledger_view)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -426,6 +430,13 @@ class BetfairPreTradeReservationStore:
             )
         finally:
             conn.close()
+
+    def _require_workspace(self, ledger_view: _LedgerView) -> None:
+        ledger_workspace = Path(ledger_view.path).parent.resolve()
+        if ledger_workspace != self.execution_workspace:
+            raise BetfairPreTradeReservationError(
+                "reservation store and execution ledger use different workspaces"
+            )
 
     def _require_ledger_completeness(
         self,

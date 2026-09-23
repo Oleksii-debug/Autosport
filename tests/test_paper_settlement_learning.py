@@ -1703,6 +1703,20 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 PaperSettlementLearningBridgeError,
                 "durably invalidated",
             ):
+                reopened_bridge.campaign_plan_anchor(ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.bind_campaign_plan_anchor(
+                    ticket_id=ticket.ticket_id,
+                    plan_id="a" * 64,
+                    reflection_available_at="2026-09-19T21:22:01+00:00",
+                )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
                 reopened_bridge.resolution_witness(ticket.ticket_id)
             with self.assertRaisesRegex(
                 PaperSettlementLearningBridgeError,

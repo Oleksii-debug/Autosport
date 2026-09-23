@@ -288,6 +288,7 @@ def project_betdaq_get_prices(
         raise TypeError("response must be BetdaqGetPricesWireResponse")
     if not isinstance(market_context, Mapping):
         raise TypeError("market_context must be a mapping")
+    context_snapshot = dict(market_context)
     observed_ts = _timestamp_text(observed_ts, "observed_ts")
     sequence = _validate_sequence(sequence)
     if type(response.return_code) is not int or response.return_code != 0:
@@ -310,16 +311,16 @@ def project_betdaq_get_prices(
     if len(set(market_ids)) != len(market_ids):
         raise BetdaqProjectionError("response contains duplicate market_id")
 
-    if any(type(key) is not int for key in market_context):
+    if any(type(key) is not int for key in context_snapshot):
         raise BetdaqProjectionError("market_context keys must be non-boolean ints")
-    if set(market_context) != set(market_ids):
+    if set(context_snapshot) != set(market_ids):
         raise BetdaqProjectionError(
             "market_context must exactly cover the projected response markets"
         )
-    for value in market_context.values():
-        if not isinstance(value, BetdaqMarketContext):
+    for value in context_snapshot.values():
+        if type(value) is not BetdaqMarketContext:
             raise BetdaqProjectionError(
-                "market_context values must be BetdaqMarketContext"
+                "market_context values must be exact BetdaqMarketContext values"
             )
 
     source_ts = _provider_source_ts(response)
@@ -332,7 +333,7 @@ def project_betdaq_get_prices(
             )
     quotes: list[ProviderQuote] = []
     for market in markets:
-        context = market_context[market.market_id]
+        context = context_snapshot[market.market_id]
         if type(market.selections) is not tuple:
             raise BetdaqProjectionError("market selections must be a tuple")
         seen_selection_ids: set[int] = set()

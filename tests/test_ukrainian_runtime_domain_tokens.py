@@ -15,6 +15,7 @@ def _ticket(status: TicketStatus):
         market_id="market-1",
         selection_id="selection-1",
         locked_odds=Decimal("2.00"),
+        sport="soccer",
     )
     return SimpleNamespace(
         status=status,

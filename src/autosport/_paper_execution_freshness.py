@@ -11,17 +11,31 @@ _ORIGINAL_LEGACY_SYNTHETIC = _impl._synthetic_attempt
 _ORIGINAL_OBSERVED = _impl._observed_attempt
 _ORIGINAL_PUBLIC_SYNTHETIC = _public._synthetic_attempt
 
+_FUTURE_QUOTE_ERROR = "PAPER execution timestamp cannot predate decision quote"
+
 
 def _age_exceeds_bound(*, execution_time, decision_time, max_quote_age_ms: int) -> bool:
     age = execution_time - decision_time
-    # Preserve the legacy validation/telemetry contract for negative durations;
+    if age < timedelta(0):
+        raise _impl.PaperExecutionStateError(_FUTURE_QUOTE_ERROR)
+    # Preserve the legacy validation/telemetry contract for representable ages;
     # the exact timedelta comparison below is the safety authority.
     _impl._milliseconds(age, "quote age")
     return age > timedelta(milliseconds=max_quote_age_ms)
 
 
 def _exact_synthetic(original, **kwargs):
-    attempt = original(**kwargs)
+    try:
+        attempt = original(**kwargs)
+    except ValueError as exc:
+        # Both synthetic implementations reject a future-dated decision quote
+        # through the legacy millisecond helper. Reclassify only that exact
+        # causality failure so callers receive the PAPER state-error contract;
+        # unrelated input validation remains ValueError.
+        if str(exc) == "quote age must be non-negative":
+            raise _impl.PaperExecutionStateError(_FUTURE_QUOTE_ERROR) from exc
+        raise
+
     config = kwargs["config"]
     action = kwargs["action"]
     started_at = kwargs["started_at"]

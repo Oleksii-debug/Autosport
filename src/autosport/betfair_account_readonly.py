@@ -1151,7 +1151,7 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
 # authority for caller-constructed DTOs.
 def _install_execution_readback_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
-    trusted_clients: dict[int, tuple[object, object, object]] = {}
+    trusted_clients: dict[int, tuple[object, object, object, object]] = {}
     active_capture_session: ContextVar[list[object] | None] = ContextVar(
         "betfair_authoritative_readback_capture",
         default=None,
@@ -1179,16 +1179,18 @@ def _install_execution_readback_authority() -> None:
 
     def trusted_record(
         self: BetfairReadOnlyClient,
-    ) -> tuple[object, object, object] | None:
+    ) -> tuple[object, object, object, object] | None:
         record = trusted_clients.get(id(self))
         if record is None or record[0]() is not self:
             return None
         transport = record[1]
         trusted_clock = record[2]
+        trusted_clock_code = record[3]
         if (
             self._transport is not transport
             or type(transport) is not sealed_transport_type
             or self._clock is not trusted_clock
+            or getattr(trusted_clock, "__code__", None) is not trusted_clock_code
         ):
             return None
         return record
@@ -1268,6 +1270,7 @@ def _install_execution_readback_authority() -> None:
             ref(self, forget_client),
             trusted_transport,
             product_clock,
+            product_clock.__code__,
         )
 
     def has_trusted_transport(self: BetfairReadOnlyClient) -> bool:
@@ -1314,7 +1317,6 @@ def _install_execution_readback_authority() -> None:
                 session[3] = True
             return raw_rpc(self, method, params)
         transport = record[1]
-        trusted_clock = record[2]
         if (
             getattr(BetfairReadOnlyClient, "_rpc", None) is not authoritative_rpc
             or raw_rpc_with_post.__code__ is not raw_rpc_with_post_code
@@ -1346,7 +1348,9 @@ def _install_execution_readback_authority() -> None:
             params,
             post,
             endpoint_map=sealed_read_method_endpoint,
-            observed_at=lambda: trusted_clock().isoformat(),
+            observed_at=lambda: sealed_datetime.now(
+                sealed_timezone_utc
+            ).isoformat(),
         )
         if tracking:
             session[2] = int(session[2]) + 1

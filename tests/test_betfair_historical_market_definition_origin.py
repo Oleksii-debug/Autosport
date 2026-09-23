@@ -117,8 +117,15 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             bound.provider_origin_witness_sha256,
             witness.witness_sha256,
         )
-        truth = bound.to_dict()["truth"]
-        self.assertTrue(truth["provider_origin_verified"])
+        with patch.object(
+            HistoricalProviderOriginWitness,
+            "assert_authoritative",
+            autospec=True,
+            return_value=None,
+        ):
+            truth = bound.to_dict()["truth"]
+            self.assertTrue(truth["provider_origin_verified"])
+            bound.assert_provider_origin()
         self.assertTrue(truth["historical_provider_publish_time_bound"])
         self.assertTrue(truth["download_acquisition_time_kept_separate"])
         self.assertFalse(truth["product_observation_time_backdated_from_provider_pt"])

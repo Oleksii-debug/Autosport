@@ -29,7 +29,7 @@ from .betfair_account_readonly import (
     BetfairReadOnlyClient,
 )
 from .bookmaker_capability import BookmakerCapabilityProfile
-from .real_execution_ledger import AttemptState, ExecutionAction, RealExecutionLedger
+from .real_execution_ledger import ExecutionAction, RealExecutionLedger
 from .supervised_provider_evidence import (
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
@@ -280,11 +280,16 @@ def _durable_timeout_authority(
     action: ExecutionAction,
     attempt_id: str,
 ) -> tuple[str, str, str]:
-    """Return durable provider ref, conservative timeout boundary, ledger SHA.
+    """Return provider ref, timeout boundary and SHA from one verified ledger view.
 
     `recorded_at` is deliberately used instead of the ATTEMPT_UNKNOWN payload's
     caller-supplied `observed_at`. The ledger writes `recorded_at` itself while
     appending the durable event; using that later boundary can only delay absence.
+
+    All authority-bearing attempt facts are derived from the same immutable verified
+    snapshot.  In particular, no separate state/reference read may be combined with
+    a later snapshot, because a concurrent terminal transition would create a
+    mixed-time authority view.
     """
 
     if type(ledger) is not RealExecutionLedger:
@@ -293,19 +298,15 @@ def _durable_timeout_authority(
         raise BetfairTimeoutResolutionError("action must be exact ExecutionAction")
     if type(attempt_id) is not str or not attempt_id or attempt_id != attempt_id.strip():
         raise BetfairTimeoutResolutionError("attempt_id must be non-empty canonical text")
-    try:
-        state = ledger.attempt_state(attempt_id)
-    except KeyError as exc:
-        raise BetfairTimeoutResolutionError("timeout attempt is not durable") from exc
-    if state is not AttemptState.UNKNOWN:
-        raise BetfairTimeoutResolutionError(
-            "timeout resolution requires a durable UNKNOWN attempt"
-        )
+
     snapshot = ledger.verified_snapshot()
     plan_events: list[dict[str, object]] = []
+    attempt_events: list[dict[str, object]] = []
     unknown_events: list[dict[str, object]] = []
     reserved_events: list[dict[str, object]] = []
     submitted_events: list[dict[str, object]] = []
+    provider_reference_events: list[dict[str, object]] = []
+    terminal_or_found_events: list[dict[str, object]] = []
     try:
         for raw_line in snapshot.payload.splitlines():
             envelope = json.loads(raw_line.decode("utf-8"))
@@ -315,17 +316,32 @@ def _durable_timeout_authority(
                 plan_events.append(event)
             if event.get("attempt_id") != attempt_id:
                 continue
+            attempt_events.append(event)
             if event_type == "ATTEMPT_RESERVED":
                 reserved_events.append(event)
             elif event_type == "ATTEMPT_SUBMITTED":
                 submitted_events.append(event)
             elif event_type == "ATTEMPT_UNKNOWN":
                 unknown_events.append(event)
+            elif event_type == "PROVIDER_ORDER_REFERENCE_BOUND":
+                provider_reference_events.append(event)
+            elif event_type in {
+                "RECONCILED_FOUND",
+                "EXTERNAL_ACKNOWLEDGEMENT",
+                "RECONCILED_NOT_FOUND",
+            }:
+                terminal_or_found_events.append(event)
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, AttributeError) as exc:
         raise BetfairTimeoutResolutionError(
             "verified execution ledger snapshot cannot be decoded"
         ) from exc
 
+    if not attempt_events:
+        raise BetfairTimeoutResolutionError("timeout attempt is not durable")
+    if terminal_or_found_events:
+        raise BetfairTimeoutResolutionError(
+            "verified ledger snapshot is no longer a durable UNKNOWN attempt"
+        )
     if len(reserved_events) != 1 or reserved_events[0].get("action_id") != action.action_id:
         raise BetfairTimeoutResolutionError(
             "timeout attempt does not bind the exact execution action"
@@ -367,25 +383,44 @@ def _durable_timeout_authority(
             "caller execution action differs from durable execution plan action"
         )
     durable_bookmaker_id = durable_action.get("bookmaker_id")
+    durable_account_id = durable_action.get("account_id")
     if not isinstance(durable_bookmaker_id, str):
         raise BetfairTimeoutResolutionError(
             "durable execution action bookmaker identity is malformed"
         )
-    provider_order_ref = ledger.provider_order_reference(
-        attempt_id=attempt_id,
-        provider_id=durable_bookmaker_id,
-    )
-    if provider_order_ref is None:
+    if not isinstance(durable_account_id, str):
         raise BetfairTimeoutResolutionError(
-            "timeout attempt lacks durable provider order reference"
+            "durable execution action account identity is malformed"
         )
+
+    if len(provider_reference_events) != 1:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt lacks one durable provider order reference"
+        )
+    provider_payload = provider_reference_events[0].get("payload")
+    if not isinstance(provider_payload, dict):
+        raise BetfairTimeoutResolutionError(
+            "durable provider order reference payload is malformed"
+        )
+    provider_order_ref = provider_payload.get("provider_order_ref")
+    if (
+        provider_payload.get("provider_id") != durable_bookmaker_id
+        or provider_payload.get("account_id") != durable_account_id
+        or not isinstance(provider_order_ref, str)
+        or not provider_order_ref
+        or provider_order_ref != provider_order_ref.strip()
+    ):
+        raise BetfairTimeoutResolutionError(
+            "durable provider order reference mismatches execution action"
+        )
+
     if len(submitted_events) != 1:
         raise BetfairTimeoutResolutionError(
             "timeout authority requires one durable provider submission boundary"
         )
     if len(unknown_events) != 1:
         raise BetfairTimeoutResolutionError(
-            "timeout attempt lacks one canonical uncertainty boundary"
+            "timeout resolution requires one durable UNKNOWN attempt boundary"
         )
     unknown = unknown_events[0]
     payload = unknown.get("payload")
@@ -400,7 +435,6 @@ def _durable_timeout_authority(
         )
     _time(recorded_at, "durable timeout recorded_at")
     return provider_order_ref, recorded_at, snapshot.sha256
-
 
 def _resolve_betfair_timeout_provider_state_core(
     ledger: RealExecutionLedger,

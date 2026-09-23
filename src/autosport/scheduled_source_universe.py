@@ -9,6 +9,7 @@ scope; callers must not trust a separately supplied resolution object.
 """
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,12 +28,18 @@ _CANONICAL_SCHEDULE_READ_SEAMS = frozenset(
         "collector_schedule_evidence",
         "_connect",
         "_connect_path",
+        "_path_file_identity",
         "_collector_schedule_id",
         "_collector_schedule_due_at",
         "_schedule_max_items",
+        "_schedule_evaluation_window",
         "_cycle_terminal_payload_json",
     }
 )
+_CANONICAL_SCHEDULE_CLASS_READ_SEAMS = {
+    name: inspect.getattr_static(CollectorDeltaStore, name)
+    for name in _CANONICAL_SCHEDULE_READ_SEAMS
+}
 _SCHEDULE_KEYS = frozenset(
     {
         "schema_version",
@@ -73,6 +80,21 @@ _HEX = frozenset("0123456789abcdef")
 
 class ScheduledSourceUniverseError(ValueError):
     """Frozen schedule and canonical source-universe evidence do not compose."""
+
+
+def _require_canonical_schedule_class_read_seams() -> None:
+    """Reject runtime replacement of transitive schedule read authority."""
+
+    rebound = sorted(
+        name
+        for name, expected in _CANONICAL_SCHEDULE_CLASS_READ_SEAMS.items()
+        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise ScheduledSourceUniverseError(
+            "store canonical schedule read seam is class-rebound: "
+            + ", ".join(rebound)
+        )
 
 
 def _text(value: object, name: str) -> str:
@@ -226,6 +248,7 @@ def _read_schedule_evidence(
     start_slot_ordinal: int,
     end_slot_ordinal: int,
 ) -> dict[str, object]:
+    _require_canonical_schedule_class_read_seams()
     instance_state = vars(store)
     rebound = sorted(
         name for name in _CANONICAL_SCHEDULE_READ_SEAMS if name in instance_state
@@ -242,6 +265,7 @@ def _read_schedule_evidence(
         start_slot_ordinal=start_slot_ordinal,
         end_slot_ordinal=end_slot_ordinal,
     )
+    _require_canonical_schedule_class_read_seams()
     if type(evidence) is not dict or set(evidence) != _SCHEDULE_KEYS:
         raise ScheduledSourceUniverseError(
             "collector schedule evidence schema is not canonical"

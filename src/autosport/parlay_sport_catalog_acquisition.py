@@ -154,42 +154,131 @@ def _bounded_read(stream: object, max_response_bytes: int) -> bytes:
     return raw
 
 
-def _default_transport(
+def _make_product_redirect_handler_factory() -> type[urllib.request.HTTPRedirectHandler]:
+    """Freeze redirect refusal independently from the mutable module class binding."""
+
+    class ProductRejectRedirects(urllib.request.HTTPRedirectHandler):
+        redirect_request = _RejectRedirects.redirect_request
+
+    return ProductRejectRedirects
+
+
+def _perform_catalog_http_response(
     url: str,
     headers: Mapping[str, str],
     timeout_seconds: float,
     max_response_bytes: int,
+    *,
+    request_factory,
+    opener_factory,
+    redirect_handler_factory,
+    bounded_reader,
+    response_factory,
+    evidence_error_type,
+    transport_error_type,
+    http_error_type,
+    url_error_type,
+    canonical_url: str,
 ) -> RawCatalogHttpResponse:
-    if url != CANONICAL_PARLAY_SPORTS_URL:
-        raise ParlaySportCatalogEvidenceError("catalog transport received a non-canonical URL")
-    request = urllib.request.Request(url, headers=dict(headers), method="GET")
-    opener = urllib.request.build_opener(_RejectRedirects())
+    """Perform one fixed-origin bounded read through explicit dependencies.
+
+    This helper carries no provider-origin authority by itself. Positive origin is
+    assigned only by the public acquirer when it uses the product transport closure
+    created at module initialization.
+    """
+
+    if url != canonical_url:
+        raise evidence_error_type("catalog transport received a non-canonical URL")
+    request = request_factory(url, headers=dict(headers), method="GET")
+    opener = opener_factory(redirect_handler_factory())
     try:
         with opener.open(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS URL
-            return RawCatalogHttpResponse(
+            return response_factory(
                 status_code=int(response.status),
-                headers=tuple((str(key), str(value)) for key, value in response.headers.items()),
-                body=_bounded_read(response, max_response_bytes),
+                headers=tuple(
+                    (str(key), str(value)) for key, value in response.headers.items()
+                ),
+                body=bounded_reader(response, max_response_bytes),
                 final_url=str(response.geturl()),
             )
-    except HTTPError as exc:
+    except http_error_type as exc:
         if exc.code == 304:
-            return RawCatalogHttpResponse(
+            return response_factory(
                 status_code=304,
                 headers=tuple(
                     (str(key), str(value))
-                    for key, value in (exc.headers.items() if exc.headers is not None else ())
+                    for key, value in (
+                        exc.headers.items() if exc.headers is not None else ()
+                    )
                 ),
-                body=_bounded_read(exc, max_response_bytes),
+                body=bounded_reader(exc, max_response_bytes),
                 final_url=str(exc.geturl()),
             )
-        raise ParlaySportCatalogTransportError(
+        raise transport_error_type(
             f"Parlay sport-catalog HTTP {exc.code}"
         ) from exc
-    except URLError as exc:
-        raise ParlaySportCatalogTransportError(
+    except url_error_type as exc:
+        raise transport_error_type(
             f"Parlay sport-catalog transport error: {exc.reason}"
         ) from exc
+
+
+def _build_product_transport(
+    *,
+    performer,
+    request_factory,
+    opener_factory,
+    redirect_handler_factory,
+    bounded_reader,
+    response_factory,
+    evidence_error_type,
+    transport_error_type,
+    http_error_type,
+    url_error_type,
+    canonical_url: str,
+) -> Transport:
+    """Capture the product network authority outside mutable module dispatch."""
+
+    def product_transport(
+        url: str,
+        headers: Mapping[str, str],
+        timeout_seconds: float,
+        max_response_bytes: int,
+    ) -> RawCatalogHttpResponse:
+        return performer(
+            url,
+            headers,
+            timeout_seconds,
+            max_response_bytes,
+            request_factory=request_factory,
+            opener_factory=opener_factory,
+            redirect_handler_factory=redirect_handler_factory,
+            bounded_reader=bounded_reader,
+            response_factory=response_factory,
+            evidence_error_type=evidence_error_type,
+            transport_error_type=transport_error_type,
+            http_error_type=http_error_type,
+            url_error_type=url_error_type,
+            canonical_url=canonical_url,
+        )
+
+    return product_transport
+
+
+_PRODUCT_REDIRECT_HANDLER = _make_product_redirect_handler_factory()
+_default_transport = _build_product_transport(
+    performer=_perform_catalog_http_response,
+    request_factory=urllib.request.Request,
+    opener_factory=urllib.request.build_opener,
+    redirect_handler_factory=_PRODUCT_REDIRECT_HANDLER,
+    bounded_reader=_bounded_read,
+    response_factory=RawCatalogHttpResponse,
+    evidence_error_type=ParlaySportCatalogEvidenceError,
+    transport_error_type=ParlaySportCatalogTransportError,
+    http_error_type=HTTPError,
+    url_error_type=URLError,
+    canonical_url=CANONICAL_PARLAY_SPORTS_URL,
+)
 
 
 def _acquisition_id(
@@ -249,13 +338,15 @@ def _validate_prior_acquisition(prior: ParlaySportCatalogAcquisition) -> str | N
     return prior.etag
 
 
-def acquire_parlay_sport_catalog(
+def _acquire_parlay_sport_catalog_impl(
     *,
     prior: ParlaySportCatalogAcquisition | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     transport: Transport | None = None,
-    clock: Clock = _utc_now_iso,
+    clock: Clock,
+    product_transport: Transport,
+    product_clock: Clock,
 ) -> ParlaySportCatalogAcquisition:
     """Acquire exact `/v1/sports` bytes without granting odds/write/product authority.
 
@@ -292,8 +383,8 @@ def acquire_parlay_sport_catalog(
             headers["If-None-Match"] = conditional_etag
 
     using_product_transport = transport is None
-    using_product_clock = clock is _utc_now_iso
-    active_transport = _default_transport if transport is None else transport
+    using_product_clock = clock is product_clock
+    active_transport = product_transport if transport is None else transport
     response = _validate_raw_response(
         active_transport(
             CANONICAL_PARLAY_SPORTS_URL,
@@ -369,3 +460,45 @@ def acquire_parlay_sport_catalog(
     if provider_origin_verified:
         object.__setattr__(result, "provider_origin_verified", True)
     return result
+
+
+def _build_product_acquirer(
+    *,
+    product_transport: Transport,
+    product_clock: Clock,
+    implementation,
+):
+    """Install the public API with product authority captured in closure cells."""
+
+    def acquire_parlay_sport_catalog(
+        *,
+        prior: ParlaySportCatalogAcquisition | None = None,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        transport: Transport | None = None,
+        clock: Clock = product_clock,
+    ) -> ParlaySportCatalogAcquisition:
+        return implementation(
+            prior=prior,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+            transport=transport,
+            clock=clock,
+            product_transport=product_transport,
+            product_clock=product_clock,
+        )
+
+    return acquire_parlay_sport_catalog
+
+
+acquire_parlay_sport_catalog = _build_product_acquirer(
+    product_transport=_default_transport,
+    product_clock=_utc_now_iso,
+    implementation=_acquire_parlay_sport_catalog_impl,
+)
+
+# These installer/implementation names are not dispatch seams. The public acquirer
+# retains exact objects in closure cells; rebinding module symbols cannot replace
+# the transport or clock used to mint positive origin evidence.
+del _build_product_acquirer
+del _acquire_parlay_sport_catalog_impl

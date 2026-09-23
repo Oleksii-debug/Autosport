@@ -35,7 +35,7 @@ def _request() -> CompleteGameBoardRequest:
     )
 
 
-def test_complete_board_rejects_conflicting_rows_for_one_logical_market() -> None:
+def test_complete_board_rejects_conflicting_combined_rows_for_one_market() -> None:
     rows = [
         {
             "event_id": "event-1",
@@ -59,7 +59,71 @@ def test_complete_board_rejects_conflicting_rows_for_one_logical_market() -> Non
 
     with pytest.raises(
         ProviderObservationIntegrityError,
-        match="conflicting rows for one logical market",
+        match="conflicting rows for one logical provider row",
+    ):
+        CompleteGameBoardSnapshot(
+            request=_request(),
+            captured_at="2026-09-23T01:00:02Z",
+            frame_json=json.dumps(_frame(rows)),
+        )
+
+
+def test_complete_board_accepts_documented_per_outcome_rows_for_one_market() -> None:
+    rows = [
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "outcome": "Player A",
+            "price_american": -110,
+            "last_update": "2026-09-23T01:00:00Z",
+        },
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "outcome": "Player B",
+            "price_american": 105,
+            "last_update": "2026-09-23T01:00:00Z",
+        },
+    ]
+
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at="2026-09-23T01:00:02Z",
+        frame_json=json.dumps(_frame(rows)),
+    )
+
+    assert len(snapshot.row_sha256s) == 2
+
+
+def test_complete_board_rejects_conflicting_rows_for_same_outcome() -> None:
+    rows = [
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "outcome": "Player A",
+            "price_american": -110,
+            "last_update": "2026-09-23T01:00:00Z",
+        },
+        {
+            "event_id": "event-1",
+            "bookmaker": "bovada",
+            "kind": "game",
+            "market_key": "h2h",
+            "outcome": "Player A",
+            "price_american": -105,
+            "last_update": "2026-09-23T01:00:01Z",
+        },
+    ]
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="conflicting rows for one logical provider row",
     ):
         CompleteGameBoardSnapshot(
             request=_request(),

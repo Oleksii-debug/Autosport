@@ -33,6 +33,8 @@ from .prophetx_transactions_transport import (
 )
 
 _MAX_PAGES = 100
+_MAX_MONEY_DIGITS = 256
+_MAX_MONEY_ABS_EXPONENT = 128
 STATUSES = frozenset({"Completed", "Pending", "Processing", "Failed", "Expired", "Invalid"})
 TYPES = frozenset({
     "TRADE", "DEPOSIT", "PAY", "WITHDRAW", "REJECT_WITHDRAW", "APPROVE_WITHDRAW",
@@ -61,6 +63,14 @@ def _provider_text(value: object, field: str) -> str | None:
 def _money(value: object, field: str, *, nonnegative: bool = False) -> Decimal:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ProphetXReadOnlyError(f"{field} must be an exact finite JSON number")
+    _sign, digits, exponent = value.as_tuple()
+    if (
+        len(digits) > _MAX_MONEY_DIGITS
+        or abs(int(exponent)) > _MAX_MONEY_ABS_EXPONENT
+    ):
+        raise ProphetXReadOnlyError(
+            f"{field} exceeds bounded exact-money representation"
+        )
     if nonnegative and value < 0:
         raise ProphetXReadOnlyError(f"{field} must be non-negative")
     return value

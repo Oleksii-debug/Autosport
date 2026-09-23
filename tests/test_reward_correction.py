@@ -392,3 +392,53 @@ def test_reopen_rejects_hash_valid_second_lineage_reusing_reward_identity(tmp_pa
     raw.close()
     with pytest.raises(RewardCorrectionError, match="reuses durable reward identity"):
         RewardCorrectionLedger.open(path)
+
+
+def test_decimal_reward_aliases_share_one_correction_identity_and_replay(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    canonical = correction(superseded=reward0, corrected=reward1, value="0.25")
+    aliased = correction(superseded=reward0, corrected=reward1, value="0.2500")
+    assert canonical.correction_id == aliased.correction_id
+    with RewardCorrectionLedger.create(path) as ledger:
+        first = ledger.append_correction(canonical)
+        replay = ledger.append_correction(aliased)
+        assert replay == first
+    raw = sqlite3.connect(path)
+    assert raw.execute("SELECT corrected_reward_value FROM corrections").fetchone()[0] == "0.25"
+    raw.close()
+    with RewardCorrectionLedger.open(path) as reopened:
+        assert reopened.latest_correction(action_id=sha("action"), transition_id=sha("transition")).corrected_reward_value == Decimal("0.25")
+
+
+def test_decimal_negative_zero_alias_is_canonical_zero(tmp_path):
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    positive = correction(superseded=reward0, corrected=reward1, value="0")
+    negative = correction(superseded=reward0, corrected=reward1, value="-0.000")
+    assert positive.correction_id == negative.correction_id
+    path = tmp_path / "corrections.sqlite3"
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_correction(negative)
+    raw = sqlite3.connect(path)
+    assert raw.execute("SELECT corrected_reward_value FROM corrections").fetchone()[0] == "0"
+    raw.close()
+
+
+def test_reopen_rejects_noncanonical_decimal_storage_even_with_parseable_value(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_correction(correction(superseded=reward0, corrected=reward1, value="0.25"))
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TRIGGER corrections_no_update")
+    raw.execute("UPDATE corrections SET corrected_reward_value='0.2500'")
+    raw.execute(
+        "CREATE TRIGGER corrections_no_update BEFORE UPDATE ON corrections "
+        "BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END"
+    )
+    raw.commit(); raw.close()
+    with pytest.raises(RewardCorrectionError, match="canonical Decimal"):
+        RewardCorrectionLedger.open(path)

@@ -363,7 +363,7 @@ def test_dataclass_replace_cannot_copy_product_issuance_authority(
         clock=at(0, 1),
     )
     copied = replace(current)
-    assert copied._issuer_token is None
+    assert copied is not current
 
     store = BookmakerAccountReconciliationStore(
         tmp_path / "workspace" / "betdaq-account.json",

@@ -368,3 +368,53 @@ def test_trusted_network_witness_rejects_status_remaining_contradiction() -> Non
     finally:
         object.__setattr__(order, "status", original_status)
 
+def test_trusted_network_witness_uses_exact_current_size_upper_bound() -> None:
+    action = _action()
+    capture = _capture(
+        action,
+        surface="current",
+        provider_requested_price=2.0,
+    )
+    matcher = _trusted_capture_matcher()
+    witnesses = _current_capture_witnesses(capture)
+    order = capture.current_pages[0].orders[0]
+
+    requested = Decimal("1")
+    matched = Decimal("0.50000000000000000000000000005")
+    remaining = Decimal("0.5")
+    # Under the default Decimal context the inexact addition rounds back to 1.
+    # The authority projection must nevertheless reject the exact over-allocation.
+    assert matched + remaining == requested
+
+    original = (
+        order.requested_size,
+        order.size_matched,
+        order.size_remaining,
+    )
+    object.__setattr__(order, "requested_size", requested)
+    object.__setattr__(order, "size_matched", matched)
+    object.__setattr__(order, "size_remaining", remaining)
+    raw = witnesses[1][2]["currentOrders"][0]
+    raw["priceSize"]["size"] = requested
+    raw["sizeMatched"] = matched
+    raw["sizeRemaining"] = remaining
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="size_matched plus size_remaining cannot exceed requested_size",
+        ):
+            matcher(
+                capture,
+                witnesses,
+                venue_id=capture.venue_id,
+                account_id=capture.account_id,
+                action_id=capture.action_id,
+                market_id=capture.market_id,
+                provider_order_ref=capture.provider_order_ref,
+                page_size=capture.page_size,
+            )
+    finally:
+        object.__setattr__(order, "requested_size", original[0])
+        object.__setattr__(order, "size_matched", original[1])
+        object.__setattr__(order, "size_remaining", original[2])
+

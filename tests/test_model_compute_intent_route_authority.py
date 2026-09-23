@@ -410,7 +410,7 @@ def test_resolve_requires_router_request_to_exist(monkeypatch) -> None:
                 intent=intent,
                 router_store=router,
                 request_id=request.request_id,
-                decision_at=_proposal(intent),
+                decision_at=issued_at + timedelta(seconds=1),
             )
 
 

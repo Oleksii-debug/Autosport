@@ -178,6 +178,21 @@ def require_scientific_registry_read_authority() -> tuple[
 
 def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, Any]:
     validate_entry = _require_durable_read_dependencies()
+    validate_negative_repeat = _source_owned_function(
+        _raw_class_function("_validate_negative_repeat_authorization"),
+        module=_registry,
+        qualname="ScientificRegistry._validate_negative_repeat_authorization",
+    )
+    validate_promotion = _source_owned_function(
+        _raw_class_function("_validate_persisted_promotion_decision"),
+        module=_registry,
+        qualname="ScientificRegistry._validate_persisted_promotion_decision",
+    )
+    validate_ablation = _source_owned_function(
+        _raw_class_function("_validate_ablation_authority_causal_inputs"),
+        module=_registry,
+        qualname="ScientificRegistry._validate_ablation_authority_causal_inputs",
+    )
     raw = _integrity.read_verified_scientific_registry_text(self.path)
     try:
         state = json.loads(
@@ -187,14 +202,17 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
         )
     except json.JSONDecodeError as exc:
         raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
-    if type(state) is not dict or state.get("schema_version") != 1:
+    if (
+        type(state) is not dict
+        or type(state.get("schema_version")) is not int
+        or state["schema_version"] != 1
+    ):
         raise ValueError("scientific registry schema_version mismatch")
     records = state.get("records")
     if type(records) is not list:
         raise ValueError("scientific registry records must be a list")
     seen: set[tuple[str, str]] = set()
-    fingerprints: set[str] = set()
-    for raw_entry in records:
+    for index, raw_entry in enumerate(records):
         validate_entry(raw_entry)
         key = (raw_entry["record_type"], raw_entry["record_id"])
         if key in seen:
@@ -202,11 +220,45 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
         seen.add(key)
         if raw_entry["record_type"] == "Experiment":
             fingerprint = raw_entry["payload"].get("fingerprint")
-            if fingerprint in fingerprints:
-                # Historical explicit repeats are represented by allow_repeat and
-                # therefore may share a fingerprint. Preserve existing semantics.
-                pass
-            fingerprints.add(fingerprint)
+            prior_state = {
+                "schema_version": _registry.ScientificRegistry.SCHEMA_VERSION,
+                "records": records[:index],
+            }
+            matching_experiments = [
+                existing
+                for existing in records[:index]
+                if existing["record_type"] == "Experiment"
+                and existing["payload"].get("fingerprint") == fingerprint
+            ]
+            negative_history = [
+                existing
+                for existing in matching_experiments
+                if existing["payload"].get("outcome")
+                != _registry.ResearchOutcome.POSITIVE.value
+            ]
+            has_repeat_provenance = (
+                raw_entry["payload"].get("repeat_of_experiment_id") is not None
+            )
+            if negative_history:
+                if not has_repeat_provenance:
+                    raise _registry.DuplicateExperimentFingerprintError(
+                        "persisted negative-result repeat lacks durable repeat provenance"
+                    )
+                validate_negative_repeat(
+                    prior_state,
+                    raw_entry,
+                    negative_history,
+                )
+            elif has_repeat_provenance:
+                raise _registry.DuplicateExperimentFingerprintError(
+                    "repeat provenance requires prior non-positive experiment history"
+                )
+
+    for raw_entry in records:
+        if raw_entry["record_type"] == "PromotionDecision":
+            validate_promotion(records, raw_entry)
+        if raw_entry["record_type"] == "AblationAuthorityEvidence":
+            validate_ablation(records, raw_entry)
 
     # Only fully validated non-pristine bytes may establish a missing machine
     # authority baseline. The helper rechecks the exact bytes under the durable

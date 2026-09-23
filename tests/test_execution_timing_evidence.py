@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, localcontext
 
 import pytest
 
@@ -49,6 +49,32 @@ def test_same_session_interval_uses_exact_monotonic_duration() -> None:
     assert evidence.start_marker_id == start.marker_id
     assert evidence.end_marker_id == end.marker_id
     assert session.require_issued_interval(evidence) is evidence
+
+
+def test_duration_ms_is_exact_independent_of_ambient_decimal_context() -> None:
+    evidence = MonotonicTimingIntervalEvidence(
+        clock_domain_id="perf-counter:a",
+        session_id="execution-session:a",
+        issuer_epoch_id="issuer-epoch:a",
+        start_marker_id="start-marker",
+        end_marker_id="end-marker",
+        start_sequence=1,
+        end_sequence=2,
+        duration_ns=123_456_789,
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        context.rounding = ROUND_DOWN
+        rounded_down_context = evidence.duration_ms
+
+    with localcontext() as context:
+        context.prec = 6
+        context.rounding = ROUND_UP
+        rounded_up_context = evidence.duration_ms
+
+    assert rounded_down_context == Decimal("123.456789")
+    assert rounded_up_context == Decimal("123.456789")
 
 
 def test_wall_clock_regression_cannot_create_negative_or_favorable_latency() -> None:

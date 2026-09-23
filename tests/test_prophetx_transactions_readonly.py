@@ -120,21 +120,33 @@ def test_transaction_balance_equation_is_fail_closed_and_decimal_context_indepen
     with pytest.raises(ProphetXReadOnlyError, match="balance_before plus change"):
         c.read_page()
 
-    huge_before = Decimal("9" * 120 + ".123456789012345678901234567890")
-    change = Decimal("0.000000000000000000000000000001")
-    exact_balance = Decimal("9" * 120 + ".123456789012345678901234567891")
-    body = json.dumps({
-        "data": {"transactions": [{
-            "status": "Completed", "user_id": "u", "transaction_type": "PAY",
-            "amount": 1, "change": str(change), "balance": str(exact_balance),
-            "balance_before": str(huge_before), "created_at": "2026-08-10T14:00:00Z",
-        }]}
-    }).encode()
-    # JSON numeric strings are intentionally rejected; the exact-arithmetic path is
-    # exercised below directly with Decimal values through the parser's JSON numbers.
+    before = "999999999999999999999999999999.123456789012345678901234567890"
+    change = "0.000000000000000000000000000001"
+    after = "999999999999999999999999999999.123456789012345678901234567891"
+    body = (
+        '{"data":{"transactions":[{"status":"Completed","user_id":"u",'
+        '"transaction_type":"PAY","amount":1,"change":' + change
+        + ',"balance":' + after + ',"balance_before":' + before
+        + ',"created_at":"2026-08-10T14:00:00Z"}]}}'
+    ).encode()
     c2, _ = client(body)
-    with pytest.raises(ProphetXReadOnlyError, match="exact finite JSON number"):
-        c2.read_page()
+    tx = c2.read_page().transactions[0]
+    assert tx.balance_before == Decimal(before)
+    assert tx.change == Decimal(change)
+    assert tx.balance == Decimal(after)
+
+
+@pytest.mark.parametrize("number", ["1e129", "1e-129", "1" + "0" * 256])
+def test_extreme_money_representation_fails_closed_before_exact_arithmetic(number):
+    body = (
+        '{"data":{"transactions":[{"status":"Completed","user_id":"u",'
+        '"transaction_type":"PAY","amount":1,"change":' + number
+        + ',"balance":1,"balance_before":0,'
+        '"created_at":"2026-08-10T14:00:00Z"}]}}'
+    ).encode()
+    c, _ = client(body)
+    with pytest.raises(ProphetXReadOnlyError, match="bounded exact-money"):
+        c.read_page()
 
 
 @pytest.mark.parametrize("literal", [b"NaN", b"Infinity", b"-Infinity"])

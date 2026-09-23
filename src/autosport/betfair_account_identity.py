@@ -495,8 +495,12 @@ def _make_account_identity_authority():
             if map_name == "process_request" and key == "https"
         )
         if (
-            dispatch_handlers != ((https_handler,),)
-            or request_handlers != ((https_handler,),)
+            len(dispatch_handlers) != 1
+            or len(dispatch_handlers[0]) != 1
+            or dispatch_handlers[0][0] is not https_handler
+            or len(request_handlers) != 1
+            or len(request_handlers[0]) != 1
+            or request_handlers[0][0] is not https_handler
             or any(
                 not any(handler is registered for registered in handler_tuple)
                 for _map_name, _key, handlers in dispatch

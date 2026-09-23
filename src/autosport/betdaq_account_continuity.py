@@ -19,13 +19,14 @@ continuity only; stronger account-identity truth remains explicitly false.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 import json
 from threading import Lock
 from typing import Callable
-from weakref import WeakValueDictionary
+from weakref import ReferenceType, ref
 
 from .betdaq_account_readonly import (
     ADAPTER_ID,
@@ -434,9 +435,13 @@ def require_reconciliation_history_compatible(
 
 
 def _build_evidence_issuer():
-    issued: WeakValueDictionary[int, BetdaqContinuousAccountEvidence] = (
-        WeakValueDictionary()
-    )
+    issued: dict[
+        int,
+        tuple[
+            ReferenceType[BetdaqContinuousAccountEvidence],
+            BetdaqContinuousAccountEvidence,
+        ],
+    ] = {}
     lock = Lock()
 
     def issue(
@@ -450,15 +455,36 @@ def _build_evidence_issuer():
             source_evidence=source_evidence,
             principal_context=principal_context,
         )
+        # Exact outer-object identity is not enough for positive authority: frozen
+        # dataclasses can still be changed with object.__setattr__. Keep a deep
+        # immutable issuance snapshot so any same-object payload mutation revokes
+        # the receipt before it can reach durable #790 reconciliation.
+        baseline = deepcopy(value)
+        key = id(value)
+
+        def release(
+            dead_ref: ReferenceType[BetdaqContinuousAccountEvidence],
+            *,
+            issued_key: int = key,
+        ) -> None:
+            with lock:
+                record = issued.get(issued_key)
+                if record is not None and record[0] is dead_ref:
+                    issued.pop(issued_key, None)
+
+        value_ref = ref(value, release)
         with lock:
-            issued[id(value)] = value
+            issued[key] = (value_ref, baseline)
         return value
 
     def is_issued(value: object) -> bool:
         if type(value) is not BetdaqContinuousAccountEvidence:
             return False
         with lock:
-            return issued.get(id(value)) is value
+            record = issued.get(id(value))
+            if record is None or record[0]() is not value:
+                return False
+            return value == record[1]
 
     return issue, is_issued
 

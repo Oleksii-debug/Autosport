@@ -232,6 +232,7 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
     assert provenance["prospective_authority"] is False
     assert provenance["provider_response_metadata_bound"] is False
     assert provenance["raw_redistribution_authority"] is False
+    assert provenance["upstream_bookmaker_keys"] == ["book-a"]
     for key in (
         "content_identity",
         "acquisition_identity",
@@ -421,6 +422,37 @@ def test_non_table_tennis_legacy_unproven_event_sport_is_rejected(tmp_path: Path
             ),
             governance_proof_path=proof,
             output_dir=tmp_path / "blocked-unproven-basketball",
+            name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_boolean_quote_count_cannot_mint_historical_evidence_identity(tmp_path: Path) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="boolean-quote-count",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload["quote_count"] = True
+    evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="boolean-quote-count",
+    )
+
+    with pytest.raises(ValueError, match="quote_count"):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="boolean-quote-count",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "blocked-boolean-count",
             name="blocked",
             outcome_reveal_after=REVEAL_AT,
             imported_at=IMPORTED_AT,

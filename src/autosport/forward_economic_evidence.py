@@ -617,9 +617,10 @@ class ResolvedPolicyOutcome:
     @property
     def effective_wager_pnl_currency(self) -> Decimal:
         if self.wager_pnl_currency is None:
-            with localcontext() as context:
-                context.prec = _DECIMAL_PRECISION
-                return +(self.net_pnl_currency + self.economic_cost_currency)
+            return _exact_decimal_sum(
+                self.net_pnl_currency,
+                self.economic_cost_currency,
+            )
         return self.wager_pnl_currency
 
     @property

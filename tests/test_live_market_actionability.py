@@ -99,7 +99,9 @@ def test_fresh_open_registered_input_waits_without_product_origin() -> None:
     assert result.components[0].wait_reasons == ()
     assert result.is_product_issued is False
 
-    # This bounded child is deliberately not a final trade/action authority.
+    # This standalone diagnostic has no product/live acquisition provenance and
+    # remains deliberately weaker than any trade/action authority.
+    assert result.product_origin_proven is False
     assert result.continuity_proven is False
     assert result.depth_liquidity_proven is False
     assert result.provider_capability_proven is False

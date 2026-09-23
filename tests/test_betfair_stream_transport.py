@@ -4,6 +4,7 @@ import json
 import socket
 from dataclasses import replace
 from hashlib import sha256
+from threading import Event, Thread
 
 import pytest
 
@@ -162,7 +163,7 @@ def make_transport(
     monkeypatch.setattr(
         stream,
         "_open_verified_tls_socket",
-        lambda timeout: fake,
+        lambda timeout, _cancel=None: fake,
     )
     return stream.BetfairStreamTlsTransport(
         identity=ident or identity(),
@@ -284,7 +285,7 @@ def test_session_epoch_rotation_mismatch_fails_before_socket_open(
 ) -> None:
     calls = 0
 
-    def forbidden(_timeout):
+    def forbidden(_timeout, _cancel=None):
         nonlocal calls
         calls += 1
         raise AssertionError(
@@ -395,7 +396,7 @@ def test_repeated_auth_failure_obeys_exponential_bounded_backoff(
         lambda: now[0],
     )
 
-    def opener(_timeout):
+    def opener(_timeout, _cancel=None):
         opens.append(now[0])
         return FakeSocket(
             [
@@ -464,7 +465,7 @@ def test_success_resets_failure_backoff(
     monkeypatch.setattr(
         stream,
         "_open_verified_tls_socket",
-        lambda _timeout: next(sockets),
+        lambda _timeout, _cancel=None: next(sockets),
     )
     transport = stream.BetfairStreamTlsTransport(
         identity=identity(),
@@ -538,33 +539,29 @@ def test_auth_failure_publishes_no_persisted_frame(
     ):
         transport.connect()
     with pytest.raises(stream.BetfairStreamTransportError):
-        transport.read_persisted_frame(sink)
+        transport.read_authenticated_frame()
     assert sink.frames == []
 
 
-def test_fragmented_crlf_frame_is_reassembled_exactly_and_persisted_before_issue(
+def test_fragmented_crlf_frame_is_reassembled_exactly_with_authenticated_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = b'{"op":"mcm","clk":"next"}\r\n'
     fake = connected_socket(tail=frame[:7])
-    fake.chunks.extend(
-        [
-            frame[7:-1],
-            frame[-1:],
-        ]
-    )
+    fake.chunks.extend([frame[7:-1], frame[-1:]])
     transport = make_transport(monkeypatch, fake)
     transport.connect()
-    sink = Sink()
 
-    issued = transport.read_persisted_frame(sink)
+    issued = transport.read_authenticated_frame()
 
-    assert len(sink.frames) == 1
-    assert sink.frames[0].payload == frame
     assert issued.payload == frame
     assert issued.payload_sha256 == sha256(frame).hexdigest()
+    assert issued.connection_id == "conn-1"
+    assert issued.connection_generation == 1
+    assert issued.frame_sequence == 1
+    assert issued.configured_identity_provider_attested is False
+    assert issued.durable_persistence_verified is False
     issued.assert_transport_issued()
-
 
 def test_coalesced_frames_are_split_without_byte_loss(
     monkeypatch: pytest.MonkeyPatch,
@@ -574,17 +571,13 @@ def test_coalesced_frames_are_split_without_byte_loss(
     fake = connected_socket(tail=first + second)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
-    sink = Sink()
 
-    one = transport.read_persisted_frame(sink)
-    two = transport.read_persisted_frame(sink)
+    one = transport.read_authenticated_frame()
+    two = transport.read_authenticated_frame()
 
     assert [one.payload, two.payload] == [first, second]
-    assert [
-        item.frame_sequence
-        for item in sink.frames
-    ] == [1, 2]
-
+    assert [one.frame_sequence, two.frame_sequence] == [1, 2]
+    assert one.connection_generation == two.connection_generation == 1
 
 def test_oversized_no_newline_frame_fails_before_persistence(
     monkeypatch: pytest.MonkeyPatch,
@@ -602,7 +595,7 @@ def test_oversized_no_newline_frame_fails_before_persistence(
         stream.BetfairStreamProtocolError,
         match="size limit",
     ):
-        transport.read_persisted_frame(sink)
+        transport.read_authenticated_frame()
     assert sink.frames == []
     assert fake.closed is True
 
@@ -623,7 +616,7 @@ def test_oversized_terminated_frame_fails_before_persistence(
         stream.BetfairStreamProtocolError,
         match="size limit",
     ):
-        transport.read_persisted_frame(sink)
+        transport.read_authenticated_frame()
     assert sink.frames == []
 
 
@@ -645,7 +638,7 @@ def test_disconnect_mid_frame_discards_partial_bytes_before_reconnect(
     monkeypatch.setattr(
         stream,
         "_open_verified_tls_socket",
-        lambda _timeout: next(sockets),
+        lambda _timeout, _cancel=None: next(sockets),
     )
     transport = stream.BetfairStreamTlsTransport(
         identity=identity(),
@@ -658,11 +651,11 @@ def test_disconnect_mid_frame_discards_partial_bytes_before_reconnect(
         stream.BetfairStreamProtocolError,
         match="truncated",
     ):
-        transport.read_persisted_frame(sink)
+        transport.read_authenticated_frame()
     assert sink.frames == []
 
     transport.connect()
-    frame = transport.read_persisted_frame(sink)
+    frame = transport.read_authenticated_frame()
     assert (
         frame.payload
         == b'{"op":"mcm","clk":"fresh"}\r\n'
@@ -682,33 +675,27 @@ def test_bare_lf_delimiter_fails_closed(
         stream.BetfairStreamProtocolError,
         match="non-CRLF",
     ):
-        transport.read_persisted_frame(Sink())
+        transport.read_authenticated_frame()
     assert fake.closed is True
 
 
-def test_persistence_exception_is_redacted_and_closes(
+def test_transport_refuses_caller_mintable_durable_persistence_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frame = (
-        b'{"private":"TEST-PRIVATE-PAYLOAD"}\r\n'
-    )
+    frame = b'{"private":"TEST-PRIVATE-PAYLOAD"}\r\n'
     fake = connected_socket(tail=frame)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
+    sink = Sink(error=RuntimeError(frame.decode()))
 
     with pytest.raises(
-        stream.BetfairStreamPersistenceError
-    ) as exc:
-        transport.read_persisted_frame(
-            Sink(
-                error=RuntimeError(
-                    frame.decode()
-                )
-            )
-        )
-    assert "TEST-PRIVATE-PAYLOAD" not in str(exc.value)
-    assert fake.closed is True
+        stream.BetfairStreamPersistenceError,
+        match="does not issue durable persistence authority",
+    ):
+        transport.read_persisted_frame(sink)
 
+    assert sink.frames == []
+    assert transport.is_authenticated is True
 
 @pytest.mark.parametrize(
     "mismatch",
@@ -718,40 +705,39 @@ def test_mismatched_persistence_receipt_never_issues_authoritative_frame(
     monkeypatch: pytest.MonkeyPatch,
     mismatch: str,
 ) -> None:
-    fake = connected_socket(
-        tail=b'{"op":"mcm"}\r\n'
-    )
+    assert mismatch in {"digest", "sequence"}
+    fake = connected_socket(tail=b'{"op":"mcm"}\r\n')
     transport = make_transport(monkeypatch, fake)
     transport.connect()
     sink = Sink(mismatch=mismatch)
 
     with pytest.raises(
         stream.BetfairStreamPersistenceError,
-        match="receipt",
+        match="does not issue durable persistence authority",
     ):
         transport.read_persisted_frame(sink)
-    assert fake.closed is True
+    assert sink.frames == []
 
-
-def test_directly_constructed_or_replaced_persisted_frame_is_not_transport_issued(
+def test_directly_constructed_or_replaced_authenticated_frame_is_not_transport_issued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = b'{"op":"mcm"}\r\n'
     fake = connected_socket(tail=payload)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
-    issued = transport.read_persisted_frame(Sink())
+    issued = transport.read_authenticated_frame()
     issued.assert_transport_issued()
 
-    forged = stream.BetfairStreamPersistedFrame(
-        issued.session_identity_sha256,
+    forged = stream.BetfairStreamAuthenticatedFrame(
         issued.connection_id,
+        issued.connection_generation,
         issued.frame_sequence,
         issued.payload,
         issued.payload_sha256,
+        issued.received_monotonic_ns,
     )
     with pytest.raises(
-        stream.BetfairStreamPersistenceError,
+        stream.BetfairStreamAuthenticationError,
         match="not issued",
     ):
         forged.assert_transport_issued()
@@ -761,11 +747,10 @@ def test_directly_constructed_or_replaced_persisted_frame_is_not_transport_issue
         frame_sequence=issued.frame_sequence + 1,
     )
     with pytest.raises(
-        stream.BetfairStreamPersistenceError,
+        stream.BetfairStreamAuthenticationError,
         match="not issued",
     ):
         replaced.assert_transport_issued()
-
 
 def test_reconnect_without_reauthentication_cannot_read_or_requalify(
     monkeypatch: pytest.MonkeyPatch,
@@ -781,7 +766,7 @@ def test_reconnect_without_reauthentication_cannot_read_or_requalify(
         stream.BetfairStreamTransportError,
         match="not authenticated",
     ):
-        transport.read_persisted_frame(Sink())
+        transport.read_authenticated_frame()
     assert (
         transport.requires_resubscription_after_connect
         is True
@@ -871,3 +856,85 @@ def test_public_protocol_declares_fail_closed_boundaries() -> None:
         stream.PUBLIC_PROTOCOL["live_decision_authority"]
         is False
     )
+
+def test_configured_identity_is_not_promoted_to_provider_attested_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = connected_socket(tail=b'{"op":"mcm","id":7}\r\n')
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+
+    frame = transport.read_authenticated_frame()
+
+    assert transport.identity.provider_attested is False
+    assert frame.configured_identity_provider_attested is False
+    assert not hasattr(frame, "session_identity_sha256")
+    assert not hasattr(frame, "account_id")
+    assert not hasattr(frame, "app_identity_id")
+    frame.assert_transport_issued()
+
+
+def test_close_cancels_blocked_connect_and_prevents_late_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    open_entered = Event()
+    allow_open_to_return = Event()
+    connect_done = Event()
+    socket_candidate = connected_socket()
+    outcome: dict[str, object] = {}
+
+    def blocked_open(*args: object, **kwargs: object) -> FakeSocket:
+        open_entered.set()
+        cancellation = next(
+            (
+                value
+                for value in (*args, *kwargs.values())
+                if hasattr(value, "is_set") and hasattr(value, "wait")
+            ),
+            None,
+        )
+        while not allow_open_to_return.wait(timeout=0.01):
+            if cancellation is not None and cancellation.is_set():
+                raise OSError("connect cancelled")
+        return socket_candidate
+
+    monkeypatch.setattr(stream, "_open_verified_tls_socket", blocked_open)
+    transport = stream.BetfairStreamTlsTransport(
+        identity=identity(),
+        secret_provider=Secrets(),
+        timeout_seconds=0.1,
+    )
+
+    def run_connect() -> None:
+        try:
+            outcome["connection_id"] = transport.connect()
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            connect_done.set()
+
+    worker = Thread(target=run_connect, name="betfair-connect-test", daemon=True)
+    worker.start()
+    assert open_entered.wait(timeout=1.0)
+
+    transport.close()
+
+    cancelled_promptly = connect_done.wait(timeout=0.25)
+    allow_open_to_return.set()
+    worker.join(timeout=1.0)
+
+    assert cancelled_promptly
+    assert not worker.is_alive()
+    assert "connection_id" not in outcome
+    assert isinstance(outcome.get("error"), stream.BetfairStreamTransportError)
+    assert transport.is_authenticated is False
+    assert transport.connection_id is None
+    assert transport._next_connect_monotonic == 0.0
+
+
+def test_public_protocol_exposes_narrow_origin_authority_only() -> None:
+    assert stream.PUBLIC_PROTOCOL["configured_identity_provider_attested"] is False
+    assert stream.PUBLIC_PROTOCOL["durable_persistence_authority"] is False
+    assert stream.PUBLIC_PROTOCOL["authenticated_transport_origin_authority"] is True
+    assert stream.PUBLIC_PROTOCOL["connect_cancellation_supported"] is True
+

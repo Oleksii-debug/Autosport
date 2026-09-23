@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import autosport.execution.feasibility as feasibility_module
 from autosport.execution.feasibility import (
     ExecutionFeasibilitySnapshot,
     FeasibilityState,
@@ -41,3 +42,20 @@ def test_caller_cannot_mint_positive_execution_feasibility_result() -> None:
 
     assert forged.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
     assert forged.sufficient is False
+
+def test_result_authority_exposes_no_module_level_mint_or_registry() -> None:
+    """Ordinary imports must not expose a writable canonical result mint."""
+
+    assert not hasattr(
+        feasibility_module,
+        "_EXECUTION_FEASIBILITY_RESULT_ISSUED",
+    )
+    assert not hasattr(
+        feasibility_module,
+        "_issue_execution_feasibility_result",
+    )
+    assert (
+        feasibility_module.EXECUTION_FEASIBILITY_RESULT_TRUST_BOUNDARY
+        == "trusted-process-api-provenance-v1"
+    )
+

@@ -157,7 +157,23 @@ class OneShotObservationWorker:
             message = self._messages.get_nowait()
         except queue.Empty:
             return None
+
+        # The worker publishes its terminal message immediately before returning.
+        # Do not expose retry availability until the owned non-daemon helper itself
+        # is quiescent; otherwise a fast poll/start pair can transiently overlap two
+        # helpers despite the single-flight contract.
+        thread = self._thread
+        if thread is not None:
+            if thread is threading.current_thread():
+                # Preserve the message and busy ownership rather than losing the
+                # terminal disposition from an unsupported self-poll.
+                self._messages.put_nowait(message)
+                raise RuntimeError("observation worker cannot poll itself")
+            thread.join()
+
         with self._lock:
+            if self._thread is thread:
+                self._thread = None
             self._busy = False
         return message
 

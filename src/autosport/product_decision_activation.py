@@ -143,6 +143,18 @@ class BuiltInIntentProducer(StrEnum):
     REGISTERED_STRATEGY = "canonical-registered-strategy-v1"
 
 
+# START authority must not depend on the caller-rebindable module global used to
+# name this closed registry. Freeze the exact import-time enum class, member
+# identities and their product-owned values, then consume those frozen objects.
+_CANONICAL_INTENT_PRODUCER_CLASS: Final = BuiltInIntentProducer
+_CANONICAL_INTENT_PRODUCER_MEMBERS: Final = tuple(
+    (member, member.value) for member in _CANONICAL_INTENT_PRODUCER_CLASS
+)
+_CANONICAL_INTENT_PRODUCER_VALUES: Final = frozenset(
+    value for _, value in _CANONICAL_INTENT_PRODUCER_MEMBERS
+)
+
+
 _BINDING_FIELDS: Final = frozenset(
     {
         "strategy_version_id",
@@ -512,9 +524,7 @@ class ProductDecisionActivationBinding:
             raise ProductDecisionActivationError(
                 "currency must be uppercase three-letter ASCII"
             )
-        if self.intent_producer_id not in {
-            member.value for member in BuiltInIntentProducer
-        }:
+        if self.intent_producer_id not in _CANONICAL_INTENT_PRODUCER_VALUES:
             raise ProductDecisionActivationError(
                 "intent producer is not product-owned"
             )
@@ -736,7 +746,22 @@ class ProductDecisionActivationStore:
             _CANONICAL_EXECUTION_FINGERPRINT_GETTER(execution_config),
             "execution_model_fingerprint",
         )
-        if not isinstance(intent_producer, BuiltInIntentProducer):
+        if (
+            BuiltInIntentProducer is not _CANONICAL_INTENT_PRODUCER_CLASS
+            or type(intent_producer) is not _CANONICAL_INTENT_PRODUCER_CLASS
+        ):
+            raise ProductDecisionActivationError(
+                "intent producer must come from the closed product registry"
+            )
+        intent_producer_id = next(
+            (
+                value
+                for member, value in _CANONICAL_INTENT_PRODUCER_MEMBERS
+                if intent_producer is member
+            ),
+            None,
+        )
+        if intent_producer_id is None:
             raise ProductDecisionActivationError(
                 "intent producer must come from the closed product registry"
             )
@@ -799,7 +824,7 @@ class ProductDecisionActivationStore:
                 "risk_policy_provenance_sha256",
             ),
             risk_policy_file_sha256=risk_file_sha,
-            intent_producer_id=intent_producer.value,
+            intent_producer_id=intent_producer_id,
             execution_mode=PAPER_EXECUTION_MODE,
             execution_model_fingerprint=execution_model_fingerprint,
             product_composition_sha256=composition_sha,

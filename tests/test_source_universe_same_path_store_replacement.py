@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,20 +94,20 @@ class SourceUniverseSamePathStoreReplacementTests(unittest.TestCase):
             _begin_pending(canonical)
             _, favorable = _favorable_decoy(decoy_path)
 
-            original_connect_path = CollectorDeltaStore._connect_path
+            original_sqlite_connect = sqlite3.connect
             replaced = False
 
-            def replace_then_connect(path: Path):
+            def replace_then_connect(database, *args, **kwargs):
                 nonlocal replaced
-                if Path(path) == canonical_path and not replaced:
+                if Path(database) == canonical_path and not replaced:
                     replaced = True
                     os.replace(decoy_path, canonical_path)
-                return original_connect_path(path)
+                return original_sqlite_connect(database, *args, **kwargs)
 
             with mock.patch.object(
-                CollectorDeltaStore,
-                "_connect_path",
-                staticmethod(replace_then_connect),
+                sqlite3,
+                "connect",
+                replace_then_connect,
             ):
                 with self.assertRaises(SourceUniverseCommitmentError):
                     verify_source_universe_commitment(

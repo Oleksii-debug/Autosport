@@ -63,10 +63,12 @@ class _CrossingReadbackTransport:
                 {"marketId": "1.234", "event": {"id": "event-1"}}
             ]
         elif method.endswith("listCurrentOrders"):
-            self.current_request_started_at = self.clock().isoformat()
-            # Simulate transport latency carrying this already-started request over
-            # the provider's +15s visibility horizon before the response is stamped.
-            self.clock.set(_AFTER_DEADLINE)
+            if self.current_request_started_at is None:
+                self.current_request_started_at = self.clock().isoformat()
+                # Simulate transport latency carrying the first exact-ref request
+                # over the provider's +15s visibility horizon. A later coherence
+                # reread must not overwrite that first-request timing evidence.
+                self.clock.set(_AFTER_DEADLINE)
             result = {"currentOrders": [], "moreAvailable": False}
         elif method.endswith("listClearedOrders"):
             result = {"clearedOrders": [], "moreAvailable": False}

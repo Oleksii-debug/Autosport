@@ -262,6 +262,13 @@ def _empty_provider_capture(
         responses.append(
             _rpc_result({"clearedOrders": [], "moreAvailable": False}, request_id)
         )
+    responses.append(
+        _rpc_result({"currentOrders": [], "moreAvailable": False}, 7)
+    )
+    for request_id in range(8, 12):
+        responses.append(
+            _rpc_result({"clearedOrders": [], "moreAvailable": False}, request_id)
+        )
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret", "session-secret"),
         transport=_ReadbackTransport(responses),

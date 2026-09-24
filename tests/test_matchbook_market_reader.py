@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 import pytest
 from autosport.matchbook_market_reader import *
 
@@ -40,22 +41,52 @@ def test_liquidity_currency_gate():
     require_direct_liquidity_comparability(snap(req(currency="GBP")),snap(req(currency="GBP")))
     with pytest.raises(MatchbookMarketReadError,match="FX"): require_direct_liquidity_comparability(snap(req(currency="GBP")),snap(req(currency="EUR")))
 def items(n=5): return tuple(req(runner_id=303+i) for i in range(n))
-def test_poll_budget_restart_and_window():
+def _poll_env(tmp_path,monkeypatch):
+    workspace=tmp_path/"workspace"
+    authority=tmp_path/"authority"
+    monkeypatch.setenv("AUTOSPORT_WORKSPACE",str(workspace))
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",str(authority))
+    return workspace
+
+def test_poll_budget_restart_and_window(tmp_path,monkeypatch):
+    _poll_env(tmp_path,monkeypatch)
     a=plan_matchbook_poll(items(),now="2026-09-23T00:00:00Z",cursor=None,max_requests_per_minute=2,batch_limit=1); assert len(a.request_sha256s)==1
     b=plan_matchbook_poll(items(),now="2026-09-23T00:00:10Z",cursor=a.next_cursor,max_requests_per_minute=2,batch_limit=3); assert len(b.request_sha256s)==1
     c=plan_matchbook_poll(items(),now="2026-09-23T00:00:20Z",cursor=b.next_cursor,max_requests_per_minute=2,batch_limit=2); assert c.request_sha256s==()
-    d=plan_matchbook_poll(items(),now="2026-09-23T00:01:01Z",cursor=c.next_cursor,max_requests_per_minute=2,batch_limit=1); assert d.request_sha256s==(items()[2].semantic_sha256,)
-def test_poll_fail_closed():
+    restart=plan_matchbook_poll(items(),now="2026-09-23T00:00:30Z",cursor=None,max_requests_per_minute=2,batch_limit=1); assert restart.request_sha256s==() and restart.next_cursor.used_in_window==2
+    d=plan_matchbook_poll(items(),now="2026-09-23T00:01:01Z",cursor=None,max_requests_per_minute=2,batch_limit=1); assert d.request_sha256s==(items()[2].semantic_sha256,)
+
+def test_poll_fail_closed(tmp_path,monkeypatch):
+    _poll_env(tmp_path,monkeypatch)
     with pytest.raises(MatchbookMarketReadError): plan_matchbook_poll(items(),now="2026-09-23T00:00:00Z",cursor=None,max_requests_per_minute=701,batch_limit=1)
     x=req()
     with pytest.raises(MatchbookMarketReadError,match="duplicate"): plan_matchbook_poll((x,x),now="2026-09-23T00:00:00Z",cursor=None,max_requests_per_minute=2,batch_limit=1)
     a=plan_matchbook_poll(items(2),now="2026-09-23T00:00:10Z",cursor=None,max_requests_per_minute=2,batch_limit=1)
-    with pytest.raises(MatchbookMarketReadError,match="different universe"): plan_matchbook_poll(items(3),now="2026-09-23T00:00:11Z",cursor=a.next_cursor,max_requests_per_minute=2,batch_limit=1)
+    with pytest.raises(MatchbookMarketReadError,match="active budget window"): plan_matchbook_poll(items(3),now="2026-09-23T00:00:11Z",cursor=a.next_cursor,max_requests_per_minute=2,batch_limit=1)
     with pytest.raises(MatchbookMarketReadError,match="regressed"): plan_matchbook_poll(items(2),now="2026-09-23T00:00:09Z",cursor=a.next_cursor,max_requests_per_minute=2,batch_limit=1)
+    with pytest.raises(MatchbookMarketReadError,match="budget cannot change"): plan_matchbook_poll(items(2),now="2026-09-23T00:00:11Z",cursor=a.next_cursor,max_requests_per_minute=3,batch_limit=1)
+    with pytest.raises(MatchbookMarketReadError,match="cursor budget"): MatchbookPollCursor("0"*64,0,"2026-09-23T00:00:00Z",-1)
+    with pytest.raises(MatchbookMarketReadError,match="cursor index"): MatchbookPollCursor("0"*64,-1,"2026-09-23T00:00:00Z",0)
 
+def test_caller_cannot_reset_current_window_budget_with_forged_cursor(tmp_path,monkeypatch):
+    _poll_env(tmp_path,monkeypatch)
+    requests=tuple(req(runner_id=i) for i in range(1,701))
+    now="2026-09-23T00:00:00Z"
+    exhausted=plan_matchbook_poll(requests,now=now,cursor=None,max_requests_per_minute=700,batch_limit=700)
+    assert len(exhausted.request_sha256s)==700 and exhausted.next_cursor.used_in_window==700
+    forged=MatchbookPollCursor(exhausted.next_cursor.universe_sha256,exhausted.next_cursor.next_index,exhausted.next_cursor.window_started_at,0)
+    with pytest.raises(MatchbookMarketReadError,match="current durable authority"):
+        plan_matchbook_poll(requests,now=now,cursor=forged,max_requests_per_minute=700,batch_limit=1)
+    resumed=plan_matchbook_poll(requests,now="2026-09-23T00:00:30Z",cursor=None,max_requests_per_minute=700,batch_limit=1)
+    assert resumed.request_sha256s==() and resumed.next_cursor.used_in_window==700
 
-def test_forged_poll_cursor_cannot_expand_budget():
-    with pytest.raises(MatchbookMarketReadError,match="cursor budget"):
-        MatchbookPollCursor("0"*64,0,"2026-09-23T00:00:00Z",-1)
-    with pytest.raises(MatchbookMarketReadError,match="cursor index"):
-        MatchbookPollCursor("0"*64,-1,"2026-09-23T00:00:00Z",0)
+def test_persisted_budget_rollback_is_rejected_by_monotonic_authority(tmp_path,monkeypatch):
+    workspace=_poll_env(tmp_path,monkeypatch)
+    current=plan_matchbook_poll(items(),now="2026-09-23T00:00:00Z",cursor=None,max_requests_per_minute=2,batch_limit=2)
+    assert current.next_cursor.used_in_window==2
+    state_path=workspace/".matchbook-poll-budget-v1.json"
+    raw=json.loads(state_path.read_text(encoding="utf-8"))
+    raw["used_in_window"]=0
+    state_path.write_text(json.dumps(raw,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+    with pytest.raises(MatchbookMarketReadError,match="monotonic authority"):
+        plan_matchbook_poll(items(),now="2026-09-23T00:00:10Z",cursor=None,max_requests_per_minute=2,batch_limit=1)

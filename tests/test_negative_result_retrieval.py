@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from test_scientific_registry_index import (
@@ -225,14 +228,38 @@ def test_self_consistent_unknown_experiment_outcome_tamper_fails_closed_at_regis
     path = tmp_path / "scientific_registry.json"
     _seed_registry(path)
 
-    state = path.read_text(encoding="utf-8")
-    tampered = state.replace(
-        '"outcome": "NULL"',
-        '"outcome": "UNKNOWN_RESULT"',
-        1,
+    state = json.loads(path.read_text(encoding="utf-8"))
+    experiment = next(
+        record
+        for record in state["records"]
+        if record["record_type"] == "Experiment"
+        and record["record_id"] == "experiment-2"
     )
-    assert tampered != state
-    path.write_text(tampered, encoding="utf-8")
+    experiment["payload"]["outcome"] = "UNKNOWN_RESULT"
+    envelope = {
+        key: experiment[key]
+        for key in ("record_type", "record_id", "available_at", "payload")
+    }
+    experiment["record_sha256"] = hashlib.sha256(
+        json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(
         MonotonicAuthorityRollbackError,

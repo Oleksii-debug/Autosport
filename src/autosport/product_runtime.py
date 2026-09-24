@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import ExitStack, contextmanager
-from types import FunctionType
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from threading import RLock
-from typing import Callable, Iterator, Protocol
+from types import FunctionType
+from typing import Callable, Protocol
 
 from .causal_collector import (
     CanonicalDesktopApplication,
@@ -51,6 +52,17 @@ class ProductCompositionError(RuntimeError):
     """The durable product composition cannot be verified safely."""
 
 
+def _serialized_runtime_operation(method):
+    """Hold one runtime-local fence across an admitted public lifecycle operation."""
+
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._operation_fence:
+            return method(self, *args, **kwargs)
+
+    return guarded
+
+
 class _ProductRuntimeLease(WorkspaceEconomicLock):
     """Crash-releasing single-process authority for one canonical product workspace."""
 
@@ -67,9 +79,6 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         return self._authority_active
 
     def acquire(self) -> None:
-        # A product runtime lease is a one-shot lifetime capability. Reacquiring the
-        # same mutable lock object after release could resurrect an old runtime object
-        # after ownership has moved elsewhere.
         if self._acquired_once:
             raise WorkspaceEconomicLockError(
                 "product runtime workspace authority cannot be reacquired"
@@ -79,8 +88,6 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         self._authority_active = True
 
     def release(self) -> None:
-        # Revoke product authority before attempting OS teardown. Even if unlock/close
-        # later reports an error, callers must never treat ownership as positively held.
         self._authority_active = False
         super().release()
 
@@ -477,9 +484,7 @@ def _settlement_authority_identity(
         raise ProductCompositionError(
             "settlement_configuration_sha256 must be lowercase SHA-256 hex"
         )
-    implementation = (
-        f"{type(source).__module__}.{type(source).__qualname__}"
-    )
+    implementation = f"{type(source).__module__}.{type(source).__qualname__}"
     payload = {
         "source_id": source_id,
         "authority_id": authority_id,
@@ -515,10 +520,11 @@ class AutonomousProductRuntime:
     _runtime_lease: _ProductRuntimeLease
     _start_transition_store: _ProductStartTransitionStore
     _closed: bool = False
-    _decision_commit_lock: RLock = field(
+    _operation_fence: RLock = field(
         default_factory=RLock,
         init=False,
         repr=False,
+        compare=False,
     )
 
     def _require_runtime_authority(self) -> None:
@@ -622,11 +628,6 @@ class AutonomousProductRuntime:
         *,
         generation: int,
     ) -> None:
-        # The START journal is durable before either child mutation. If a child
-        # transition or final journal publication fails, attempt both STOP
-        # authorities independently. Only verified coherent STOPPED can close the
-        # transaction as rolled back; otherwise the durable transition remains
-        # recovery-required and positive lifecycle use stays fenced.
         compensation_failed = False
         for action, stop in (
             ("collector STOP compensation", self.collector.stop),
@@ -664,8 +665,6 @@ class AutonomousProductRuntime:
         try:
             self._start_transition_store.mark_rolled_back(generation)
         except BaseException as transition_error:
-            # A still-STARTING journal is intentionally fail-closed and will be
-            # recovered on restart. Keep the original START failure primary.
             self._note_secondary_failure(
                 primary_error,
                 action="START rollback journal",
@@ -683,153 +682,131 @@ class AutonomousProductRuntime:
                 "cannot recover interrupted product START transition"
             ) from exc
 
-    @contextmanager
-    def decision_commit_fence(self) -> Iterator[None]:
-        """Serialize one already-prepared economic commit against lifecycle changes."""
-
-        self._require_runtime_authority()
-        with self._decision_commit_lock:
-            current = self._coherent_status()
-            if self._state_value(current) != SessionState.RUNNING.value:
-                raise ProductCompositionError(
-                    "PAPER decision commit requires the canonical product runtime "
-                    "to remain running"
-                )
-            yield
-
+    @_serialized_runtime_operation
     def start(self) -> ContinuousSessionStatus:
-        # Lifecycle transitions and decision publication share this process-local
-        # fence. It is deliberately narrower than provider/strategy work: only the
-        # already-prepared durable decision commit can delay START/PAUSE/STOP/CLOSE.
-        with self._decision_commit_lock:
-            # A completed RUNNING start is idempotent. Every mutating START/resume
-            # publishes a durable transition before the first child mutation.
-            current = self._coherent_status()
-            current_state = self._state_value(current)
-            if current_state == SessionState.RUNNING.value:
-                return current
+        current = self._coherent_status()
+        current_state = self._state_value(current)
+        if current_state == SessionState.RUNNING.value:
+            return current
 
-            generation = self._start_transition_store.begin(
-                collector_was_stopped=current_state == SessionState.STOPPED.value,
-                session_pre_state=current_state,
-            )
-            try:
-                self.collector.resume()
-                self.coordinator.resume()
-                resolved = self._coherent_status(allow_pending_start=True)
-                if self._state_value(resolved) != SessionState.RUNNING.value:
-                    raise ProductCompositionError(
-                        "product START did not reach coherent RUNNING state"
-                    )
-                self._start_transition_store.mark_completed(generation)
-                return resolved
-            except BaseException as primary_error:
-                self._compensate_failed_start(
-                    primary_error,
-                    generation=generation,
-                )
-                raise
-
-    def pause(self) -> ContinuousSessionStatus:
-        with self._decision_commit_lock:
-            current = self._coherent_status()
-            state = self._state_value(current)
-            if state == SessionState.STOPPED.value:
+        generation = self._start_transition_store.begin(
+            collector_was_stopped=current_state == SessionState.STOPPED.value,
+            session_pre_state=current_state,
+        )
+        try:
+            self.collector.resume()
+            self.coordinator.resume()
+            resolved = self._coherent_status(allow_pending_start=True)
+            if self._state_value(resolved) != SessionState.RUNNING.value:
                 raise ProductCompositionError(
-                    "cannot pause a stopped product runtime; start it before pausing"
+                    "product START did not reach coherent RUNNING state"
                 )
-            if state == SessionState.PAUSED.value:
-                return current
-            self.coordinator.pause()
-            return self._coherent_status()
+            self._start_transition_store.mark_completed(generation)
+            return resolved
+        except BaseException as primary_error:
+            self._compensate_failed_start(
+                primary_error,
+                generation=generation,
+            )
+            raise
 
+    @_serialized_runtime_operation
+    def pause(self) -> ContinuousSessionStatus:
+        current = self._coherent_status()
+        state = self._state_value(current)
+        if state == SessionState.STOPPED.value:
+            raise ProductCompositionError(
+                "cannot pause a stopped product runtime; start it before pausing"
+            )
+        if state == SessionState.PAUSED.value:
+            return current
+        self.coordinator.pause()
+        return self._coherent_status()
+
+    @_serialized_runtime_operation
     def resume(self) -> ContinuousSessionStatus:
         return self.start()
 
+    @_serialized_runtime_operation
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
-        with self._decision_commit_lock:
-            self._require_runtime_authority()
-            pending = self._start_transition_store.pending()
-            # STOP is also the explicit recovery action for a previously split
-            # lifecycle graph, so do not preflight coherence here. Attempt both
-            # durable STOP authorities even if either side reports an error.
-            collector_error: BaseException | None = None
-            coordinator_error: BaseException | None = None
-            try:
-                self.collector.stop(reason)
-            except BaseException as exc:
-                collector_error = exc
-            try:
-                self.coordinator.stop(reason)
-            except BaseException as exc:
-                coordinator_error = exc
+        self._require_runtime_authority()
+        pending = self._start_transition_store.pending()
+        collector_error: BaseException | None = None
+        coordinator_error: BaseException | None = None
+        try:
+            self.collector.stop(reason)
+        except BaseException as exc:
+            collector_error = exc
+        try:
+            self.coordinator.stop(reason)
+        except BaseException as exc:
+            coordinator_error = exc
 
-            if collector_error is not None:
-                if coordinator_error is not None:
-                    self._note_secondary_failure(
-                        collector_error,
-                        action="session STOP",
-                        secondary_error=coordinator_error,
-                    )
-                if pending is not None:
-                    self._mark_start_recovery_required(
-                        int(pending["generation"]),
-                        collector_error,
-                    )
-                raise collector_error
+        if collector_error is not None:
             if coordinator_error is not None:
-                if pending is not None:
-                    self._mark_start_recovery_required(
-                        int(pending["generation"]),
-                        coordinator_error,
-                    )
-                raise coordinator_error
-
-            resolved = self._coherent_status(allow_pending_start=True)
-            if self._state_value(resolved) != SessionState.STOPPED.value:
-                error = ProductCompositionError(
-                    "canonical product STOP did not reach coherent STOPPED state"
+                self._note_secondary_failure(
+                    collector_error,
+                    action="session STOP",
+                    secondary_error=coordinator_error,
                 )
-                if pending is not None:
-                    self._mark_start_recovery_required(
-                        int(pending["generation"]),
-                        error,
-                    )
-                raise error
             if pending is not None:
-                self._start_transition_store.mark_rolled_back(
-                    int(pending["generation"])
+                self._mark_start_recovery_required(
+                    int(pending["generation"]),
+                    collector_error,
                 )
-            return resolved
+            raise collector_error
+        if coordinator_error is not None:
+            if pending is not None:
+                self._mark_start_recovery_required(
+                    int(pending["generation"]),
+                    coordinator_error,
+                )
+            raise coordinator_error
 
+        resolved = self._coherent_status(allow_pending_start=True)
+        if self._state_value(resolved) != SessionState.STOPPED.value:
+            error = ProductCompositionError(
+                "canonical product STOP did not reach coherent STOPPED state"
+            )
+            if pending is not None:
+                self._mark_start_recovery_required(
+                    int(pending["generation"]),
+                    error,
+                )
+            raise error
+        if pending is not None:
+            self._start_transition_store.mark_rolled_back(
+                int(pending["generation"])
+            )
+        return resolved
+
+    @_serialized_runtime_operation
     def status(self) -> ContinuousSessionStatus:
         return self._coherent_status()
 
+    @_serialized_runtime_operation
     def tick(self) -> ContinuousTickResult:
         self._coherent_status()
         return self.coordinator.tick()
 
+    @_serialized_runtime_operation
     def close(self) -> None:
-        with self._decision_commit_lock:
-            # Revoke lifecycle authority before closing resources or releasing the
-            # workspace lease. Cleanup may fail, but a closing runtime must never
-            # become usable again after exclusive ownership can be transferred.
-            self._closed = True
+        self._closed = True
+        try:
+            self.market_store.close()
+        except BaseException as primary_error:
             try:
-                self.market_store.close()
-            except BaseException as primary_error:
+                self._runtime_lease.release()
+            except BaseException as release_error:
                 try:
-                    self._runtime_lease.release()
-                except BaseException as release_error:
-                    try:
-                        primary_error.add_note(
-                            "product runtime lease release also failed while closing "
-                            f"market storage: {type(release_error).__name__}: {release_error}"
-                        )
-                    except BaseException:
-                        pass
-                raise
-            self._runtime_lease.release()
+                    primary_error.add_note(
+                        "product runtime lease release also failed while closing "
+                        f"market storage: {type(release_error).__name__}: {release_error}"
+                    )
+                except BaseException:
+                    pass
+            raise
+        self._runtime_lease.release()
 
 
 def build_autonomous_product_runtime(
@@ -893,21 +870,13 @@ def build_autonomous_product_runtime(
 
         lifecycle = ContinuousEventLifecycle(root / "catalog.json")
         market_store = SQLiteMarketStore(root / "market.db")
-        # Until the fully assembled runtime takes ownership, construction unwind owns
-        # every opened resource. Register exactly once so failures at any later
-        # composition step cannot leak SQLite handles or leave Windows files locked.
         lease_stack.callback(market_store.close)
         mirror = MarketMirror()
         invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
-        # Rebuild volatile mirror truth from the canonical durable current projection.
-        # ExitStack closes the store exactly once if this or any downstream step fails.
         for event in market_store.current_by_source().values():
             invalidations.accept_persisted(event)
 
-        # Future mirror updates are downstream of the canonical market bus so they are
-        # delivered only after SQLite persistence. If a subscriber fails after persistence,
-        # canonical desktop application recovery can safely replay from durable truth.
         market_bus = MarketEventBus(market_store)
         market_bus.subscribe(invalidations.accept_persisted)
         source_health = SourceHealthStore(root / "source_health.json")
@@ -964,10 +933,6 @@ def build_autonomous_product_runtime(
                 root / "product_start_transition.json"
             ),
         )
-        # An interrupted START is recovered while the same exclusive product lease
-        # still serializes the workspace. Conservatively reconverge to STOPPED
-        # before handing runtime authority back to a caller.
         runtime._recover_interrupted_start()
-        # Runtime lifetime, not builder lifetime, owns the process lease.
         lease_stack.pop_all()
         return runtime

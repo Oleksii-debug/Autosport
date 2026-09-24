@@ -3,8 +3,14 @@
 The ordinary Betfair Accounts API does not expose a stable customer/account identifier
 through ``getAccountDetails``.  This module therefore proves only the narrower fact
 Autosport can actually establish for the personal-developer path: one account-details
-observation came from one exact canonical authenticated client/session context in this
-process.
+observation is bound to one exact canonical authenticated client/session context in
+this process.
+
+That process-local authority deliberately stops above remote transport origin.  The
+same Python process can substitute I/O below the canonical HTTP/opener stack, so K07
+must not be consumed as proof that account-details bytes causally came from remote
+Betfair.  Remote-provider origin and provider account-details origin remain explicitly
+unproven here and require a separate operational/acquisition authority.
 
 The public identity intentionally does not contain application keys, session tokens,
 credential hashes, configured account labels, or a claim of cross-session account
@@ -14,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import sha256
+from hashlib import blake2b, sha256
 import hmac
 import json
 import urllib.request as _urllib_request
@@ -34,7 +40,7 @@ from .betfair_account_readonly import (
 VENUE_ID = "betfair"
 IDENTITY_SCOPE = "SESSION_CONTEXT"
 IDENTITY_SCHEMA = "autosport.betfair_authenticated_account_context"
-IDENTITY_SCHEMA_VERSION = 1
+IDENTITY_SCHEMA_VERSION = 2
 _CONTEXT_PREFIX = "betfair-session-context:"
 
 
@@ -45,6 +51,46 @@ class BetfairAccountIdentityError(RuntimeError):
 class BetfairAccountIdentityMode(str, Enum):
     PERSONAL_DEVELOPER = "PERSONAL_DEVELOPER"
     LICENSED_VENDOR = "LICENSED_VENDOR"
+
+
+def _identity_projection_material(
+    schema: str,
+    schema_version: int,
+    venue_id: str,
+    mode: str,
+    identity_scope: str,
+    session_context_id: str,
+    currency_code: str,
+    account_details_sha256: str,
+    observed_at: str,
+) -> bytes:
+    """Encode K07 identity fields without a mutable JSON codec dependency.
+
+    The length-prefixed field order is versioned by schema and schema_version.
+    This helper deliberately depends only on immutable scalar inputs and Python
+    built-ins; the authority closure pins both its function identity and bytecode.
+    """
+
+    parts = (
+        schema,
+        str(schema_version),
+        venue_id,
+        mode,
+        identity_scope,
+        session_context_id,
+        currency_code,
+        account_details_sha256,
+        observed_at,
+        "false",
+        "false",
+        "false",
+    )
+    encoded = bytearray()
+    for part in parts:
+        raw = part.encode("utf-8")
+        encoded.extend(len(raw).to_bytes(8, "big", signed=False))
+        encoded.extend(raw)
+    return bytes(encoded)
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -83,6 +129,16 @@ class BetfairAuthenticatedAccountIdentity:
         _canonical_timestamp(self.observed_at)
 
     @property
+    def remote_provider_origin_proven(self) -> bool:
+        """K07 alone does not prove below-process remote Betfair transport origin."""
+        return False
+
+    @property
+    def provider_account_details_origin_proven(self) -> bool:
+        """Account-details bytes are not independently attested as remote-provider bytes."""
+        return False
+
+    @property
     def stable_account_identity_proven(self) -> bool:
         return False
 
@@ -96,19 +152,18 @@ class BetfairAuthenticatedAccountIdentity:
 
     @property
     def identity_id(self) -> str:
-        payload = {
-            "schema": IDENTITY_SCHEMA,
-            "schema_version": IDENTITY_SCHEMA_VERSION,
-            "venue_id": self.venue_id,
-            "mode": self.mode.value,
-            "identity_scope": self.identity_scope,
-            "session_context_id": self.session_context_id,
-            "currency_code": self.currency_code,
-            "account_details_sha256": self.account_details_sha256,
-            "observed_at": self.observed_at,
-            "stable_account_identity_proven": False,
-        }
-        return sha256(_canonical_json(payload)).hexdigest()
+        material = _identity_projection_material(
+            IDENTITY_SCHEMA,
+            IDENTITY_SCHEMA_VERSION,
+            self.venue_id,
+            self.mode.value,
+            self.identity_scope,
+            self.session_context_id,
+            self.currency_code,
+            self.account_details_sha256,
+            self.observed_at,
+        )
+        return sha256(material).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +171,7 @@ class _CanonicalClientOrigin:
     transport: object
     opener: object
     opener_handlers: tuple[object, ...]
+    opener_dispatch: tuple[tuple[str, object, tuple[object, ...]], ...]
     clock: object
     credentials: object
     credential_binding: bytes
@@ -150,6 +206,7 @@ def _make_account_identity_authority():
     client_type = BetfairReadOnlyClient
     transport_type = UrllibBetfairHttpTransport
     details_type = BetfairAccountDetailsObservation
+    readonly_module = _readonly_module
     evidence_type = readonly_module.BetfairEvidence
     rpc_result_type = readonly_module._RpcResult
     identity_type = BetfairAuthenticatedAccountIdentity
@@ -164,10 +221,12 @@ def _make_account_identity_authority():
     identity_schema = IDENTITY_SCHEMA
     identity_schema_version = IDENTITY_SCHEMA_VERSION
     context_prefix = _CONTEXT_PREFIX
-    readonly_module = _readonly_module
-    json_dumps = json.dumps
+    identity_projection_material = _identity_projection_material
+    identity_projection_material_code = getattr(
+        identity_projection_material, "__code__", None
+    )
     sha256_fn = sha256
-    hmac_digest = hmac.digest
+    keyed_digest_fn = blake2b
     hmac_compare_digest = hmac.compare_digest
     token_hex_fn = token_hex
     weakref_fn = ref
@@ -183,7 +242,17 @@ def _make_account_identity_authority():
     canonical_redirect_request = redirect_handler_type.redirect_request
     opener_type = _urllib_request.OpenerDirector
     http_redirect_handler_type = _urllib_request.HTTPRedirectHandler
+    https_handler_type = _urllib_request.HTTPSHandler
+    abstract_http_handler_type = _urllib_request.AbstractHTTPHandler
+    http_error_processor_type = _urllib_request.HTTPErrorProcessor
     canonical_opener_open = opener_type.open
+    canonical_opener_internal_open = opener_type._open
+    canonical_opener_call_chain = opener_type._call_chain
+    canonical_opener_error = opener_type.error
+    canonical_https_open = https_handler_type.https_open
+    canonical_https_request = https_handler_type.https_request
+    canonical_do_open = abstract_http_handler_type.do_open
+    canonical_https_response = http_error_processor_type.https_response
     canonical_details_init = details_type.__init__
     canonical_details_post_init = details_type.__post_init__
     canonical_evidence_init = evidence_type.__init__
@@ -191,6 +260,23 @@ def _make_account_identity_authority():
     canonical_rpc_result_init = rpc_result_type.__init__
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
+    semantic_property_bindings = tuple(
+        (
+            name,
+            descriptor,
+            descriptor.fget,
+            getattr(descriptor.fget, "__code__", None),
+        )
+        for name in (
+            "remote_provider_origin_proven",
+            "provider_account_details_origin_proven",
+            "stable_account_identity_proven",
+            "stable_account_id",
+            "cross_session_equivalence_proven",
+            "identity_id",
+        )
+        for descriptor in (identity_type.__dict__[name],)
+    )
     readonly_globals = canonical_read_account_details.__globals__
     function_type = type(canonical_read_account_details)
     missing_global = object()
@@ -291,41 +377,74 @@ def _make_account_identity_authority():
             + b"\x00"
             + credentials.session_token.encode("utf-8")
         )
-        return hmac_digest(process_hmac_key, material, "sha256")
+        return keyed_digest_fn(
+            material,
+            key=process_hmac_key,
+            digest_size=32,
+        ).digest()
 
-    def issued_identity_digest(value: BetfairAuthenticatedAccountIdentity) -> str:
-        # Authority integrity must not depend on the public identity_id property
-        # or module-level validation/JSON helpers after closure initialization.
-        payload = {
-            "schema": identity_schema,
-            "schema_version": identity_schema_version,
-            "venue_id": value.venue_id,
-            "mode": value.mode.value,
-            "identity_scope": value.identity_scope,
-            "session_context_id": value.session_context_id,
-            "currency_code": value.currency_code,
-            "account_details_sha256": value.account_details_sha256,
-            "observed_at": value.observed_at,
-            "stable_account_identity_proven": False,
-        }
+    def identity_projection_material_for(
+        value: BetfairAuthenticatedAccountIdentity,
+    ) -> bytes:
         try:
-            encoded = json_dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            ).encode("utf-8")
-        except (AttributeError, TypeError, ValueError, UnicodeEncodeError) as exc:
+            return identity_projection_material(
+                identity_schema,
+                identity_schema_version,
+                value.venue_id,
+                value.mode.value,
+                value.identity_scope,
+                value.session_context_id,
+                value.currency_code,
+                value.account_details_sha256,
+                value.observed_at,
+            )
+        except (AttributeError, TypeError, UnicodeEncodeError, OverflowError) as exc:
             raise identity_error_type(
-                "account identity cannot be verified as canonical JSON"
+                "account identity projection fields are malformed"
             ) from exc
-        return sha256_fn(encoded).hexdigest()
+
+    def public_identity_digest(
+        value: BetfairAuthenticatedAccountIdentity,
+    ) -> str:
+        return sha256_fn(identity_projection_material_for(value)).hexdigest()
+
+    def issued_identity_digest(
+        value: BetfairAuthenticatedAccountIdentity,
+    ) -> str:
+        # Hidden issuance integrity uses a closure-captured native keyed
+        # BLAKE2b primitive over the same deterministic scalar projection as
+        # the public identity_id. The native type has no mutable Python
+        # bytecode surface, unlike hmac.digest/json.dumps.
+        return keyed_digest_fn(
+            identity_projection_material_for(value),
+            key=process_hmac_key,
+            digest_size=32,
+        ).hexdigest()
+
+    def identity_projection_dependencies_are_current() -> bool:
+        return bool(
+            _identity_projection_material is identity_projection_material
+            and getattr(_identity_projection_material, "__code__", None)
+            is identity_projection_material_code
+            and sha256 is sha256_fn
+            and blake2b is keyed_digest_fn
+            and hmac.compare_digest is hmac_compare_digest
+            and IDENTITY_SCHEMA == identity_schema
+            and IDENTITY_SCHEMA_VERSION == identity_schema_version
+        )
 
     def identity_class_is_current() -> bool:
-        return (
-            identity_type.__init__ is canonical_identity_init
+        return bool(
+            identity_projection_dependencies_are_current()
+            and identity_type.__init__ is canonical_identity_init
             and identity_type.__post_init__ is canonical_identity_post_init
+            and all(
+                identity_type.__dict__.get(name) is descriptor
+                and descriptor.fget is getter
+                and getattr(getter, "__code__", None) is getter_code
+                for name, descriptor, getter, getter_code
+                in semantic_property_bindings
+            )
         )
 
     def readonly_dependencies_are_current() -> bool:
@@ -352,6 +471,9 @@ def _make_account_identity_authority():
             and redirect_handler_type.redirect_request
             is canonical_redirect_request
             and opener_type.open is canonical_opener_open
+            and opener_type._open is canonical_opener_internal_open
+            and opener_type._call_chain is canonical_opener_call_chain
+            and opener_type.error is canonical_opener_error
             and details_type.__init__ is canonical_details_init
             and details_type.__post_init__ is canonical_details_post_init
             and evidence_type.__init__ is canonical_evidence_init
@@ -376,6 +498,49 @@ def _make_account_identity_authority():
             )
         )
 
+    def opener_dispatch_snapshot(
+        opener: object,
+    ) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
+        records: list[tuple[str, object, tuple[object, ...]]] = []
+        for map_name in ("handle_open", "process_request", "process_response"):
+            mapping = getattr(opener, map_name, None)
+            if type(mapping) is not dict:
+                return None
+            for key, handlers in mapping.items():
+                if type(key) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append((map_name, key, tuple(handlers)))
+        error_mapping = getattr(opener, "handle_error", None)
+        if type(error_mapping) is not dict:
+            return None
+        for protocol, by_code in error_mapping.items():
+            if type(protocol) not in (str, int) or type(by_code) is not dict:
+                return None
+            for code, handlers in by_code.items():
+                if type(code) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append((f"handle_error:{protocol}", code, tuple(handlers)))
+        records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
+        return tuple(records)
+
+    def dispatch_matches(
+        current: tuple[tuple[str, object, tuple[object, ...]], ...] | None,
+        expected: tuple[tuple[str, object, tuple[object, ...]], ...],
+    ) -> bool:
+        if current is None or len(current) != len(expected):
+            return False
+        for actual, wanted in zip(current, expected):
+            if actual[0] != wanted[0] or actual[1] != wanted[1]:
+                return False
+            if len(actual[2]) != len(wanted[2]):
+                return False
+            if any(
+                actual_handler is not expected_handler
+                for actual_handler, expected_handler in zip(actual[2], wanted[2])
+            ):
+                return False
+        return True
+
     def canonical_network_transport(
         transport: object,
         *,
@@ -398,7 +563,10 @@ def _make_account_identity_authority():
         if type(opener) is not opener_type or type(opener).open is not canonical_opener_open:
             return False
         opener_dict = getattr(opener, "__dict__", None)
-        if type(opener_dict) is not dict or "open" in opener_dict:
+        if type(opener_dict) is not dict or any(
+            name in opener_dict
+            for name in ("open", "_open", "_call_chain", "error")
+        ):
             return False
         handlers = getattr(opener, "handlers", None)
         if type(handlers) is not list:
@@ -415,6 +583,64 @@ def _make_account_identity_authority():
         ):
             return False
 
+        https_handlers = tuple(
+            handler
+            for handler in handler_tuple
+            if isinstance(handler, https_handler_type)
+        )
+        if len(https_handlers) != 1 or type(https_handlers[0]) is not https_handler_type:
+            return False
+        https_handler = https_handlers[0]
+        https_handler_dict = getattr(https_handler, "__dict__", None)
+        if (
+            type(https_handler_dict) is not dict
+            or "https_open" in https_handler_dict
+            or "https_request" in https_handler_dict
+            or "do_open" in https_handler_dict
+            or https_handler_type.https_open is not canonical_https_open
+            or https_handler_type.https_request is not canonical_https_request
+            or abstract_http_handler_type.do_open is not canonical_do_open
+            or http_error_processor_type.https_response is not canonical_https_response
+        ):
+            return False
+
+        dispatch = opener_dispatch_snapshot(opener)
+        if dispatch is None:
+            return False
+        dispatch_handlers = tuple(
+            handlers
+            for map_name, key, handlers in dispatch
+            if map_name == "handle_open" and key == "https"
+        )
+        request_handlers = tuple(
+            handlers
+            for map_name, key, handlers in dispatch
+            if map_name == "process_request" and key == "https"
+        )
+        response_handlers = tuple(
+            handlers
+            for map_name, key, handlers in dispatch
+            if map_name == "process_response" and key == "https"
+        )
+        if (
+            len(dispatch_handlers) != 1
+            or len(dispatch_handlers[0]) != 1
+            or dispatch_handlers[0][0] is not https_handler
+            or len(request_handlers) != 1
+            or len(request_handlers[0]) != 1
+            or request_handlers[0][0] is not https_handler
+            or len(response_handlers) != 1
+            or len(response_handlers[0]) != 1
+            or type(response_handlers[0][0]) is not http_error_processor_type
+            or "https_response" in getattr(response_handlers[0][0], "__dict__", {})
+            or any(
+                not any(handler is registered for registered in handler_tuple)
+                for _map_name, _key, handlers in dispatch
+                for handler in handlers
+            )
+        ):
+            return False
+
         if origin is not None:
             if type(origin) is not origin_type or origin.opener is not opener:
                 return False
@@ -424,6 +650,8 @@ def _make_account_identity_authority():
                 current is not expected
                 for current, expected in zip(handler_tuple, origin.opener_handlers)
             ):
+                return False
+            if not dispatch_matches(dispatch, origin.opener_dispatch):
                 return False
         return True
 
@@ -522,10 +750,30 @@ def _make_account_identity_authority():
                 if record is not None and record.value_ref is dead_ref:
                     issued.pop(identity, None)
 
+        if not identity_projection_dependencies_are_current():
+            raise identity_error_type(
+                "account identity projection dependencies changed before issuance"
+            )
+        hidden_digest = issued_identity_digest(value)
+        expected_public_id = public_identity_digest(value)
+        try:
+            current_public_id = value.identity_id
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise identity_error_type(
+                "account identity public projection cannot be verified"
+            ) from exc
+        if (
+            not identity_projection_dependencies_are_current()
+            or not hmac_compare_digest(expected_public_id, current_public_id)
+        ):
+            raise identity_error_type(
+                "account identity public projection changed before issuance"
+            )
+
         with lock:
             issued[identity] = issued_record_type(
                 value_ref=weakref_fn(value, discard),
-                identity_id=issued_identity_digest(value),
+                identity_id=hidden_digest,
                 client_ref=weakref_fn(client),
                 session_context_id=context.session_context_id,
             )
@@ -563,10 +811,16 @@ def _make_account_identity_authority():
                 "canonical Betfair client factory produced invalid origin"
             )
         opener = client._transport._opener
+        dispatch = opener_dispatch_snapshot(opener)
+        if dispatch is None:
+            raise identity_error_type(
+                "canonical Betfair opener dispatch is not inspectable"
+            )
         origin = origin_type(
             client._transport,
             opener,
             tuple(opener.handlers),
+            dispatch,
             client._clock,
             client._credentials,
             binding,
@@ -651,6 +905,7 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
+        """Verify current process-local K07 session-context issuance only."""
         if type(value) is not identity_type or not identity_class_is_current():
             return False
         with lock:
@@ -659,9 +914,15 @@ def _make_account_identity_authority():
                 return False
             try:
                 current_identity_digest = issued_identity_digest(value)
-            except identity_error_type:
+                expected_public_id = public_identity_digest(value)
+                current_public_id = value.identity_id
+            except (identity_error_type, AttributeError, TypeError, ValueError):
+                return False
+            if not identity_projection_dependencies_are_current():
                 return False
             if not hmac_compare_digest(record.identity_id, current_identity_digest):
+                return False
+            if not hmac_compare_digest(expected_public_id, current_public_id):
                 return False
             issued_client = record.client_ref()
             if issued_client is None:
@@ -686,6 +947,7 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> BetfairAuthenticatedAccountIdentity:
+        """Require current K07 context authority, never remote-provider origin proof."""
         if not is_authoritative(value, client=client):
             raise identity_error_type(
                 "Betfair account identity lacks current authenticated-context authority"

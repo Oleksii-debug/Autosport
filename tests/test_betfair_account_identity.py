@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
+import hmac
 import json
 import http.client as _http_client
 import os
@@ -290,6 +291,85 @@ def test_module_helper_rebinding_cannot_weaken_k07_identity_integrity(
     assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
+def test_public_identity_projection_no_longer_depends_on_public_json_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    original_identity_id = value.identity_id
+
+    monkeypatch.setattr(_identity, "_canonical_json", lambda _value: b"forged")
+
+    assert value.identity_id == original_identity_id
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_projection_material_rebind_revokes_public_k07_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    original_identity_id = value.identity_id
+
+    monkeypatch.setattr(
+        _identity,
+        "_identity_projection_material",
+        lambda *_args, **_kwargs: b"attacker-selected-projection",
+    )
+
+    assert value.identity_id != original_identity_id
+    assert not is_authoritative_betfair_account_identity(value, client=client)
+    with pytest.raises(BetfairAccountIdentityError, match="lacks current"):
+        require_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_json_dumps_code_mutation_cannot_mask_issued_field_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    original_dumps_code = json.dumps.__code__
+
+    def forged_dumps(*_args, **_kwargs):
+        return "{}"
+
+    try:
+        json.dumps.__code__ = forged_dumps.__code__
+        object.__setattr__(value, "currency_code", "GBP")
+
+        assert not is_authoritative_betfair_account_identity(value, client=client)
+        with pytest.raises(BetfairAccountIdentityError, match="lacks current"):
+            require_authoritative_betfair_account_identity(value, client=client)
+    finally:
+        json.dumps.__code__ = original_dumps_code
+
+
+def test_hmac_digest_code_mutation_cannot_mask_issued_field_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    original_digest_code = hmac.digest.__code__
+
+    def forged_digest(_key, _msg, _digest):
+        return bytes(32)
+
+    try:
+        hmac.digest.__code__ = forged_digest.__code__
+        client = _client()
+        value = resolve_betfair_authenticated_account_identity(client)
+
+        object.__setattr__(value, "currency_code", "GBP")
+
+        assert not is_authoritative_betfair_account_identity(value, client=client)
+        with pytest.raises(BetfairAccountIdentityError, match="lacks current"):
+            require_authoritative_betfair_account_identity(value, client=client)
+    finally:
+        hmac.digest.__code__ = original_digest_code
+
+
 def test_identity_class_post_init_rebinding_cannot_mint_altered_k07_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -323,9 +403,41 @@ def test_personal_developer_identity_never_claims_cross_session_stability(
 
     assert value.mode is BetfairAccountIdentityMode.PERSONAL_DEVELOPER
     assert value.identity_scope == IDENTITY_SCOPE
+    assert value.remote_provider_origin_proven is False
+    assert value.provider_account_details_origin_proven is False
     assert value.stable_account_identity_proven is False
     assert value.stable_account_id is None
     assert value.cross_session_equivalence_proven is False
+
+
+@pytest.mark.parametrize(
+    ("attribute", "forged_value"),
+    [
+        ("remote_provider_origin_proven", True),
+        ("provider_account_details_origin_proven", True),
+        ("stable_account_identity_proven", True),
+        ("stable_account_id", "forged-stable-account"),
+        ("cross_session_equivalence_proven", True),
+        ("identity_id", "0" * 64),
+    ],
+)
+def test_authority_projection_rebind_revokes_issued_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    forged_value: object,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+
+    monkeypatch.setattr(
+        BetfairAuthenticatedAccountIdentity,
+        attribute,
+        property(lambda _self, result=forged_value: result),
+    )
+
+    assert getattr(value, attribute) == forged_value
+    assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
 @pytest.mark.parametrize("copy_kind", ["copy", "replace", "pickle"])

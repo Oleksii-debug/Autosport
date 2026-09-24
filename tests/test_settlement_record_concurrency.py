@@ -390,6 +390,27 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertIs(SettlementEngine.record, canonical_record)
         self.assertIs(SettlementEngine.settle_ready, canonical_settle_ready)
 
+        # Calling the builtin metaclass mutator directly bypasses an ordinary
+        # custom __setattr__ override.  The metaclass data descriptors must still
+        # reject both replacement and deletion at that lower dispatch layer.
+        for name, forged in (
+            ("record", forged_record),
+            ("settle_ready", forged_settle_ready),
+        ):
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement public entry binding is immutable",
+            ):
+                type.__setattr__(SettlementEngine, name, forged)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement public entry binding is immutable",
+            ):
+                type.__delattr__(SettlementEngine, name)
+
+        self.assertIs(SettlementEngine.record, canonical_record)
+        self.assertIs(SettlementEngine.settle_ready, canonical_settle_ready)
+
         book = PaperBook("100")
         leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
         ticket = book.open_ticket(

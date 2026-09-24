@@ -239,6 +239,7 @@ class ProphetXTalariaContinuity:
         self._channels: dict[str, TalariaScope] = {}
         self._acks: set[TalariaScope] = set()
         self._rebase: set[TalariaScope] = set()
+        self._rebase_after: dict[TalariaScope, str] = {}
         self._dirty: set[TalariaScope] = set()
         self._seen_dirty_frames: set[tuple[TalariaScope, str]] = set()
         self._snapshots: dict[TalariaScope, tuple[str, str]] = {}
@@ -283,13 +284,13 @@ class ProphetXTalariaContinuity:
         self._generation_id = sha256(seed).hexdigest()
         self._socket_hash, self._config, self._started = socket_hash, config, observed
         self._scopes, self._subscription_digest, self._coverage_id, self._registration_digest = (), None, None, None
-        self._channels.clear(); self._acks.clear(); self._rebase.clear(); self._dirty.clear(); self._seen_dirty_frames.clear(); self._snapshots.clear()
+        self._channels.clear(); self._acks.clear(); self._rebase.clear(); self._rebase_after.clear(); self._dirty.clear(); self._seen_dirty_frames.clear(); self._snapshots.clear()
         self._signin = False
         self._state = TalariaContinuityState.CONNECTED
         return self._generation_id
 
     def bind_registration(self, generation_id: str, *, declared_scopes: Iterable[TalariaScope], channel_scope: Mapping[str, TalariaScope], channel_limit: int, registration_evidence_sha256: str, observed_at: str) -> str:
-        self._require(generation_id); self._clock(observed_at)
+        self._require(generation_id); observed = self._clock(observed_at)
         scopes = _scope_set(declared_scopes)
         reg = _digest(registration_evidence_sha256, "registration_evidence_sha256")
         if type(channel_limit) is not int or channel_limit < 1 or len(scopes) > channel_limit:
@@ -308,7 +309,7 @@ class ProphetXTalariaContinuity:
         seed = f"{_PROTOCOL}\x00coverage\x00{generation_id}\x00{self._coverage_counter}\x00{self._subscription_digest}\x00{reg}".encode()
         self._coverage_id = sha256(seed).hexdigest()
         self._channels = channels
-        self._acks.clear(); self._rebase = set(scopes); self._dirty = set(scopes); self._seen_dirty_frames.clear(); self._snapshots.clear()
+        self._acks.clear(); self._rebase = set(scopes); self._rebase_after = {scope: observed for scope in scopes}; self._dirty = set(scopes); self._seen_dirty_frames.clear(); self._snapshots.clear()
         self._signin = False
         self._state = TalariaContinuityState.REGISTERED
         return self._subscription_digest
@@ -320,11 +321,20 @@ class ProphetXTalariaContinuity:
         self._state = TalariaContinuityState.DEGRADED
         self._dirty.update(self._scopes); self._rebase.update(self._scopes)
 
+    def _raise_rebase_floor(self, scope: TalariaScope, observed_at: str) -> None:
+        prior = self._rebase_after.get(scope)
+        if prior is None or _time(observed_at, "observed_at") > _time(prior, "rebase_after"):
+            self._rebase_after[scope] = observed_at
+
+    def _raise_all_rebase_floors(self, observed_at: str) -> None:
+        for scope in self._scopes:
+            self._raise_rebase_floor(scope, observed_at)
+
     def handle_frame(self, generation_id: str, raw_frame: bytes | str, *, observed_at: str) -> TalariaScope | None:
         self._require(generation_id)
         if self._state is TalariaContinuityState.DEGRADED:
             raise ProphetXTalariaGenerationError("degraded generation must reconnect")
-        frame = parse_talaria_frame(raw_frame); self._clock(observed_at)
+        frame = parse_talaria_frame(raw_frame); observed = self._clock(observed_at)
         if frame.event == "pusher:connection_established":
             raise ProphetXTalariaContractError("new connection requires new generation")
         if frame.event == "pusher:error":
@@ -333,7 +343,9 @@ class ProphetXTalariaContinuity:
             if self._state not in {TalariaContinuityState.REGISTERED, TalariaContinuityState.SIGNED_IN}:
                 raise ProphetXTalariaContractError("signin_success before registration")
             self._signin = True; self._state = TalariaContinuityState.SIGNED_IN
-            if self._handshake(): self._state = TalariaContinuityState.REBASE_REQUIRED
+            if self._handshake():
+                self._raise_all_rebase_floors(observed)
+                self._state = TalariaContinuityState.REBASE_REQUIRED
             return None
         if frame.event == "pusher_internal:subscription_succeeded":
             if not self._signin:
@@ -341,7 +353,9 @@ class ProphetXTalariaContinuity:
             if frame.channel is None or frame.channel not in self._channels:
                 raise ProphetXTalariaContractError("subscription ack for undeclared channel")
             scope = self._channels[frame.channel]; self._acks.add(scope)
-            if self._handshake(): self._state = TalariaContinuityState.REBASE_REQUIRED
+            if self._handshake():
+                self._raise_all_rebase_floors(observed)
+                self._state = TalariaContinuityState.REBASE_REQUIRED
             return scope
         if frame.event != "market_selections":
             raise ProphetXTalariaContractError("unsupported event")
@@ -352,6 +366,7 @@ class ProphetXTalariaContinuity:
         scope = _scope_from_market(frame.data)
         if scope != self._channels[frame.channel]:
             self._degrade(); raise ProphetXTalariaContractError("provider scope mismatch")
+        self._raise_rebase_floor(scope, observed)
         marker = (scope, frame.frame_sha256)
         if marker not in self._seen_dirty_frames:
             self._seen_dirty_frames.add(marker); self._dirty.add(scope); self._rebase.add(scope)
@@ -369,9 +384,13 @@ class ProphetXTalariaContinuity:
         assert self._started is not None
         if _time(snapshot_time, "snapshot_available_at") < _time(self._started, "started_at"):
             raise ProphetXTalariaContractError("pre-generation snapshot cannot clear rebase")
+        rebase_after = self._rebase_after.get(scope, self._started)
+        if _time(snapshot_time, "snapshot_available_at") < _time(rebase_after, "rebase_after"):
+            raise ProphetXTalariaContractError("snapshot predates the rebase trigger")
         if _time(snapshot_time, "snapshot_available_at") > _time(observed, "observed_at"):
             raise ProphetXTalariaContractError("future snapshot cannot clear rebase")
         self._snapshots[scope] = (digest, snapshot_time); self._rebase.discard(scope); self._dirty.discard(scope)
+        self._rebase_after.pop(scope, None)
         self._seen_dirty_frames = {x for x in self._seen_dirty_frames if x[0] != scope}
         self._state = TalariaContinuityState.REBASED if not self._rebase else TalariaContinuityState.REBASE_REQUIRED
 

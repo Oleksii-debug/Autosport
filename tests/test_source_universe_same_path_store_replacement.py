@@ -82,6 +82,48 @@ class SourceUniverseSamePathStoreReplacementTests(unittest.TestCase):
                     expected_end_cycle_seq=1,
                 )
 
+    def test_file_identity_helper_class_rebind_cannot_accept_replacement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_path = root / "canonical.db"
+            decoy_path = root / "decoy.db"
+
+            canonical = CollectorDeltaStore(canonical_path)
+            _begin_pending(canonical)
+            _, favorable = _favorable_decoy(decoy_path)
+            expected_identity = vars(canonical)["_canonical_file_identity_v1"]
+
+            os.replace(decoy_path, canonical_path)
+
+            forged_identity_calls = 0
+
+            def forged_identity(_path):
+                nonlocal forged_identity_calls
+                forged_identity_calls += 1
+                return expected_identity
+
+            with mock.patch.object(
+                CollectorDeltaStore,
+                "_path_file_identity",
+                staticmethod(forged_identity),
+            ):
+                with self.assertRaisesRegex(
+                    SourceUniverseCommitmentError,
+                    "class-rebound: _path_file_identity",
+                ):
+                    verify_source_universe_commitment(
+                        canonical,
+                        favorable,
+                        expected_store_path=canonical_path,
+                        expected_source_id="source-x",
+                        expected_start_cycle_seq=1,
+                        expected_end_cycle_seq=1,
+                    )
+
+            self.assertEqual(forged_identity_calls, 0)
+
     def test_replacement_between_identity_precheck_and_sqlite_open_is_rejected(
         self,
     ) -> None:

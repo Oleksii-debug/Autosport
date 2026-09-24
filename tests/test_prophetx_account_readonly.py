@@ -10,6 +10,7 @@ from urllib.request import HTTPSHandler, OpenerDirector, ProxyHandler
 
 import pytest
 
+import autosport.prophetx_account_readonly as subject
 from autosport.bookmaker_capability import BookmakerCapability
 from autosport.prophetx_account_readonly import (
     ADAPTER_ID,
@@ -121,6 +122,56 @@ def test_canonical_wallet_authority_rejects_preconstruction_stdlib_rebind(
             clock=lambda: FIXED_NOW,
         )
 
+    assert forged_calls == []
+
+
+def test_canonical_wallet_authority_rejects_coordinated_tripwire_rebind(
+    monkeypatch,
+):
+    forged_calls: list[str] = []
+
+    def forged(self, request, timeout=None):
+        del self, timeout
+        forged_calls.append(request.full_url)
+        raise AssertionError("forged opener dispatch must not run")
+
+    monkeypatch.setattr(
+        subject,
+        "_wallet_stdlib_dispatch_is_canonical",
+        lambda: True,
+    )
+    monkeypatch.setattr(subject, "_canonical_wallet_opener_open", forged)
+    monkeypatch.setattr(OpenerDirector, "open", forged)
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network dispatch changed before construction",
+    ):
+        ProphetXReadOnlyClient(
+            ProphetXSessionToken("session-secret"),
+            clock=lambda: FIXED_NOW,
+        )
+
+    assert forged_calls == []
+
+
+def test_canonical_transport_ignores_provider_fetch_factory_module_rebind(
+    monkeypatch,
+):
+    forged_calls: list[object] = []
+
+    def forged_factory(*args, **kwargs):
+        forged_calls.append((args, kwargs))
+        raise AssertionError("forged provider-fetch factory must not run")
+
+    monkeypatch.setattr(subject, "_make_provider_fetch", forged_factory)
+
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+
+    assert type(client._transport) is UrllibProphetXHttpTransport
     assert forged_calls == []
 
 

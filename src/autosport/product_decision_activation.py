@@ -360,7 +360,6 @@ def _product_composition(workspace: Path) -> tuple[str, str, str]:
     if payload.get("schema") != "autosport.autonomous_product_composition":
         raise ProductDecisionActivationError("product composition schema mismatch")
     version = payload.get("schema_version")
-    v1_fields = frozenset({"schema", "schema_version", "source_id", "initial_bankroll"})
     v2_fields = frozenset(
         {
             "schema",
@@ -370,21 +369,17 @@ def _product_composition(workspace: Path) -> tuple[str, str, str]:
             "settlement_authority_identity",
         }
     )
-    if version == 1:
-        if frozenset(payload) != v1_fields:
-            raise ProductDecisionActivationError("product composition schema mismatch")
-    elif version == 2:
-        if frozenset(payload) != v2_fields:
-            raise ProductDecisionActivationError("product composition schema mismatch")
-        settlement_authority_identity = payload.get("settlement_authority_identity")
-        if settlement_authority_identity is not None:
-            _sha256(
-                settlement_authority_identity,
-                "settlement_authority_identity",
-            )
-    else:
+    if version != 2:
         raise ProductDecisionActivationError(
             "product composition schema version is invalid"
+        )
+    if frozenset(payload) != v2_fields:
+        raise ProductDecisionActivationError("product composition schema mismatch")
+    settlement_authority_identity = payload.get("settlement_authority_identity")
+    if settlement_authority_identity is not None:
+        _sha256(
+            settlement_authority_identity,
+            "settlement_authority_identity",
         )
     source_id = _text(payload.get("source_id"), "product source_id")
     initial_bankroll = _text(payload.get("initial_bankroll"), "initial_bankroll")

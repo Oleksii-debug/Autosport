@@ -644,7 +644,10 @@ def test_account_activity_read_rejects_redirect(monkeypatch) -> None:
         ),
     )
 
-    with pytest.raises(SmarketsSessionContextError, match="fixed official endpoint"):
+    with pytest.raises(
+        SmarketsSessionContextError,
+        match="final URL does not match the canonical request",
+    ):
         session.acquire_account_activity()
 
 

@@ -44,6 +44,7 @@ from .bookmaker_capability import (
     BookmakerAccountSnapshot,
     BookmakerBalanceObservation,
     BookmakerCapability,
+    BookmakerCapabilityFact,
     BookmakerCapabilityProfile,
     BookmakerPositionObservation,
 )
@@ -892,6 +893,11 @@ def _build_canonical_continuity_authority():
         (
             "BetdaqAccountEvidence",
             BetdaqAccountEvidence,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        (
+            "BookmakerCapabilityFact",
+            BookmakerCapabilityFact,
             ("__init__", "__post_init__", "__eq__"),
         ),
         (

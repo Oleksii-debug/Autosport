@@ -359,26 +359,21 @@ class ProductPaperDecisionCycle:
                 "PAPER decision composition already has a product cycle in progress"
             )
         try:
-            # The parent runtime owns the process-wide product authority. Hold its
-            # re-entrant operation fence across the entire collector -> decision
-            # transaction so close/stop/pause cannot release or revoke that authority
-            # after preflight while PAPER effects are still being admitted.
-            with self.runtime._operation_fence:
-                self._require_running_runtime()
-                product_tick = self.runtime.tick()
-                status = self.runtime.status()
-                skip_reason = self._decision_skip_reason(product_tick, status)
-                if skip_reason is not None:
-                    return ProductPaperDecisionTickResult(
-                        product_tick=product_tick,
-                        decision=None,
-                        skipped_reason=skip_reason,
-                    )
-                decision = self._run_decision_cycle()
+            self._require_running_runtime()
+            product_tick = self.runtime.tick()
+            status = self.runtime.status()
+            skip_reason = self._decision_skip_reason(product_tick, status)
+            if skip_reason is not None:
                 return ProductPaperDecisionTickResult(
                     product_tick=product_tick,
-                    decision=decision,
-                    skipped_reason=None,
+                    decision=None,
+                    skipped_reason=skip_reason,
                 )
+            decision = self._run_decision_cycle()
+            return ProductPaperDecisionTickResult(
+                product_tick=product_tick,
+                decision=decision,
+                skipped_reason=None,
+            )
         finally:
             self._cycle_lock.release()

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
+from .continuous_session import SettlementOutcomeAuthority
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
 
@@ -91,6 +92,65 @@ def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
     return source
 
 
+
+def _source_owned_settlement_authority(
+    source: object,
+) -> SettlementOutcomeAuthority | None:
+    """Adopt only an explicitly declared source-owned settlement authority.
+
+    A generic source may expose a method named resolve for unrelated purposes, so
+    callability alone cannot widen authority. Opt-in requires the stable identity
+    fields already verified by build_autonomous_product_runtime. Partial
+    declarations fail before the product workspace is opened.
+    """
+
+    implementation_id = getattr(
+        type(source),
+        "settlement_resolver_implementation_id",
+        None,
+    )
+    authority_id = getattr(source, "settlement_authority_id", None)
+    configuration_sha256 = getattr(
+        source,
+        "settlement_configuration_sha256",
+        None,
+    )
+    declared = (
+        implementation_id is not None,
+        authority_id is not None,
+        configuration_sha256 is not None,
+    )
+    if not any(declared):
+        return None
+
+    resolver = getattr(source, "resolve", None)
+    if not all(declared) or not callable(resolver):
+        raise ProductEntrypointError(
+            "product source settlement authority contract is incomplete"
+        )
+
+    for label, value in (
+        ("settlement_resolver_implementation_id", implementation_id),
+        ("settlement_authority_id", authority_id),
+    ):
+        if type(value) is not str or not value or value.strip() != value:
+            raise ProductEntrypointError(
+                f"product source {label} must be a non-empty trimmed string"
+            )
+    if (
+        type(configuration_sha256) is not str
+        or len(configuration_sha256) != 64
+        or configuration_sha256 != configuration_sha256.lower()
+        or any(
+            character not in "0123456789abcdef"
+            for character in configuration_sha256
+        )
+    ):
+        raise ProductEntrypointError(
+            "product source settlement_configuration_sha256 must be lowercase SHA-256 hex"
+        )
+    return source
+
 def _print_record(kind: str, *, runtime: AutonomousProductRuntime, value: object) -> None:
     print(
         json.dumps(
@@ -164,10 +224,12 @@ def run_product(
     # creates a workspace or durable manifest. Missing event resolution or a split
     # source/runtime workspace must never be hidden by runtime initialization.
     source = _validated_source(source_factory, workspace=workspace)
+    outcome_authority = _source_owned_settlement_authority(source)
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
         source=source,
         initial_bankroll=initial_bankroll,
+        outcome_authority=outcome_authority,
     )
     stop_request = _SignalStopRequest()
     previous_handlers: dict[signal.Signals, object] = {}

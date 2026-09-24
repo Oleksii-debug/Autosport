@@ -154,3 +154,4 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # therefore consumes the canonically resolved confirmation holdout before publication;
 # legacy direct export is fail-closed so callers cannot substitute holdout identity.
 from . import scientific_disclosure_export as _scientific_disclosure_export  # noqa: F401,E402
+from . import _scientific_disclosure_export_reload_guard as _scientific_disclosure_export_reload_guard  # noqa: F401,E402

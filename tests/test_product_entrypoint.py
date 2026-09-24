@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import io
 import json
+import signal
 import sys
 import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from autosport.event_lifecycle import CatalogPage
 from autosport.product_entrypoint import (
     ProductEntrypointError,
+    _product_stop_signals,
     run_product,
     run_product_command,
 )
@@ -115,6 +117,271 @@ class SupportedProductEntrypointTests(unittest.TestCase):
                 self.assertEqual(second_code, 0)
                 self.assertEqual(second[0]["value"]["session_id"], first_session_id)
                 self.assertEqual(second[1]["value"]["cycle_index"], 2)
+
+    def test_product_stop_signals_include_windows_sigbreak_when_available(self) -> None:
+        with patch.object(signal, "SIGBREAK", 21, create=True):
+            self.assertEqual(
+                _product_stop_signals(),
+                (int(signal.SIGINT), int(signal.SIGTERM), 21),
+            )
+
+    def test_supported_boundary_registers_and_restores_all_product_stop_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            source_module = _module(_Source)
+            stop_signals = (int(signal.SIGINT), int(signal.SIGTERM), 21)
+            previous_handlers = {signum: object() for signum in stop_signals}
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"autosport_test_product_source": source_module},
+                ),
+                patch(
+                    "autosport.product_entrypoint._product_stop_signals",
+                    return_value=stop_signals,
+                ),
+                patch(
+                    "autosport.product_entrypoint.signal.getsignal",
+                    side_effect=lambda signum: previous_handlers[signum],
+                ) as getsignal,
+                patch("autosport.product_entrypoint.signal.signal") as set_signal,
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = run_product(
+                        workspace=workspace,
+                        source_factory="autosport_test_product_source:make_source",
+                        initial_bankroll="100",
+                        max_cycles=1,
+                        poll_seconds=0,
+                        sleep=lambda _: self.fail("bounded run must not sleep"),
+                    )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                [call.args[0] for call in getsignal.call_args_list],
+                list(stop_signals),
+            )
+            self.assertEqual(set_signal.call_count, len(stop_signals) * 2)
+            for index, signum in enumerate(stop_signals):
+                self.assertEqual(set_signal.call_args_list[index].args[0], signum)
+                self.assertTrue(callable(set_signal.call_args_list[index].args[1]))
+                restored = set_signal.call_args_list[index + len(stop_signals)]
+                self.assertEqual(restored.args, (signum, previous_handlers[signum]))
+
+    def test_signal_lookup_failure_closes_runtime_before_handler_mutation(self) -> None:
+        runtime = Mock()
+        runtime.start.side_effect = AssertionError(
+            "runtime must not start after signal handler lookup fails"
+        )
+        stop_signals = (int(signal.SIGINT), int(signal.SIGTERM), 21)
+        lookup_calls: list[int] = []
+
+        def get_signal(signum: int) -> object:
+            lookup_calls.append(signum)
+            if signum == stop_signals[1]:
+                raise OSError("simulated signal handler lookup failure")
+            return object()
+
+        with (
+            patch(
+                "autosport.product_entrypoint._validated_source",
+                return_value=object(),
+            ),
+            patch(
+                "autosport.product_entrypoint.build_autonomous_product_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "autosport.product_entrypoint._product_stop_signals",
+                return_value=stop_signals,
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.getsignal",
+                side_effect=get_signal,
+            ),
+            patch("autosport.product_entrypoint.signal.signal") as set_signal,
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "simulated signal handler lookup failure",
+            ):
+                run_product(
+                    workspace="unused-workspace",
+                    source_factory="unused:factory",
+                    max_cycles=1,
+                    poll_seconds=0,
+                )
+
+        self.assertEqual(lookup_calls, list(stop_signals[:2]))
+        set_signal.assert_not_called()
+        runtime.start.assert_not_called()
+        runtime.close.assert_called_once_with()
+
+    def test_partial_signal_install_failure_rolls_back_only_installed_handlers(
+        self,
+    ) -> None:
+        runtime = Mock()
+        runtime.start.side_effect = AssertionError(
+            "runtime must not start after handler setup fails"
+        )
+        stop_signals = (int(signal.SIGINT), int(signal.SIGTERM), 21)
+        previous_handlers = {signum: object() for signum in stop_signals}
+        signal_calls: list[tuple[int, object]] = []
+
+        def set_signal(signum: int, handler: object) -> object:
+            signal_calls.append((signum, handler))
+            if (
+                signum == stop_signals[-1]
+                and handler is not previous_handlers[signum]
+            ):
+                raise OSError("simulated SIGBREAK handler installation failure")
+            return previous_handlers[signum]
+
+        with (
+            patch(
+                "autosport.product_entrypoint._validated_source",
+                return_value=object(),
+            ),
+            patch(
+                "autosport.product_entrypoint.build_autonomous_product_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "autosport.product_entrypoint._product_stop_signals",
+                return_value=stop_signals,
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.getsignal",
+                side_effect=lambda signum: previous_handlers[signum],
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.signal",
+                side_effect=set_signal,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "simulated SIGBREAK handler installation failure",
+            ):
+                run_product(
+                    workspace="unused-workspace",
+                    source_factory="unused:factory",
+                    max_cycles=1,
+                    poll_seconds=0,
+                )
+
+        runtime.start.assert_not_called()
+        runtime.close.assert_called_once_with()
+        restorations = [
+            call
+            for call in signal_calls
+            if any(call[1] is prior for prior in previous_handlers.values())
+        ]
+        self.assertEqual(
+            restorations,
+            [
+                (stop_signals[0], previous_handlers[stop_signals[0]]),
+                (stop_signals[1], previous_handlers[stop_signals[1]]),
+            ],
+        )
+
+    def test_signal_during_final_tick_wins_terminal_stop_reason(self) -> None:
+        runtime = Mock()
+        runtime.start.return_value = object()
+        runtime.stop.return_value = object()
+        installed_handlers: dict[int, object] = {}
+        previous_handler = object()
+
+        def install_handler(signum: int, handler: object) -> object:
+            if callable(handler):
+                installed_handlers[signum] = handler
+            return previous_handler
+
+        def tick() -> object:
+            handler = installed_handlers[int(signal.SIGTERM)]
+            self.assertTrue(callable(handler))
+            handler(int(signal.SIGTERM), None)
+            return object()
+
+        runtime.tick.side_effect = tick
+        with (
+            patch(
+                "autosport.product_entrypoint._validated_source",
+                return_value=object(),
+            ),
+            patch(
+                "autosport.product_entrypoint.build_autonomous_product_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "autosport.product_entrypoint._product_stop_signals",
+                return_value=(int(signal.SIGTERM),),
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.getsignal",
+                return_value=previous_handler,
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.signal",
+                side_effect=install_handler,
+            ),
+            patch("autosport.product_entrypoint._print_record"),
+        ):
+            code = run_product(
+                workspace="unused-workspace",
+                source_factory="unused:factory",
+                max_cycles=1,
+                poll_seconds=0,
+                sleep=lambda _seconds: self.fail(
+                    "bounded final cycle must not sleep"
+                ),
+            )
+
+        self.assertEqual(code, 128 + int(signal.SIGTERM))
+        runtime.stop.assert_called_once_with("signal:SIGTERM")
+        runtime.close.assert_called_once_with()
+
+    def test_no_signal_final_tick_still_records_max_cycles_reached(self) -> None:
+        runtime = Mock()
+        runtime.start.return_value = object()
+        runtime.tick.return_value = object()
+        runtime.stop.return_value = object()
+        previous_handler = object()
+
+        with (
+            patch(
+                "autosport.product_entrypoint._validated_source",
+                return_value=object(),
+            ),
+            patch(
+                "autosport.product_entrypoint.build_autonomous_product_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "autosport.product_entrypoint._product_stop_signals",
+                return_value=(int(signal.SIGTERM),),
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.getsignal",
+                return_value=previous_handler,
+            ),
+            patch("autosport.product_entrypoint.signal.signal"),
+            patch("autosport.product_entrypoint._print_record"),
+        ):
+            code = run_product(
+                workspace="unused-workspace",
+                source_factory="unused:factory",
+                max_cycles=1,
+                poll_seconds=0,
+                sleep=lambda _seconds: self.fail(
+                    "bounded final cycle must not sleep"
+                ),
+            )
+
+        self.assertEqual(code, 0)
+        runtime.stop.assert_called_once_with("max_cycles_reached")
+        runtime.close.assert_called_once_with()
 
     def test_missing_event_resolution_fails_before_workspace_creation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

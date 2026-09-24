@@ -599,6 +599,48 @@ def _build_historical_snapshot_provider_origin_authority():
     # would let a caller install a replacement first and have that replacement
     # promoted to positive provider-origin authority for the current acquisition.
     canonical_build_opener_code = getattr(build_opener_fn, "__code__", None)
+    canonical_build_opener_globals = getattr(build_opener_fn, "__globals__", None)
+    build_opener_handler_names = (
+        "ProxyHandler",
+        "UnknownHandler",
+        "HTTPHandler",
+        "HTTPDefaultErrorHandler",
+        "HTTPRedirectHandler",
+        "FTPHandler",
+        "FileHandler",
+        "HTTPErrorProcessor",
+        "DataHandler",
+        "HTTPSHandler",
+    )
+    if type(canonical_build_opener_globals) is not dict:
+        raise RuntimeError("canonical urllib build_opener globals are unavailable")
+    canonical_build_opener_handler_types = {
+        name: canonical_build_opener_globals.get(name)
+        for name in build_opener_handler_names
+    }
+    canonical_build_opener_handler_dispatch = {
+        name: (
+            getattr(handler_type, "__new__", None),
+            getattr(handler_type, "__init__", None),
+        )
+        for name, handler_type in canonical_build_opener_handler_types.items()
+        if isinstance(handler_type, type)
+    }
+    canonical_build_opener_handler_codes = {
+        name: (
+            getattr(dispatch[0], "__code__", None),
+            getattr(dispatch[1], "__code__", None),
+        )
+        for name, dispatch in canonical_build_opener_handler_dispatch.items()
+    }
+    canonical_opener_init = opener_type.__init__
+    canonical_opener_init_code = getattr(canonical_opener_init, "__code__", None)
+    canonical_opener_add_handler = opener_type.add_handler
+    canonical_opener_add_handler_code = getattr(
+        canonical_opener_add_handler,
+        "__code__",
+        None,
+    )
     canonical_opener_open = opener_type.open
     canonical_opener_open_code = getattr(canonical_opener_open, "__code__", None)
     canonical_opener_internal_open = opener_type._open
@@ -624,6 +666,20 @@ def _build_historical_snapshot_provider_origin_authority():
     canonical_urllib_http_package = canonical_https_open.__globals__.get("http")
     if (
         canonical_build_opener_code is None
+        or canonical_build_opener_globals.get("OpenerDirector") is not opener_type
+        or canonical_build_opener_globals.get("http")
+        is not canonical_urllib_http_package
+        or any(
+            not isinstance(
+                canonical_build_opener_handler_types.get(name),
+                type,
+            )
+            for name in build_opener_handler_names
+        )
+        or len(canonical_build_opener_handler_dispatch)
+        != len(build_opener_handler_names)
+        or canonical_opener_init is None
+        or canonical_opener_add_handler is None
         or canonical_https_handler_init_code is None
         or canonical_http_create_https_context_code is None
         or canonical_ssl_default_https_context_code is None
@@ -810,9 +866,55 @@ def _build_historical_snapshot_provider_origin_authority():
                 return False
         return True
 
+    def opener_construction_dispatch_is_canonical() -> bool:
+        if (
+            getattr(build_opener_fn, "__globals__", None)
+            is not canonical_build_opener_globals
+            or canonical_build_opener_globals.get("OpenerDirector") is not opener_type
+            or canonical_build_opener_globals.get("http")
+            is not canonical_urllib_http_package
+            or opener_type.__init__ is not canonical_opener_init
+            or (
+                canonical_opener_init_code is not None
+                and getattr(opener_type.__init__, "__code__", None)
+                is not canonical_opener_init_code
+            )
+            or opener_type.add_handler is not canonical_opener_add_handler
+            or (
+                canonical_opener_add_handler_code is not None
+                and getattr(opener_type.add_handler, "__code__", None)
+                is not canonical_opener_add_handler_code
+            )
+        ):
+            return False
+        for name in build_opener_handler_names:
+            expected_type = canonical_build_opener_handler_types[name]
+            if canonical_build_opener_globals.get(name) is not expected_type:
+                return False
+            expected_new, expected_init = canonical_build_opener_handler_dispatch[name]
+            expected_new_code, expected_init_code = (
+                canonical_build_opener_handler_codes[name]
+            )
+            current_new = getattr(expected_type, "__new__", None)
+            current_init = getattr(expected_type, "__init__", None)
+            if current_new is not expected_new or current_init is not expected_init:
+                return False
+            if (
+                expected_new_code is not None
+                and getattr(current_new, "__code__", None) is not expected_new_code
+            ):
+                return False
+            if (
+                expected_init_code is not None
+                and getattr(current_init, "__code__", None) is not expected_init_code
+            ):
+                return False
+        return True
+
     def stdlib_dispatch_is_canonical() -> bool:
         return (
-            request_dispatch_is_canonical()
+            opener_construction_dispatch_is_canonical()
+            and request_dispatch_is_canonical()
             and socket_tls_dispatch_is_canonical()
             and connection_dispatch_is_canonical()
             and https_handler_type.__init__ is canonical_https_handler_init

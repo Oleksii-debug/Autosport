@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 from pathlib import Path
 
 from autosport.domain import MarketEvent
@@ -520,6 +521,51 @@ class RegisteredStrategyLiveFeatureTests(unittest.TestCase):
             )
             self.assertEqual(authority.model_version_id, "model-v1")
             self.assertEqual(authority.feature_set_id, LIVE_FEATURE_SET_ID)
+
+    def test_registry_constructor_rebind_cannot_redirect_durable_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = _registry(Path(directory))
+            attacker_called = False
+
+            def attacker_init(self: ScientificRegistry, path: object) -> None:
+                nonlocal attacker_called
+                attacker_called = True
+                raise AssertionError("attacker registry constructor executed")
+
+            with patch.object(ScientificRegistry, "__init__", attacker_init):
+                with self.assertRaisesRegex(
+                    RegisteredStrategyLiveFeatureError,
+                    "ScientificRegistry read/causal authority changed",
+                ):
+                    resolve_registered_live_feature_authority(
+                        registry,
+                        "model-v1",
+                        decision_at=DECISION_AT,
+                    )
+
+            self.assertFalse(attacker_called)
+
+    def test_model_version_validation_rebind_cannot_rewrite_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = _registry(Path(directory))
+            attacker_called = False
+
+            def attacker_post_init(self: ModelVersion) -> None:
+                nonlocal attacker_called
+                attacker_called = True
+
+            with patch.object(ModelVersion, "__post_init__", attacker_post_init):
+                with self.assertRaisesRegex(
+                    RegisteredStrategyLiveFeatureError,
+                    "scientific record validation changed",
+                ):
+                    resolve_registered_live_feature_authority(
+                        registry,
+                        "model-v1",
+                        decision_at=DECISION_AT,
+                    )
+
+            self.assertFalse(attacker_called)
 
     def test_non_open_or_duplicate_quote_snapshot_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

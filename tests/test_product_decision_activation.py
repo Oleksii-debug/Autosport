@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import autosport.economic_goal_store as economic_goal_store_module
+import autosport.monotonic_workspace_authority as monotonic_authority_module
 import autosport.monotonic_workspace_binding as workspace_binding_module
 import autosport.product_decision_activation as activation_module
 from autosport.economic_goal import EconomicGoalContract
@@ -843,6 +844,60 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertFalse(alternate_path.exists())
         reopened = ProductDecisionActivationStore(self.workspace)
         self.assertEqual(reopened.load(), committed)
+
+    def test_mwa_defining_global_rebind_cannot_reinterpret_committed_history(
+        self,
+    ) -> None:
+        committed = self._initialize()
+        self.store.path.unlink()
+        canonical_json = monotonic_authority_module.strict_json_loads
+        canonical_record_hash = monotonic_authority_module._record_hash
+        forged_calls: list[str] = []
+
+        def forged_json(text: str) -> object:
+            forged_calls.append("strict_json_loads")
+            payload = canonical_json(text)
+            if isinstance(payload, dict) and payload.get("phase") == "COMMIT":
+                payload = dict(payload)
+                payload["phase"] = "ABORT"
+            return payload
+
+        def forged_record_hash(payload: dict[str, object]) -> str:
+            forged_calls.append("_record_hash")
+            canonical_payload = payload
+            if payload.get("phase") == "ABORT":
+                canonical_payload = dict(payload)
+                canonical_payload["phase"] = "COMMIT"
+            return canonical_record_hash(canonical_payload)
+
+        with (
+            mock.patch.object(
+                monotonic_authority_module,
+                "strict_json_loads",
+                forged_json,
+            ),
+            mock.patch.object(
+                monotonic_authority_module,
+                "_record_hash",
+                forged_record_hash,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "defining globals changed",
+            ):
+                self._initialize()
+
+        self.assertEqual(forged_calls, [])
+        self.assertFalse(self.store.path.exists())
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "anti-rollback authority rejected",
+        ):
+            self._initialize()
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(committed.product_source_id, "provider-a")
+
 
     def test_committed_activation_deletion_cannot_reinitialize(self) -> None:
         committed = self._initialize()

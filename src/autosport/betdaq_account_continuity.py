@@ -731,3 +731,112 @@ def _sha256_hex(value: str, field: str) -> str:
             f"{field} must be lowercase SHA-256 hex"
         )
     return text
+
+# Positive continuity evidence is an authority-bearing projection. Compose that path
+# once, after every helper exists, so later module rebinding cannot choose the
+# principal id, projected account snapshot, credential checks, or issuer.
+def _build_canonical_continuity_read_authority():
+    credential_material = _credential_material
+    require_source_authority = _require_canonical_source_authority
+    require_source_instance = _require_canonical_source_instance
+    source_read = _CANONICAL_ACCOUNT_READ_EVIDENCE
+    principal_context = _principal_context
+    project_snapshot = _project_snapshot
+    issue_evidence = _issue_continuous_evidence
+    continuity_error = BetdaqAccountContinuityError
+    source_error = BetdaqAccountReadOnlyError
+
+    helper_graph = (
+        ("_credential_material", credential_material),
+        ("_require_canonical_source_authority", require_source_authority),
+        ("_require_canonical_source_instance", require_source_instance),
+        ("_principal_context", principal_context),
+        ("_project_snapshot", project_snapshot),
+    )
+    helper_codes = tuple(
+        (name, getattr(helper, "__code__", None))
+        for name, helper in helper_graph
+    )
+
+    def require_composition_graph() -> None:
+        module_globals = globals()
+        expected_codes = dict(helper_codes)
+        for helper_name, expected_helper in helper_graph:
+            live_helper = module_globals.get(helper_name)
+            if (
+                live_helper is not expected_helper
+                or getattr(expected_helper, "__code__", None)
+                is not expected_codes[helper_name]
+            ):
+                raise continuity_error(
+                    "canonical BETDAQ continuity composition helper dispatch changed"
+                )
+        # The issuer is intentionally closure-only. Re-exposing any module callable
+        # under its former name is authority drift, not a supported test seam.
+        if "_issue_continuous_evidence" in module_globals:
+            raise continuity_error(
+                "canonical BETDAQ continuity issuer authority was exposed"
+            )
+
+    def read_account_evidence(
+        self: BetdaqAccountContinuityClient,
+        requested_capabilities: frozenset[BookmakerCapability],
+    ) -> BetdaqContinuousAccountEvidence:
+        require_composition_graph()
+        sealed_material = credential_material(self._sealed_credentials)
+        if credential_material(self._credentials) != sealed_material:
+            raise source_error(
+                "BETDAQ authenticated account context changed during acquisition"
+            )
+        require_source_authority()
+        require_source_instance(self._source)
+        source = source_read(
+            self._source,
+            requested_capabilities,
+        )
+        require_composition_graph()
+        require_source_authority()
+        require_source_instance(self._source)
+        if credential_material(self._credentials) != sealed_material:
+            raise source_error(
+                "BETDAQ authenticated account context changed during acquisition"
+            )
+        context = principal_context(
+            self._sealed_credentials.username,
+            source.account_context,
+        )
+        snapshot = project_snapshot(
+            source.snapshot,
+            context,
+        )
+        require_composition_graph()
+        return issue_evidence(
+            snapshot=snapshot,
+            source_evidence=source,
+            principal_context=context,
+        )
+
+    def read_account_snapshot(
+        self: BetdaqAccountContinuityClient,
+        requested_capabilities: frozenset[BookmakerCapability],
+    ) -> BookmakerAccountSnapshot:
+        return read_account_evidence(self, requested_capabilities).snapshot
+
+    return read_account_evidence, read_account_snapshot
+
+
+(
+    _canonical_continuity_read_account_evidence,
+    _canonical_continuity_read_account_snapshot,
+) = _build_canonical_continuity_read_authority()
+BetdaqAccountContinuityClient.read_account_evidence = (
+    _canonical_continuity_read_account_evidence
+)
+BetdaqAccountContinuityClient.read_account_snapshot = (
+    _canonical_continuity_read_account_snapshot
+)
+del _canonical_continuity_read_account_evidence
+del _canonical_continuity_read_account_snapshot
+del _issue_continuous_evidence
+del _build_canonical_continuity_read_authority
+

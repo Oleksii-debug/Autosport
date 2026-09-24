@@ -320,6 +320,47 @@ def test_transitive_goal_parser_dependency_rebind_fails_closed(
 
 
 
+@pytest.mark.parametrize(
+    "member_name",
+    ("loads", "dumps", "JSONEncoder", "JSONDecoder"),
+)
+def test_stdlib_json_member_rebind_fails_before_goal_authority_dispatch(
+    tmp_path, monkeypatch, member_name
+):
+    _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
+    canonical = getattr(json, member_name)
+    forged_calls: list[str] = []
+
+    if member_name in {"loads", "dumps"}:
+        def forged_member(*args, **kwargs):
+            forged_calls.append(member_name)
+            return canonical(*args, **kwargs)
+
+        replacement = forged_member
+    else:
+        class ForgedJsonMember(canonical):
+            def __init__(self, *args, **kwargs):
+                forged_calls.append(member_name)
+                super().__init__(*args, **kwargs)
+
+        replacement = ForgedJsonMember
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json, member_name, replacement)
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="stdlib JSON authority changed",
+        ):
+            _review(store)
+
+    assert forged_calls == []
+    assert not store.path.exists()
+
+    review = _review(store)
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
 def test_path_open_rebind_cannot_replace_durable_goal_bytes(
     tmp_path, monkeypatch
 ):

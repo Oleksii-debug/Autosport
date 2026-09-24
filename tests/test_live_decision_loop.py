@@ -22,6 +22,7 @@ from autosport.event_lifecycle import (
     ContinuousEventLifecycle,
     EventPhase,
 )
+from autosport.ingestion_health import SourceHealthStore
 from autosport.live_decision_loop import (
     LiveCycleStatus,
     LiveDecisionMode,
@@ -46,7 +47,12 @@ from autosport.portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
 )
-from autosport.providers import ProviderUnavailableError
+from autosport.providers import (
+    InMemoryProvider,
+    ProviderBatch,
+    ProviderQuote,
+    ProviderUnavailableError,
+)
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
@@ -88,6 +94,29 @@ class _DurableObserver:
         finally:
             store.close()
         return object()
+
+
+class _SequencedProvider:
+    def __init__(self, batches: list[ProviderBatch]) -> None:
+        if not batches:
+            raise ValueError("sequenced provider requires at least one batch")
+        self.source_id = batches[0].source_id
+        if any(batch.source_id != self.source_id for batch in batches):
+            raise ValueError("sequenced provider batches must share one source_id")
+        self._batches = list(batches)
+        self.calls = 0
+
+    def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+            raise ValueError("max_items must be a positive non-boolean integer")
+        self.calls += 1
+        if self._batches:
+            return self._batches.pop(0)
+        return ProviderBatch(
+            self.source_id,
+            (),
+            cursor=f"empty-{self.calls}",
+        )
 
 
 class _EmptyIntentFactory:
@@ -210,6 +239,25 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ingest_ts=timestamp,
         )
 
+    @classmethod
+    def _provider_quote(
+        cls,
+        *,
+        selection: str = "selection-a",
+        sequence: int = 1,
+        odds: str = "2.00",
+    ) -> ProviderQuote:
+        timestamp = cls.START.isoformat()
+        return ProviderQuote(
+            provider_event_id="event-1",
+            provider_market_id="market-1",
+            provider_selection_id=selection,
+            decimal_odds=Decimal(odds),
+            observed_ts=timestamp,
+            sequence=sequence,
+            source_ts=timestamp,
+        )
+
     @staticmethod
     def _authority() -> EconomicDecisionAuthority:
         goal = EconomicGoalContract(
@@ -295,6 +343,351 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_source_id=catalog_source_id,
             catalog_required_history=catalog_required_history,
         )
+
+    def _provider_loop(
+        self,
+        workspace: Path,
+        *,
+        provider,
+        factory,
+        clock: _ManualClock,
+        post_append_hook=None,
+        strategy_version: StrategyVersion | None = None,
+    ) -> PersistentLiveDecisionLoop:
+        selected_strategy = strategy_version or self._strategy_version()
+        registry = self._scientific_registry(workspace, selected_strategy)
+        return PersistentLiveDecisionLoop(
+            workspace,
+            loop_id="live-test-loop",
+            mode=LiveDecisionMode.PAPER,
+            book=PaperBook("1000"),
+            authority=self._authority(),
+            intent_factory=factory,
+            scientific_registry=registry,
+            provider=provider,
+            max_quote_age=timedelta(seconds=5),
+            clock=clock,
+            post_append_hook=post_append_hook,
+        )
+
+    @staticmethod
+    def _register_provider_input(loop: PersistentLiveDecisionLoop) -> None:
+        loop.register_input(
+            "input-a",
+            source_ids="provider-a",
+            event_ids="provider-a:event-1",
+            market_ids="provider-a:market-1",
+            selection_ids="provider-a:selection-a",
+        )
+
+    def test_default_provider_degraded_health_filters_fresh_quote_from_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            provider = InMemoryProvider(
+                "provider-a",
+                [self._provider_quote()],
+                quality_flags=("PARTIAL_SNAPSHOT",),
+            )
+            loop = self._provider_loop(
+                workspace,
+                provider=provider,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            self._register_provider_input(loop)
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["schema_version"], 3)
+            self.assertEqual(record.payload["gate"], "provider_health")
+            self.assertEqual(
+                record.to_dict()["payload"]["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": (
+                            self.START + timedelta(seconds=1)
+                        ).isoformat(),
+                        "transition_order": 1,
+                    }
+                ],
+            )
+            progress = json.loads(
+                (workspace / loop.PROGRESS_FILE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["schema_version"], 2)
+            self.assertEqual(
+                progress["provider_health_boundaries"],
+                record.to_dict()["payload"]["provider_health_boundaries"],
+            )
+            loop.close()
+
+    def test_health_transition_invalidates_cached_intent_without_quote_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            quote = self._provider_quote()
+            provider = _SequencedProvider(
+                [
+                    ProviderBatch(
+                        "provider-a",
+                        (quote,),
+                        cursor="healthy",
+                    ),
+                    ProviderBatch(
+                        "provider-a",
+                        (quote,),
+                        cursor="degraded",
+                        quality_flags=("PARTIAL_SNAPSHOT",),
+                    ),
+                ]
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._provider_loop(
+                workspace,
+                provider=provider,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            self._register_provider_input(loop)
+
+            first = loop.run_cycle()
+            second = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [
+                    (
+                        "input-a",
+                        (("provider-a:selection-a", 1, "open"),),
+                    ),
+                    ("input-a", ()),
+                ],
+            )
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertTrue(
+                all(record.payload["gate"] == "provider_health" for record in records)
+            )
+            progress = json.loads(
+                (workspace / loop.PROGRESS_FILE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["schema_version"], 2)
+            self.assertEqual(
+                progress["provider_health_boundaries"][0]["transition_order"],
+                2,
+            )
+            loop.close()
+
+    def test_material_quote_change_rebuilds_same_source_inputs_under_one_health_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider = _SequencedProvider(
+                [
+                    ProviderBatch(
+                        "provider-a",
+                        (
+                            self._provider_quote(
+                                selection="selection-a",
+                                sequence=1,
+                            ),
+                            self._provider_quote(
+                                selection="selection-b",
+                                sequence=1,
+                                odds="2.10",
+                            ),
+                        ),
+                        cursor="snapshot-1",
+                    ),
+                    ProviderBatch(
+                        "provider-a",
+                        (
+                            self._provider_quote(
+                                selection="selection-a",
+                                sequence=2,
+                                odds="2.05",
+                            ),
+                        ),
+                        cursor="snapshot-2",
+                    ),
+                ]
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._provider_loop(
+                workspace,
+                provider=provider,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            self._register_provider_input(loop)
+            loop.register_input(
+                "input-b",
+                source_ids="provider-a",
+                event_ids="provider-a:event-1",
+                market_ids="provider-a:market-1",
+                selection_ids="provider-a:selection-b",
+            )
+
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            self.assertEqual(
+                factory.calls,
+                [
+                    (
+                        "input-a",
+                        (("provider-a:selection-a", 1, "open"),),
+                    ),
+                    (
+                        "input-b",
+                        (("provider-a:selection-b", 1, "open"),),
+                    ),
+                    (
+                        "input-a",
+                        (("provider-a:selection-a", 2, "open"),),
+                    ),
+                    (
+                        "input-b",
+                        (("provider-a:selection-b", 1, "open"),),
+                    ),
+                ],
+            )
+            progress = json.loads(
+                (workspace / loop.PROGRESS_FILE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                progress["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": (
+                            self.START + timedelta(seconds=1)
+                        ).isoformat(),
+                        "transition_order": 2,
+                    }
+                ],
+            )
+            loop.close()
+
+    def test_pending_recovery_reuses_exact_health_boundary_after_same_time_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            original_factory = _EmptyIntentFactory()
+
+            def fail_after_append() -> None:
+                raise RuntimeError("crash-after-ledger-append")
+
+            first = self._provider_loop(
+                workspace,
+                provider=InMemoryProvider(
+                    "provider-a",
+                    [self._provider_quote()],
+                ),
+                factory=original_factory,
+                clock=_ManualClock(decision_time),
+                post_append_hook=fail_after_append,
+            )
+            self._register_provider_input(first)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "crash-after-ledger-append",
+            ):
+                first.run_cycle()
+            first.close()
+
+            SourceHealthStore(
+                workspace / "source_health.json"
+            ).record_failure(
+                "provider-a",
+                now=decision_time.isoformat(),
+                error=ConnectionError("same-time later failure"),
+            )
+
+            replay_factory = _EmptyIntentFactory()
+            resumed = self._provider_loop(
+                workspace,
+                provider=InMemoryProvider("provider-a", []),
+                factory=replay_factory,
+                clock=_ManualClock(decision_time),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(
+                recovered.status,
+                LiveCycleStatus.DUPLICATE_DECISION,
+            )
+            self.assertEqual(
+                replay_factory.calls,
+                [
+                    (
+                        "input-a",
+                        (("provider-a:selection-a", 1, "open"),),
+                    )
+                ],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            resumed.close()
+
+    def test_committed_restart_binds_progress_health_horizon_to_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            first = self._provider_loop(
+                workspace,
+                provider=InMemoryProvider(
+                    "provider-a",
+                    [self._provider_quote()],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            self._register_provider_input(first)
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            verified = self._provider_loop(
+                workspace,
+                provider=InMemoryProvider("provider-a", []),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            verified.close()
+
+            progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            tampered = json.loads(progress_path.read_text(encoding="utf-8"))
+            tampered["provider_health_boundaries"][0]["transition_order"] += 1
+            progress_path.write_text(
+                json.dumps(tampered, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "provider health evidence conflicts",
+            ):
+                self._provider_loop(
+                    workspace,
+                    provider=InMemoryProvider("provider-a", []),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(decision_time),
+                )
 
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

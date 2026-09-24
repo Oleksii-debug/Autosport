@@ -61,23 +61,18 @@ def _bind_canonical_settlement_engine(method):
 
 
 def _seal_settlement_consumer_entry(method):
-    """Return a state-free descriptor whose dispatch target is closure-owned."""
+    """Return an immutable built-in descriptor with a closure-owned dispatch target."""
 
-    class SettlementConsumerEntry:
-        __slots__ = ()
+    def resolve(instance):
+        return method.__get__(instance, type(instance))
 
-        def __get__(self, instance, owner=None):
-            if instance is None:
-                return method
-            return method.__get__(instance, owner)
+    def reject_set(_instance, _value) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
 
-        def __set__(self, _instance, _value) -> None:
-            raise TypeError("canonical settlement consumer entry binding is immutable")
+    def reject_delete(_instance) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
 
-        def __delete__(self, _instance) -> None:
-            raise TypeError("canonical settlement consumer entry binding is immutable")
-
-    return SettlementConsumerEntry()
+    return property(resolve, reject_set, reject_delete, method.__doc__)
 
 
 def _build_settlement_consumer_class_guard(name: str):

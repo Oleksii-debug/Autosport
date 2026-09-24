@@ -1512,6 +1512,56 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         for name, descriptor in canonical_workspace_binding_descriptors.items()
     }
 
+    # Descriptor identity alone does not close this trust graph: those exact
+    # functions resolve schema, parsing, hashing and durable-create helpers through
+    # their module globals at call time. Freeze the binding module surface that can
+    # change what durable workspace identity evidence means without changing any
+    # WorkspaceIdentityBinding descriptor or code object.
+    canonical_workspace_binding_globals = getattr(
+        workspace_binding_descriptor_callable(
+            canonical_workspace_binding_descriptors["resolve"]
+        ),
+        "__globals__",
+        None,
+    )
+    canonical_workspace_binding_global_names = (
+        "strict_json_loads",
+        "WORKSPACE_BINDING_SCHEMA",
+        "PATH_BINDING_SCHEMA",
+        "BINDING_SCHEMA_VERSION",
+        "BINDING_AUTHORITY_ID",
+        "_WORKSPACE_MARKER_KEYS",
+        "_PATH_BINDING_KEYS",
+        "_SHA256_LENGTH",
+        "_canonical_bytes",
+        "_payload_hash",
+        "_canonical_instance_id",
+        "_workspace_locator",
+        "_fsync_directory",
+        "_sync_existing_lineage",
+        "_durable_exclusive_json_create",
+        "_read_strict_object",
+        "_verify_binding_hash",
+        "hashlib",
+        "json",
+        "os",
+        "stat",
+        "uuid",
+        "Path",
+    )
+    canonical_workspace_binding_global_values = {
+        name: (
+            canonical_workspace_binding_globals.get(name)
+            if isinstance(canonical_workspace_binding_globals, dict)
+            else None
+        )
+        for name in canonical_workspace_binding_global_names
+    }
+    canonical_workspace_binding_global_codes = {
+        name: getattr(value, "__code__", None)
+        for name, value in canonical_workspace_binding_global_values.items()
+    }
+
     if (
         canonical_authority_root_code is None
         or canonical_init is None
@@ -1531,6 +1581,11 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             for descriptor in canonical_workspace_binding_descriptors.values()
         )
         or any(code is None for code in canonical_workspace_binding_codes.values())
+        or not isinstance(canonical_workspace_binding_globals, dict)
+        or any(
+            value is None
+            for value in canonical_workspace_binding_global_values.values()
+        )
     ):
         raise RuntimeError(
             "canonical product decision activation authority composition is unavailable"
@@ -1587,6 +1642,19 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             ):
                 raise ProductDecisionActivationError(
                     "nested workspace identity binding dispatch changed"
+                )
+        for name, canonical in canonical_workspace_binding_global_values.items():
+            live = canonical_workspace_binding_globals.get(name)
+            canonical_code = canonical_workspace_binding_global_codes[name]
+            if (
+                live is not canonical
+                or (
+                    canonical_code is not None
+                    and getattr(live, "__code__", None) is not canonical_code
+                )
+            ):
+                raise ProductDecisionActivationError(
+                    "nested workspace identity binding global trust changed"
                 )
 
     def require_store_state(store: ProductDecisionActivationStore) -> None:

@@ -25,8 +25,11 @@ def _install_forward_economic_step_identity_guard() -> None:
     raw_validate_aggregate = accumulator_type._validated_aggregate_state
     raw_steps_property = accumulator_type.steps
     raw_next_sequence_property = accumulator_type.next_sequence
-    step_to_payload = _evidence.ForwardEconomicStep.to_payload
+    step_type = _evidence.ForwardEconomicStep
+    step_to_payload = step_type.to_payload
+    step_to_payload_code = getattr(step_to_payload, "__code__", None)
     canonical_digest = _evidence._canonical_digest
+    canonical_digest_code = getattr(canonical_digest, "__code__", None)
 
     if (
         type(raw_steps_property) is not property
@@ -42,6 +45,18 @@ def _install_forward_economic_step_identity_guard() -> None:
         int,
         tuple[ReferenceType[_evidence.ForwardEconomicEvidenceAccumulator], tuple[str, ...]],
     ] = {}
+
+    def _require_executable_identity() -> None:
+        if (
+            _evidence.ForwardEconomicStep is not step_type
+            or getattr(step_type, "to_payload", None) is not step_to_payload
+            or getattr(step_to_payload, "__code__", None) is not step_to_payload_code
+            or getattr(_evidence, "_canonical_digest", None) is not canonical_digest
+            or getattr(canonical_digest, "__code__", None) is not canonical_digest_code
+        ):
+            raise _evidence.ForwardEconomicEvidenceError(
+                "internal recorded step identity executable integrity drift"
+            )
 
     def _registry_for(
         self: _evidence.ForwardEconomicEvidenceAccumulator,
@@ -59,6 +74,7 @@ def _install_forward_economic_step_identity_guard() -> None:
         *,
         require_exact_length: bool,
     ) -> tuple[_evidence.ForwardEconomicStep, ...]:
+        _require_executable_identity()
         protocol = self._validated_protocol()
         steps = self._steps
         if type(steps) is not list:

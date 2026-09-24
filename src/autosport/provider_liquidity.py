@@ -30,8 +30,8 @@ _LIQUIDITY_DECIMAL_CONTEXT = Context(
 
 
 def _require_money(value: object, label: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise ValueError(f"{label} must be a finite Decimal")
+    if type(value) is not Decimal or not value.is_finite():
+        raise ValueError(f"{label} must be a finite exact Decimal")
     if value < 0:
         raise ValueError(f"{label} must be non-negative")
     return value

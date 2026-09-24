@@ -68,7 +68,10 @@ def test_caller_constructed_reset_plan_cannot_mint_durable_reset(tmp_path) -> No
         T2,
     )
 
-    with pytest.raises(ProphetXFixEvidenceConflict):
+    with pytest.raises(
+        ProphetXFixContractError,
+        match="product-owned reconnect causal authority",
+    ):
         store.record_reset(forged, observed_at=T3)
 
     assert store.load_checkpoint(identity) == before

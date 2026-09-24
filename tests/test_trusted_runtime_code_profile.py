@@ -328,6 +328,7 @@ def test_injected_builder_cannot_become_profiled_after_alias_rebind(
     assert terminal.kind == "ERROR"
     assert terminal.error_type == "ProductEntrypointError"
 
+
 def test_profiled_worker_root_captures_transitive_dependencies_once(
     monkeypatch,
 ) -> None:
@@ -364,6 +365,7 @@ def test_profiled_worker_root_captures_transitive_dependencies_once(
     assert after["validated_source"] is not attacker
     assert after["runtime_factory"] is not attacker
     assert after["source_identity_check"] is not attacker
+
 
 def test_arbitrary_headless_builder_never_enters_trusted_profile_path(
     tmp_path: Path,

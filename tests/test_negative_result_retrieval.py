@@ -227,8 +227,8 @@ def test_self_consistent_unknown_experiment_outcome_tamper_fails_closed_at_regis
 
     state = path.read_text(encoding="utf-8")
     tampered = state.replace(
-        '"outcome":"NULL"',
-        '"outcome":"UNKNOWN_RESULT"',
+        '"outcome": "NULL"',
+        '"outcome": "UNKNOWN_RESULT"',
         1,
     )
     assert tampered != state

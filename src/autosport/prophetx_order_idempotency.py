@@ -590,7 +590,17 @@ def _build_provider_order_correlation_authority():
         for dependency_name in dependency_names
     )
     profile_map = _PROFILE_BY_VERSION
-    profile_entries = tuple(sorted(profile_map.items()))
+    profile_entries = tuple(
+        (
+            version,
+            profile,
+            profile.bookmaker_profile_version,
+            profile.environment,
+            profile.transport,
+            profile.production_write_qualified,
+        )
+        for version, profile in sorted(profile_map.items())
+    )
     json_module = json
     json_loads = json.loads
     json_loads_code = getattr(json_loads, "__code__", None)
@@ -622,8 +632,21 @@ def _build_provider_order_correlation_authority():
             module_globals.get("_PROFILE_BY_VERSION") is not profile_map
             or len(profile_map) != len(profile_entries)
             or any(
-                key not in profile_map or profile_map[key] is not expected_profile
-                for key, expected_profile in profile_entries
+                version not in profile_map
+                or profile_map[version] is not expected_profile
+                or expected_profile.bookmaker_profile_version != expected_version
+                or expected_profile.environment is not expected_environment
+                or expected_profile.transport is not expected_transport
+                or expected_profile.production_write_qualified
+                is not expected_production_write_qualified
+                for (
+                    version,
+                    expected_profile,
+                    expected_version,
+                    expected_environment,
+                    expected_transport,
+                    expected_production_write_qualified,
+                ) in profile_entries
             )
         ):
             raise ProphetXOrderIdentityError(

@@ -166,6 +166,41 @@ function Find-UiaElementForProcessFamily {
     return $null
 }
 
+function Find-UiaRootWithElementForProcessFamily {
+    param(
+        [int[]]$ProcessIds,
+        [string]$AutomationId
+    )
+
+    $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        $AutomationId
+    )
+    try {
+        $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+        $windows = $desktop.FindAll(
+            [System.Windows.Automation.TreeScope]::Children,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        foreach ($window in $windows) {
+            if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
+            if ([string]$window.Current.AutomationId -eq $AutomationId) {
+                return [pscustomobject]@{ Root = $window; Element = $window }
+            }
+            $element = $window.FindFirst(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                $condition
+            )
+            if ($null -ne $element) {
+                return [pscustomobject]@{ Root = $window; Element = $element }
+            }
+        }
+    } catch {
+        # The UIA tree may change while WebView2 publishes its semantic subtree.
+    }
+    return $null
+}
+
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
@@ -207,20 +242,22 @@ try {
     }
 
     # A native top-level window can be visible before the embedded WebView2
-    # accessibility provider has projected its semantic DOM into UIA.  Treating
-    # those two states as equivalent makes the external gate race startup.  Keep
-    # one bounded startup deadline and wait for a stable semantic sentinel instead.
+    # accessibility provider has projected its semantic DOM into UIA. Treating
+    # those two states as equivalent makes the external gate race startup. Keep
+    # one bounded startup deadline and bind readiness to the same top-level root
+    # whose accessibility tree is reported below.
     $semanticReady = $null
     while ([DateTime]::UtcNow -lt $deadline) {
         $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
-        if ($null -ne $uiaRoot) {
-            $semanticReady = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
-            if ($null -ne $semanticReady) { break }
+        $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
+        if ($null -ne $semanticSurface) {
+            $uiaRoot = $semanticSurface.Root
+            $semanticReady = $semanticSurface.Element
+            break
         }
         Start-Sleep -Milliseconds 100
     }
-    if ($null -eq $semanticReady) {
+    if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
         throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
     }
 

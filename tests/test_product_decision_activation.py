@@ -468,6 +468,34 @@ class ProductDecisionActivationTests(unittest.TestCase):
         canonical = self._initialize()
         self.assertEqual(canonical.product_source_id, "provider-a")
 
+    def test_exact_alternate_mwa_root_cannot_replace_product_authority(
+        self,
+    ) -> None:
+        original_authority = self.store._authority
+        authority_type = type(original_authority)
+        alternate_root = self.test_root / "caller-selected-authority-root"
+        alternate_authority = authority_type(
+            workspace=self.workspace,
+            domain=original_authority.domain,
+            key=original_authority.key,
+            authority_root=alternate_root,
+        )
+
+        object.__setattr__(self.store, "_authority", alternate_authority)
+        try:
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "construction state changed",
+            ):
+                self._initialize()
+            self.assertFalse(self.store.path.exists())
+        finally:
+            object.__setattr__(self.store, "_authority", original_authority)
+
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
     def test_nested_authority_records_path_redirect_fails_before_start_publication(
         self,
     ) -> None:

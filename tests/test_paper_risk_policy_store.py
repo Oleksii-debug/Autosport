@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.paper_risk_policy_store as risk_store_module
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.paper_risk_policy_store import (
@@ -35,6 +36,15 @@ def _policy(goal: EconomicGoalContract | None) -> PaperRiskPolicy:
         max_ticket_fraction=Decimal("0.017"),
         max_committed_fraction=Decimal("0.133"),
         minimum_cash_reserve_fraction=Decimal("0.271"),
+        economic_goal=goal,
+    )
+
+
+def _weaker_policy(goal: EconomicGoalContract) -> PaperRiskPolicy:
+    return PaperRiskPolicy(
+        max_ticket_fraction=Decimal("0.050"),
+        max_committed_fraction=Decimal("0.400"),
+        minimum_cash_reserve_fraction=Decimal("0.050"),
         economic_goal=goal,
     )
 
@@ -184,7 +194,6 @@ def test_payload_rejects_malformed_or_ambiguous_authority(mutation: str) -> None
         )
 
 
-
 def test_coherent_fraction_and_self_digest_rewrite_cannot_rebind_external_authority() -> None:
     goal = _goal()
     owner_policy = _policy(goal)
@@ -226,6 +235,7 @@ def test_external_policy_authority_must_be_canonical_sha256() -> None:
             economic_goal=goal,
             expected_policy_provenance_sha256="A" * 64,
         )
+
 
 def test_strict_json_rejects_duplicate_schema_key() -> None:
     duplicate = (
@@ -277,3 +287,86 @@ def test_unbound_policy_roundtrip_requires_exact_unbound_state() -> None:
             economic_goal=_goal(),
             expected_policy_provenance_sha256=policy.provenance_sha256,
         )
+
+
+def test_delete_after_commit_cannot_rebootstrap_weaker_policy(tmp_path) -> None:
+    goal = _goal()
+    owner = _policy(goal)
+    store = PaperRiskPolicyStore(tmp_path)
+    store.initialize_owner(owner)
+    store.path.unlink()
+
+    with pytest.raises(PaperRiskPolicyStoreError, match="anti-rollback"):
+        PaperRiskPolicyStore(tmp_path).initialize_owner(_weaker_policy(goal))
+
+    assert not store.path.exists()
+
+
+def test_coherent_valid_policy_replacement_is_rejected_by_independent_authority(
+    tmp_path,
+) -> None:
+    goal = _goal()
+    owner = _policy(goal)
+    replacement = _weaker_policy(goal)
+    store = PaperRiskPolicyStore(tmp_path)
+    store.initialize_owner(owner)
+
+    risk_store_module.atomic_write_json(
+        store.path,
+        paper_risk_policy_to_payload(replacement),
+    )
+
+    with pytest.raises(PaperRiskPolicyStoreError, match="anti-rollback"):
+        PaperRiskPolicyStore(tmp_path).load(
+            economic_goal=goal,
+            expected_policy_provenance_sha256=replacement.provenance_sha256,
+        )
+
+
+def test_publish_then_crash_recovers_exact_prepared_policy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    goal = _goal()
+    policy = _policy(goal)
+    store = PaperRiskPolicyStore(tmp_path)
+    real_write = risk_store_module.atomic_write_json
+
+    def write_then_crash(path, payload) -> None:
+        real_write(path, payload)
+        raise RuntimeError("simulated crash after policy publication")
+
+    monkeypatch.setattr(risk_store_module, "atomic_write_json", write_then_crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        store.initialize_owner(policy)
+    monkeypatch.setattr(risk_store_module, "atomic_write_json", real_write)
+
+    assert PaperRiskPolicyStore(tmp_path).load(
+        economic_goal=goal,
+        expected_policy_provenance_sha256=policy.provenance_sha256,
+    ) == policy
+
+
+def test_prepublication_crash_aborts_and_allows_fresh_owner_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    goal = _goal()
+    policy = _policy(goal)
+    store = PaperRiskPolicyStore(tmp_path)
+    real_write = risk_store_module.atomic_write_json
+
+    def crash_before_write(path, payload) -> None:
+        raise RuntimeError("simulated crash before policy publication")
+
+    monkeypatch.setattr(risk_store_module, "atomic_write_json", crash_before_write)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        store.initialize_owner(policy)
+    monkeypatch.setattr(risk_store_module, "atomic_write_json", real_write)
+
+    restarted = PaperRiskPolicyStore(tmp_path)
+    restarted.initialize_owner(policy)
+    assert restarted.load(
+        economic_goal=goal,
+        expected_policy_provenance_sha256=policy.provenance_sha256,
+    ) == policy

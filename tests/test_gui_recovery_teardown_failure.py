@@ -115,6 +115,7 @@ def test_replay_primary_error_survives_raising_session_teardown() -> None:
     showerror.assert_called_once_with(
         "Автоспорт",
         "Помилка паперового повтору: RuntimeError: replay failed",
+        parent=app,
     )
 
 

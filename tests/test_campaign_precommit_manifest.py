@@ -293,13 +293,17 @@ def test_windows_write_once_fails_if_parent_identity_changes_during_publication(
     path.parent.mkdir()
     moved_parent = tmp_path / "evidence-moved"
     original_open = precommit_module._open_bound_windows_parent_directory
+    swapped = False
 
     def bind_then_swap(
         parent: Path,
     ) -> tuple[int, Path, tuple[int, int, int]]:
+        nonlocal swapped
         handle, absolute, identity = original_open(parent)
-        Path(parent).rename(moved_parent)
-        Path(parent).mkdir()
+        if not swapped:
+            Path(parent).rename(moved_parent)
+            Path(parent).mkdir()
+            swapped = True
         return handle, absolute, identity
 
     monkeypatch.setattr(
@@ -329,14 +333,18 @@ def test_windows_loader_rejects_moved_parent_even_with_identical_decoy(
     expected = path.read_bytes()
     moved_parent = tmp_path / "evidence-moved"
     original_open = precommit_module._open_bound_windows_parent_directory
+    swapped = False
 
     def bind_then_swap(
         parent: Path,
     ) -> tuple[int, Path, tuple[int, int, int]]:
+        nonlocal swapped
         handle, absolute, identity = original_open(parent)
-        Path(parent).rename(moved_parent)
-        Path(parent).mkdir()
-        path.write_bytes(expected)
+        if not swapped:
+            Path(parent).rename(moved_parent)
+            Path(parent).mkdir()
+            path.write_bytes(expected)
+            swapped = True
         return handle, absolute, identity
 
     monkeypatch.setattr(

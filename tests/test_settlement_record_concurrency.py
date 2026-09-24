@@ -356,5 +356,53 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertEqual(engine.outcomes, {"event-1|winner|alice": "void"})
 
 
+    def test_public_settlement_entry_class_bindings_are_immutable(self) -> None:
+        canonical_record = SettlementEngine.record
+        canonical_settle_ready = SettlementEngine.settle_ready
+
+        def forged_record(_engine, _outcomes) -> None:
+            return None
+
+        def forged_settle_ready(_engine, _book) -> list[str]:
+            return ["forged-settlement"]
+
+        for name, forged in (
+            ("record", forged_record),
+            ("settle_ready", forged_settle_ready),
+        ):
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement public entry binding is immutable",
+            ):
+                setattr(SettlementEngine, name, forged)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement public entry binding is immutable",
+            ):
+                delattr(SettlementEngine, name)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement public entry binding is immutable",
+        ):
+            SettlementEngine._public_entry_bindings_sealed = False
+
+        self.assertIs(SettlementEngine.record, canonical_record)
+        self.assertIs(SettlementEngine.settle_ready, canonical_settle_ready)
+
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+        self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+        self.assertIs(ticket.status, TicketStatus.WON)
+        self.assertEqual(ticket.payout, Decimal("20"))
+        self.assertEqual(book.balance, Decimal("110"))
+
+
 if __name__ == "__main__":
     unittest.main()

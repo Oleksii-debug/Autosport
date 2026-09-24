@@ -183,8 +183,6 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             self.assertFalse((workspace / "market.db").exists())
             self.assertFalse((workspace / "run_registry.json").exists())
 
-
-
     def test_forecast_market_semantics_survives_plan_parse_and_binds_replay_event(self):
         dataset = load_dataset(Path("examples/tt_demo"))
         events = list(dataset.load_market_events())

@@ -18,10 +18,10 @@ from pathlib import Path
 from secrets import token_hex
 from threading import RLock
 
+from .collector_service import _load_source_factory
 from .operator_source_registry import (
     OperatorSourceRegistryError,
-    list_product_source_entries,
-    resolve_product_source_entry,
+    resolve_product_source_runtime_binding,
 )
 from .product_runtime import AutonomousProductRuntime
 
@@ -130,51 +130,28 @@ def _workspace_text(runtime: AutonomousProductRuntime) -> str:
     return text
 
 
-def _closed_registry_entry(
+def require_product_owned_source_factory_identity(
     *,
     source_factory: str,
     expected_provider_source_id: str,
 ):
-    if (
-        type(source_factory) is not str
-        or not source_factory
-        or source_factory.strip() != source_factory
-    ):
-        raise TrustedRuntimeCodeProfileError(
-            "source_factory must be a non-empty trimmed string"
+    """Require the dynamic loader to resolve the exact product-imported callable."""
+
+    try:
+        entry, canonical_factory = resolve_product_source_runtime_binding(
+            source_factory,
+            expected_provider_source_id,
         )
-    if (
-        type(expected_provider_source_id) is not str
-        or not expected_provider_source_id
-        or expected_provider_source_id.strip() != expected_provider_source_id
-    ):
-        raise TrustedRuntimeCodeProfileError(
-            "expected_provider_source_id must be a non-empty trimmed string"
-        )
-    matches = tuple(
-        entry
-        for entry in list_product_source_entries()
-        if entry.factory_spec == source_factory
-        and entry.expected_provider_source_id == expected_provider_source_id
-    )
-    if len(matches) != 1:
+        observed_factory = _load_source_factory(source_factory)
+    except (OperatorSourceRegistryError, ImportError, AttributeError, TypeError, ValueError) as exc:
         raise TrustedRuntimeCodeProfileError(
             "runtime code profile requires one exact product-shipped source binding"
-        )
-    try:
-        resolved = resolve_product_source_entry(matches[0].source_id)
-    except OperatorSourceRegistryError as exc:
-        raise TrustedRuntimeCodeProfileError(
-            "runtime source is no longer registered by this product build"
         ) from exc
-    if (
-        resolved.factory_spec != source_factory
-        or resolved.expected_provider_source_id != expected_provider_source_id
-    ):
+    if observed_factory is not canonical_factory:
         raise TrustedRuntimeCodeProfileError(
-            "runtime source registry binding changed during qualification"
+            "registered product source factory callable identity has drifted"
         )
-    return resolved
+    return entry
 
 
 def issue_trusted_runtime_code_profile(
@@ -193,7 +170,7 @@ def issue_trusted_runtime_code_profile(
         raise TrustedRuntimeCodeProfileError(
             "trusted runtime profile requires exact AutonomousProductRuntime"
         )
-    entry = _closed_registry_entry(
+    entry = require_product_owned_source_factory_identity(
         source_factory=source_factory,
         expected_provider_source_id=expected_provider_source_id,
     )
@@ -264,7 +241,7 @@ def is_authoritative_trusted_runtime_code_profile(
             return False
         try:
             runtime_workspace = _workspace_text(runtime)
-            entry = _closed_registry_entry(
+            entry = require_product_owned_source_factory_identity(
                 source_factory=value.factory_spec,
                 expected_provider_source_id=value.provider_source_id,
             )

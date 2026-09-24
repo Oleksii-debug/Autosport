@@ -12,7 +12,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
@@ -267,10 +266,6 @@ def _decode_mean_baseline_artifact(
             "model artifact mean_target must be finite numeric"
         )
     mean_target_value = float(mean_target)
-    if mean_target_value < 0.0 or mean_target_value > 1.0:
-        raise RegisteredStrategyModelRuntimeError(
-            "predictive model mean_target must be a probability"
-        )
     training_count = artifact.get("training_count")
     if (
         isinstance(training_count, bool)
@@ -317,14 +312,14 @@ class RegisteredStrategyModelRuntime:
     training_cutoff: str
     _model: MeanBaselineModel = field(repr=False, compare=False)
 
-    def predict_probability(
+    def predict_value(
         self,
         *,
         feature: float,
         observed_at: str,
         decision_at: str,
-    ) -> Decimal:
-        """Predict through the reconstructed built-in model, never a caller callable."""
+    ) -> float:
+        """Evaluate the reconstructed generic model without asserting probability semantics."""
 
         if isinstance(feature, bool) or type(feature) not in (int, float):
             raise RegisteredStrategyModelRuntimeError(
@@ -346,11 +341,11 @@ class RegisteredStrategyModelRuntime:
                 "registered model training cutoff exceeds decision time"
             )
         value = self._model.mean_target
-        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        if not math.isfinite(value):
             raise RegisteredStrategyModelRuntimeError(
-                "registered model output is not a probability"
+                "registered model output must be finite"
             )
-        return Decimal(str(value))
+        return value
 
 
 def resolve_registered_strategy_model(
@@ -473,6 +468,10 @@ def resolve_registered_strategy_model(
         )
     if feature.payload.get("feature_set_id") != feature_set_id:
         raise RegisteredStrategyModelRuntimeError("FeatureSet typed identity mismatch")
+    protocol_sha256 = _sha256(
+        protocol.payload.get("protocol_sha256"),
+        "ResearchProtocol protocol_sha256",
+    )
 
     for earlier_type, earlier_id, label in (
         ("ResearchProtocol", research_protocol_id, "ResearchProtocol -> ModelVersion"),
@@ -511,6 +510,10 @@ def resolve_registered_strategy_model(
         promotion.record_id,
         name="StrategyVersion -> PromotionDecision",
     )
+    if promotion.payload.get("protocol_sha256") != protocol_sha256:
+        raise RegisteredStrategyModelRuntimeError(
+            "PROMOTE authority protocol digest mismatch"
+        )
     evaluation_bundle_id = _text(
         promotion.payload.get("evaluation_bundle_id"),
         "PromotionDecision evaluation_bundle_id",
@@ -530,6 +533,8 @@ def resolve_registered_strategy_model(
         evaluation.payload.get("evaluation_bundle_id") != evaluation_bundle_id
         or evaluation.payload.get("evaluated_strategy_version_id") != strategy_id
         or evaluation.payload.get("evaluated_model_version_id") != model_id
+        or evaluation.payload.get("dataset_snapshot_id") != dataset_snapshot_id
+        or evaluation.payload.get("protocol_sha256") != protocol_sha256
         or evaluation.payload.get("bundle_sha256")
         != promotion.payload.get("evaluation_bundle_sha256")
     ):

@@ -544,7 +544,9 @@ def test_strict_json_global_injection_cannot_persist_prerouted_origin(
         canonical_state_text = store.path.read_text(encoding="utf-8")
         forged_state = json.loads(canonical_state_text)
         forged_state["records"].append(forged_record.to_dict())
-        forged_state["records"].sort(key=lambda item: item["request_id"])
+        forged_state["records"].sort(
+            key=lambda item: item["request"]["request_id"]
+        )
         canonical_strict_json_loads = subject.strict_json_loads
         calls: list[str] = []
 

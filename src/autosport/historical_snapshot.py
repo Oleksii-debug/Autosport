@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import hashlib
+import http.client as http_client
 import json
 import os
 import ssl
@@ -411,6 +412,40 @@ def _build_historical_snapshot_provider_origin_authority():
     ssl_context_type = ssl.SSLContext
     ssl_cert_required = ssl.CERT_REQUIRED
     ssl_error_type = ssl.SSLError
+    http_client_module = http_client
+    http_connection_type = http_client_module.HTTPConnection
+    https_connection_type = http_client_module.HTTPSConnection
+    connection_dispatch_names = (
+        "__init__",
+        "connect",
+        "set_tunnel",
+        "set_debuglevel",
+        "request",
+        "_send_request",
+        "putrequest",
+        "putheader",
+        "endheaders",
+        "_send_output",
+        "send",
+        "getresponse",
+        "close",
+    )
+    canonical_http_connection_dispatch = {
+        name: getattr(http_connection_type, name)
+        for name in connection_dispatch_names
+    }
+    canonical_http_connection_dispatch_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_http_connection_dispatch.items()
+    }
+    canonical_https_connection_dispatch = {
+        name: getattr(https_connection_type, name)
+        for name in connection_dispatch_names
+    }
+    canonical_https_connection_dispatch_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_https_connection_dispatch.items()
+    }
 
     # Freeze the private network dispatch before any product-owned capture can be
     # called. Capturing these descriptors inside build_product_owned_transport()
@@ -439,6 +474,7 @@ def _build_historical_snapshot_provider_origin_authority():
     canonical_https_response_code = getattr(
         canonical_https_response, "__code__", None
     )
+    canonical_urllib_http_package = canonical_https_open.__globals__.get("http")
     if (
         canonical_build_opener_code is None
         or canonical_opener_open_code is None
@@ -449,11 +485,52 @@ def _build_historical_snapshot_provider_origin_authority():
         or canonical_https_request_code is None
         or canonical_do_open_code is None
         or canonical_https_response_code is None
+        or canonical_urllib_http_package is None
+        or getattr(canonical_urllib_http_package, "client", None)
+        is not http_client_module
+        or any(
+            code is None
+            for code in canonical_http_connection_dispatch_codes.values()
+        )
+        or any(
+            code is None
+            for code in canonical_https_connection_dispatch_codes.values()
+        )
     ):
         raise RuntimeError("canonical Parlay historical network dispatch is unavailable")
 
+    def connection_dispatch_is_canonical() -> bool:
+        if (
+            getattr(canonical_urllib_http_package, "client", None)
+            is not http_client_module
+            or getattr(http_client_module, "HTTPConnection", None)
+            is not http_connection_type
+            or getattr(http_client_module, "HTTPSConnection", None)
+            is not https_connection_type
+        ):
+            return False
+        for name in connection_dispatch_names:
+            current_http = getattr(http_connection_type, name, None)
+            expected_http = canonical_http_connection_dispatch[name]
+            if (
+                current_http is not expected_http
+                or getattr(current_http, "__code__", None)
+                is not canonical_http_connection_dispatch_codes[name]
+            ):
+                return False
+            current_https = getattr(https_connection_type, name, None)
+            expected_https = canonical_https_connection_dispatch[name]
+            if (
+                current_https is not expected_https
+                or getattr(current_https, "__code__", None)
+                is not canonical_https_connection_dispatch_codes[name]
+            ):
+                return False
+        return True
+
     def stdlib_dispatch_is_canonical() -> bool:
         return (
+            connection_dispatch_is_canonical()
             getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
             and opener_type.open is canonical_opener_open
             and getattr(canonical_opener_open, "__code__", None)
@@ -473,6 +550,7 @@ def _build_historical_snapshot_provider_origin_authority():
             and https_handler_type.https_request is canonical_https_request
             and getattr(canonical_https_request, "__code__", None)
             is canonical_https_request_code
+            and getattr(https_handler_type, "do_open", None) is canonical_do_open
             and abstract_http_handler_type.do_open is canonical_do_open
             and getattr(canonical_do_open, "__code__", None)
             is canonical_do_open_code

@@ -115,6 +115,7 @@ class HealthGatedMirrorDecisionIndex:
         *,
         as_of: datetime,
         replay_boundary: ProviderHealthReplayBoundary | None,
+        raw: dict | None = None,
     ) -> tuple[SourceHealthState, ProviderHealthReplayBoundary]:
         """Read one source at a durable log horizon without inventing evidence time.
 
@@ -127,7 +128,12 @@ class HealthGatedMirrorDecisionIndex:
         their durable evidence timestamp is later than ``as_of``. The reader performs no
         mutation and delegates persisted state decoding/validation to ``SourceHealthStore``.
         """
-        raw = self._health_store._read()
+        # A caller that resolves more than one provider for the same economic
+        # decision must pass one already-validated store image here. Reading the
+        # store once per provider can otherwise manufacture a cross-source state
+        # combination that never existed durably.
+        if raw is None:
+            raw = self._health_store._read()
         schema_version = raw["schema_version"]
         entries = raw.get("history", {}).get(source_id, ())
 
@@ -236,20 +242,22 @@ class HealthGatedMirrorDecisionIndex:
             normalize_failed_flags=False,
         ), bound
 
-    def provider_health(
+    def _provider_health_from_raw(
         self,
+        raw: dict,
         source_id: str,
         *,
         as_of: datetime,
         replay_boundary: ProviderHealthReplayBoundary | None = None,
     ) -> ProviderHealthDecision:
-        """Return fail-closed eligibility bound to an explicit durable health horizon."""
+        """Resolve one provider from one already-validated durable store image."""
         normalized_source = self._source_id(source_id)
         boundary = self._as_of(as_of)
         state, bound = self._health_at_boundary(
             normalized_source,
             as_of=boundary,
             replay_boundary=replay_boundary,
+            raw=raw,
         )
 
         if state.status == "unknown":
@@ -277,6 +285,69 @@ class HealthGatedMirrorDecisionIndex:
             source_status=state.status,
             last_success_at=state.last_success_at,
             replay_boundary=bound,
+        )
+
+    def provider_health_snapshot(
+        self,
+        source_ids: tuple[str, ...],
+        *,
+        as_of: datetime,
+        replay_boundaries: Mapping[str, ProviderHealthReplayBoundary] | None = None,
+    ) -> dict[str, ProviderHealthDecision]:
+        """Resolve a complete provider set from exactly one durable health-store read.
+
+        This is the causal-cut API for multi-provider economic decisions. The returned
+        mapping cannot combine source A from one durable file image with source B from
+        a later image, even if another process appends health transitions concurrently.
+        """
+        if not isinstance(source_ids, tuple):
+            raise TypeError("source_ids must be a tuple")
+        normalized_sources = tuple(self._source_id(source_id) for source_id in source_ids)
+        if len(normalized_sources) != len(set(normalized_sources)):
+            raise ValueError("source_ids must be unique")
+        if tuple(sorted(normalized_sources)) != normalized_sources:
+            raise ValueError("source_ids must be sorted")
+
+        boundary = self._as_of(as_of)
+        if replay_boundaries is None:
+            supplied: Mapping[str, ProviderHealthReplayBoundary] = {}
+        else:
+            if not isinstance(replay_boundaries, Mapping):
+                raise TypeError("replay_boundaries must be a mapping or null")
+            if set(replay_boundaries) != set(normalized_sources):
+                raise ValueError(
+                    "health replay boundaries must exactly match provider snapshot sources"
+                )
+            supplied = replay_boundaries
+
+        raw = self._health_store._read()
+        return {
+            source_id: self._provider_health_from_raw(
+                raw,
+                source_id,
+                as_of=boundary,
+                replay_boundary=(
+                    supplied[source_id] if replay_boundaries is not None else None
+                ),
+            )
+            for source_id in normalized_sources
+        }
+
+    def provider_health(
+        self,
+        source_id: str,
+        *,
+        as_of: datetime,
+        replay_boundary: ProviderHealthReplayBoundary | None = None,
+    ) -> ProviderHealthDecision:
+        """Return fail-closed eligibility bound to an explicit durable health horizon."""
+        normalized_source = self._source_id(source_id)
+        raw = self._health_store._read()
+        return self._provider_health_from_raw(
+            raw,
+            normalized_source,
+            as_of=as_of,
+            replay_boundary=replay_boundary,
         )
 
     def decision_view(
@@ -310,14 +381,13 @@ class HealthGatedMirrorDecisionIndex:
                 raise ValueError("health replay boundaries must match decision-view sources")
             supplied = health_boundaries
 
-        decisions = {
-            source_id: self.provider_health(
-                source_id,
-                as_of=boundary,
-                replay_boundary=(supplied[source_id] if health_boundaries is not None else None),
-            )
-            for source_id in source_ids
-        }
+        decisions = self.provider_health_snapshot(
+            source_ids,
+            as_of=boundary,
+            replay_boundaries=(
+                supplied if health_boundaries is not None else None
+            ),
+        )
         return HealthGatedMirrorSnapshot(
             revision=captured.revision,
             events=tuple(

@@ -3,6 +3,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.paper as paper_module
 import autosport.settlement as settlement_module
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
@@ -170,6 +171,64 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
         self.assertIs(ticket.status, TicketStatus.WON)
         self.assertEqual(book.balance, Decimal("110"))
+
+    def test_paperbook_module_ticket_status_rebind_fails_closed(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+        canonical_ticket_status = paper_module.TicketStatus
+
+        class ForgedTicketStatus:
+            OPEN = canonical_ticket_status.OPEN
+            WON = canonical_ticket_status.LOST
+            LOST = canonical_ticket_status.LOST
+            VOID = canonical_ticket_status.VOID
+
+        with patch.object(paper_module, "TicketStatus", ForgedTicketStatus):
+            with self.assertRaisesRegex(
+                ValueError,
+                "PaperBook settlement authority globals changed",
+            ):
+                engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+        self.assertIs(ticket.status, TicketStatus.WON)
+        self.assertEqual(ticket.payout, Decimal("20"))
+        self.assertEqual(book.balance, Decimal("110"))
+
+    def test_paperbook_module_decimal_context_helper_rebind_fails_closed(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+        canonical_context_factory = paper_module._paper_decimal_context
+
+        with patch.object(
+            paper_module,
+            "_paper_decimal_context",
+            lambda: canonical_context_factory(),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "PaperBook settlement authority globals changed",
+            ):
+                engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
 
     def test_constructor_snapshots_caller_owned_outcomes_dict(self) -> None:
         caller_owned = {"event-1|winner|alice": "win"}

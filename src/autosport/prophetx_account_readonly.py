@@ -96,6 +96,79 @@ class _RejectRedirectHandler(HTTPRedirectHandler):
         raise ProphetXReadOnlyError("ProphetX HTTP redirect refused")
 
 
+def _build_wallet_stdlib_dispatch_authority():
+    """Freeze network dispatch before callers can construct canonical wallet clients."""
+
+    opener_type = OpenerDirector
+    redirect_handler_type = _RejectRedirectHandler
+    https_handler_type = HTTPSHandler
+    abstract_http_handler_type = AbstractHTTPHandler
+    http_error_processor_type = HTTPErrorProcessor
+
+    canonical_opener_open = _canonical_wallet_opener_open
+    canonical_opener_internal_open = opener_type._open
+    canonical_opener_call_chain = opener_type._call_chain
+    canonical_opener_error = opener_type.error
+    canonical_redirect_request = redirect_handler_type.redirect_request
+    canonical_https_open = https_handler_type.https_open
+    canonical_https_request = https_handler_type.https_request
+    canonical_do_open = abstract_http_handler_type.do_open
+    canonical_https_response = http_error_processor_type.https_response
+
+    canonical_codes = (
+        canonical_opener_open.__code__,
+        canonical_opener_internal_open.__code__,
+        canonical_opener_call_chain.__code__,
+        canonical_opener_error.__code__,
+        canonical_redirect_request.__code__,
+        canonical_https_open.__code__,
+        canonical_https_request.__code__,
+        canonical_do_open.__code__,
+        canonical_https_response.__code__,
+    )
+
+    def is_current() -> bool:
+        live = (
+            opener_type.open,
+            opener_type._open,
+            opener_type._call_chain,
+            opener_type.error,
+            redirect_handler_type.redirect_request,
+            https_handler_type.https_open,
+            https_handler_type.https_request,
+            abstract_http_handler_type.do_open,
+            http_error_processor_type.https_response,
+        )
+        return all(
+            current is canonical
+            and getattr(current, "__code__", None) is canonical_code
+            for current, canonical, canonical_code in zip(
+                live,
+                (
+                    canonical_opener_open,
+                    canonical_opener_internal_open,
+                    canonical_opener_call_chain,
+                    canonical_opener_error,
+                    canonical_redirect_request,
+                    canonical_https_open,
+                    canonical_https_request,
+                    canonical_do_open,
+                    canonical_https_response,
+                ),
+                canonical_codes,
+            )
+        )
+
+    return is_current, canonical_opener_open
+
+
+(
+    _wallet_stdlib_dispatch_is_canonical,
+    _canonical_wallet_opener_open,
+) = _build_wallet_stdlib_dispatch_authority()
+del _build_wallet_stdlib_dispatch_authority
+
+
 def _make_provider_fetch(
     opener: object,
     max_response_bytes: int,
@@ -106,6 +179,10 @@ def _make_provider_fetch(
     if opener_type is not OpenerDirector:
         raise ProphetXReadOnlyError(
             "canonical ProphetX account network authority requires OpenerDirector"
+        )
+    if not _wallet_stdlib_dispatch_is_canonical():
+        raise ProphetXReadOnlyError(
+            "canonical ProphetX account network dispatch changed before construction"
         )
 
     open_response = opener.open
@@ -285,7 +362,8 @@ def _make_provider_fetch(
 
     def authority_is_current() -> bool:
         if (
-            type(opener) is not opener_type
+            not _wallet_stdlib_dispatch_is_canonical()
+            or type(opener) is not opener_type
             or opener_type.open is not canonical_opener_open
             or opener_type._open is not canonical_opener_internal_open
             or opener_type._call_chain is not canonical_opener_call_chain
@@ -404,7 +482,9 @@ def _make_provider_fetch(
         require_authority()
         request = request_type(url, headers=dict(headers), method="GET")
         try:
-            with open_response(request, timeout=timeout_seconds) as response:
+            with canonical_opener_open(
+                opener, request, timeout=timeout_seconds
+            ) as response:
                 body = response.read(max_response_bytes + 1)
                 if len(body) > max_response_bytes:
                     raise ProphetXReadOnlyError(

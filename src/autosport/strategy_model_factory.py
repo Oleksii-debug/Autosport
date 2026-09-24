@@ -152,6 +152,63 @@ def _read_publish_commit_ledger(
 
 
 @_bind_publish_commit_workspace_lock
+def _publication_receipt(
+    self,
+    kind: str,
+    identity: str,
+    *,
+    expected_sha256: str | None = None,
+) -> dict[str, object]:
+    """Resolve one publication receipt from one stable artifact/ledger snapshot."""
+
+    canonical_kind = _IMPL._text(kind, "kind")
+    canonical_identity = _IMPL._text(identity, "identity")
+    actual_sha256 = self.sha256(canonical_kind, canonical_identity)
+    if expected_sha256 is not None and actual_sha256 != _IMPL._sha256(
+        expected_sha256,
+        "expected_sha256",
+    ):
+        raise ValueError("factory publication receipt artifact hash mismatch")
+
+    records = _ORIGINAL_READ_PUBLISH_COMMIT_LEDGER(self)
+    observed_state_sha256 = (
+        self._publish_commit_state_sha256(records)
+        if self._publish_commit_ledger_path().exists()
+        else None
+    )
+    self._recover_publish_commit_authority(observed_state_sha256)
+
+    matches: list[dict[str, object]] = []
+    for record in records:
+        for artifact in record["artifacts"]:
+            if (
+                artifact["kind"] == canonical_kind
+                and artifact["identity"] == canonical_identity
+            ):
+                if artifact["sha256"] != actual_sha256:
+                    raise ValueError(
+                        "factory publication receipt artifact hash mismatch"
+                    )
+                matches.append(record)
+    if len(matches) != 1:
+        raise ValueError(
+            "factory publication receipt is missing or ambiguous: "
+            f"{kind}:{identity}"
+        )
+
+    if self.sha256(canonical_kind, canonical_identity) != actual_sha256:
+        raise ValueError(
+            "factory artifact changed during publication receipt verification"
+        )
+
+    record = dict(matches[0])
+    record["artifacts"] = [
+        dict(artifact) for artifact in matches[0]["artifacts"]
+    ]
+    return record
+
+
+@_bind_publish_commit_workspace_lock
 @_bind_canonical_publish_commit_clock
 def _append_publish_commit_record(
     self,
@@ -318,6 +375,7 @@ FactoryArtifactStore._publish_commit_state_sha256 = _publish_commit_state_sha256
 FactoryArtifactStore._publish_commit_authority = _publish_commit_authority
 FactoryArtifactStore._recover_publish_commit_authority = _recover_publish_commit_authority
 FactoryArtifactStore._read_publish_commit_ledger = _read_publish_commit_ledger
+FactoryArtifactStore.publication_receipt = _publication_receipt
 FactoryArtifactStore._append_publish_commit_record = _append_publish_commit_record
 ExperimentRunner = _receipt.ExperimentRunner
 

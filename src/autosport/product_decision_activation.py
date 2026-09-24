@@ -1431,6 +1431,9 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     constructor_authorities: weakref.WeakKeyDictionary[
         ProductDecisionActivationStore, MonotonicWorkspaceAuthority
     ] = weakref.WeakKeyDictionary()
+    constructor_binding_states: weakref.WeakKeyDictionary[
+        ProductDecisionActivationStore, tuple[object, ...]
+    ] = weakref.WeakKeyDictionary()
 
     canonical_derive = store_class.__dict__.get("_derive")
     canonical_derive_code = getattr(canonical_derive, "__code__", None)
@@ -1675,6 +1678,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             path = store.path
             authority = store._authority
             constructor_authority = constructor_authorities.get(store)
+            constructor_binding_state = constructor_binding_states.get(store)
         except (AttributeError, TypeError) as exc:
             raise ProductDecisionActivationError(
                 "product decision activation store construction state changed"
@@ -1682,6 +1686,10 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         if constructor_authority is None or authority is not constructor_authority:
             raise ProductDecisionActivationError(
                 "product decision activation constructor authority identity changed"
+            )
+        if constructor_binding_state is None:
+            raise ProductDecisionActivationError(
+                "product decision activation constructor binding state is unavailable"
             )
 
         try:
@@ -1708,6 +1716,42 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
 
         require_workspace_binding_dispatch()
         binding = authority.workspace_binding
+        (
+            constructor_binding,
+            binding_workspace,
+            binding_authority_root,
+            binding_workspace_instance_id,
+            binding_workspace_marker_path,
+            binding_path_binding_path,
+            binding_workspace_locator,
+            binding_workspace_locator_sha256,
+            authority_workspace_instance_id,
+            authority_workspace_binding_path,
+            authority_namespace_sha256,
+            authority_journal_dir,
+            authority_records_dir,
+            authority_namespace_marker_path,
+        ) = constructor_binding_state
+        if (
+            binding is not constructor_binding
+            or binding.workspace != binding_workspace
+            or binding.authority_root != binding_authority_root
+            or binding.workspace_instance_id != binding_workspace_instance_id
+            or binding.workspace_marker_path != binding_workspace_marker_path
+            or binding.path_binding_path != binding_path_binding_path
+            or binding.workspace_locator != binding_workspace_locator
+            or binding.workspace_locator_sha256
+            != binding_workspace_locator_sha256
+            or authority.workspace_instance_id != authority_workspace_instance_id
+            or authority.workspace_binding_path != authority_workspace_binding_path
+            or authority.namespace_sha256 != authority_namespace_sha256
+            or authority.journal_dir != authority_journal_dir
+            or authority.records_dir != authority_records_dir
+            or authority.namespace_marker_path != authority_namespace_marker_path
+        ):
+            raise ProductDecisionActivationError(
+                "nested workspace identity binding construction state changed"
+            )
         expected_namespace = hashlib.sha256(
             "\0".join(
                 (
@@ -2022,7 +2066,26 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         require_workspace_binding_dispatch()
         canonical_init(self, workspace)
         require_workspace_binding_dispatch()
-        constructor_authorities[self] = self._authority
+        authority = self._authority
+        binding = authority.workspace_binding
+        constructor_authorities[self] = authority
+        constructor_binding_states[self] = (
+            binding,
+            binding.workspace,
+            binding.authority_root,
+            binding.workspace_instance_id,
+            binding.workspace_marker_path,
+            binding.path_binding_path,
+            binding.workspace_locator,
+            binding.workspace_locator_sha256,
+            authority.workspace_instance_id,
+            authority.workspace_binding_path,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.records_dir,
+            authority.namespace_marker_path,
+        )
+        require_store_state(self)
 
     setattr(store_class, "__init__", init)
     setattr(store_class, "initialize_owner", initialize_owner)

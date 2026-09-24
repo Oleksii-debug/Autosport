@@ -64,17 +64,33 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
 
     def test_no_args_requires_preflight_before_webview_startup(self) -> None:
         calls: list[str] = []
+        fake_emergency_stop = types.ModuleType(
+            "autosport.windows_webview_emergency_stop"
+        )
         fake_shell = types.ModuleType("autosport.windows_webview_shell")
+
+        class EmergencyStopWebController:
+            def __init__(self, workspace: Path) -> None:
+                calls.append("controller")
+                self.workspace = workspace
+
+        class AutosportWebBridge:
+            def __init__(self, controller: EmergencyStopWebController) -> None:
+                calls.append("bridge")
+                self.controller = controller
 
         class WindowsWebViewUnavailable(RuntimeError):
             pass
 
-        def shell_main() -> int:
+        def launch_windows_shell(bridge: AutosportWebBridge) -> int:
+            self.assertIsInstance(bridge.controller, EmergencyStopWebController)
             calls.append("webview")
             return 17
 
+        fake_emergency_stop.EmergencyStopWebController = EmergencyStopWebController
+        fake_shell.AutosportWebBridge = AutosportWebBridge
         fake_shell.WindowsWebViewUnavailable = WindowsWebViewUnavailable
-        fake_shell.main = shell_main
+        fake_shell.launch_windows_shell = launch_windows_shell
         path_patch, workspace_patch = self._interactive_patches()
         with (
             path_patch,
@@ -85,13 +101,14 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
                     "autosport.webview2_runtime_deployment": self._deployment_module(
                         available=True
                     ),
+                    "autosport.windows_webview_emergency_stop": fake_emergency_stop,
                     "autosport.windows_webview_shell": fake_shell,
                 },
             ),
         ):
             self.assertEqual(main([]), 17)
 
-        self.assertEqual(calls, ["webview"])
+        self.assertEqual(calls, ["controller", "bridge", "webview"])
 
     def test_unavailable_runtime_fails_before_webview_shell_start(self) -> None:
         calls: list[str] = []

@@ -56,7 +56,10 @@ class BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError("economic evidence method is not read-only")
         _sha256_hex(self.request_identity_sha256, "request_identity_sha256")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
-        _timestamp(self.observed_at, "observed_at")
+        if _timestamp(self.observed_at, "observed_at") != self.observed_at:
+            raise BetdaqEconomicReadbackError(
+                "observed_at must use canonical UTC timestamp spelling"
+            )
         if (
             type(self.account_context_id) is not str
             or not self.account_context_id.startswith("betdaq-auth-context:")
@@ -123,7 +126,11 @@ class BetdaqOrderSettlementObservation:
         _nonnegative_int(self.sequence_number, "sequence_number")
         _unsigned_byte(self.polarity_code, "polarity_code")
         for field in ("issued_at", "last_changed_at", "matching_timestamp"):
-            _timestamp(getattr(self, field), field)
+            value = getattr(self, field)
+            if _timestamp(value, field) != value:
+                raise BetdaqEconomicReadbackError(
+                    f"{field} must use canonical UTC timestamp spelling"
+                )
         for field in (
             "requested_stake",
             "requested_price",
@@ -141,7 +148,13 @@ class BetdaqOrderSettlementObservation:
             if value is not None:
                 _finite_decimal(value, field)
         if self.market_settled_at is not None:
-            _timestamp(self.market_settled_at, "market_settled_at")
+            if (
+                _timestamp(self.market_settled_at, "market_settled_at")
+                != self.market_settled_at
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "market_settled_at must use canonical UTC timestamp spelling"
+                )
         if self.currency is not None:
             if (
                 type(self.currency) is not str
@@ -155,6 +168,10 @@ class BetdaqOrderSettlementObservation:
             raise BetdaqEconomicReadbackError("denomination_proven must be bool")
         if type(self.scalar_economic_use_proven) is not bool:
             raise BetdaqEconomicReadbackError("scalar_economic_use_proven must be bool")
+        if type(self.evidence) is not BetdaqEconomicEvidence:
+            raise BetdaqEconomicReadbackError(
+                "order settlement evidence must be canonical BETDAQ economic evidence"
+            )
         if self.denomination_proven is not (self.currency is not None):
             raise BetdaqEconomicReadbackError(
                 "denomination_proven must match independently bound settlement currency"
@@ -229,7 +246,10 @@ class BetdaqPostingObservation:
     evidence: BetdaqEconomicEvidence
 
     def __post_init__(self) -> None:
-        _timestamp(self.posted_at, "posted_at")
+        if _timestamp(self.posted_at, "posted_at") != self.posted_at:
+            raise BetdaqEconomicReadbackError(
+                "posted_at must use canonical UTC timestamp spelling"
+            )
         if type(self.description) is not str:
             raise BetdaqEconomicReadbackError("description must be text")
         _finite_decimal(self.amount, "amount")
@@ -292,8 +312,15 @@ class BetdaqPostingsReadback:
         if self.method == "ListAccountPostings":
             if self.query_start_at is None or self.query_end_at is None:
                 raise BetdaqEconomicReadbackError("window read requires exact bounds")
-            _timestamp(self.query_start_at, "query_start_at")
-            _timestamp(self.query_end_at, "query_end_at")
+            if (
+                _timestamp(self.query_start_at, "query_start_at")
+                != self.query_start_at
+                or _timestamp(self.query_end_at, "query_end_at")
+                != self.query_end_at
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "postings window bounds must use canonical UTC timestamp spelling"
+                )
             if type(self.window_complete) is not bool:
                 raise BetdaqEconomicReadbackError(
                     "window completeness must come from provider boolean"
@@ -318,6 +345,8 @@ class BetdaqPostingsReadback:
             raise BetdaqEconomicReadbackError(
                 "postings evidence must be canonical BETDAQ economic evidence"
             )
+        if type(self.postings) is not tuple:
+            raise BetdaqEconomicReadbackError("postings must be an exact immutable tuple")
         seen: dict[str, dict[str, object]] = {}
         for posting in self.postings:
             if type(posting) is not BetdaqPostingObservation:
@@ -446,7 +475,9 @@ class BetdaqEconomicReadbackClient:
     ) -> BetdaqPostingsReadback:
         start = _request_time(start_at, "start_at")
         end = _request_time(end_at, "end_at")
-        if start_at.astimezone(timezone.utc) >= end_at.astimezone(timezone.utc):
+        start_utc = datetime.fromisoformat(start[:-1] + "+00:00")
+        end_utc = datetime.fromisoformat(end[:-1] + "+00:00")
+        if start_utc >= end_utc:
             raise BetdaqEconomicReadbackError("postings window start must precede end")
         result, evidence = self._call(
             "ListAccountPostings", {"StartTime": start, "EndTime": end}
@@ -811,8 +842,8 @@ def _optional_decimal_attr(element: ET.Element, name: str) -> Decimal | None:
 
 
 def _finite_decimal(value: Decimal, field: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise BetdaqEconomicReadbackError(f"{field} must be a finite Decimal")
+    if type(value) is not Decimal or not value.is_finite():
+        raise BetdaqEconomicReadbackError(f"{field} must be an exact finite Decimal")
     return value
 
 
@@ -846,15 +877,21 @@ def _optional_timestamp_attr(element: ET.Element, name: str) -> str | None:
 
 
 def _request_time(value: datetime, field: str) -> str:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or value.tzinfo is None:
         raise BetdaqEconomicReadbackError(
-            f"{field} must be a timezone-aware datetime"
+            f"{field} must be an exact timezone-aware datetime"
         )
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        detached = datetime.fromisoformat(value.isoformat())
+    except (TypeError, ValueError):
+        raise BetdaqEconomicReadbackError(
+            f"{field} must be an exact timezone-aware datetime"
+        ) from None
+    if detached.tzinfo is None or detached.utcoffset() is None:
+        raise BetdaqEconomicReadbackError(
+            f"{field} must be an exact timezone-aware datetime"
+        )
+    return detached.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _nonnegative_int(value: int, field: str) -> int:

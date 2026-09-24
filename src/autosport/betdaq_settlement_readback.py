@@ -643,6 +643,19 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
             raise BetdaqEconomicReadbackError(
                 f"BETDAQ economic ReturnStatus reported failure code {int(raw_code)}"
             )
+
+    allowed_children = {
+        f"{{{_account._EXTERNAL_NS}}}ReturnStatus",
+        (
+            f"{{{_account._EXTERNAL_NS}}}OrderSettlementInformation"
+            if method == "GetOrderDetails"
+            else f"{{{_account._EXTERNAL_NS}}}Orders"
+        ),
+    }
+    if any(child.tag not in allowed_children for child in result):
+        raise BetdaqEconomicReadbackError(
+            f"BETDAQ economic {method} result contains unexpected element"
+        )
     return result
 
 

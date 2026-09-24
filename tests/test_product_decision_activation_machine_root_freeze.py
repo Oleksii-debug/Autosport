@@ -11,6 +11,7 @@ import autosport.product_decision_activation as activation
 
 def test_product_activation_machine_root_is_frozen_after_module_composition(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Post-import OS resolver drift must not retarget supported START authority."""
 
@@ -19,8 +20,9 @@ def test_product_activation_machine_root_is_frozen_after_module_composition(
 
     import pwd
 
-    canonical_root = activation._product_activation_authority_root()
-    forged_home = Path("/tmp/autosport-forged-product-root")
+    before = activation.ProductDecisionActivationStore(tmp_path / "before")
+    canonical_root = before._authority.authority_root
+    forged_home = tmp_path / "forged-home"
 
     monkeypatch.setattr(
         pwd,
@@ -28,4 +30,9 @@ def test_product_activation_machine_root_is_frozen_after_module_composition(
         lambda _uid: SimpleNamespace(pw_dir=str(forged_home)),
     )
 
-    assert activation._product_activation_authority_root() == canonical_root
+    # The raw OS helper is not itself positive START authority after module sealing.
+    # A newly constructed canonical store must continue to use the import-time root
+    # captured by the sealed constructor closure, not the caller-retargeted resolver.
+    after = activation.ProductDecisionActivationStore(tmp_path / "after")
+    assert after._authority.authority_root == canonical_root
+    assert forged_home not in canonical_root.parents

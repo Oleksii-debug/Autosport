@@ -740,6 +740,7 @@ def test_post_init_transport_limit_mutation_cannot_enter_authoritative_size_path
     finally:
         transport._max_response_bytes = original_limit
 
+
 def test_authoritative_rpc_rejects_request_constructor_rebind_before_network() -> None:
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret", "session-secret"),
@@ -765,6 +766,57 @@ def test_authoritative_rpc_rejects_request_constructor_rebind_before_network() -
     assert called is False
 
 
+def test_request_add_header_cannot_transiently_replace_https_handler() -> None:
+    post = _canonical_network_post()
+    opener = _private_authority_opener()
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler).__name__ == "HTTPSHandler"
+    )
+    handler_type = type(https_handler)
+    original_add_header = Request.add_header
+    original_https_open = handler_type.https_open
+    construction_called = False
+    handler_called = False
+
+    def synthetic_https_open(self, request):
+        nonlocal handler_called
+        del self, request
+        handler_called = True
+        handler_type.https_open = original_https_open
+        raise AssertionError("synthetic HTTPS response must never be trusted")
+
+    def forged_add_header(self, key, value):
+        nonlocal construction_called
+        construction_called = True
+        handler_type.https_open = synthetic_https_open
+        return original_add_header(self, key, value)
+
+    Request.add_header = forged_add_header
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair request construction authority changed",
+        ):
+            post(
+                1024,
+                "https://api.betfair.com/exchange/betting/json-rpc/v1",
+                headers={
+                    "X-Application": "app-secret",
+                    "X-Authentication": "session-secret",
+                },
+                body=b"{}",
+                timeout_seconds=1.0,
+            )
+    finally:
+        Request.add_header = original_add_header
+        handler_type.https_open = original_https_open
+
+    assert construction_called is False
+    assert handler_called is False
+
+
 def test_canonical_network_post_rejects_request_host_retarget_before_dispatch() -> None:
     post = _canonical_network_post()
     original_parse = Request._parse
@@ -780,7 +832,7 @@ def test_canonical_network_post_rejects_request_host_retarget_before_dispatch() 
     try:
         with pytest.raises(
             BetfairReadOnlyError,
-            match="canonical Betfair outbound request state changed",
+            match="canonical Betfair request construction authority changed",
         ):
             post(
                 1024,
@@ -792,14 +844,17 @@ def test_canonical_network_post_rejects_request_host_retarget_before_dispatch() 
     finally:
         Request._parse = original_parse
 
-    assert called is True
+    assert called is False
 
 
 def test_canonical_network_post_rejects_request_body_retarget_before_dispatch() -> None:
     post = _canonical_network_post()
     original_data = Request.data
+    called = False
 
     def forged_setter(self, value):
+        nonlocal called
+        called = True
         del value
         object.__setattr__(self, "_data", b'{"method":"forged"}')
 
@@ -812,7 +867,7 @@ def test_canonical_network_post_rejects_request_body_retarget_before_dispatch() 
     try:
         with pytest.raises(
             BetfairReadOnlyError,
-            match="canonical Betfair outbound request state changed",
+            match="canonical Betfair request construction authority changed",
         ):
             post(
                 1024,
@@ -823,4 +878,6 @@ def test_canonical_network_post_rejects_request_body_retarget_before_dispatch() 
             )
     finally:
         Request.data = original_data
+
+    assert called is False
 

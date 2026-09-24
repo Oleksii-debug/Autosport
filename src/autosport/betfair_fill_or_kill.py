@@ -14,6 +14,7 @@ _PERSISTENCE = "LAPSE"
 _TIME_IN_FORCE = "FILL_OR_KILL"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_TEXT = 512
+_MAX_TEXT_INPUT_CHARS = 512
 _MAX_DECIMAL_INPUT_MAGNITUDE = 10 ** _MAX_FIXED_POINT_TEXT
 _MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
 _BETFAIR_CLASSIC_MIN_ODDS = Decimal("1.01")
@@ -43,7 +44,13 @@ class FillOrKillStructuralOutcome(str, Enum):
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+    if type(value) is not str or not value:
+        raise BetfairFillOrKillError(f"{name} must be non-empty canonical text")
+    if len(value) > _MAX_TEXT_INPUT_CHARS:
+        raise BetfairFillOrKillError(
+            f"{name} text input exceeds resource bound"
+        )
+    if value != value.strip() or "\x00" in value:
         raise BetfairFillOrKillError(f"{name} must be non-empty canonical text")
     try:
         value.encode("utf-8")
@@ -240,6 +247,10 @@ def _exact_nonnegative_difference(total: Decimal, part: Decimal) -> Decimal:
 
 
 def _positive_selection(value: object) -> str:
+    if type(value) is str and len(value) > len(_MAX_BETFAIR_SELECTION_ID):
+        raise BetfairFillOrKillError(
+            "selection_id exceeds Betfair signed-long domain"
+        )
     raw = _text(value, "selection_id")
     if not raw.isascii() or not raw.isdigit() or raw.startswith("0"):
         raise BetfairFillOrKillError(

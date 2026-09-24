@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -90,6 +89,7 @@ def _write_workspace(
     mean_target: float = 0.61,
     feature_after_model: bool = False,
     second_champion: bool = False,
+    promotion_protocol_sha256: str = D,
 ) -> tuple[str, Path]:
     store = FactoryArtifactStore(workspace / "factory-artifacts")
     artifact = _model_artifact(
@@ -220,7 +220,7 @@ def _write_workspace(
             "candidate_strategy_version_id": "strategy-v1",
             "candidate_model_version_id": "model-v1",
             "research_protocol_id": "protocol-v1",
-            "protocol_sha256": D,
+            "protocol_sha256": promotion_protocol_sha256,
             "evaluation_bundle_id": "evaluation-v1",
             "evaluation_bundle_sha256": evaluation_bundle_sha256,
             "predecessor_strategy_version_id": None,
@@ -335,11 +335,11 @@ def test_resolves_exact_promoted_model_and_predicts_without_caller_callable(
     assert runtime.strategy_version_id == "strategy-v1"
     assert runtime.model_version_id == "model-v1"
     assert runtime.feature_set_id == "feature-v1"
-    assert runtime.predict_probability(
+    assert runtime.predict_value(
         feature=0.52,
         observed_at="2026-01-01T00:00:30Z",
         decision_at="2026-01-01T00:01:00Z",
-    ) == Decimal("0.61")
+    ) == 0.61
 
 
 def test_rejects_prediction_before_model_training_cutoff(tmp_path: Path) -> None:
@@ -355,7 +355,7 @@ def test_rejects_prediction_before_model_training_cutoff(tmp_path: Path) -> None
         RegisteredStrategyModelRuntimeError,
         match="training cutoff exceeds decision time",
     ):
-        runtime.predict_probability(
+        runtime.predict_value(
             feature=0.52,
             observed_at="2025-12-31T23:59:00Z",
             decision_at="2025-12-31T23:59:30Z",
@@ -436,14 +436,31 @@ def test_rejects_backfilled_feature_contract_that_did_not_precede_model(
         )
 
 
-def test_rejects_model_artifact_probability_outside_predictive_domain(
+def test_generic_model_value_is_not_promoted_to_probability_semantics(
     tmp_path: Path,
 ) -> None:
     _write_workspace(tmp_path, mean_target=1.2)
 
+    runtime = resolve_registered_strategy_model(
+        tmp_path,
+        strategy_version_id="strategy-v1",
+        as_of="2026-01-01T00:01:00Z",
+    )
+
+    assert runtime.predict_value(
+        feature=0.52,
+        observed_at="2026-01-01T00:00:30Z",
+        decision_at="2026-01-01T00:01:00Z",
+    ) == 1.2
+    assert not hasattr(runtime, "predict_probability")
+
+
+def test_rejects_promotion_protocol_digest_mismatch(tmp_path: Path) -> None:
+    _write_workspace(tmp_path, promotion_protocol_sha256=E)
+
     with pytest.raises(
         RegisteredStrategyModelRuntimeError,
-        match="mean_target must be a probability",
+        match="PROMOTE authority protocol digest mismatch",
     ):
         resolve_registered_strategy_model(
             tmp_path,

@@ -240,6 +240,10 @@ class BetdaqPostingObservation:
         if self.market_id is not None:
             _provider_id(self.market_id, "market_id")
         _provider_id(self.transaction_id, "transaction_id")
+        if type(self.evidence) is not BetdaqEconomicEvidence:
+            raise BetdaqEconomicReadbackError(
+                "posting evidence must be canonical BETDAQ economic evidence"
+            )
 
     def canonical_dict(self) -> dict[str, object]:
         return {
@@ -251,6 +255,7 @@ class BetdaqPostingObservation:
             "order_id": self.order_id,
             "market_id": self.market_id,
             "transaction_id": self.transaction_id,
+            "evidence_id": self.evidence.evidence_id,
         }
 
     @property
@@ -309,10 +314,18 @@ class BetdaqPostingsReadback:
                 raise BetdaqEconomicReadbackError(
                     "ById read cannot claim bounded-window authority"
                 )
+        if type(self.evidence) is not BetdaqEconomicEvidence:
+            raise BetdaqEconomicReadbackError(
+                "postings evidence must be canonical BETDAQ economic evidence"
+            )
         seen: dict[str, dict[str, object]] = {}
         for posting in self.postings:
-            if not isinstance(posting, BetdaqPostingObservation):
+            if type(posting) is not BetdaqPostingObservation:
                 raise BetdaqEconomicReadbackError("postings contain invalid observation")
+            if posting.evidence.evidence_id != self.evidence.evidence_id:
+                raise BetdaqEconomicReadbackError(
+                    "posting evidence does not match readback authenticated context"
+                )
             canonical = posting.canonical_dict()
             previous = seen.get(posting.transaction_id)
             if previous is not None and previous != canonical:

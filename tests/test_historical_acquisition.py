@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -230,6 +231,27 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 )
             self.assertFalse(root.exists())
             self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_keyboard_interrupt_removes_staging_directory(self) -> None:
+        transport = _Transport()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch(
+                "autosport.historical_acquisition.capture_historical_snapshot",
+                side_effect=KeyboardInterrupt(),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+        self.assertEqual(len(transport.urls), 1)
+        self.assertTrue(urlparse(transport.urls[0]).path.endswith("/coverage"))
 
     def test_existing_output_is_never_overwritten(self) -> None:
         transport = _Transport()

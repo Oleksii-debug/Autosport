@@ -453,12 +453,16 @@ class ProphetXFixtureDiscovery:
             raise ProphetXDiscoveryUnavailable(f"HTTP_{response.status_code}", response.status_code)
         return response, provider_origin_verified
 
-    def _observe(self) -> tuple[str, bool]:
-        # Capture the exact callable before both verification and invocation so a
-        # concurrent/ordinary attribute replacement cannot make one clock appear
-        # to have supplied another clock's timestamp.
+    def _observe(
+        self,
+        _canonicalize_observed_at=_canonical_observed_at,
+        _verify_clock_origin=_clock_origin_verified,
+    ) -> tuple[str, bool]:
+        # Import-compose the exact causal helpers as well as the exact clock callable:
+        # ordinary module-global rebinding must not change either the timestamp
+        # canonicalization or the authority verdict after this product path is defined.
         clock = self.clock
-        return _canonical_observed_at(clock()), _clock_origin_verified(clock)
+        return _canonicalize_observed_at(clock()), _verify_clock_origin(clock)
 
     def _acquisition(
         self,

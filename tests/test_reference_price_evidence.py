@@ -939,6 +939,114 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                 consensus_evidence=None,
             )
 
+    def test_insufficient_constructor_rejects_present_missing_namespace_contradiction(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("aggregator",),
+            eligible_price_source_ids=("book-a", "book-b"),
+            minimum_sources=2,
+        )
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event(
+                    "aggregator",
+                    "2.00",
+                    bookmaker_key="book-a",
+                    sequence=1,
+                ),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=(
+                        ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+                    ),
+                    event_canonical_jsons=(),
+                )
+                if candidate.namespace is ReferenceCandidateNamespace.PRICE_SOURCE
+                and candidate.source_id == "book-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "candidate namespace projections must contain identical observation bytes",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+                consensus_evidence=None,
+            )
+
+    def test_insufficient_constructor_rejects_alternate_dual_namespace_bytes(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("aggregator",),
+            eligible_price_source_ids=("book-a", "book-b"),
+            minimum_sources=2,
+        )
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event(
+                    "aggregator",
+                    "2.00",
+                    bookmaker_key="book-a",
+                    sequence=1,
+                ),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        alternate_json = ReferenceObservation.from_event(
+            self.event(
+                "aggregator",
+                "9.00",
+                bookmaker_key="book-a",
+                sequence=1,
+            )
+        ).event_canonical_json
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=ReferenceCandidateDisposition.PRESENT_UNQUALIFIED,
+                    event_canonical_jsons=(alternate_json,),
+                )
+                if candidate.namespace is ReferenceCandidateNamespace.PRICE_SOURCE
+                and candidate.source_id == "book-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "candidate namespace projections must contain identical observation bytes",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+                consensus_evidence=None,
+            )
+
     def test_positive_resolution_constructor_binds_candidate_bytes_to_consensus(
         self,
     ) -> None:

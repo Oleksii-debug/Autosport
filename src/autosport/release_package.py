@@ -152,7 +152,17 @@ def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
         publication = Path(tmp_name)
         digest = hashlib.sha256()
         try:
-            with os.fdopen(fd, "wb") as handle:
+            try:
+                handle = os.fdopen(fd, "wb")
+            except BaseException as exc:
+                try:
+                    os.close(fd)
+                except OSError as cleanup_error:
+                    exc.add_note(
+                        f"release package temporary descriptor cleanup also failed: {cleanup_error}"
+                    )
+                raise
+            with handle:
                 for chunk in iter(lambda: authored.read(1024 * 1024), b""):
                     digest.update(chunk)
                     handle.write(chunk)
@@ -162,8 +172,10 @@ def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
             os.replace(publication, package_zip)
             return writer_sha
         finally:
-            if publication.exists():
+            try:
                 publication.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _require_canonical_zip_metadata(

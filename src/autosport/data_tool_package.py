@@ -112,7 +112,17 @@ def _verified_base_members(
     )
     snapshot = Path(tmp_name)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException as exc:
+            try:
+                os.close(fd)
+            except OSError as cleanup_error:
+                exc.add_note(
+                    f"data-tool verification descriptor cleanup also failed: {cleanup_error}"
+                )
+            raise
+        with handle:
             handle.write(base_bytes)
             handle.flush()
             os.fsync(handle.fileno())
@@ -127,8 +137,10 @@ def _verified_base_members(
             )
         return members, build_info, verification
     finally:
-        if snapshot.exists():
+        try:
             snapshot.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def bind_portable_data_tool(

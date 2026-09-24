@@ -303,6 +303,8 @@ class ExperimentFamilyPlan:
         if self.control_kind is not MultiplicityControlKind.FWER:
             raise ValueError("implemented alpha-spending method provides FWER control only")
         total_per_member = _exact_sum(spends)
+        if total_per_member > alpha:
+            raise ValueError("predeclared family alpha spending exceeds familywise_alpha")
         total_family_spend = _exact_multiply_int(total_per_member, len(self.members))
         if total_family_spend > alpha:
             raise ValueError("predeclared family alpha spending exceeds familywise_alpha")

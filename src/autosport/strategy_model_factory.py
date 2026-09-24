@@ -34,6 +34,28 @@ def _canonical_publish_commit_utc_now(
     return _now(_utc)
 
 
+def _bind_canonical_publish_commit_clock(
+    implementation,
+    _utc_now=_canonical_publish_commit_utc_now,
+    _datetime_type=datetime,
+    _utc=timezone.utc,
+    _instant=_impl._instant,
+):
+    """Close publication-time authority over import-composed trusted primitives."""
+
+    def bound(self, transaction):
+        return implementation(
+            self,
+            transaction,
+            _utc_now,
+            _datetime_type,
+            _utc,
+            _instant,
+        )
+
+    return bound
+
+
 class FactoryArtifactStore(_impl.FactoryArtifactStore):
     """Immutable factory evidence read from one stable regular filesystem object."""
 
@@ -365,14 +387,14 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
             previous = record_sha256
         return validated
 
+    @_bind_canonical_publish_commit_clock
     def _append_publish_commit_record(
         self,
         transaction: dict[str, object],
-        *,
-        _utc_now=_canonical_publish_commit_utc_now,
-        _datetime_type=datetime,
-        _utc=timezone.utc,
-        _instant=_impl._instant,
+        _utc_now,
+        _datetime_type,
+        _utc,
+        _instant,
     ) -> dict[str, object]:
         """Append a verified canonical factory publish record.
 

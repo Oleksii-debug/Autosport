@@ -531,7 +531,7 @@ def _build_historical_snapshot_provider_origin_authority():
     def stdlib_dispatch_is_canonical() -> bool:
         return (
             connection_dispatch_is_canonical()
-            getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
+            and getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
             and opener_type.open is canonical_opener_open
             and getattr(canonical_opener_open, "__code__", None)
             is canonical_opener_open_code

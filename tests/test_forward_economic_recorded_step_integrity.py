@@ -296,6 +296,7 @@ def test_record_fails_closed_before_append_on_private_step_identity_drift() -> N
 
     assert len(accumulator._steps) == 1
 
+
 def test_recorded_step_guard_rejects_to_payload_dispatch_rebind(monkeypatch) -> None:
     accumulator, _resolver = _filled_accumulator(event_count=1)
 

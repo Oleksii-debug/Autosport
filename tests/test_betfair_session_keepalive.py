@@ -315,6 +315,60 @@ def test_issuer_fails_closed_if_transport_code_is_mutated(monkeypatch):
         )
 
 
+def test_issuer_rejects_in_place_tls_factory_code_drift_before_network(monkeypatch):
+    canonical_factory = subject.ssl.create_default_context
+
+    def forged_default_context(
+        purpose=None,
+        *,
+        cafile=None,
+        capath=None,
+        cadata=None,
+    ):
+        raise AssertionError("forged TLS factory must never execute")
+
+    monkeypatch.setattr(
+        canonical_factory,
+        "__code__",
+        forged_default_context.__code__,
+    )
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session")
+    )
+
+    with pytest.raises(
+        BetfairSessionKeepAliveError,
+        match="canonical authenticated-session authority binding changed",
+    ):
+        keep_alive_betfair_session(
+            _forged_jurisdiction(),
+            client=client,
+        )
+
+
+def test_issuer_rejects_in_place_opener_dispatch_code_drift_before_network(
+    monkeypatch,
+):
+    canonical_open = subject.urllib_request.OpenerDirector.open
+
+    def forged_open(self, fullurl, data=None, timeout=None):
+        raise AssertionError("forged opener dispatch must never execute")
+
+    monkeypatch.setattr(canonical_open, "__code__", forged_open.__code__)
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app", "session")
+    )
+
+    with pytest.raises(
+        BetfairSessionKeepAliveError,
+        match="canonical authenticated-session authority binding changed",
+    ):
+        keep_alive_betfair_session(
+            _forged_jurisdiction(),
+            client=client,
+        )
+
+
 def test_issuer_fails_closed_if_json_decoder_is_rebound(monkeypatch):
     class ForgedDecoder:
         def __init__(self, *args, **kwargs):

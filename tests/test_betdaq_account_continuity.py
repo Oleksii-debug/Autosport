@@ -536,13 +536,64 @@ def test_issued_evidence_equality_rebind_cannot_preserve_mutated_authority(
 
     with pytest.raises(
         BetdaqAccountContinuityError,
-        match="product-issued BETDAQ continuity evidence",
+        match="continuity class dispatch changed",
     ):
         append_to_reconciliation(store, current)
 
     assert store.latest_snapshot() is None
     assert not store_path.exists()
 
+
+
+def test_generic_deepcopy_protocol_cannot_alias_product_issuance_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    deepcopy_calls: list[str] = []
+
+    def aliasing_deepcopy(self, memo):
+        del memo
+        deepcopy_calls.append("called")
+        return self
+
+    monkeypatch.setattr(
+        BetdaqContinuousAccountEvidence,
+        "__deepcopy__",
+        aliasing_deepcopy,
+        raising=False,
+    )
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    assert deepcopy_calls == []
+    assert current.snapshot.balance is not None
+
+    forged_balance = replace(
+        current.snapshot.balance,
+        available_balance=Decimal("999.99"),
+    )
+    object.__setattr__(
+        current,
+        "snapshot",
+        replace(current.snapshot, balance=forged_balance),
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="product-issued BETDAQ continuity evidence",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert deepcopy_calls == []
+    assert store.latest_snapshot() is None
+    assert not store_path.exists()
 
 def test_reconciliation_store_subclass_cannot_bypass_canonical_durability(
     monkeypatch,

@@ -1087,7 +1087,321 @@ def _install_store_runtime_guards() -> None:
         for _name, method in state_read_methods
     )
 
+    # Sealing only the two store method objects is insufficient: both methods
+    # resolve authority-bearing helpers through writable module globals. Capture
+    # the complete bounded state-read dependency graph once so a caller cannot
+    # keep _load/_observed_sha256 byte-identical while substituting the digest
+    # helper, JSON parser, record parser, or their reachable decoder machinery.
+    state_read_globals = state_read_methods[0][1].__globals__
+    if state_read_methods[1][1].__globals__ is not state_read_globals:
+        raise RuntimeError("intent-route state readers do not share module authority")
+
+    canonical_sha256_file = state_read_globals.get("sha256_file")
+    canonical_sha256_file_code = getattr(
+        canonical_sha256_file,
+        "__code__",
+        None,
+    )
+    sha256_file_globals = getattr(canonical_sha256_file, "__globals__", {})
+    canonical_integrity_hashlib = sha256_file_globals.get("hashlib")
+    canonical_integrity_path = sha256_file_globals.get("Path")
+    canonical_integrity_sha256 = getattr(
+        canonical_integrity_hashlib,
+        "sha256",
+        None,
+    )
+    canonical_path_new = getattr(canonical_integrity_path, "__new__", None)
+    canonical_path_new_code = getattr(canonical_path_new, "__code__", None)
+    canonical_runtime_path_type = type(canonical_integrity_path("."))
+    path_dispatch_names = ("exists", "read_text", "open")
+    canonical_path_dispatch = tuple(
+        (
+            name,
+            getattr(canonical_runtime_path_type, name),
+            getattr(
+                getattr(canonical_runtime_path_type, name),
+                "__code__",
+                None,
+            ),
+        )
+        for name in path_dispatch_names
+    )
+
+    canonical_strict_json_loads = state_read_globals.get("strict_json_loads")
+    canonical_strict_json_loads_code = getattr(
+        canonical_strict_json_loads,
+        "__code__",
+        None,
+    )
+    strict_globals = getattr(canonical_strict_json_loads, "__globals__", {})
+    strict_helper_names = (
+        "_unique_json_object",
+        "_reject_nonstandard_json_constant",
+        "_parse_bounded_json_integer",
+        "_validate_strict_json_value",
+    )
+    strict_helpers = tuple(
+        (
+            name,
+            strict_globals.get(name),
+            getattr(strict_globals.get(name), "__code__", None),
+        )
+        for name in strict_helper_names
+    )
+    strict_exception_names = (
+        "DuplicateJsonKeyError",
+        "NonStandardJsonConstantError",
+        "InvalidJsonDomainError",
+    )
+    strict_exceptions = tuple(
+        (name, strict_globals.get(name))
+        for name in strict_exception_names
+    )
+    canonical_json_integer_max_digits = strict_globals.get(
+        "_JSON_INTEGER_MAX_DIGITS"
+    )
+    canonical_strict_math = strict_globals.get("math")
+    canonical_strict_math_isfinite = getattr(
+        canonical_strict_math,
+        "isfinite",
+        None,
+    )
+    canonical_json_module = strict_globals.get("json")
+    canonical_json_loads = getattr(canonical_json_module, "loads", None)
+    canonical_json_loads_code = getattr(canonical_json_loads, "__code__", None)
+    canonical_json_decode_error = getattr(
+        canonical_json_module,
+        "JSONDecodeError",
+        None,
+    )
+    canonical_json_decoder = getattr(canonical_json_module, "JSONDecoder", None)
+    canonical_json_decoder_init = getattr(
+        canonical_json_decoder,
+        "__init__",
+        None,
+    )
+    canonical_json_decoder_init_code = getattr(
+        canonical_json_decoder_init,
+        "__code__",
+        None,
+    )
+    canonical_json_decoder_decode = getattr(
+        canonical_json_decoder,
+        "decode",
+        None,
+    )
+    canonical_json_decoder_decode_code = getattr(
+        canonical_json_decoder_decode,
+        "__code__",
+        None,
+    )
+    canonical_json_decoder_raw_decode = getattr(
+        canonical_json_decoder,
+        "raw_decode",
+        None,
+    )
+    canonical_json_decoder_raw_decode_code = getattr(
+        canonical_json_decoder_raw_decode,
+        "__code__",
+        None,
+    )
+    canonical_json_decoder_module = getattr(canonical_json_module, "decoder", None)
+    canonical_json_scanner_module = getattr(canonical_json_module, "scanner", None)
+    canonical_json_scanner_make = getattr(
+        canonical_json_scanner_module,
+        "make_scanner",
+        None,
+    )
+    canonical_json_scanner_make_code = getattr(
+        canonical_json_scanner_make,
+        "__code__",
+        None,
+    )
+    canonical_json_object_parser = getattr(
+        canonical_json_decoder_module,
+        "JSONObject",
+        None,
+    )
+    canonical_json_object_parser_code = getattr(
+        canonical_json_object_parser,
+        "__code__",
+        None,
+    )
+    canonical_json_array_parser = getattr(
+        canonical_json_decoder_module,
+        "JSONArray",
+        None,
+    )
+    canonical_json_array_parser_code = getattr(
+        canonical_json_array_parser,
+        "__code__",
+        None,
+    )
+    canonical_json_scanstring = getattr(
+        canonical_json_decoder_module,
+        "scanstring",
+        None,
+    )
+    canonical_json_scanstring_code = getattr(
+        canonical_json_scanstring,
+        "__code__",
+        None,
+    )
+
+    canonical_record_parser = state_read_globals.get(
+        "_CANONICAL_INTENT_ROUTE_RECORD_FROM_DICT"
+    )
+    canonical_record_parser_func = getattr(
+        canonical_record_parser,
+        "__func__",
+        canonical_record_parser,
+    )
+    canonical_record_parser_code = getattr(
+        canonical_record_parser_func,
+        "__code__",
+        None,
+    )
+    canonical_record_class = state_read_globals.get(
+        "_CANONICAL_INTENT_ROUTE_RECORD_CLASS"
+    )
+    canonical_schema = state_read_globals.get("SCHEMA")
+    canonical_schema_version = state_read_globals.get("SCHEMA_VERSION")
+    canonical_mapping = state_read_globals.get("Mapping")
+
+    def state_read_dependency_graph_matches() -> bool:
+        if (
+            state_read_globals.get("sha256_file") is not canonical_sha256_file
+            or getattr(canonical_sha256_file, "__code__", None)
+            is not canonical_sha256_file_code
+            or sha256_file_globals.get("hashlib")
+            is not canonical_integrity_hashlib
+            or sha256_file_globals.get("Path") is not canonical_integrity_path
+            or getattr(canonical_integrity_hashlib, "sha256", None)
+            is not canonical_integrity_sha256
+            or getattr(canonical_integrity_path, "__new__", None)
+            is not canonical_path_new
+            or (
+                canonical_path_new_code is not None
+                and getattr(canonical_path_new, "__code__", None)
+                is not canonical_path_new_code
+            )
+            or state_read_globals.get("strict_json_loads")
+            is not canonical_strict_json_loads
+            or getattr(canonical_strict_json_loads, "__code__", None)
+            is not canonical_strict_json_loads_code
+            or strict_globals.get("_JSON_INTEGER_MAX_DIGITS")
+            != canonical_json_integer_max_digits
+            or strict_globals.get("math") is not canonical_strict_math
+            or getattr(canonical_strict_math, "isfinite", None)
+            is not canonical_strict_math_isfinite
+            or strict_globals.get("json") is not canonical_json_module
+            or getattr(canonical_json_module, "loads", None)
+            is not canonical_json_loads
+            or getattr(canonical_json_loads, "__code__", None)
+            is not canonical_json_loads_code
+            or getattr(canonical_json_module, "JSONDecodeError", None)
+            is not canonical_json_decode_error
+            or getattr(canonical_json_module, "JSONDecoder", None)
+            is not canonical_json_decoder
+            or getattr(canonical_json_module, "decoder", None)
+            is not canonical_json_decoder_module
+            or getattr(canonical_json_module, "scanner", None)
+            is not canonical_json_scanner_module
+            or getattr(canonical_json_decoder_module, "JSONDecodeError", None)
+            is not canonical_json_decode_error
+            or getattr(canonical_json_decoder_module, "JSONDecoder", None)
+            is not canonical_json_decoder
+            or getattr(canonical_json_decoder_module, "scanner", None)
+            is not canonical_json_scanner_module
+            or getattr(canonical_json_scanner_module, "make_scanner", None)
+            is not canonical_json_scanner_make
+            or (
+                canonical_json_scanner_make_code is not None
+                and getattr(canonical_json_scanner_make, "__code__", None)
+                is not canonical_json_scanner_make_code
+            )
+            or getattr(canonical_json_decoder_module, "JSONObject", None)
+            is not canonical_json_object_parser
+            or getattr(canonical_json_object_parser, "__code__", None)
+            is not canonical_json_object_parser_code
+            or getattr(canonical_json_decoder_module, "JSONArray", None)
+            is not canonical_json_array_parser
+            or getattr(canonical_json_array_parser, "__code__", None)
+            is not canonical_json_array_parser_code
+            or getattr(canonical_json_decoder_module, "scanstring", None)
+            is not canonical_json_scanstring
+            or (
+                canonical_json_scanstring_code is not None
+                and getattr(canonical_json_scanstring, "__code__", None)
+                is not canonical_json_scanstring_code
+            )
+            or getattr(canonical_json_decoder, "__init__", None)
+            is not canonical_json_decoder_init
+            or getattr(canonical_json_decoder_init, "__code__", None)
+            is not canonical_json_decoder_init_code
+            or getattr(canonical_json_decoder, "decode", None)
+            is not canonical_json_decoder_decode
+            or getattr(canonical_json_decoder_decode, "__code__", None)
+            is not canonical_json_decoder_decode_code
+            or getattr(canonical_json_decoder, "raw_decode", None)
+            is not canonical_json_decoder_raw_decode
+            or getattr(canonical_json_decoder_raw_decode, "__code__", None)
+            is not canonical_json_decoder_raw_decode_code
+            or state_read_globals.get(
+                "_CANONICAL_INTENT_ROUTE_RECORD_FROM_DICT"
+            )
+            is not canonical_record_parser
+            or getattr(
+                getattr(canonical_record_parser, "__func__", canonical_record_parser),
+                "__code__",
+                None,
+            )
+            is not canonical_record_parser_code
+            or state_read_globals.get("_CANONICAL_INTENT_ROUTE_RECORD_CLASS")
+            is not canonical_record_class
+            or getattr(
+                getattr(canonical_record_class, "from_dict", None),
+                "__func__",
+                getattr(canonical_record_class, "from_dict", None),
+            )
+            is not canonical_record_parser_func
+            or state_read_globals.get("SCHEMA") != canonical_schema
+            or state_read_globals.get("SCHEMA_VERSION")
+            != canonical_schema_version
+            or state_read_globals.get("Mapping") is not canonical_mapping
+        ):
+            return False
+
+        for name, expected, expected_code in canonical_path_dispatch:
+            current = getattr(canonical_runtime_path_type, name, None)
+            if current is not expected:
+                return False
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                return False
+
+        for name, expected, expected_code in strict_helpers:
+            current = strict_globals.get(name)
+            if current is not expected:
+                return False
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                return False
+
+        return all(
+            strict_globals.get(name) is expected
+            for name, expected in strict_exceptions
+        )
+
     def guard_state_read_dispatch(self) -> None:
+        if not state_read_dependency_graph_matches():
+            raise error_type(
+                "intent-route authority state-read dependency graph changed"
+            )
         try:
             instance_state = vars(self)
         except TypeError as exc:

@@ -127,8 +127,9 @@ class ContinuousObservationSplitCommitRestartTests(unittest.TestCase):
             )
 
             # The first provider-unavailable transition is already durable in
-            # SourceHealthStore. The next one is therefore provider streak 2.
-            self.assertEqual(waits, [2.0])
+            # SourceHealthStore. Restart must first honor the remaining streak-1
+            # deadline; the next outage is streak 2 and earns the 2-second wait.
+            self.assertEqual(waits, [1.0, 2.0])
             self.assertEqual(restarted.calls, 2)
             self.assertEqual(result.exit_code, 0)
 

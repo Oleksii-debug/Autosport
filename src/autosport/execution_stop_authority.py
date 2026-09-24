@@ -1460,3 +1460,96 @@ def _require_canonical_admission_graph() -> None:
         raise ExecutionStopIntegrityError(
             "canonical execution admission lock generator changed"
         )
+
+
+def _build_sealed_admission_lease():
+    """Bind positive STOP admission to the import-time canonical module graph.
+
+    The provider write boundary captures admission_lease by function identity,
+    but a function object still resolves ordinary module globals at call time.
+    Keep the lease's security-critical dispatch and its verifier in closure state,
+    and reject any pre-call rebinding of the canonical admission graph or its
+    low-level durable/locking helpers.
+    """
+
+    module_globals = globals()
+    sealed_names = tuple(
+        sorted(
+            name
+            for name in module_globals
+            if name.startswith("_CANONICAL_ADMISSION_")
+            or name
+            in {
+                "_canonical",
+                "_digest",
+                "_exclusive_file_lock",
+                "_parse_json_object",
+                "_sha256",
+                "_sync_directory",
+                "_require_canonical_admission_graph",
+                "AuthorityPhase",
+                "ExecutionAuthorityMode",
+                "ExecutionStopAuthority",
+                "ExecutionStopIntegrityError",
+                "ExecutionStoppedError",
+                "MonotonicWorkspaceAuthority",
+                "Path",
+                "hashlib",
+                "json",
+                "os",
+                "stat",
+                "tempfile",
+                "threading",
+                "uuid",
+            }
+        )
+    )
+    sealed_bindings = tuple(
+        (name, module_globals[name]) for name in sealed_names
+    )
+    authority_class = _CANONICAL_ADMISSION_AUTHORITY_CLASS
+    authority_mode = ExecutionAuthorityMode
+    stopped_error = ExecutionStoppedError
+    integrity_error = ExecutionStopIntegrityError
+    require_graph = _require_canonical_admission_graph
+    operation_lock = _CANONICAL_ADMISSION_OPERATION_LOCK
+    current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+
+    def require_sealed_module_graph() -> None:
+        for name, expected in sealed_bindings:
+            if module_globals.get(name) is not expected:
+                raise integrity_error(
+                    "canonical execution admission module dependency graph changed"
+                )
+        require_graph()
+
+    @contextmanager
+    def sealed_admission_lease(
+        self,
+    ) -> Iterator[ExecutionAuthorityState]:
+        require_sealed_module_graph()
+        with operation_lock(self):
+            require_sealed_module_graph()
+            state = current_unlocked(self)
+            require_sealed_module_graph()
+            if state.mode is not authority_mode.ARMED:
+                raise stopped_error(
+                    f"execution STOP is active at revision {state.revision}: "
+                    f"{state.reason}"
+                )
+            try:
+                yield state
+            finally:
+                # If any canonical dependency changed while an irreversible
+                # caller held the lease, never return a successful authority
+                # result. The provider layer will retain UNKNOWN/reconciliation
+                # semantics for an already-attempted external effect.
+                require_sealed_module_graph()
+
+    return sealed_admission_lease
+
+
+# Install the sealed lease only after the complete canonical helper graph above
+# has been frozen. Importers therefore capture this exact closure-backed method,
+# not the class-body implementation that resolves its dispatch globals live.
+ExecutionStopAuthority.admission_lease = _build_sealed_admission_lease()

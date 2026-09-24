@@ -1079,8 +1079,19 @@ def _build_canonical_reservation_admission_authority():
     }
     module_helper_names = (
         "_ledger_view",
+        "_LEDGER_SNAPSHOT",
+        "_LEDGER_PARSE",
+        "_LEDGER_ACTION",
+        "_LEDGER_STATE",
+        "RealExecutionLedger",
+        "ExecutionAction",
+        "AttemptState",
+        "EventType",
+        "BetfairExposureReservation",
+        "ReservationStatus",
         "worst_case_incremental_exposure",
         "require_authoritative_funds_precheck",
+        "_action_from_dict",
         "_text",
         "_context_id",
         "_sha",
@@ -1100,8 +1111,12 @@ def _build_canonical_reservation_admission_authority():
         name: globals()[name]
         for name in module_helper_names
     }
+    def callable_code(value: object):
+        callable_value = getattr(value, "__func__", value)
+        return getattr(callable_value, "__code__", None)
+
     module_helper_codes = {
-        name: getattr(helper, "__code__", None)
+        name: callable_code(helper)
         for name, helper in module_helpers.items()
     }
     connect = store_methods["_connect"]
@@ -1140,8 +1155,7 @@ def _build_canonical_reservation_admission_authority():
             live_helper = module_globals.get(name)
             if (
                 live_helper is not expected_helper
-                or getattr(expected_helper, "__code__", None)
-                is not module_helper_codes[name]
+                or callable_code(expected_helper) is not module_helper_codes[name]
             ):
                 raise admission_error(
                     "canonical Betfair reservation admission helper dispatch changed"

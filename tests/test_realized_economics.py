@@ -30,6 +30,22 @@ def test_realized_path_reports_growth_turnover_and_drawdown_without_authority():
     assert report.real_money_authority is False
 
 
+def test_max_drawdown_fraction_uses_peak_that_preceded_the_drawdown():
+    report = summarize_realized_economics(
+        starting_bankroll=Decimal("1000"),
+        realized_pnls=(
+            Decimal("100"), Decimal("-250"), Decimal("350"),
+        ),
+        stakes=(
+            Decimal("100"), Decimal("100"), Decimal("100"),
+        ),
+    )
+
+    assert report.peak_bankroll == Decimal("1200")
+    assert report.max_drawdown_amount == Decimal("250")
+    assert report.max_drawdown_fraction == Decimal("250") / Decimal("1100")
+
+
 def test_zero_turnover_has_no_turnover_return():
     report = summarize_realized_economics(
         starting_bankroll=Decimal("500"), realized_pnls=(), stakes=()

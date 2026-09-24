@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
@@ -256,6 +257,59 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
 
             self.assertEqual(stale.eligibility, ProviderDecisionEligibility.STALE_HEALTH)
             self.assertEqual(before_first.eligibility, ProviderDecisionEligibility.UNKNOWN)
+
+    def test_multi_provider_snapshot_reads_one_durable_health_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            same_time = "2026-09-17T12:00:08+00:00"
+            as_of = datetime(2026, 9, 17, 12, 0, 8, tzinfo=timezone.utc)
+            self.record_healthy(health_store, "provider-a", now=same_time)
+            self.record_healthy(health_store, "provider-b", now=same_time)
+            healthy_raw = health_store._read()
+
+            health_store.record_failure(
+                "provider-a",
+                now=same_time,
+                error=ConnectionError("provider-a later durable failure"),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=same_time,
+                error=ConnectionError("provider-b later durable failure"),
+            )
+            failed_raw = health_store._read()
+
+            # If the gate re-read the store per source, this deterministic side
+            # effect would expose provider-a from the healthy image and provider-b
+            # from the failed image: a cross-source cut that never existed.
+            with patch.object(
+                health_store,
+                "_read",
+                side_effect=(healthy_raw, failed_raw),
+            ) as read_store:
+                decisions = gate.provider_health_snapshot(
+                    ("provider-a", "provider-b"),
+                    as_of=as_of,
+                )
+
+            self.assertEqual(read_store.call_count, 1)
+            self.assertEqual(
+                {
+                    source_id: decision.eligibility
+                    for source_id, decision in decisions.items()
+                },
+                {
+                    "provider-a": ProviderDecisionEligibility.ELIGIBLE,
+                    "provider-b": ProviderDecisionEligibility.ELIGIBLE,
+                },
+            )
+            self.assertEqual(
+                {
+                    source_id: decision.replay_boundary.transition_order
+                    for source_id, decision in decisions.items()
+                },
+                {"provider-a": 1, "provider-b": 1},
+            )
 
     def test_one_failed_provider_does_not_remove_other_healthy_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -75,6 +75,7 @@ class DataClassification(StrEnum):
     PUBLIC = "PUBLIC"
     PRIVATE = "PRIVATE"
     RESTRICTED = "RESTRICTED"
+    SECRET = "SECRET"
 
 
 class VOCEvidenceProvenance(StrEnum):
@@ -1377,6 +1378,21 @@ def route_compute(
     if not isinstance(policy, ComputeRoutingPolicy):
         raise TypeError("policy must be ComputeRoutingPolicy")
     now = _instant("as_of", as_of)
+    if request.data_classification is DataClassification.SECRET:
+        return ComputeRouteDecision.build(
+            decision_id=f"{request.request_id}:wait",
+            request_id=request.request_id,
+            decided_at=as_of,
+            policy=policy,
+            tier=ComputeTier.WAIT,
+            candidate=None,
+            reason=(
+                "secret/credential data is not admissible to model compute; "
+                "use a non-model product authority boundary"
+            ),
+            voc_evidence_id=None,
+            domain_observation_id=None,
+        )
     if domain_route is not None and not isinstance(
         domain_route, RouteRecommendation
     ):

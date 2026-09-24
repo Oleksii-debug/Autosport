@@ -17,7 +17,9 @@ from .product_entrypoint import ProductEntrypointError, _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 from .trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfile,
+    TrustedRuntimeCodeProfileError,
     issue_trusted_runtime_code_profile,
+    require_product_owned_source_factory_identity,
     revoke_trusted_runtime_code_profile,
 )
 
@@ -40,7 +42,27 @@ def _runtime_builder(
         or expected_source_id.strip() != expected_source_id
     ):
         raise ValueError("expected_source_id must be a non-empty trimmed string")
+    if expected_source_id is not None:
+        try:
+            require_product_owned_source_factory_identity(
+                source_factory=source_factory,
+                expected_provider_source_id=expected_source_id,
+            )
+        except TrustedRuntimeCodeProfileError as exc:
+            raise ProductEntrypointError(
+                "configured source factory is not product-owned by this build"
+            ) from exc
     source = _validated_source(source_factory, workspace=workspace)
+    if expected_source_id is not None:
+        try:
+            require_product_owned_source_factory_identity(
+                source_factory=source_factory,
+                expected_provider_source_id=expected_source_id,
+            )
+        except TrustedRuntimeCodeProfileError as exc:
+            raise ProductEntrypointError(
+                "configured source factory changed during source construction"
+            ) from exc
     if expected_source_id is not None and source.source_id != expected_source_id:
         raise ProductEntrypointError(
             "product source identity does not match the configured source"

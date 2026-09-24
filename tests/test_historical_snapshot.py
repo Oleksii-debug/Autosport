@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import replace
 import hashlib
 import json
-import ssl
 import tempfile
 import threading
 import unittest
@@ -24,7 +22,6 @@ from autosport.parlayapi_provider import (
     HttpJsonResponse,
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
-    ProviderTransportError,
 )
 
 

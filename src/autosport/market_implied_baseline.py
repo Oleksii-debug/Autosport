@@ -325,50 +325,73 @@ def build_market_implied_baseline_evidence(
 
     key = _text(cohort_key, "cohort_key")
     _require_canonical_inputs(store, outcome_authority)
+
+    # Caller-controlled datetime/timedelta subclasses may execute arbitrary Python
+    # while they are normalized. Collapse them to exact built-in values before any
+    # durable-history read, then revalidate the product-owned input authorities.
     cutoff = _utc(decision_cutoff, "decision_cutoff")
     age_us = _age_us(max_age)
+    decision_boundary = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+    age_limit = timedelta(microseconds=age_us)
+    _require_canonical_inputs(store, outcome_authority)
+
     try:
-        _OUTCOME_ASSERT_AVAILABLE(outcome_authority, decision_cutoff)
+        _OUTCOME_ASSERT_AVAILABLE(outcome_authority, decision_boundary)
     except (TypeError, ValueError) as exc:
         raise MarketImpliedBaselineError(
             "verified outcome roster is not causally available at decision cutoff"
         ) from exc
 
+    # Availability validation is another executable boundary. Recheck the exact
+    # product objects before consuming canonical history, then invoke the captured
+    # unbound SQLite reader exactly once so later instance dispatch cannot replace
+    # the history used by one evidence issuance.
+    _require_canonical_inputs(store, outcome_authority)
     identity = outcome_authority.identity
-    decision_boundary = decision_cutoff.astimezone(timezone.utc)
+    history = tuple(_STORE_EVENTS(store))
+
     causally_known_selections: set[str] = set()
-    for event in store.events():
+    mirror = MarketMirror()
+    for event in history:
         if (
-            event.source_id != identity.source_id
-            or event.sport != identity.sport
-            or event.event_id != identity.event_id
-            or event.market_id != identity.market_id
+            event.source_id == identity.source_id
+            and event.sport == identity.sport
+            and event.event_id == identity.event_id
+            and event.market_id == identity.market_id
         ):
-            continue
+            observed = _event_utc(event.observed_ts)
+            ingested = _event_utc(event.ingest_ts)
+            if observed is not None and ingested is not None:
+                if observed <= decision_boundary and ingested <= decision_boundary:
+                    if event.market_type is not identity.market_type:
+                        raise MarketImpliedBaselineError(
+                            "canonical durable market identity contradicts "
+                            "verified outcome authority"
+                        )
+                    causally_known_selections.add(event.selection_id)
+
         observed = _event_utc(event.observed_ts)
         ingested = _event_utc(event.ingest_ts)
-        if observed is None or ingested is None:
-            continue
-        if observed > decision_boundary or ingested > decision_boundary:
-            continue
-        if event.market_type is not identity.market_type:
-            raise MarketImpliedBaselineError(
-                "canonical durable market identity contradicts verified outcome authority"
-            )
-        causally_known_selections.add(event.selection_id)
+        if (
+            observed is not None
+            and ingested is not None
+            and observed <= decision_boundary
+            and ingested <= decision_boundary
+        ):
+            mirror.apply(event)
+
     if causally_known_selections.difference(outcome_authority.selection_ids):
         raise MarketImpliedBaselineError(
             "canonical durable market history contradicts verified outcome roster"
         )
 
-    # Replay the complete decision-visible canonical market before applying the
-    # asserted outcome roster.  Filtering by outcome_authority.selection_ids first
-    # would let an incomplete/caller-minted roster erase a real selection that is
-    # already present in durable market history.
-    snapshot = MarketMirror.replay_view_from_store(
-        store,
-        as_of=decision_cutoff,
-        max_age=max_age,
+    # Replay the complete decision-visible canonical market from the same captured
+    # durable-history tuple before applying the asserted outcome roster. Filtering
+    # by outcome_authority.selection_ids first would let an incomplete/caller-minted
+    # roster erase a real selection already present in durable market history.
+    snapshot = mirror.active_view(
+        as_of=decision_boundary,
+        max_age=age_limit,
         source_ids=identity.source_id,
         sports=identity.sport,
         event_ids=identity.event_id,

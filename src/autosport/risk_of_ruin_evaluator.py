@@ -76,7 +76,7 @@ class RiskEvidenceClass(StrEnum):
 
 
 class RiskOfRuinEvaluationError(ValueError):
-    """The request is malformed, outside resource support, or statistically unqualified."""
+    """Malformed, unsupported-resource, or statistically unqualified request."""
 
 
 class RiskOfRuinIssuanceError(RuntimeError):

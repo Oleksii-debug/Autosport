@@ -542,6 +542,61 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 )
             )
 
+    def test_provider_order_correlation_rejects_ledger_bind_readback_alias_rebind(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            provider_order_id = "provider-order-ledger-alias"
+            matched = _evidence(
+                identity,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id=provider_order_id,
+                effect_fingerprint=identity.effect_fingerprint,
+            )
+            attacker_calls = []
+
+            def forged_bind(
+                _ledger,
+                *,
+                attempt_id,
+                provider_id,
+                provider_order_id,
+            ):
+                attacker_calls.append(
+                    ("bind", attempt_id, provider_id, provider_order_id)
+                )
+                return provider_order_id
+
+            def forged_read(_ledger, *, attempt_id, provider_id):
+                attacker_calls.append(("read", attempt_id, provider_id))
+                return provider_order_id
+
+            with patch.object(
+                prophetx_module,
+                "_CANONICAL_LEDGER_BIND_PROVIDER_ASSIGNED_ORDER_ID",
+                forged_bind,
+            ), patch.object(
+                prophetx_module,
+                "_CANONICAL_LEDGER_PROVIDER_ASSIGNED_ORDER_ID",
+                forged_read,
+            ):
+                self.assertEqual(
+                    reconciliation_disposition(identity, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.CONFLICT,
+                )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
     def test_positive_provider_order_consumer_ignores_reexposed_binder_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "execution.jsonl"

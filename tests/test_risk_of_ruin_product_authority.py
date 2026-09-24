@@ -1,5 +1,7 @@
 from dataclasses import replace
 from decimal import Decimal
+import subprocess
+import sys
 
 
 from autosport.domain import MarketEvent, TicketLeg
@@ -13,6 +15,25 @@ from autosport.risk import (
 )
 from autosport.risk_of_ruin_authority import risk_of_ruin_result_sha256
 from autosport.scientific_registry import DatasetSnapshot, EvaluationBundleRef, ScientificRegistry
+
+
+def test_decision_ledger_and_risk_cold_import_without_authority_cycle() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import autosport.decision_ledger as decision_ledger; "
+                "import autosport.risk as risk; "
+                "assert decision_ledger.DecisionRecord is not None; "
+                "assert risk.PaperRiskPolicy is not None"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 PROPOSAL_TS = "2026-09-16T15:00:02+00:00"

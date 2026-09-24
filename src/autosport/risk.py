@@ -21,7 +21,26 @@ from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
-from .risk_of_ruin_authority import verify_risk_of_ruin_authority
+
+
+def _verify_product_risk_of_ruin_authority(
+    registry_path: str | Path | None,
+    evidence: object,
+    *,
+    kind: str,
+    available_by: str,
+) -> tuple[bool, str]:
+    # Import only when the mature authority-bearing policy path is evaluated.
+    # Importing this module while autosport.risk itself is initializing creates
+    # a cycle through ScientificRegistry -> agents -> decision_ledger -> risk.
+    from .risk_of_ruin_authority import verify_risk_of_ruin_authority
+
+    return verify_risk_of_ruin_authority(
+        registry_path,
+        evidence,
+        kind=kind,
+        available_by=available_by,
+    )
 
 
 def _canonical_context_text(name: str, value: object) -> str:
@@ -1943,7 +1962,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         evidence = context.risk_of_ruin_evidence
         assert evidence is not None
         assert context.proposal_ts is not None
-        verified, reason = verify_risk_of_ruin_authority(
+        verified, reason = _verify_product_risk_of_ruin_authority(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="single",
@@ -1981,7 +2000,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
                 "portfolio vector risk-of-ruin evidence lacks canonical proposal time",
             )
         available_by = min(proposal_times).astimezone(timezone.utc).isoformat()
-        verified, reason = verify_risk_of_ruin_authority(
+        verified, reason = _verify_product_risk_of_ruin_authority(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="vector",

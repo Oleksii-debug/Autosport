@@ -46,107 +46,6 @@ from .strategies import (
 from .workspace_lock import WorkspaceEconomicLock
 
 
-def _bind_canonical_settlement_engine(method):
-    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
-
-    canonical_engine_type = SettlementEngine
-
-    def guarded(self, *args, **kwargs):
-        if "_settlement_engine_type" in kwargs:
-            raise TypeError("settlement engine origin is internal product authority")
-        kwargs["_settlement_engine_type"] = canonical_engine_type
-        return method(self, *args, **kwargs)
-
-    guarded.__name__ = method.__name__
-    guarded.__qualname__ = method.__qualname__
-    guarded.__doc__ = method.__doc__
-    guarded.__annotations__ = method.__annotations__
-    return guarded
-
-
-def _seal_settlement_consumer_entry(method):
-    """Return an immutable built-in descriptor with a closure-owned dispatch target."""
-
-    def resolve(instance):
-        return method.__get__(instance, type(instance))
-
-    def reject_set(_instance, _value) -> None:
-        raise TypeError("canonical settlement consumer entry binding is immutable")
-
-    def reject_delete(_instance) -> None:
-        raise TypeError("canonical settlement consumer entry binding is immutable")
-
-    return property(resolve, reject_set, reject_delete, method.__doc__)
-
-
-def _build_settlement_consumer_class_guard(name: str):
-    """Keep type-level replacement from bypassing the installed data descriptor."""
-
-    class SettlementConsumerClassGuard:
-        __slots__ = ()
-
-        def __get__(self, instance, owner=None):
-            if instance is None:
-                return self
-            binding = instance.__dict__[name]
-            return binding.__get__(None, instance)
-
-        def __set__(self, _instance, _value) -> None:
-            raise TypeError("canonical settlement consumer entry binding is immutable")
-
-        def __delete__(self, _instance) -> None:
-            raise TypeError("canonical settlement consumer entry binding is immutable")
-
-    return SettlementConsumerClassGuard()
-
-
-class _AutosportSessionMeta(type):
-    """Seal the trusted settlement consumer entry inside the process TCB."""
-
-    def __init_subclass__(mcls, **kwargs) -> None:
-        raise TypeError("canonical settlement consumer metaclass is not extensible")
-
-    def __new__(mcls, name, bases, namespace, **kwargs):
-        protected = {"_run_dataset_locked", "_settlement_consumer_bindings_sealed"}
-        inherits_sealed_consumer = any(
-            any(
-                ancestor.__dict__.get(
-                    "_settlement_consumer_bindings_sealed",
-                    False,
-                )
-                for ancestor in base.__mro__
-            )
-            for base in bases
-        )
-        if inherits_sealed_consumer and protected.intersection(namespace):
-            raise TypeError("canonical settlement consumer entry binding is immutable")
-        return super().__new__(mcls, name, bases, namespace, **kwargs)
-
-    def __setattr__(cls, name: str, value: object) -> None:
-        sealed = any(
-            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
-            for ancestor in cls.__mro__
-        )
-        if sealed and name in {
-            "_run_dataset_locked",
-            "_settlement_consumer_bindings_sealed",
-        }:
-            raise TypeError("canonical settlement consumer entry binding is immutable")
-        super().__setattr__(name, value)
-
-    def __delattr__(cls, name: str) -> None:
-        sealed = any(
-            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
-            for ancestor in cls.__mro__
-        )
-        if sealed and name in {
-            "_run_dataset_locked",
-            "_settlement_consumer_bindings_sealed",
-        }:
-            raise TypeError("canonical settlement consumer entry binding is immutable")
-        super().__delattr__(name)
-
-
 @dataclass(frozen=True, slots=True)
 class SessionResult:
     replay: ReplayRun
@@ -165,10 +64,8 @@ class ObservationResult:
     current_quotes: tuple[MarketEvent, ...]
 
 
-class AutosportSession(metaclass=_AutosportSessionMeta):
+class AutosportSession:
     """V1 runtime for causal replay, paper simulation and read-only market observation."""
-
-    _settlement_consumer_bindings_sealed = False
 
     def __init__(
         self,
@@ -333,8 +230,6 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 runtime_strategy_id=runtime_strategy_id,
             )
 
-    @_seal_settlement_consumer_entry
-    @_bind_canonical_settlement_engine
     def _run_dataset_locked(
         self,
         dataset: ReplayDataset,
@@ -347,10 +242,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         economic_goal: EconomicGoalContract | None = None,
         risk_policy: PaperRiskPolicy | None = None,
         runtime_strategy_id: str | None = None,
-        _settlement_engine_type: type[SettlementEngine],
     ) -> SessionResult:
-        if SettlementEngine is not _settlement_engine_type:
-            raise RuntimeError("settlement engine constructor origin changed")
         if risk_policy is None:
             risk_policy = PaperRiskPolicy(economic_goal=economic_goal)
         runtime_strategy_id = runtime_strategy_id or self._runtime_strategy_identity(
@@ -414,11 +306,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             # Fail closed on any planned causal decision that did not execute before
             # loading sealed outcome facts into settlement.
             orchestrator.finalize_replay()
-            settlement = _settlement_engine_type()
-            if type(settlement) is not _settlement_engine_type:
-                raise RuntimeError(
-                    "settlement engine constructor returned non-canonical type"
-                )
+            settlement = SettlementEngine()
             settlement.record(dataset.load_results_after_replay())
             settled = tuple(settlement.settle_ready(working_book))
             evaluation = evaluate(working_book)
@@ -694,10 +582,3 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         # this session may have been constructed before another process committed a
         # newer canonical book, and saving here would silently roll that commit back.
         self.store.close()
-
-# Seal the consumer entry after class creation. The metaclass data descriptor also
-# makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.
-_AutosportSessionMeta._run_dataset_locked = _build_settlement_consumer_class_guard(
-    "_run_dataset_locked"
-)
-AutosportSession._settlement_consumer_bindings_sealed = True

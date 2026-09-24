@@ -92,25 +92,18 @@ class EnduranceTests(unittest.TestCase):
             paper_tickets=5,
         )
 
-        class LosingSettlementEngine:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-            def record(self, _quote_outcomes):
-                pass
-
-            def settle_ready(self, book):
-                settled = []
-                for ticket in list(book.tickets.values()):
-                    if ticket.status is TicketStatus.OPEN:
-                        book.settle(ticket.ticket_id, set())
-                        settled.append(ticket.ticket_id)
-                return settled
+        def settle_as_losses(_engine, book):
+            settled = []
+            for ticket in list(book.tickets.values()):
+                if ticket.status is TicketStatus.OPEN:
+                    book.settle(ticket.ticket_id, set())
+                    settled.append(ticket.ticket_id)
+            return settled
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch(
-                "autosport.endurance.SettlementEngine",
-                new=LosingSettlementEngine,
+                "autosport.endurance.SettlementEngine.settle_ready",
+                new=settle_as_losses,
             ):
                 report = run_endurance(Path(tmp), config)
 

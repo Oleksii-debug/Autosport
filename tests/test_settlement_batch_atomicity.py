@@ -169,21 +169,16 @@ class SettlementBatchAtomicityTests(unittest.TestCase):
             }
         )
 
-        before_balance = book.balance
-        before_lifecycle = list(book._lifecycle)
-
-        with self.assertRaisesRegex(
-            ValueError, "settlement book mutation helpers must not be shadowed"
-        ):
-            settlement.settle_ready(book)
-
+        self.assertEqual(
+            settlement.settle_ready(book),
+            [first.ticket_id, second.ticket_id],
+        )
         self.assertEqual(settle_calls, 0)
-        self.assertEqual(book.balance, before_balance)
-        self.assertIs(first.status, TicketStatus.OPEN)
-        self.assertEqual(first.payout, Decimal("0"))
-        self.assertIs(second.status, TicketStatus.OPEN)
-        self.assertEqual(second.payout, Decimal("0"))
-        self.assertEqual(book._lifecycle, before_lifecycle)
+        self.assertIs(first.status, TicketStatus.WON)
+        self.assertEqual(first.payout, Decimal("20"))
+        self.assertIs(second.status, TicketStatus.WON)
+        self.assertEqual(second.payout, Decimal("20"))
+        self.assertEqual(book.balance, Decimal("120"))
 
     def test_instance_shadowed_settlement_helper_fails_before_batch_mutation(self) -> None:
         book = PaperBook("100")

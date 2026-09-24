@@ -12,7 +12,6 @@ from autosport._provider_evaluation_semantic_gate import (
 )
 
 from autosport.domain import MarketEvent
-from autosport.execution_stop_authority import ExecutionStopAuthority
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -141,58 +140,3 @@ def _legacy_provider_semantic_fixture_bridge(request):
         yield
     finally:
         _set_legacy_provider_semantic_bypass_for_tests(False)
-
-
-# The final #1212 Betfair provider-truth suites predate the #1155 STOP-admission
-# composition. Their positive provider cases must now supply the same explicit
-# durable ARMED authority production requires. Keep the bridge exact and local to
-# the deliberately recomposed carrier; the dedicated STOP-composition suite is
-# intentionally excluded so missing/STOPPED/corrupt authority remains fail-closed.
-_RECOMPOSED_BETFAIR_PROVIDER_MODULES = frozenset(
-    {
-        "test_betfair_supervised_execution",
-        "test_betfair_placeorders_customer_order_ref_echo_falsifier",
-        "test_betfair_placeorders_executable_authority_code_seal",
-        "test_betfair_placeorders_execution_errorcode_coherence",
-        "test_betfair_placeorders_network_origin_authority",
-        "test_betfair_placeorders_response_truth",
-        "test_betfair_placeorders_single_instruction_status",
-        "test_betfair_placeorders_terminal_identity",
-        "test_betfair_placeorders_urllib_opener_origin",
-    }
-)
-
-
-@pytest.fixture(autouse=True)
-def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
-    module = request.module
-    if module is None:
-        return
-    module_name = module.__name__.rsplit(".", 1)[-1]
-    if module_name not in _RECOMPOSED_BETFAIR_PROVIDER_MODULES:
-        return
-
-    original_prepared = getattr(module, "_prepared", None)
-    if not callable(original_prepared):
-        return
-
-    def prepared_with_armed_stop(tmp, *args, **kwargs):
-        prepared = original_prepared(tmp, *args, **kwargs)
-        stop_path = Path(tmp) / "execution-stop.jsonl"
-        if not stop_path.exists():
-            authority = ExecutionStopAuthority(stop_path)
-            stopped = authority.initialize_stopped(
-                operator_id="test-owner",
-                reason="explicit test safety baseline",
-                command_id="betfair-provider-stop-fixture-init",
-            )
-            authority.arm(
-                operator_id="test-owner",
-                reason="explicit positive provider test authority",
-                confirmation_id="betfair-provider-stop-fixture-confirmation",
-                expected_revision=stopped.revision,
-                command_id="betfair-provider-stop-fixture-arm",
-            )
-        return prepared
-
-    monkeypatch.setattr(module, "_prepared", prepared_with_armed_stop)

@@ -27,11 +27,9 @@ def _goal(workspace: Path) -> EconomicGoalStore:
 
 def _store(tmp_path: Path):
     workspace = tmp_path / "workspace"
-    authority_root = tmp_path / "authority"
     goal_store = _goal(workspace)
-    tariff_store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority_root
-    )
+    tariff_store = subject.LocalComputeTariffAuthorityStore(workspace)
+    authority_root = tariff_store._authority.authority_root
     return workspace, authority_root, goal_store, tariff_store
 
 
@@ -176,6 +174,59 @@ def test_historical_timestamp_cannot_resurrect_old_tariff(tmp_path):
         )
 
 
+def test_tariff_machine_root_cannot_be_retargeted_after_local_state_loss(
+    tmp_path, monkeypatch
+):
+    workspace, canonical_root, _goal_store, tariff_store = _store(tmp_path)
+    _publish(tariff_store, tariff_id="root-binding", amount="0.10")
+
+    canonical_path = tariff_store.path
+    canonical_domain = tariff_store._authority.domain
+    canonical_key = tariff_store._authority.key
+    alternate_root = tmp_path / "alternate-machine-authority"
+    alternate_file = "alternate-local-compute-tariffs.json"
+
+    monkeypatch.setattr(
+        subject,
+        "local_compute_monotonic_authority_root",
+        lambda: alternate_root,
+    )
+    monkeypatch.setattr(subject, "FILE_NAME", alternate_file)
+    monkeypatch.setattr(
+        subject,
+        "AUTHORITY_DOMAIN",
+        canonical_domain + ".alternate",
+    )
+    monkeypatch.setattr(
+        subject,
+        "AUTHORITY_KEY",
+        canonical_key + "-alternate",
+    )
+
+    rebound = subject.LocalComputeTariffAuthorityStore(workspace)
+    assert rebound.path == canonical_path
+    assert rebound._authority.authority_root == canonical_root
+    assert rebound._basis_store._authority.authority_root == canonical_root
+    assert rebound._authority.domain == canonical_domain
+    assert rebound._authority.key == canonical_key
+    assert not alternate_root.exists()
+    assert not (workspace / alternate_file).exists()
+
+    canonical_path.unlink()
+
+    with pytest.raises(TypeError, match="authority_root"):
+        subject.LocalComputeTariffAuthorityStore(
+            workspace,
+            authority_root=alternate_root,  # type: ignore[call-arg]
+        )
+
+    with pytest.raises(MonotonicWorkspaceAuthorityError):
+        subject.LocalComputeTariffAuthorityStore(workspace)
+
+    assert not alternate_root.exists()
+    assert not (workspace / alternate_file).exists()
+
+
 def test_tariff_amount_cannot_diverge_from_resolved_basis(tmp_path):
     _workspace, authority, _goal_store, tariff_store = _store(tmp_path)
     record = _publish(
@@ -197,10 +248,7 @@ def test_tariff_amount_cannot_diverge_from_resolved_basis(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(MonotonicWorkspaceAuthorityError):
-        subject.LocalComputeTariffAuthorityStore(
-            tariff_store.workspace,
-            authority_root=authority,
-        )
+        subject.LocalComputeTariffAuthorityStore(tariff_store.workspace)
 
 
 def test_deleting_tariff_state_cannot_reset_authority(tmp_path):
@@ -209,7 +257,4 @@ def test_deleting_tariff_state_cannot_reset_authority(tmp_path):
     tariff_store.path.unlink()
 
     with pytest.raises(MonotonicWorkspaceAuthorityError):
-        subject.LocalComputeTariffAuthorityStore(
-            tariff_store.workspace,
-            authority_root=authority,
-        )
+        subject.LocalComputeTariffAuthorityStore(tariff_store.workspace)

@@ -215,7 +215,7 @@ def test_admission_lease_rejects_product_root_selector_class_rebind(
 
 
 
-def test_admission_lease_rejects_monotonic_recover_class_substitution_on_valid_old_armed(
+def test_admission_lease_rejects_monotonic_recover_class_substitution_on_old_arm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

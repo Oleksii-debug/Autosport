@@ -812,3 +812,64 @@ def test_positive_continuity_rejects_post_import_composition_helper_rebind(
     assert attacker_calls == []
     assert opener.calls == []
 
+@pytest.mark.parametrize("dependency_name", ("sha256", "replace"))
+def test_positive_continuity_rejects_transitive_global_rebind_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    dependency_name: str,
+) -> None:
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    attacker_calls: list[str] = []
+
+    def attacker(*args, **kwargs):
+        del args, kwargs
+        attacker_calls.append(dependency_name)
+        raise AssertionError("attacker-controlled transitive dependency executed")
+
+    monkeypatch.setattr(continuity_module, dependency_name, attacker)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="transitive dependency changed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert attacker_calls == []
+    assert opener.calls == []
+
+
+def test_positive_continuity_rejects_json_dumps_rebind_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    attacker_calls: list[str] = []
+
+    def attacker(*args, **kwargs):
+        del args, kwargs
+        attacker_calls.append("json.dumps")
+        raise AssertionError("attacker-controlled json.dumps executed")
+
+    monkeypatch.setattr(continuity_module.json, "dumps", attacker)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="transitive dependency changed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert attacker_calls == []
+    assert opener.calls == []
+

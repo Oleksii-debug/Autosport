@@ -212,6 +212,48 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
             with self.assertRaises(ProphetXOrderIdentityError):
                 bind_before_effect(restarted, attempt_id="try-1")
 
+    def test_ambiguous_delivery_requires_canonical_durable_unknown_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            attacker_calls = []
+
+            def forged_mark_unknown(*_args, **_kwargs):
+                attacker_calls.append("mark_unknown")
+
+            ledger.mark_unknown = forged_mark_unknown
+
+            with self.assertRaisesRegex(
+                ProphetXOrderIdentityError,
+                "canonical execution ledger provider-order dispatch changed",
+            ):
+                mark_ambiguous_delivery(
+                    ledger,
+                    identity=identity,
+                    reason="timeout_after_possible_send",
+                    observed_at=UNKNOWN,
+                )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertEqual(
+                RealExecutionLedger(path).attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+
+            restarted = RealExecutionLedger(path)
+            mark_ambiguous_delivery(
+                restarted,
+                identity=load_identity(restarted, attempt_id="try-1"),
+                reason="timeout_after_possible_send",
+                observed_at=UNKNOWN,
+            )
+            self.assertEqual(
+                RealExecutionLedger(path).attempt_state("try-1"),
+                AttemptState.UNKNOWN,
+            )
+
     def test_rest_duplicate_or_wallet_evidence_never_releases_ambiguity(self):
         with tempfile.TemporaryDirectory() as tmp:
             identity = bind_before_effect(

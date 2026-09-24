@@ -390,7 +390,7 @@ def mark_ambiguous_delivery(
     ledger.mark_unknown(identity.attempt_id, reason=reason, observed_at=observed_at)
 
 
-def _bind_provider_assigned_order_id_impl(
+def _validate_provider_order_candidate_impl(
     ledger: RealExecutionLedger,
     identity: ProphetXOrderIdentity,
     provider_order_id: str,
@@ -400,6 +400,8 @@ def _bind_provider_assigned_order_id_impl(
     identity_eq,
     identity_eq_code: object,
 ) -> bool:
+    """Validate a candidate without letting caller evidence create durable OrderID truth."""
+
     try:
         _require_canonical_provider_order_ledger(ledger)
         if getattr(identity_resolver, "__code__", None) is not identity_resolver_code:
@@ -415,18 +417,11 @@ def _bind_provider_assigned_order_id_impl(
         ):
             return False
         _require_canonical_provider_order_ledger(ledger)
-        bound = _CANONICAL_LEDGER_BIND_PROVIDER_ASSIGNED_ORDER_ID(
-            ledger,
-            attempt_id=identity.attempt_id,
-            provider_id=PROPHETX_PROVIDER_ID,
-            provider_order_id=provider_order_id,
-        )
-        if bound != provider_order_id or ledger.path != ledger_path:
-            return False
-        _require_canonical_provider_order_ledger(ledger)
 
-        # Positive correlation requires a restart-visible durable fact, not merely
-        # a successful method return from the caller-held ledger object.
+        # Public ProphetX evidence in this module is a correlation candidate, not
+        # an issuer-bound #1634 provider-origin receipt.  It may be checked against
+        # an OrderID that a future authoritative source has already durably bound,
+        # but it must never create that durable fact itself.
         restarted = object.__new__(_CANONICAL_LEDGER_CLASS)
         _CANONICAL_LEDGER_INIT(restarted, ledger_path)
         _require_canonical_provider_order_ledger(restarted)
@@ -436,7 +431,7 @@ def _bind_provider_assigned_order_id_impl(
             provider_id=PROPHETX_PROVIDER_ID,
         )
         _require_canonical_provider_order_ledger(restarted)
-        if durable != provider_order_id:
+        if durable is not None and durable != provider_order_id:
             return False
     except (
         ExecutionIdentityConflict,
@@ -452,7 +447,7 @@ def _reconciliation_disposition_impl(
     evidence: ProphetXProviderEvidence,
     *,
     ledger: RealExecutionLedger | None = None,
-    bind_provider_order_id,
+    validate_provider_order_candidate,
 ) -> ProphetXReconciliationDisposition:
     """Return correlation candidates only; never mint #1634/#530 provider truth."""
 
@@ -473,7 +468,7 @@ def _reconciliation_disposition_impl(
             evidence.kind is ProphetXEvidenceKind.ORDER_STATE
             and evidence.provider_order_id
         ):
-            if ledger is None or not bind_provider_order_id(
+            if ledger is None or not validate_provider_order_candidate(
                 ledger, identity, evidence.provider_order_id
             ):
                 return ProphetXReconciliationDisposition.CONFLICT
@@ -485,7 +480,7 @@ def _reconciliation_disposition_impl(
     if evidence.kind is ProphetXEvidenceKind.FIX_EXECUTION_REPORT:
         if not evidence.provider_order_id:
             return ProphetXReconciliationDisposition.CONFLICT
-        if ledger is None or not bind_provider_order_id(
+        if ledger is None or not validate_provider_order_candidate(
             ledger, identity, evidence.provider_order_id
         ):
             return ProphetXReconciliationDisposition.CONFLICT
@@ -519,7 +514,7 @@ def _normalize_fix_execution_reports_impl(
     reports: Iterable[ProphetXFixExecutionReport],
     *,
     ledger: RealExecutionLedger | None = None,
-    bind_provider_order_id,
+    validate_provider_order_candidate,
 ) -> tuple[ProphetXFixExecutionReport, ...]:
     if identity.transport is not ProphetXTransport.FIX_ORDER_ENTRY:
         raise ProphetXOrderIdentityError(
@@ -549,10 +544,10 @@ def _normalize_fix_execution_reports_impl(
     if by_exec_id:
         if ledger is None:
             raise ProphetXOrderIdentityError(
-                "FIX execution reports require durable provider order id binding"
+                "FIX execution reports require durable attempt correlation"
             )
         provider_order_id = next(iter(provider_order_ids))
-        if not bind_provider_order_id(
+        if not validate_provider_order_candidate(
             ledger, identity, provider_order_id
         ):
             raise ProphetXEvidenceConflict(
@@ -568,7 +563,7 @@ def _normalize_fix_execution_reports_impl(
 
 
 def _build_provider_order_correlation_authority():
-    """Closure-own durable identity resolution and positive provider-OrderID admission."""
+    """Closure-own durable identity resolution for non-authoritative order candidates."""
 
     identity_resolver = load_identity
     identity_resolver_code = getattr(identity_resolver, "__code__", None)
@@ -586,12 +581,16 @@ def _build_provider_order_correlation_authority():
         ("__eq__", identity_eq, getattr(identity_eq, "__code__", None)),
     )
     identity_eq_code = getattr(identity_eq, "__code__", None)
-    bind_impl = _bind_provider_assigned_order_id_impl
+    candidate_validator_impl = _validate_provider_order_candidate_impl
     reconciliation_impl = _reconciliation_disposition_impl
     normalize_impl = _normalize_fix_execution_reports_impl
 
     module_globals = globals()
-    dependency_functions = (identity_resolver, durable_attempt_facts, bind_impl)
+    dependency_functions = (
+        identity_resolver,
+        durable_attempt_facts,
+        candidate_validator_impl,
+    )
     dependency_names = tuple(
         sorted(
             {
@@ -716,7 +715,7 @@ def _build_provider_order_correlation_authority():
                     "canonical ProphetX identity class dispatch changed"
                 )
 
-    def bind_provider_order_id(
+    def validate_provider_order_candidate(
         ledger: RealExecutionLedger,
         identity: ProphetXOrderIdentity,
         provider_order_id: str,
@@ -725,7 +724,7 @@ def _build_provider_order_correlation_authority():
             require_identity_resolver_graph()
         except ProphetXOrderIdentityError:
             return False
-        result = bind_impl(
+        result = candidate_validator_impl(
             ledger,
             identity,
             provider_order_id,
@@ -750,7 +749,7 @@ def _build_provider_order_correlation_authority():
             identity,
             evidence,
             ledger=ledger,
-            bind_provider_order_id=bind_provider_order_id,
+            validate_provider_order_candidate=validate_provider_order_candidate,
         )
 
     def normalize_fix_execution_reports(
@@ -772,7 +771,7 @@ def _build_provider_order_correlation_authority():
 reconciliation_disposition, normalize_fix_execution_reports = (
     _build_provider_order_correlation_authority()
 )
-del _bind_provider_assigned_order_id_impl
+del _validate_provider_order_candidate_impl
 del _reconciliation_disposition_impl
 del _normalize_fix_execution_reports_impl
 del _build_provider_order_correlation_authority

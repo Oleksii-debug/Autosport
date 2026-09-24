@@ -1,16 +1,18 @@
 """Durable exact reconstruction authority for the canonical PaperRiskPolicy.
 
-This module persists only the existing executable paper-risk configuration.  It
+This module persists only the existing executable paper-risk configuration. It
 does not make risk decisions, widen EconomicGoal authority, or create a second
-risk model.  A persisted policy can be reconstructed only against the exact
-EconomicGoalContract revision whose canonical digest was stored with it.  Load
-also requires the exact PaperRiskPolicy provenance identity from a separately
-verified durable authority; the mutable store payload is never allowed to
-self-authorize a coherent rewrite.
+risk model. A persisted policy can be reconstructed only against the exact
+EconomicGoalContract revision whose canonical digest was stored with it. The
+workspace file is additionally fenced by the shared independent monotonic
+workspace authority so deletion or a coherent older/different replacement
+cannot become a new creation-only truth after restart.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
@@ -19,6 +21,11 @@ from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .risk import PaperRiskPolicy
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -26,6 +33,7 @@ from .workspace_lock import WorkspaceEconomicLock
 PAPER_RISK_POLICY_SCHEMA: Final = "autosport.paper_risk_policy"
 PAPER_RISK_POLICY_SCHEMA_VERSION: Final = 1
 
+_AUTHORITY_DOMAIN: Final = "autosport.paper-risk-policy.v1"
 _POLICY_KEYS: Final = frozenset(
     {
         "max_ticket_fraction",
@@ -99,6 +107,24 @@ def _economic_goal_sha256(goal: EconomicGoalContract | None) -> str | None:
     return provenance_for(goal).contract_sha256
 
 
+def _durable_bytes(payload: dict[str, object]) -> bytes:
+    """Return the exact bytes emitted by integrity.atomic_write_json()."""
+
+    try:
+        text = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PaperRiskPolicyStoreError(
+            "paper risk policy payload is not durably serializable"
+        ) from exc
+    return (text + "\n").encode("utf-8")
+
+
 def paper_risk_policy_to_payload(policy: PaperRiskPolicy) -> dict[str, object]:
     """Return the canonical durable schema-v1 payload for ``policy``."""
 
@@ -131,7 +157,7 @@ def paper_risk_policy_from_payload(
     """Reconstruct only when an external immutable policy identity agrees.
 
     The expected provenance must come from a separately verified authority
-    outside paper_risk_policy.json.  This prevents a coherent rewrite of both
+    outside paper_risk_policy.json. This prevents a coherent rewrite of both
     executable fractions and the self-derived digest stored in this payload.
     """
 
@@ -240,18 +266,71 @@ def paper_risk_policy_from_json(
 
 
 class PaperRiskPolicyStore:
-    """Workspace-local, creation-only durable paper-risk configuration authority.
+    """Creation-only durable executable risk-policy configuration authority.
 
-    Owner initialization is deliberately one-way.  This store does not provide an
-    automatic update API, because changing any executable risk fraction is an
-    authority transition that belongs at a separate explicit owner boundary.
+    The workspace file is an exact reconstruction payload. The independent
+    MonotonicWorkspaceAuthority is the chronology/existence witness: once a
+    policy is committed, missing or different workspace bytes fail closed until
+    a future explicit policy-revision authority is implemented.
     """
 
     FILE_NAME: Final = "paper_risk_policy.json"
 
     def __init__(self, workspace: str | Path) -> None:
-        self.workspace = Path(workspace)
+        self.workspace = Path(workspace).absolute().resolve(strict=False)
         self.path = self.workspace / self.FILE_NAME
+        try:
+            self._authority = MonotonicWorkspaceAuthority(
+                workspace=self.workspace,
+                domain=_AUTHORITY_DOMAIN,
+                key=self.FILE_NAME,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperRiskPolicyStoreError(
+                "cannot bind paper risk policy anti-rollback authority"
+            ) from exc
+
+    def _read_bytes(self) -> bytes:
+        if self.path.is_symlink() or not self.path.is_file():
+            raise PaperRiskPolicyStoreError(
+                "persisted paper risk policy must be a regular file"
+            )
+        try:
+            return self.path.read_bytes()
+        except OSError as exc:
+            raise PaperRiskPolicyStoreError(
+                f"cannot read persisted paper risk policy: {exc}"
+            ) from exc
+
+    def _observed_state_sha256(self) -> str | None:
+        if self.path.is_symlink():
+            raise PaperRiskPolicyStoreError(
+                "persisted paper risk policy must be a regular file"
+            )
+        if not self.path.exists():
+            return None
+        return hashlib.sha256(self._read_bytes()).hexdigest()
+
+    def _recover_authority(self, observed: str | None) -> None:
+        try:
+            history = self._authority.read_history()
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            if pending is None:
+                self._authority.recover(observed_state_sha256=observed)
+            else:
+                self._authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperRiskPolicyStoreError(
+                "paper risk policy anti-rollback authority rejected workspace state"
+            ) from exc
 
     def load(
         self,
@@ -259,29 +338,82 @@ class PaperRiskPolicyStore:
         economic_goal: EconomicGoalContract | None,
         expected_policy_provenance_sha256: str,
     ) -> PaperRiskPolicy:
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise PaperRiskPolicyStoreError(
-                f"cannot read persisted paper risk policy: {exc}"
-            ) from exc
-        return paper_risk_policy_from_json(
-            text,
-            economic_goal=economic_goal,
-            expected_policy_provenance_sha256=expected_policy_provenance_sha256,
-        )
+        with WorkspaceEconomicLock(self.workspace):
+            raw = self._read_bytes()
+            try:
+                text = raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise PaperRiskPolicyStoreError(
+                    "invalid paper risk policy JSON"
+                ) from exc
+            reconstructed = paper_risk_policy_from_json(
+                text,
+                economic_goal=economic_goal,
+                expected_policy_provenance_sha256=expected_policy_provenance_sha256,
+            )
+            observed = hashlib.sha256(raw).hexdigest()
+            self._recover_authority(observed)
+            if self._observed_state_sha256() != observed:
+                raise PaperRiskPolicyStoreError(
+                    "paper risk policy changed during authority verification"
+                )
+            return reconstructed
 
     def initialize_owner(self, policy: PaperRiskPolicy) -> None:
-        """Create the exact initial policy under the canonical economic writer lock."""
+        """Publish the first owner policy with PREPARE -> publish -> COMMIT fencing."""
 
         if type(policy) is not PaperRiskPolicy:
             raise PaperRiskPolicyStoreError(
                 "paper risk policy persistence requires exact PaperRiskPolicy"
             )
         with WorkspaceEconomicLock(self.workspace):
-            if self.path.exists():
+            observed = self._observed_state_sha256()
+            self._recover_authority(observed)
+            if observed is not None:
                 raise PaperRiskPolicyStoreError(
                     "persisted paper risk policy already exists; replacement requires "
                     "a separate owner authority boundary"
                 )
-            atomic_write_json(self.path, paper_risk_policy_to_payload(policy))
+
+            payload = paper_risk_policy_to_payload(policy)
+            intended = hashlib.sha256(_durable_bytes(payload)).hexdigest()
+            semantic_material = "\0".join(
+                (
+                    _AUTHORITY_DOMAIN,
+                    self.FILE_NAME,
+                    intended,
+                    policy.provenance_sha256,
+                    _economic_goal_sha256(policy.economic_goal) or "<UNBOUND>",
+                )
+            ).encode("utf-8")
+            semantic_binding = hashlib.sha256(semantic_material).hexdigest()
+            tx_id = f"paper-risk-policy-{intended}"
+
+            try:
+                self._authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=semantic_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise PaperRiskPolicyStoreError(
+                    "cannot prepare paper risk policy anti-rollback authority"
+                ) from exc
+
+            atomic_write_json(self.path, payload)
+            published = self._observed_state_sha256()
+            if published != intended:
+                raise PaperRiskPolicyStoreError(
+                    "published paper risk policy differs from prepared authority bytes"
+                )
+            try:
+                self._authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published,
+                    semantic_binding_sha256=semantic_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise PaperRiskPolicyStoreError(
+                    "cannot commit paper risk policy anti-rollback authority"
+                ) from exc

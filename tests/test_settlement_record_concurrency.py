@@ -326,8 +326,61 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
             {"event-1|winner|alice": "win"},
         )
 
+        before_record = engine.outcomes
         engine.record({"event-3|winner|carol": "void"})
         self.assertNotIn("event-3|winner|carol", caller_owned)
+        self.assertIsNot(engine.outcomes, before_record)
+        before_record["event-4|winner|dave"] = "loss"
+        self.assertNotIn("event-4|winner|dave", engine.outcomes)
+
+    def test_direct_outcome_overwrite_cannot_bypass_record_conflict(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+
+        engine.outcomes[leg.quote_key] = "loss"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.record({leg.quote_key: "loss"})
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+
+    def test_whole_outcome_dict_replacement_cannot_drive_settlement(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+
+        engine.outcomes = {leg.quote_key: "loss"}
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
 
 
     def test_same_outcome_concurrent_replay_remains_idempotent(self) -> None:

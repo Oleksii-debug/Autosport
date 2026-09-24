@@ -23,7 +23,10 @@ from autosport.bookmaker_account_reconciliation import (
     AccountReconciliationIntegrityError,
     BookmakerAccountReconciliationStore,
 )
-from autosport.bookmaker_capability import BookmakerCapability
+from autosport.bookmaker_capability import (
+    BookmakerCapability,
+    BookmakerCapabilityFact,
+)
 
 
 NS = "http://www.GlobalBettingExchange.com/ExternalAPI/"
@@ -1185,3 +1188,53 @@ def test_source_evidence_equality_side_effect_cannot_swap_snapshot_during_admiss
     assert current.snapshot is original_snapshot
     assert store.latest_snapshot() is None
     assert not store_path.exists()
+
+def test_issued_evidence_capability_fact_equality_rebind_cannot_mask_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    fact = current.snapshot.profile.facts[0]
+    assert fact.capability is BookmakerCapability.BALANCE_READ
+
+    # The projected and source profiles share the original immutable capability
+    # facts. object.__setattr__ can still alter a frozen fact after issuance; the
+    # deep baseline owns an independent copy. If BookmakerCapabilityFact.__eq__
+    # remains live, permissive equality can hide that mutation from the captured
+    # outer evidence equality before durable #790 admission.
+    object.__setattr__(
+        fact,
+        "capability",
+        BookmakerCapability.OPEN_POSITIONS_READ,
+    )
+    equality_calls: list[str] = []
+
+    def permissive_fact_equality(_left, _right):
+        equality_calls.append("called")
+        return True
+
+    monkeypatch.setattr(
+        BookmakerCapabilityFact,
+        "__eq__",
+        permissive_fact_equality,
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity class dispatch changed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert equality_calls == []
+    assert store.latest_snapshot() is None
+    assert not store_path.exists()
+

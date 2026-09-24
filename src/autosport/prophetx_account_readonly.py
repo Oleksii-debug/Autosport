@@ -958,6 +958,87 @@ class ProphetXReadOnlyClient:
             )
         return value.isoformat()
 
+    @staticmethod
+    def _build_provider_origin_issuers(
+        read_wallet_impl,
+        require_sync_impl,
+        require_origin_impl,
+        profile_for_impl,
+    ):
+        """Bind positive issuance to import-time class-body method identities."""
+
+        def authoritative_wallet(client):
+            wallet = read_wallet_impl(client)
+            require_sync_impl(wallet)
+            require_origin_impl(client)
+            return wallet
+
+        def capability_profile(self) -> BookmakerCapabilityProfile:
+            wallet = authoritative_wallet(self)
+            return profile_for_impl(self, wallet)
+
+        def read_account_snapshot(
+            self,
+            requested_capabilities: frozenset[BookmakerCapability],
+            /,
+        ) -> BookmakerAccountSnapshot:
+            if not isinstance(requested_capabilities, frozenset):
+                raise TypeError("requested_capabilities must be a frozenset")
+            if not requested_capabilities:
+                raise ProphetXReadOnlyError(
+                    "at least one account capability must be requested"
+                )
+            if requested_capabilities != frozenset(
+                {BookmakerCapability.BALANCE_READ}
+            ):
+                raise ProphetXReadOnlyError(
+                    "ProphetX wallet adapter implements only balance_read"
+                )
+
+            wallet = authoritative_wallet(self)
+            profile = profile_for_impl(self, wallet)
+            balance = BookmakerBalanceObservation(
+                venue_id=self._venue_id,
+                account_id=self._account_id,
+                adapter_id=ADAPTER_ID,
+                observation_id=(
+                    f"wallet:{wallet.evidence.source_payload_sha256}"
+                ),
+                currency=PROVIDER_CURRENCY,
+                available_balance=wallet.balance,
+                observed_at=wallet.evidence.observed_at,
+                source_payload_sha256=wallet.evidence.source_payload_sha256,
+                total_balance=None,
+                exposure=None,
+                retained_commission=None,
+                exposure_limit=None,
+            )
+            return BookmakerAccountSnapshot(
+                profile=profile,
+                observed_capabilities=frozenset(
+                    {BookmakerCapability.BALANCE_READ}
+                ),
+                observed_at=wallet.evidence.observed_at,
+                balance=balance,
+            )
+
+        return capability_profile, read_account_snapshot
+
+    # Positive provider/account issuance never resolves read_wallet (or the
+    # supporting validation/profile helpers) through the caller-writable
+    # instance namespace. Public read_wallet remains available for structural
+    # parsing tests, while these two authority-bearing methods retain the exact
+    # class-body callables captured here.
+    capability_profile, read_account_snapshot = (
+        _build_provider_origin_issuers.__func__(
+            read_wallet,
+            _require_synchronized_wallet.__func__,
+            _require_provider_origin_authority,
+            _profile_for,
+        )
+    )
+    del _build_provider_origin_issuers
+
 
 def _require_canonical_network_authority(
     client: ProphetXReadOnlyClient,

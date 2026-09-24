@@ -22,6 +22,10 @@ from autosport.betfair_supervised_execution import (
     execute_betfair_supervised_action,
     read_betfair_supervised_action_readback,
 )
+from autosport.betfair_timeout_reconciliation import (
+    BetfairTimeoutResolutionKind,
+    resolve_betfair_timeout_provider_state,
+)
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
@@ -65,7 +69,10 @@ from autosport.supervised_execution import (
     supervised_execution_terms_sha256,
     verify_betfair_provider_state,
 )
-from autosport.supervised_provider_evidence import ProviderEvidenceError
+from autosport.supervised_provider_evidence import (
+    ProviderEvidenceError,
+    _evaluate_betfair_provider_state_semantics,
+)
 from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 DECISION_TS = "2026-09-19T08:00:00+00:00"
@@ -961,6 +968,10 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(
+            "autosport.real_execution_ledger._now",
+            lambda: SUBMITTED_AT,
+        )
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _TimeoutTransport()
         client = _enabled_client(profile, transport, store=goal_store)
@@ -1000,13 +1011,50 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
             provider_order_ref=provider_ref,
             action=action,
         )
+        post_horizon_at = "2026-09-19T08:00:20+00:00"
+
+        class _PostHorizonDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime.fromisoformat(post_horizon_at)
+                return value if tz is None else value.astimezone(tz)
+
+        capture_ticks = iter([1_000_000_000, 16_000_000_000])
+        monkeypatch.setattr(
+            "autosport.betfair_timeout_reconciliation.datetime",
+            _PostHorizonDateTime,
+        )
+        monkeypatch.setattr(
+            "autosport.betfair_timeout_reconciliation.monotonic_ns",
+            lambda: next(capture_ticks),
+        )
         read_client = BetfairReadOnlyClient(
             BetfairSessionCredentials("app-key", "session-token"),
             transport=read_transport,
-            clock=lambda: datetime.fromisoformat(READBACK_AT),
+            clock=lambda: datetime.fromisoformat(post_horizon_at),
             venue_id="betfair",
             account_id="acct-1",
         )
+        first_envelope = read_betfair_supervised_action_readback(
+            read_client,
+            restarted,
+            bound,
+            attempt_id="attempt-timeout",
+        )
+        first_resolution = resolve_betfair_timeout_provider_state(
+            restarted,
+            action,
+            profile,
+            attempt_id="attempt-timeout",
+            expected_profile_sha256=profile.profile_id,
+            readback=first_envelope,
+        )
+        assert (
+            first_resolution.kind
+            is BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+        )
+        assert first_resolution.evidence is None
+
         envelope = read_betfair_supervised_action_readback(
             read_client,
             restarted,
@@ -1020,13 +1068,20 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
             in (None, [provider_ref])
             for call in read_transport.calls
         )
-        verified_absence = verify_betfair_provider_state(
+        timeout_resolution = resolve_betfair_timeout_provider_state(
+            restarted,
             action,
             profile,
+            attempt_id="attempt-timeout",
             expected_profile_sha256=profile.profile_id,
             readback=envelope,
-            expected_provider_order_ref=provider_ref,
         )
+        assert (
+            timeout_resolution.kind
+            is BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
+        )
+        verified_absence = timeout_resolution.evidence
+        assert verified_absence is not None
         assert verified_absence.provider_order_ref == provider_ref
         reconciliation = reconcile_provider_not_found(
             restarted,
@@ -1126,7 +1181,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
             ProviderEvidenceError,
             match="expected durable binding",
         ):
-            verify_betfair_provider_state(
+            _evaluate_betfair_provider_state_semantics(
                 action,
                 profile,
                 expected_profile_sha256=profile.profile_id,
@@ -1134,7 +1189,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
                 expected_provider_order_ref=owned_ref,
             )
 
-        foreign_effect = verify_betfair_provider_state(
+        foreign_effect = _evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,
@@ -1143,7 +1198,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
         assert foreign_effect.provider_order_ref == foreign_ref
         with pytest.raises(
             SupervisedExecutionError,
-            match="provider order reference mismatches durable attempt binding",
+            match="verified canonical provider evidence is not authoritative",
         ):
             reconcile_provider_readback(
                 ledger,
@@ -1195,7 +1250,7 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
             provider_order_ref=foreign_ref,
             market_id=action.market_id,
         )
-        foreign_absence = verify_betfair_provider_state(
+        foreign_absence = _evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,
@@ -1205,7 +1260,7 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
 
         with pytest.raises(
             SupervisedExecutionError,
-            match="provider order reference mismatches durable attempt binding",
+            match="verified complete provider absence evidence is not authoritative",
         ):
             reconcile_provider_not_found(
                 ledger,
@@ -1214,6 +1269,112 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
                 readback=foreign_absence,
             )
         assert ledger.attempt_state("attempt-foreign-absence") is AttemptState.UNKNOWN
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_not_found_consumer_rejects_rebound_authority_dispatch(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        timeout_client = _enabled_client(
+            profile, _TimeoutTransport(), store=goal_store
+        )
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-consumer-dispatch",
+            profile=profile,
+            client=timeout_client,
+            clock=lambda: SUBMITTED_AT,
+        )
+        assert result.attempt_state is AttemptState.UNKNOWN
+        owned_ref = ledger.provider_order_reference(
+            attempt_id="attempt-consumer-dispatch",
+            provider_id="betfair",
+        )
+        assert owned_ref is not None
+        foreign_ref = "d" * 32
+        assert foreign_ref != owned_ref
+
+        transport = _ReadbackTransport(
+            provider_order_ref=foreign_ref,
+            action=action,
+        )
+        client = BetfairReadOnlyClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            transport=transport,
+            clock=lambda: datetime.fromisoformat(READBACK_AT),
+            venue_id="betfair",
+            account_id="acct-1",
+        )
+        envelope = client.read_execution_readback(
+            action_id=action.action_id,
+            provider_order_ref=foreign_ref,
+            market_id=action.market_id,
+        )
+        foreign_absence = _evaluate_betfair_provider_state_semantics(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=envelope,
+        )
+        assert foreign_absence.provider_order_ref == foreign_ref
+
+        with monkeypatch.context() as local:
+            local.setattr(
+                "autosport.supervised_execution."
+                "assert_verified_provider_evidence_authoritative",
+                lambda evidence: None,
+            )
+            with pytest.raises(
+                SupervisedExecutionError,
+                match=(
+                    "provider not-found executable authority changed: "
+                    "assert_verified_provider_evidence_authoritative"
+                ),
+            ):
+                reconcile_provider_not_found(
+                    ledger,
+                    bound,
+                    attempt_id="attempt-consumer-dispatch",
+                    readback=foreign_absence,
+                )
+
+        assert (
+            ledger.attempt_state("attempt-consumer-dispatch")
+            is AttemptState.UNKNOWN
+        )
+
+        with monkeypatch.context() as local:
+            local.setattr(
+                RealExecutionLedger,
+                "provider_order_reference",
+                lambda self, *, attempt_id, provider_id: foreign_ref,
+            )
+            with pytest.raises(
+                SupervisedExecutionError,
+                match=(
+                    "provider not-found authority method changed: "
+                    "RealExecutionLedger.provider_order_reference"
+                ),
+            ):
+                reconcile_provider_not_found(
+                    ledger,
+                    bound,
+                    attempt_id="attempt-consumer-dispatch",
+                    readback=foreign_absence,
+                )
+
+        assert (
+            ledger.attempt_state("attempt-consumer-dispatch")
+            is AttemptState.UNKNOWN
+        )
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,

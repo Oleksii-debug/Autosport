@@ -413,7 +413,8 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         action_id="action-1",
         market_id="1.234",
     )
-    capture.assert_authoritative()
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        capture.assert_authoritative()
 
     assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
     assert not hasattr(betfair_readonly, "_EXECUTION_READBACK_SEAL")
@@ -442,6 +443,54 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         copied.assert_authoritative()
 
 
+def test_transient_post_init_transport_substitution_cannot_mint_readback_authority():
+    credentials = BetfairSessionCredentials("app-secret", "session-secret")
+    client = BetfairReadOnlyClient(
+        credentials,
+        clock=lambda: FIXED_NOW,
+    )
+    original_transport = client._transport
+
+    class RestoringTransport(FakeTransport):
+        def post(self, url, *, headers, body, timeout_seconds):
+            payload = super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+            if not self.responses:
+                client._transport = original_transport
+            return payload
+
+    synthetic = RestoringTransport(
+        [
+            response(
+                [{"marketId": "1.234", "event": {"id": "event-1"}}],
+                1,
+            ),
+            response({"currentOrders": [], "moreAvailable": False}, 2),
+            response({"clearedOrders": [], "moreAvailable": False}, 3),
+            response({"clearedOrders": [], "moreAvailable": False}, 4),
+            response({"clearedOrders": [], "moreAvailable": False}, 5),
+            response({"clearedOrders": [], "moreAvailable": False}, 6),
+        ]
+    )
+
+    # Restore the original transport before issuance to exercise the exact
+    # rebind/restore attack: end-state identity alone must never be enough.
+    client._transport = synthetic
+    capture = client.read_execution_readback(
+        action_id="action-1",
+        market_id="1.234",
+    )
+
+    assert len(synthetic.calls) == 6
+    assert client._transport is original_transport
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        capture.assert_authoritative()
+
+
 def test_execution_readback_detects_post_capture_origin_tampering():
     client, _ = client_for(
         response(
@@ -460,7 +509,7 @@ def test_execution_readback_detects_post_capture_origin_tampering():
     )
 
     object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
-    with pytest.raises(BetfairReadOnlyError, match="changed after canonical adapter capture"):
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
         capture.assert_authoritative()
 
 

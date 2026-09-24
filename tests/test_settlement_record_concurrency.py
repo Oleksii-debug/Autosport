@@ -492,5 +492,116 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("110"))
 
 
+    def test_coherent_outcomes_and_authority_slot_rewrite_cannot_mint_truth(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+
+        # Reproduce the predecessor bypass exactly: rewrite public truth and then
+        # rewrite the nominal authority slot to a matching caller-built snapshot.
+        engine.outcomes[leg.quote_key] = "loss"
+        engine._outcomes_authority = tuple(engine.outcomes.items())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+
+    def test_cross_engine_outcome_authority_token_cannot_be_transplanted(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        target = SettlementEngine({leg.quote_key: "win"})
+        donor = SettlementEngine({leg.quote_key: "loss"})
+
+        target.outcomes = {leg.quote_key: "loss"}
+        target._outcomes_authority = donor._outcomes_authority
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            target.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("90"))
+
+    def test_fabricated_outcome_authority_token_is_not_registered(self) -> None:
+        engine = SettlementEngine({"event-1|winner|alice": "win"})
+        token_type = type(engine._outcomes_authority)
+        engine._outcomes_authority = token_type()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.record({})
+
+    def test_canonical_record_revokes_predecessor_outcome_authority_token(self) -> None:
+        key = "event-1|winner|alice"
+        engine = SettlementEngine({key: "win"})
+        stale_outcomes = engine.outcomes
+        stale_token = engine._outcomes_authority
+
+        engine.record({"event-2|winner|bob": "void"})
+        self.assertIsNot(engine._outcomes_authority, stale_token)
+
+        # Even if caller retained both predecessor objects, the token registry
+        # revokes that generation when canonical record() advances authority.
+        engine.outcomes = stale_outcomes
+        engine._outcomes_authority = stale_token
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.record({})
+
+    def test_constructor_outcome_authority_initializer_binding_is_immutable(self) -> None:
+        canonical_post_init = SettlementEngine.__post_init__
+
+        def forged_post_init(_engine) -> None:
+            return None
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement public entry binding is immutable",
+        ):
+            SettlementEngine.__post_init__ = forged_post_init
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement public entry binding is immutable",
+        ):
+            del SettlementEngine.__post_init__
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement public entry binding is immutable",
+        ):
+            type.__setattr__(SettlementEngine, "__post_init__", forged_post_init)
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement public entry binding is immutable",
+        ):
+            type.__delattr__(SettlementEngine, "__post_init__")
+
+        self.assertIs(SettlementEngine.__post_init__, canonical_post_init)
+        engine = SettlementEngine({"event-1|winner|alice": "win"})
+        self.assertIsNotNone(engine._outcomes_authority)
+
+
 if __name__ == "__main__":
     unittest.main()

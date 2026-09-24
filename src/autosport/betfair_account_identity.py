@@ -206,6 +206,7 @@ def _make_account_identity_authority():
     client_type = BetfairReadOnlyClient
     transport_type = UrllibBetfairHttpTransport
     details_type = BetfairAccountDetailsObservation
+    readonly_module = _readonly_module
     evidence_type = readonly_module.BetfairEvidence
     rpc_result_type = readonly_module._RpcResult
     identity_type = BetfairAuthenticatedAccountIdentity
@@ -220,7 +221,6 @@ def _make_account_identity_authority():
     identity_schema = IDENTITY_SCHEMA
     identity_schema_version = IDENTITY_SCHEMA_VERSION
     context_prefix = _CONTEXT_PREFIX
-    readonly_module = _readonly_module
     identity_projection_material = _identity_projection_material
     identity_projection_material_code = getattr(
         identity_projection_material, "__code__", None

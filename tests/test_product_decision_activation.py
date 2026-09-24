@@ -898,6 +898,62 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertFalse(self.store.path.exists())
         self.assertEqual(committed.product_source_id, "provider-a")
 
+    def test_mwa_json_member_rebind_cannot_reinterpret_committed_history(
+        self,
+    ) -> None:
+        committed = self._initialize()
+        self.store.path.unlink()
+        canonical_loads = monotonic_authority_module.json.loads
+        canonical_dumps = monotonic_authority_module.json.dumps
+        forged_calls: list[str] = []
+
+        def forged_loads(*args: object, **kwargs: object) -> object:
+            forged_calls.append("json.loads")
+            payload = canonical_loads(*args, **kwargs)
+            if isinstance(payload, dict) and payload.get("phase") == "COMMIT":
+                payload = dict(payload)
+                payload["phase"] = "ABORT"
+            return payload
+
+        def forged_dumps(
+            payload: object,
+            *args: object,
+            **kwargs: object,
+        ) -> str:
+            forged_calls.append("json.dumps")
+            canonical_payload = payload
+            if isinstance(payload, dict) and payload.get("phase") == "ABORT":
+                canonical_payload = dict(payload)
+                canonical_payload["phase"] = "COMMIT"
+            return canonical_dumps(canonical_payload, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                monotonic_authority_module.json,
+                "loads",
+                forged_loads,
+            ),
+            mock.patch.object(
+                monotonic_authority_module.json,
+                "dumps",
+                forged_dumps,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "defining globals changed",
+            ):
+                self._initialize()
+
+        self.assertEqual(forged_calls, [])
+        self.assertFalse(self.store.path.exists())
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "anti-rollback authority rejected",
+        ):
+            self._initialize()
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(committed.product_source_id, "provider-a")
 
     def test_committed_activation_deletion_cannot_reinitialize(self) -> None:
         committed = self._initialize()

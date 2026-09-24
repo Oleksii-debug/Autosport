@@ -758,14 +758,12 @@ def test_raw_manifest_bytes_are_not_standalone_prospective_authority() -> None:
     assert RAW_MANIFEST_IS_PROSPECTIVE_AUTHORITY is False
 
 
-def test_monotonic_publication_witness_round_trip_and_late_retry(
+def test_monotonic_publication_witness_round_trip_and_helper_rebind_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, path, authority_root = _publication_workspace(tmp_path)
     original = manifest()
-    before = datetime(2099, 12, 31, 20, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
 
     first = publish_campaign_precommit_manifest(
         path,
@@ -781,12 +779,27 @@ def test_monotonic_publication_witness_round_trip_and_late_retry(
 
     assert first == resolved
     assert first.manifest_sha256 == original.manifest_sha256
-    assert first.post_publish_observed_at == "2099-12-31T20:00:00.000000Z"
+    observed = datetime.fromisoformat(
+        first.post_publish_observed_at.replace("Z", "+00:00")
+    )
+    assert observed < datetime.fromisoformat(
+        original.observation_not_before.replace("Z", "+00:00")
+    )
     assert first.target_relative_path == "evidence/precommit.json"
     assert first.authority_generation == 2
 
-    after = datetime(2100, 1, 1, 7, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: after)
+    # These module-level helpers remain a deterministic seam for the low-level
+    # non-authorizing byte writer. They are not positive publication authority.
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_deadline_reached",
+        lambda _deadline: True,
+    )
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_now_text",
+        lambda: "2200-01-01T00:00:00.000000Z",
+    )
     retry = publish_campaign_precommit_manifest(
         path,
         original,
@@ -798,12 +811,9 @@ def test_monotonic_publication_witness_round_trip_and_late_retry(
 
 def test_existing_raw_manifest_cannot_be_retroactively_promoted(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, path, authority_root = _publication_workspace(tmp_path)
     original = manifest()
-    before = datetime(2099, 12, 31, 20, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
 
     write_campaign_precommit_manifest_once(path, original)
 
@@ -819,25 +829,43 @@ def test_existing_raw_manifest_cannot_be_retroactively_promoted(
         )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX deterministic link timing seam")
-def test_link_boundary_race_can_leave_bytes_but_cannot_issue_witness(
+def test_module_clock_rebinding_cannot_mint_past_deadline_witness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, path, authority_root = _publication_workspace(tmp_path)
     original = manifest(
-        committed_at="2099-12-31T23:59:00Z",
-        observation_not_before="2100-01-01T00:00:00Z",
-        observation_not_after="2100-01-02T00:00:00Z",
+        committed_at="2019-12-31T23:00:00Z",
+        observation_not_before="2020-01-01T00:00:00Z",
+        observation_not_after="2020-01-02T00:00:00Z",
     )
-    before = datetime(2099, 12, 31, 23, 59, 59, 900000, tzinfo=timezone.utc)
-    after = datetime(2100, 1, 1, 0, 0, 0, 100000, tzinfo=timezone.utc)
-    clock = iter((before, before, before, after))
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: next(clock))
+    forged_before = datetime(2019, 12, 31, 23, 30, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(precommit_module, "_publication_now", lambda: forged_before)
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_deadline_reached",
+        lambda _deadline: False,
+    )
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_now_text",
+        lambda: "2019-12-31T23:30:00.000000Z",
+    )
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_observed_instant",
+        lambda _value: forged_before,
+    )
+    monkeypatch.setattr(
+        precommit_module,
+        "_instant",
+        lambda _value: datetime(2200, 1, 1, tzinfo=timezone.utc),
+    )
 
     with pytest.raises(
         CampaignPrecommitManifestError,
-        match="no publication witness issued",
+        match="first campaign precommit publication must precede prospective observation",
     ):
         publish_campaign_precommit_manifest(
             path,
@@ -846,17 +874,7 @@ def test_link_boundary_race_can_leave_bytes_but_cannot_issue_witness(
             authority_root=authority_root,
         )
 
-    assert path.exists()
-    assert load_campaign_precommit_manifest(path) == original
-    with pytest.raises(
-        CampaignPrecommitManifestError,
-        match="not a publication witness",
-    ):
-        resolve_campaign_precommit_publication_witness(
-            path,
-            workspace=workspace,
-            authority_root=authority_root,
-        )
+    assert not path.exists()
 
 
 def test_pending_witness_recovers_original_preboundary_observation_after_restart(
@@ -869,8 +887,6 @@ def test_pending_witness_recovers_original_preboundary_observation_after_restart
         observation_not_before="2100-01-01T00:00:00Z",
         observation_not_after="2100-01-02T00:00:00Z",
     )
-    before = datetime(2099, 12, 31, 23, 59, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
 
     real_commit = MonotonicWorkspaceAuthority.commit
 
@@ -906,8 +922,11 @@ def test_pending_witness_recovers_original_preboundary_observation_after_restart
         "commit",
         real_commit,
     )
-    after = datetime(2100, 1, 1, 1, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: after)
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_now_text",
+        lambda: "2200-01-01T00:00:00.000000Z",
+    )
 
     recovered = publish_campaign_precommit_manifest(
         path,
@@ -915,7 +934,12 @@ def test_pending_witness_recovers_original_preboundary_observation_after_restart
         workspace=workspace,
         authority_root=authority_root,
     )
-    assert recovered.post_publish_observed_at == "2099-12-31T23:59:00.000000Z"
+    recovered_observed = datetime.fromisoformat(
+        recovered.post_publish_observed_at.replace("Z", "+00:00")
+    )
+    assert recovered_observed < datetime.fromisoformat(
+        original.observation_not_before.replace("Z", "+00:00")
+    )
     assert recovered.authority_generation == 2
     assert resolve_campaign_precommit_publication_witness(
         path,
@@ -926,12 +950,9 @@ def test_pending_witness_recovers_original_preboundary_observation_after_restart
 
 def test_committed_witness_rejects_manifest_digest_or_path_drift(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, path, authority_root = _publication_workspace(tmp_path)
     original = manifest()
-    before = datetime(2099, 12, 31, 20, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(precommit_module, "_publication_now", lambda: before)
     witness = publish_campaign_precommit_manifest(
         path,
         original,

@@ -467,6 +467,67 @@ def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
     assert shadow_calls == []
 
 
+def test_public_positive_reads_reject_canonical_module_alias_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    authority = _initialized(path)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-module-alias",
+        expected_revision=1,
+        command_id="arm-r2-module-alias",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-module-alias",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    # Keep the independent product-root monotonic STOP at rev3 while restoring
+    # only the mutually-consistent local ARMED rev2 pair.
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+
+    forged_calls: list[str] = []
+
+    def bypass_monotonic_current(
+        _authority: ExecutionStopAuthority,
+        _records: object,
+        *,
+        adopt_if_missing: bool,
+    ) -> None:
+        forged_calls.append(f"adopt={adopt_if_missing}")
+
+    monkeypatch.setattr(
+        stop_module,
+        "_CANONICAL_ADMISSION_ENSURE_MONOTONIC_CURRENT_UNLOCKED",
+        bypass_monotonic_current,
+    )
+
+    # The public APIs must use the same full module graph guard as the sealed
+    # provider lease. The rebound alias must be rejected before it can suppress
+    # the newer durable STOP high-water check.
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopIntegrityError):
+        restarted.assert_execution_allowed()
+    with pytest.raises(ExecutionStopIntegrityError):
+        with restarted.admission_lease():
+            pytest.fail("module-alias rebind granted an execution lease")
+
+    assert forged_calls == []
+
+
 def test_admission_lease_rejects_product_root_selector_class_rebind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

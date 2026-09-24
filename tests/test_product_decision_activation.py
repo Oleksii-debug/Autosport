@@ -43,18 +43,6 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.test_root = Path(self._tmp.name)
         self.workspace = self.test_root / "workspace"
         self.workspace.mkdir()
-        self.machine_state_base = self.test_root / "machine-state"
-        self.authority_root = (
-            self.machine_state_base
-            / "autosport"
-            / "product-decision-activation-authority-v1"
-        )
-        self._machine_state_patch = mock.patch(
-            "autosport.product_decision_activation._product_machine_state_base",
-            return_value=self.machine_state_base,
-        )
-        self._machine_state_patch.start()
-        self.addCleanup(self._machine_state_patch.stop)
         self.registry = ScientificRegistry.initialize_pristine(
             self.workspace / "scientific_registry.json"
         )
@@ -87,6 +75,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self._write_composition(source_id="provider-a", bankroll="1000")
         self._write_risk(self.risk, self.goal)
         self.store = ProductDecisionActivationStore(self.workspace)
+        self.authority_root = self.store._authority.authority_root
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -867,6 +856,52 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         self.assertFalse(self.store.path.exists())
         self.assertEqual(committed.strategy_version_id, self.STRATEGY_ID)
+
+    def test_preconstruction_root_rebind_cannot_select_start_authority(
+        self,
+    ) -> None:
+        forged_root = self.test_root / "forged-preconstruction-root"
+        resolver_calls: list[str] = []
+
+        def forged_machine_state_base() -> Path:
+            resolver_calls.append("machine-state-base")
+            return forged_root
+
+        with mock.patch.object(
+            activation_module,
+            "_product_machine_state_base",
+            forged_machine_state_base,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "authority root trust changed",
+            ):
+                ProductDecisionActivationStore(self.workspace)
+
+        self.assertEqual(resolver_calls, [])
+        self.assertFalse(forged_root.exists())
+
+        with mock.patch.object(
+            activation_module,
+            "_PRODUCT_AUTHORITY_ROOT_NAME",
+            "caller-selected-activation-root",
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "authority root trust changed",
+            ):
+                ProductDecisionActivationStore(self.workspace)
+
+        self.assertFalse(
+            (
+                self.authority_root.parent
+                / "caller-selected-activation-root"
+            ).exists()
+        )
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
 
     def test_process_environment_cannot_repoint_activation_authority_root(self) -> None:
         env_root_a = self.test_root / "operator-root-a"

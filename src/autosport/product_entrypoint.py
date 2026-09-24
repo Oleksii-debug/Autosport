@@ -193,16 +193,18 @@ def run_product(
     )
     stop_request = _SignalStopRequest()
     previous_handlers: dict[int, object] = {}
-    if install_signal_handlers:
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in _product_stop_signals()
-        }
-        for signum in previous_handlers:
-            signal.signal(signum, stop_request.handle)
-
+    installed_handlers: list[int] = []
     started = False
     try:
+        if install_signal_handlers:
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in _product_stop_signals()
+            }
+            for signum in previous_handlers:
+                signal.signal(signum, stop_request.handle)
+                installed_handlers.append(signum)
+
         start_status = runtime.start()
         started = True
         _print_record("product_status", runtime=runtime, value=start_status)
@@ -253,8 +255,8 @@ def run_product(
                 raise ProductRuntimeError(type(exc).__name__) from exc
             raise
         finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+            for signum in installed_handlers:
+                signal.signal(signum, previous_handlers[signum])
 
 
 def run_product_command(

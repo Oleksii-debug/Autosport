@@ -1546,6 +1546,23 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         name: getattr(member, "__code__", None)
         for name, member in canonical_authority_json_members.items()
     }
+    # hashlib is also a mutable module object. Freezing only its module identity
+    # leaves sha256 member substitution able to relabel activation bytes and every
+    # downstream digest while all first-order MWA global checks still pass.
+    canonical_authority_hashlib_module = (
+        canonical_authority_module_globals.get("hashlib")
+        if isinstance(canonical_authority_module_globals, dict)
+        else None
+    )
+    canonical_authority_hashlib_member_names = ("sha256",)
+    canonical_authority_hashlib_members = {
+        name: getattr(canonical_authority_hashlib_module, name, None)
+        for name in canonical_authority_hashlib_member_names
+    }
+    canonical_authority_hashlib_member_codes = {
+        name: getattr(member, "__code__", None)
+        for name, member in canonical_authority_hashlib_members.items()
+    }
 
     # Nested MWA operations also virtual-dispatch into WorkspaceIdentityBinding.
     # Capture the exact descriptor graph rather than getattr()-bound methods so
@@ -1656,6 +1673,11 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             member is None
             for member in canonical_authority_json_members.values()
         )
+        or canonical_authority_hashlib_module is None
+        or any(
+            member is None
+            for member in canonical_authority_hashlib_members.values()
+        )
         or any(
             descriptor is None
             for descriptor in canonical_workspace_binding_descriptors.values()
@@ -1720,6 +1742,19 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         for name, canonical in canonical_authority_json_members.items():
             live = getattr(canonical_authority_json_module, name, None)
             canonical_code = canonical_authority_json_member_codes[name]
+            if (
+                live is not canonical
+                or (
+                    canonical_code is not None
+                    and getattr(live, "__code__", None) is not canonical_code
+                )
+            ):
+                raise ProductDecisionActivationError(
+                    "nested anti-rollback authority defining globals changed"
+                )
+        for name, canonical in canonical_authority_hashlib_members.items():
+            live = getattr(canonical_authority_hashlib_module, name, None)
+            canonical_code = canonical_authority_hashlib_member_codes[name]
             if (
                 live is not canonical
                 or (

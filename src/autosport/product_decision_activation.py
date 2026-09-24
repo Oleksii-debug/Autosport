@@ -1390,3 +1390,175 @@ class ProductDecisionActivationStore:
                     "supported START activation evidence no longer matches durable authority"
                 )
             return persisted
+
+def _seal_product_decision_activation_derive_dispatch() -> None:
+    """Seal positive START derivation against transient class descriptor rebinding."""
+
+    store_class = ProductDecisionActivationStore
+    canonical_derive = store_class.__dict__.get("_derive")
+    canonical_derive_code = getattr(canonical_derive, "__code__", None)
+    if canonical_derive is None or canonical_derive_code is None:
+        raise RuntimeError("canonical product decision activation derivation is unavailable")
+
+    def derive_canonically(
+        store: ProductDecisionActivationStore,
+        *,
+        scientific_registry: ScientificRegistry,
+        strategy_version_id: str,
+        economic_goal: EconomicGoalContract,
+        risk_policy: PaperRiskPolicy,
+        execution_config: PaperExecutionModelConfig,
+        intent_producer: BuiltInIntentProducer,
+    ) -> ProductDecisionActivationBinding:
+        if type(store) is not store_class:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
+        live_derive = store_class.__dict__.get("_derive")
+        if (
+            live_derive is not canonical_derive
+            or getattr(live_derive, "__code__", None) is not canonical_derive_code
+        ):
+            raise ProductDecisionActivationError(
+                "canonical product decision activation derivation authority changed"
+            )
+        return canonical_derive(
+            store,
+            scientific_registry=scientific_registry,
+            strategy_version_id=strategy_version_id,
+            economic_goal=economic_goal,
+            risk_policy=risk_policy,
+            execution_config=execution_config,
+            intent_producer=intent_producer,
+        )
+
+    def initialize_owner(
+        self: ProductDecisionActivationStore,
+        *,
+        scientific_registry: ScientificRegistry,
+        strategy_version_id: str,
+        economic_goal: EconomicGoalContract,
+        risk_policy: PaperRiskPolicy,
+        execution_config: PaperExecutionModelConfig,
+        intent_producer: BuiltInIntentProducer = BuiltInIntentProducer.REGISTERED_STRATEGY,
+    ) -> ProductDecisionActivationBinding:
+        """Create once with an independent freshness witness; exact retry is idempotent."""
+
+        if type(self) is not store_class:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
+        with WorkspaceEconomicLock(self.workspace):
+            observed = self._recover_authority()
+            expected = derive_canonically(
+                self,
+                scientific_registry=scientific_registry,
+                strategy_version_id=strategy_version_id,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                execution_config=execution_config,
+                intent_producer=intent_producer,
+            )
+            if self.path.exists():
+                existing = self._load_local()
+                if existing != expected:
+                    raise ProductDecisionActivationError(
+                        "durable product decision activation conflicts with requested START"
+                    )
+                return existing
+            if observed is not None:
+                raise ProductDecisionActivationError(
+                    "activation state disappeared after anti-rollback verification"
+                )
+
+            root = self._root(expected)
+            intended = hashlib.sha256(_durable_json_bytes(root)).hexdigest()
+            semantic_binding = _digest(
+                {
+                    "kind": "PRODUCT_DECISION_ACTIVATION_CREATE",
+                    "activation_filename": "product_decision_activation.json",
+                    "binding_sha256": expected.binding_sha256,
+                    "intended_state_sha256": intended,
+                }
+            )
+            tx_id = f"activation-{uuid.uuid4().hex}"
+            try:
+                self._authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=semantic_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise ProductDecisionActivationError(
+                    "cannot prepare product decision activation anti-rollback witness"
+                ) from exc
+
+            atomic_write_json(self.path, root)
+            published = self._observed_state_sha256()
+            if published != intended:
+                raise ProductDecisionActivationError(
+                    "published product decision activation differs from prepared bytes"
+                )
+            persisted = self._load_local()
+            if persisted != expected:
+                raise ProductDecisionActivationError(
+                    "persisted product decision activation does not match requested START"
+                )
+            try:
+                self._authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published,
+                    semantic_binding_sha256=semantic_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise ProductDecisionActivationError(
+                    "cannot commit product decision activation anti-rollback witness"
+                ) from exc
+            return persisted
+
+    def verify(
+        self: ProductDecisionActivationStore,
+        *,
+        scientific_registry: ScientificRegistry,
+        strategy_version_id: str,
+        economic_goal: EconomicGoalContract,
+        risk_policy: PaperRiskPolicy,
+        execution_config: PaperExecutionModelConfig,
+        intent_producer: BuiltInIntentProducer = BuiltInIntentProducer.REGISTERED_STRATEGY,
+    ) -> ProductDecisionActivationBinding:
+        """Re-resolve every child authority and reject START-time drift."""
+
+        if type(self) is not store_class:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
+        with WorkspaceEconomicLock(self.workspace):
+            if self.path.exists() or self.path.is_symlink():
+                persisted = self._load_local()
+                self._recover_authority()
+            else:
+                self._recover_authority()
+                persisted = self._load_local()
+            expected = derive_canonically(
+                self,
+                scientific_registry=scientific_registry,
+                strategy_version_id=strategy_version_id,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                execution_config=execution_config,
+                intent_producer=intent_producer,
+            )
+            if persisted != expected:
+                raise ProductDecisionActivationError(
+                    "supported START activation evidence no longer matches durable authority"
+                )
+            return persisted
+
+    setattr(store_class, "initialize_owner", initialize_owner)
+    setattr(store_class, "verify", verify)
+
+
+_seal_product_decision_activation_derive_dispatch()
+del _seal_product_decision_activation_derive_dispatch
+

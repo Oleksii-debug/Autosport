@@ -1014,7 +1014,10 @@ def evaluate_calibration_diagnostics(
         confidence_level=confidence_level,
         method=_BRIER_INTERVAL_METHOD,
     )
-    max_log_loss = -math.log(float(support_floor))
+    max_log_loss = max(
+        -math.log(float(support_floor)),
+        -math.log1p(-float(support_ceiling)),
+    )
     log_loss = _bounded_mean_interval(
         summary.log_loss,
         count=summary.count,

@@ -622,6 +622,104 @@ def test_generic_reconciled_not_found_cannot_release_local_capital(
         )
 
 
+def test_deleted_row_cannot_free_generic_not_found_held_capital(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("not-found-held", stake="70")
+    second = _action("next-after-not-found", stake="40")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    ledger.mark_unknown("try-1", reason="timeout", observed_at=UNKNOWN)
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="try-1",
+            evidence_id="generic-not-found",
+            observed_at=RECONCILED,
+            external_effect_found=False,
+            source="provider-readback",
+        )
+    )
+    held = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert held.ledger_state is AttemptState.RECONCILED_NOT_FOUND
+    assert held.active
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM reservations WHERE attempt_id = 'try-1'")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+
+
+def test_deleted_row_cannot_free_rejected_held_capital(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("rejected-held", stake="70")
+    second = _action("next-after-rejected", stake="40")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    ledger.acknowledge(
+        ExternalAcknowledgement(
+            attempt_id="try-1",
+            external_receipt_id="rejected-receipt",
+            status=AcknowledgementStatus.REJECTED,
+            acknowledged_at=ACKED,
+        )
+    )
+    held = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert held.ledger_state is AttemptState.REJECTED
+    assert held.active
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM reservations WHERE attempt_id = 'try-1'")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+
+
 def test_restart_preserves_active_reservation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

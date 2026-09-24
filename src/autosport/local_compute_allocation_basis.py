@@ -792,6 +792,12 @@ def _build_allocation_basis_store_runtime():
     json_dumps = json.dumps
     sha256 = hashlib.sha256
     object_new = object.__new__
+    object_setattr = object.__setattr__
+
+    class GoalStoreReader:
+        __slots__ = ("path",)
+
+    goal_store_reader_type = GoalStoreReader
     sealed_state = weakref.WeakKeyDictionary()
     authority_operations = {
         "read_history": authority_type.read_history,
@@ -1028,9 +1034,12 @@ def _build_allocation_basis_store_runtime():
         require_state(self)
         try:
             frozen_workspace, _path, _authority, _root = sealed_state[self]
-            goal_store = object_new(goal_store_type)
-            goal_store.workspace = frozen_workspace
-            goal_store.path = frozen_workspace / goal_store_file_name
+            goal_store = object_new(goal_store_reader_type)
+            object_setattr(
+                goal_store,
+                "path",
+                frozen_workspace / goal_store_file_name,
+            )
             goal = goal_store_load(goal_store)
             raw = json_dumps(
                 goal_to_payload(goal),

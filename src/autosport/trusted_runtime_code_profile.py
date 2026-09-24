@@ -105,6 +105,15 @@ class TrustedRuntimeCodeProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class _StartedRuntimeOrigin:
+    runtime: AutonomousProductRuntime
+    operator_source_id: str
+    factory_spec: str
+    provider_source_id: str
+    workspace: str
+
+
+@dataclass(frozen=True, slots=True)
 class _IssuedRuntimeProfile:
     profile: TrustedRuntimeCodeProfile
     evidence_sha256: str
@@ -112,6 +121,7 @@ class _IssuedRuntimeProfile:
 
 
 _LOCK = RLock()
+_STARTED_ORIGINS: dict[int, _StartedRuntimeOrigin] = {}
 _ISSUED: dict[int, _IssuedRuntimeProfile] = {}
 _ACTIVE_BY_RUNTIME: dict[int, int] = {}
 _ACTIVE_BY_WORKSPACE: dict[str, int] = {}
@@ -160,21 +170,17 @@ def require_product_owned_source_factory_identity(
     return entry
 
 
-def issue_trusted_runtime_code_profile(
+def _register_started_product_runtime_origin(
     runtime: AutonomousProductRuntime,
     *,
     source_factory: str,
     expected_provider_source_id: str,
-) -> TrustedRuntimeCodeProfile:
-    """Issue one active profile for the exact running closed-registry runtime.
-
-    The caller must invoke this only after runtime.start() succeeds. Direct/headless
-    module:function construction intentionally has no issuance path.
-    """
+) -> None:
+    """Record canonical closed-registry origin only after runtime.start() succeeds."""
 
     if type(runtime) is not AutonomousProductRuntime:
         raise TrustedRuntimeCodeProfileError(
-            "trusted runtime profile requires exact AutonomousProductRuntime"
+            "trusted runtime origin requires exact AutonomousProductRuntime"
         )
     entry = require_product_owned_source_factory_identity(
         source_factory=source_factory,
@@ -186,8 +192,70 @@ def issue_trusted_runtime_code_profile(
         )
     workspace = _workspace_text(runtime)
     runtime_identity = id(runtime)
+    origin = _StartedRuntimeOrigin(
+        runtime=runtime,
+        operator_source_id=entry.source_id,
+        factory_spec=entry.factory_spec,
+        provider_source_id=entry.expected_provider_source_id,
+        workspace=workspace,
+    )
+    with _LOCK:
+        existing = _STARTED_ORIGINS.get(runtime_identity)
+        if existing is not None:
+            if existing == origin and existing.runtime is runtime:
+                return
+            raise TrustedRuntimeCodeProfileError(
+                "runtime has an inconsistent started code origin"
+            )
+        _STARTED_ORIGINS[runtime_identity] = origin
+
+
+def _clear_started_product_runtime_origin(runtime: object) -> None:
+    """Drop exact process-local START origin during terminal worker cleanup."""
 
     with _LOCK:
+        existing = _STARTED_ORIGINS.get(id(runtime))
+        if existing is not None and existing.runtime is runtime:
+            _STARTED_ORIGINS.pop(id(runtime), None)
+
+
+def issue_trusted_runtime_code_profile(
+    runtime: AutonomousProductRuntime,
+) -> TrustedRuntimeCodeProfile:
+    """Issue only from a current canonical STARTED-origin record."""
+
+    if type(runtime) is not AutonomousProductRuntime:
+        raise TrustedRuntimeCodeProfileError(
+            "trusted runtime profile requires exact AutonomousProductRuntime"
+        )
+    runtime_identity = id(runtime)
+    with _LOCK:
+        origin = _STARTED_ORIGINS.get(runtime_identity)
+        if origin is None or origin.runtime is not runtime:
+            raise TrustedRuntimeCodeProfileError(
+                "runtime lacks canonical started product-code origin"
+            )
+
+    entry = require_product_owned_source_factory_identity(
+        source_factory=origin.factory_spec,
+        expected_provider_source_id=origin.provider_source_id,
+    )
+    workspace = _workspace_text(runtime)
+    if (
+        runtime.manifest.source_id != origin.provider_source_id
+        or workspace != origin.workspace
+        or entry.source_id != origin.operator_source_id
+    ):
+        raise TrustedRuntimeCodeProfileError(
+            "runtime started origin changed before profile issuance"
+        )
+
+    with _LOCK:
+        current_origin = _STARTED_ORIGINS.get(runtime_identity)
+        if current_origin != origin or current_origin is None:
+            raise TrustedRuntimeCodeProfileError(
+                "runtime started origin changed during profile issuance"
+            )
         existing_profile_identity = _ACTIVE_BY_RUNTIME.get(runtime_identity)
         if existing_profile_identity is not None:
             existing = _ISSUED.get(existing_profile_identity)
@@ -207,9 +275,9 @@ def issue_trusted_runtime_code_profile(
 
         profile = TrustedRuntimeCodeProfile(
             profile_id=f"trusted-runtime:{token_hex(32)}",
-            operator_source_id=entry.source_id,
-            factory_spec=entry.factory_spec,
-            provider_source_id=entry.expected_provider_source_id,
+            operator_source_id=origin.operator_source_id,
+            factory_spec=origin.factory_spec,
+            provider_source_id=origin.provider_source_id,
             workspace=workspace,
         )
         profile_identity = id(profile)
@@ -239,6 +307,9 @@ def is_authoritative_trusted_runtime_code_profile(
         runtime = record.runtime
         if type(runtime) is not AutonomousProductRuntime:
             return False
+        origin = _STARTED_ORIGINS.get(id(runtime))
+        if origin is None or origin.runtime is not runtime:
+            return False
         if _ACTIVE_BY_RUNTIME.get(id(runtime)) != id(value):
             return False
         if _ACTIVE_BY_WORKSPACE.get(value.workspace) != id(value):
@@ -248,14 +319,18 @@ def is_authoritative_trusted_runtime_code_profile(
         try:
             runtime_workspace = _workspace_text(runtime)
             entry = require_product_owned_source_factory_identity(
-                source_factory=value.factory_spec,
-                expected_provider_source_id=value.provider_source_id,
+                source_factory=origin.factory_spec,
+                expected_provider_source_id=origin.provider_source_id,
             )
         except TrustedRuntimeCodeProfileError:
             return False
         if (
             runtime_workspace != value.workspace
+            or runtime_workspace != origin.workspace
             or runtime.manifest.source_id != value.provider_source_id
+            or value.provider_source_id != origin.provider_source_id
+            or value.factory_spec != origin.factory_spec
+            or value.operator_source_id != origin.operator_source_id
             or entry.source_id != value.operator_source_id
         ):
             return False

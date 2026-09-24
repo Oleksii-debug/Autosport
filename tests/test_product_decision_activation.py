@@ -294,6 +294,68 @@ class ProductDecisionActivationTests(unittest.TestCase):
         canonical = self._initialize()
         self.assertEqual(canonical.product_source_id, "provider-a")
 
+    def test_store_class_derive_rebind_cannot_mint_durable_start_authority(
+        self,
+    ) -> None:
+        canonical_expected = self.store._derive(
+            scientific_registry=self.registry,
+            strategy_version_id=self.STRATEGY_ID,
+            economic_goal=self.goal,
+            risk_policy=self.risk,
+            execution_config=self.execution,
+            intent_producer=BuiltInIntentProducer.REGISTERED_STRATEGY,
+        )
+        forged_binding = replace(
+            canonical_expected,
+            product_source_id="caller-forged-provider",
+        )
+
+        def forged_derive(_store, **_kwargs):
+            return forged_binding
+
+        with mock.patch.object(
+            ProductDecisionActivationStore,
+            "_derive",
+            forged_derive,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "derivation authority changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(
+            ProductDecisionActivationStore(self.workspace).load(),
+            canonical,
+        )
+
+    def test_store_class_derive_rebind_cannot_fake_verification(self) -> None:
+        canonical = self._initialize()
+        forged_binding = replace(
+            canonical,
+            product_source_id="caller-forged-provider",
+        )
+
+        def forged_derive(_store, **_kwargs):
+            return forged_binding
+
+        with mock.patch.object(
+            ProductDecisionActivationStore,
+            "_derive",
+            forged_derive,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "derivation authority changed",
+            ):
+                self._verify()
+
+        self.assertEqual(self._verify(), canonical)
+        self.assertEqual(self.store.load(), canonical)
+
     def test_activation_filename_rebind_cannot_create_second_namespace(self) -> None:
         committed = self._initialize()
         canonical_path = self.store.path

@@ -354,7 +354,7 @@ def test_hmac_digest_code_mutation_cannot_mask_issued_field_mutation(
     original_digest_code = hmac.digest.__code__
 
     def forged_digest(_key, _msg, _digest):
-        return b"\\x00" * 32
+        return bytes(32)
 
     try:
         hmac.digest.__code__ = forged_digest.__code__

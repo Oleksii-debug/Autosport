@@ -370,3 +370,35 @@ def test_prepublication_crash_aborts_and_allows_fresh_owner_retry(
         economic_goal=goal,
         expected_policy_provenance_sha256=policy.provenance_sha256,
     ) == policy
+
+
+def test_post_commit_substitution_cannot_return_success_for_stale_policy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    goal = _goal()
+    owner = _policy(goal)
+    replacement = _weaker_policy(goal)
+    store = PaperRiskPolicyStore(tmp_path)
+    real_commit = store._authority.commit
+
+    def commit_then_substitute(**kwargs) -> None:
+        real_commit(**kwargs)
+        risk_store_module.atomic_write_json(
+            store.path,
+            paper_risk_policy_to_payload(replacement),
+        )
+
+    monkeypatch.setattr(store._authority, "commit", commit_then_substitute)
+
+    with pytest.raises(
+        PaperRiskPolicyStoreError,
+        match="changed during authority commit",
+    ):
+        store.initialize_owner(owner)
+
+    with pytest.raises(PaperRiskPolicyStoreError, match="anti-rollback"):
+        PaperRiskPolicyStore(tmp_path).load(
+            economic_goal=goal,
+            expected_policy_provenance_sha256=replacement.provenance_sha256,
+        )

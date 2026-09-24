@@ -732,6 +732,7 @@ def _sha256_hex(value: str, field: str) -> str:
         )
     return text
 
+
 # Positive continuity evidence and its durable #790 admission are one authority-
 # bearing composition. Compose both once, after every helper exists, so later
 # module rebinding cannot choose a principal, projected snapshot, issuer, or

@@ -122,5 +122,124 @@ class AtomicWriteJsonTests(unittest.TestCase):
                     )
 
 
+    def test_generic_write_reads_back_exact_published_digest_before_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "стан Autosport з пробілом.json"
+            original_sha256_file = integrity.sha256_file
+            hashed_paths: list[Path] = []
+
+            def recording_sha256_file(path: str | Path) -> str:
+                candidate = Path(path)
+                hashed_paths.append(candidate)
+                return original_sha256_file(candidate)
+
+            with patch.object(
+                integrity,
+                "sha256_file",
+                side_effect=recording_sha256_file,
+            ):
+                integrity.atomic_write_json(
+                    destination,
+                    {"value": "перевірено", "generation": 2},
+                )
+
+            self.assertGreaterEqual(len(hashed_paths), 2)
+            self.assertEqual(hashed_paths[-1], destination)
+            self.assertEqual(
+                json.loads(destination.read_text(encoding="utf-8")),
+                {"value": "перевірено", "generation": 2},
+            )
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                [],
+            )
+
+    def test_replace_failure_preserves_prior_generic_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "state.json"
+            integrity.atomic_write_json(destination, {"generation": 1})
+            prior_bytes = destination.read_bytes()
+
+            with patch.object(
+                integrity.os,
+                "replace",
+                side_effect=OSError(28, "No space left on device"),
+            ):
+                with self.assertRaises(OSError):
+                    integrity.atomic_write_json(destination, {"generation": 2})
+
+            self.assertEqual(destination.read_bytes(), prior_bytes)
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                [],
+            )
+
+    def test_generic_post_replace_readback_io_failure_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "state.json"
+            integrity.atomic_write_json(destination, {"generation": 1})
+            original_sha256_file = integrity.sha256_file
+
+            def fail_destination_readback(path: str | Path) -> str:
+                candidate = Path(path)
+                if candidate == destination:
+                    raise OSError(5, "readback unavailable")
+                return original_sha256_file(candidate)
+
+            with patch.object(
+                integrity,
+                "sha256_file",
+                side_effect=fail_destination_readback,
+            ):
+                with self.assertRaisesRegex(
+                    integrity.AtomicWritePublicationUncertainError,
+                    "replacement completed but published bytes could not be verified",
+                ) as caught:
+                    integrity.atomic_write_json(destination, {"generation": 2})
+
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+
+            self.assertEqual(
+                json.loads(destination.read_text(encoding="utf-8")),
+                {"generation": 2},
+            )
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                [],
+            )
+
+    def test_generic_post_replace_digest_mismatch_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "state.json"
+            integrity.atomic_write_json(destination, {"generation": 1})
+            original_sha256_file = integrity.sha256_file
+
+            def mismatch_destination_readback(path: str | Path) -> str:
+                candidate = Path(path)
+                if candidate == destination:
+                    return "0" * 64
+                return original_sha256_file(candidate)
+
+            with patch.object(
+                integrity,
+                "sha256_file",
+                side_effect=mismatch_destination_readback,
+            ):
+                with self.assertRaisesRegex(
+                    integrity.AtomicWritePublicationUncertainError,
+                    "replacement completed but published bytes do not match intended digest",
+                ):
+                    integrity.atomic_write_json(destination, {"generation": 2})
+
+            self.assertEqual(
+                json.loads(destination.read_text(encoding="utf-8")),
+                {"generation": 2},
+            )
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                [],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

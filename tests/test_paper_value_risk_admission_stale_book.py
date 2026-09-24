@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from autosport.agents import AgentContext
-from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -20,44 +20,6 @@ from autosport.paper_execution_reality import (
 )
 from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.risk import PaperRiskPolicy
-
-
-class _ConcurrentAllocationLedger(JsonlDecisionLedger):
-    """Commit one independently admissible allocation after the first risk PASS."""
-
-    def __init__(self, path, book: PaperBook, risk_policy: PaperRiskPolicy) -> None:
-        super().__init__(path)
-        self._book = book
-        self._risk_policy = risk_policy
-        self.mutated = False
-
-    def append(self, record: DecisionRecord) -> str:
-        digest = super().append(record)
-        if not self.mutated:
-            # At committed exposure 19.00, either competing 1.00 action is
-            # independently valid: aggregate exposure would become exactly the
-            # canonical 20% cap. Execute the competitor first to model the race.
-            assert self._risk_policy.evaluate(self._book, Decimal("1.00")).allowed
-            self._book.open_ticket(
-                (
-                    TicketLeg(
-                        "event-concurrent",
-                        "market-concurrent",
-                        "selection-concurrent",
-                        Decimal("2.00"),
-                        sport="football",
-                    ),
-                ),
-                Decimal("1.00"),
-                reason="simultaneous-paper-allocation",
-                placed_at="2026-09-20T08:59:59+00:00",
-            )
-            self.mutated = True
-            assert not self._risk_policy.evaluate(
-                self._book,
-                Decimal("1.00"),
-            ).allowed
-        return digest
 
 
 def _runtime(tmp_path, book: PaperBook) -> PaperExecutionAdoptionRuntime:
@@ -128,11 +90,36 @@ def test_fresh_general_risk_pass_cannot_be_rebound_to_changed_paper_book(tmp_pat
     assert policy.evaluate(book, Decimal("1.00")).allowed
 
     runtime = _runtime(tmp_path, book)
-    ledger = _ConcurrentAllocationLedger(
-        tmp_path / "decisions.jsonl",
-        book,
-        policy,
-    )
+    ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    canonical_append = ledger.append
+    mutated = False
+
+    def append_then_allocate(record) -> str:
+        nonlocal mutated
+        digest = canonical_append(record)
+        if not mutated:
+            # Keep the product authority exact while injecting the race only
+            # after this action's durable decision has been committed.
+            assert policy.evaluate(book, Decimal("1.00")).allowed
+            book.open_ticket(
+                (
+                    TicketLeg(
+                        "event-concurrent",
+                        "market-concurrent",
+                        "selection-concurrent",
+                        Decimal("2.00"),
+                        sport="football",
+                    ),
+                ),
+                Decimal("1.00"),
+                reason="simultaneous-paper-allocation",
+                placed_at="2026-09-20T08:59:59+00:00",
+            )
+            mutated = True
+            assert not policy.evaluate(book, Decimal("1.00")).allowed
+        return digest
+
+    ledger.append = append_then_allocate  # type: ignore[method-assign]
     context = AgentContext(
         book,
         replay_run_id="replay-a",
@@ -163,7 +150,7 @@ def test_fresh_general_risk_pass_cannot_be_rebound_to_changed_paper_book(tmp_pat
     ):
         agent.on_market_event(event, context)
 
-    assert ledger.mutated is True
+    assert mutated is True
     assert book.balance == Decimal("80.00")
     assert len(book.tickets) == 20
     assert not policy.evaluate(book, Decimal("1.00")).allowed

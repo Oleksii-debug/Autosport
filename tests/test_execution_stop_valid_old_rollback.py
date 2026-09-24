@@ -295,6 +295,84 @@ def test_product_root_module_rebind_cannot_reauthorize_valid_old_armed(
     assert not forged_root.exists()
 
 
+def test_execution_authority_coordinates_cannot_retarget_valid_old_armed_workspace(
+    tmp_path: Path,
+) -> None:
+    path_a = tmp_path / "workspace-a" / "execution-stop.jsonl"
+    authority = _initialized(path_a)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-location-seal",
+        expected_revision=1,
+        command_id="arm-r2-location-seal",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path_a.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-location-seal",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+    assert authority.decision().allowed is False
+
+    path_b = tmp_path / "workspace-b" / "execution-stop.jsonl"
+    path_b.parent.mkdir(parents=True, exist_ok=True)
+    anchor_b = path_b.with_name(path_b.name + ".anchor.json")
+    lock_b = path_b.with_name(path_b.name + ".lock")
+    path_b.write_bytes(valid_old_armed_journal)
+    anchor_b.write_bytes(valid_old_armed_anchor)
+
+    restarted = ExecutionStopAuthority(path_a)
+    canonical_anchor = restarted.anchor_path
+    canonical_lock = restarted._lock_path
+
+    # Direct dictionary insertion used to retarget these ordinary instance
+    # attributes without touching any class/module seal. Data-descriptor
+    # precedence must keep the construction-owned A coordinates authoritative.
+    restarted.__dict__["path"] = path_b
+    restarted.__dict__["_anchor_path"] = anchor_b
+    restarted.__dict__["_lock_path"] = lock_b
+
+    assert restarted.path == path_a
+    assert restarted.anchor_path == canonical_anchor
+    assert restarted._lock_path == canonical_lock
+
+    for name, forged in (
+        ("path", path_b),
+        ("_anchor_path", anchor_b),
+        ("_lock_path", lock_b),
+    ):
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="construction coordinates are immutable",
+        ):
+            setattr(restarted, name, forged)
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="construction coordinates are immutable",
+        ):
+            object.__setattr__(restarted, name, forged)
+
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+    with pytest.raises(ExecutionStopAuthorityError):
+        with restarted.admission_lease():
+            pytest.fail("retargeted valid-old ARMED workspace granted an execution lease")
+
+    # The copied workspace remains only inert local bytes. Normal positive reads
+    # never switched the live authority away from the newer STOP in workspace A.
+    assert restarted.path == path_a
+    assert restarted.anchor_path == canonical_anchor
+    assert restarted._lock_path == canonical_lock
+
+
 def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
     tmp_path: Path,
 ) -> None:

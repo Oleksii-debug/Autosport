@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,6 +52,91 @@ _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD: Final = economic_goal_to_payload
 
 class LocalComputeAllocationBasisError(ValueError):
     """The reviewed allocation basis or durable state is malformed."""
+
+
+def _build_local_compute_monotonic_authority_root():
+    """Freeze the shared LOCAL-compute machine-state root at import time."""
+
+    os_name = os.name
+    path_type = Path
+    error_type = LocalComputeAllocationBasisError
+
+    if os_name == "nt":
+        try:
+            import ctypes
+
+            create_unicode_buffer = ctypes.create_unicode_buffer
+            get_folder_path = (
+                ctypes.windll.shell32.SHGetFolderPathW  # type: ignore[attr-defined]
+            )
+        except (AttributeError, ImportError) as exc:
+            raise error_type(
+                "cannot resolve product-owned Windows authority root"
+            ) from exc
+
+        def resolve() -> Path:
+            try:
+                buffer = create_unicode_buffer(32768)
+                result = get_folder_path(
+                    None,
+                    0x001C,  # CSIDL_LOCAL_APPDATA
+                    None,
+                    0,
+                    buffer,
+                )
+            except (AttributeError, OSError, ValueError) as exc:
+                raise error_type(
+                    "cannot resolve product-owned Windows authority root"
+                ) from exc
+            if result != 0 or not buffer.value:
+                raise error_type(
+                    "cannot resolve product-owned Windows authority root"
+                )
+            base = path_type(buffer.value)
+            relative = (
+                path_type("Autosport")
+                / "application-state"
+                / "monotonic-authority-v1"
+            )
+            if not base.is_absolute():
+                raise error_type(
+                    "product-owned monotonic authority root must be absolute"
+                )
+            return base / relative
+
+        return resolve
+
+    try:
+        import pwd
+
+        getuid = os.getuid
+        getpwuid = pwd.getpwuid
+    except (AttributeError, ImportError) as exc:
+        raise error_type(
+            "cannot resolve product-owned POSIX authority root"
+        ) from exc
+
+    def resolve() -> Path:
+        try:
+            home = getpwuid(getuid()).pw_dir
+        except (KeyError, OSError) as exc:
+            raise error_type(
+                "cannot resolve product-owned POSIX authority root"
+            ) from exc
+        base = path_type(home) / ".local" / "state"
+        relative = path_type("autosport") / "monotonic-authority-v1"
+        if not base.is_absolute():
+            raise error_type(
+                "product-owned monotonic authority root must be absolute"
+            )
+        return base / relative
+
+    return resolve
+
+
+local_compute_monotonic_authority_root = (
+    _build_local_compute_monotonic_authority_root()
+)
 
 
 def _text(value: object, field: str, *, limit: int = 512) -> str:
@@ -669,27 +755,77 @@ def _validate_publication_available_at(
     return available_instant
 
 
+def _build_allocation_basis_store_init():
+    """Bind one LOCAL-compute namespace to the product machine root."""
+
+    root_resolver = local_compute_monotonic_authority_root
+    root_code = getattr(root_resolver, "__code__", None)
+    root_closure = getattr(root_resolver, "__closure__", None)
+    try:
+        root_closure_state = tuple(
+            cell.cell_contents for cell in (root_closure or ())
+        )
+    except ValueError as exc:
+        raise LocalComputeAllocationBasisError(
+            "canonical product authority root closure is invalid"
+        ) from exc
+
+    path_type = Path
+    authority_type = MonotonicWorkspaceAuthority
+    lock_type = WorkspaceEconomicLock
+    file_name = FILE_NAME
+    authority_domain = AUTHORITY_DOMAIN
+    authority_key = AUTHORITY_KEY
+    error_type = LocalComputeAllocationBasisError
+
+    def sealed_init(self, workspace: str | Path) -> None:
+        if getattr(root_resolver, "__code__", None) is not root_code:
+            raise error_type(
+                "canonical product authority root resolver code changed"
+            )
+        live_closure = getattr(root_resolver, "__closure__", None)
+        try:
+            live_closure_state = tuple(
+                cell.cell_contents for cell in (live_closure or ())
+            )
+        except ValueError as exc:
+            raise error_type(
+                "canonical product authority root closure changed"
+            ) from exc
+        if (
+            len(live_closure_state) != len(root_closure_state)
+            or any(
+                current is not frozen
+                for current, frozen in zip(
+                    live_closure_state,
+                    root_closure_state,
+                )
+            )
+        ):
+            raise error_type(
+                "canonical product authority root closure changed"
+            )
+
+        self.workspace = path_type(workspace).absolute().resolve(strict=False)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.path = self.workspace / file_name
+        self._authority = authority_type(
+            workspace=self.workspace,
+            domain=authority_domain,
+            key=authority_key,
+            authority_root=root_resolver(),
+        )
+        with lock_type(self.workspace):
+            self._recover()
+            self._records = self._load()
+
+    return sealed_init
+
+
 class LocalComputeAllocationBasisAuthorityStore:
     """Creation-only owner-reviewed basis store with rollback fencing."""
 
-    def __init__(
-        self,
-        workspace: str | Path,
-        *,
-        authority_root: str | Path | None = None,
-    ) -> None:
-        self.workspace = Path(workspace).absolute()
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / FILE_NAME
-        self._authority = MonotonicWorkspaceAuthority(
-            workspace=self.workspace,
-            domain=AUTHORITY_DOMAIN,
-            key=AUTHORITY_KEY,
-            authority_root=authority_root,
-        )
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            self._records = self._load()
+    __init__ = _build_allocation_basis_store_init()
 
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None

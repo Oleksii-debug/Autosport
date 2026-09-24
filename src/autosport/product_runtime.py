@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import ExitStack
-from types import FunctionType
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+from threading import RLock
+from types import FunctionType
 from typing import Callable, Protocol
 
 from .causal_collector import (
@@ -48,6 +50,17 @@ from .workspace_lock import (
 
 class ProductCompositionError(RuntimeError):
     """The durable product composition cannot be verified safely."""
+
+
+def _serialized_runtime_operation(method):
+    """Hold one runtime-local fence across an admitted public lifecycle operation."""
+
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._operation_fence:
+            return method(self, *args, **kwargs)
+
+    return guarded
 
 
 class _ProductRuntimeLease(WorkspaceEconomicLock):
@@ -389,7 +402,7 @@ class _ManifestStore:
             )
         return ProductCompositionManifest(
             source_id=source_id,
-            initial_bankroll=initial_bankroll,
+            initial_bankroll=normalized_bankroll,
             settlement_authority_identity=settlement_authority_identity,
         )
 
@@ -476,9 +489,7 @@ def _settlement_authority_identity(
         raise ProductCompositionError(
             "settlement_configuration_sha256 must be lowercase SHA-256 hex"
         )
-    implementation = (
-        f"{type(source).__module__}.{type(source).__qualname__}"
-    )
+    implementation = f"{type(source).__module__}.{type(source).__qualname__}"
     payload = {
         "source_id": source_id,
         "authority_id": authority_id,
@@ -514,6 +525,12 @@ class AutonomousProductRuntime:
     _runtime_lease: _ProductRuntimeLease
     _start_transition_store: _ProductStartTransitionStore
     _closed: bool = False
+    _operation_fence: RLock = field(
+        default_factory=RLock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def _require_runtime_authority(self) -> None:
         if self._closed or not self._runtime_lease.authority_active:
@@ -616,11 +633,6 @@ class AutonomousProductRuntime:
         *,
         generation: int,
     ) -> None:
-        # The START journal is durable before either child mutation. If a child
-        # transition or final journal publication fails, attempt both STOP
-        # authorities independently. Only verified coherent STOPPED can close the
-        # transaction as rolled back; otherwise the durable transition remains
-        # recovery-required and positive lifecycle use stays fenced.
         compensation_failed = False
         for action, stop in (
             ("collector STOP compensation", self.collector.stop),
@@ -658,8 +670,6 @@ class AutonomousProductRuntime:
         try:
             self._start_transition_store.mark_rolled_back(generation)
         except BaseException as transition_error:
-            # A still-STARTING journal is intentionally fail-closed and will be
-            # recovered on restart. Keep the original START failure primary.
             self._note_secondary_failure(
                 primary_error,
                 action="START rollback journal",
@@ -677,9 +687,8 @@ class AutonomousProductRuntime:
                 "cannot recover interrupted product START transition"
             ) from exc
 
+    @_serialized_runtime_operation
     def start(self) -> ContinuousSessionStatus:
-        # A completed RUNNING start is idempotent. Every mutating START/resume
-        # publishes a durable transition before the first child mutation.
         current = self._coherent_status()
         current_state = self._state_value(current)
         if current_state == SessionState.RUNNING.value:
@@ -706,6 +715,7 @@ class AutonomousProductRuntime:
             )
             raise
 
+    @_serialized_runtime_operation
     def pause(self) -> ContinuousSessionStatus:
         current = self._coherent_status()
         state = self._state_value(current)
@@ -718,15 +728,14 @@ class AutonomousProductRuntime:
         self.coordinator.pause()
         return self._coherent_status()
 
+    @_serialized_runtime_operation
     def resume(self) -> ContinuousSessionStatus:
         return self.start()
 
+    @_serialized_runtime_operation
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
         self._require_runtime_authority()
         pending = self._start_transition_store.pending()
-        # STOP is also the explicit recovery action for a previously split
-        # lifecycle graph, so do not preflight coherence here. Attempt both
-        # durable STOP authorities even if either side reports an error.
         collector_error: BaseException | None = None
         coordinator_error: BaseException | None = None
         try:
@@ -776,17 +785,17 @@ class AutonomousProductRuntime:
             )
         return resolved
 
+    @_serialized_runtime_operation
     def status(self) -> ContinuousSessionStatus:
         return self._coherent_status()
 
+    @_serialized_runtime_operation
     def tick(self) -> ContinuousTickResult:
         self._coherent_status()
         return self.coordinator.tick()
 
+    @_serialized_runtime_operation
     def close(self) -> None:
-        # Revoke lifecycle authority before closing resources or releasing the
-        # workspace lease. Cleanup may fail, but a closing runtime must never
-        # become usable again after exclusive ownership can be transferred.
         self._closed = True
         try:
             self.market_store.close()
@@ -866,21 +875,13 @@ def build_autonomous_product_runtime(
 
         lifecycle = ContinuousEventLifecycle(root / "catalog.json")
         market_store = SQLiteMarketStore(root / "market.db")
-        # Until the fully assembled runtime takes ownership, construction unwind owns
-        # every opened resource. Register exactly once so failures at any later
-        # composition step cannot leak SQLite handles or leave Windows files locked.
         lease_stack.callback(market_store.close)
         mirror = MarketMirror()
         invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
-        # Rebuild volatile mirror truth from the canonical durable current projection.
-        # ExitStack closes the store exactly once if this or any downstream step fails.
         for event in market_store.current_by_source().values():
             invalidations.accept_persisted(event)
 
-        # Future mirror updates are downstream of the canonical market bus so they are
-        # delivered only after SQLite persistence. If a subscriber fails after persistence,
-        # canonical desktop application recovery can safely replay from durable truth.
         market_bus = MarketEventBus(market_store)
         market_bus.subscribe(invalidations.accept_persisted)
         source_health = SourceHealthStore(root / "source_health.json")
@@ -937,10 +938,6 @@ def build_autonomous_product_runtime(
                 root / "product_start_transition.json"
             ),
         )
-        # An interrupted START is recovered while the same exclusive product lease
-        # still serializes the workspace. Conservatively reconverge to STOPPED
-        # before handing runtime authority back to a caller.
         runtime._recover_interrupted_start()
-        # Runtime lifetime, not builder lifetime, owns the process lease.
         lease_stack.pop_all()
         return runtime

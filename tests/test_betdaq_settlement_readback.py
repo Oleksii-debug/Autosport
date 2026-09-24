@@ -492,6 +492,40 @@ def test_soap_body_smuggling_is_rejected(monkeypatch):
         client.read_account_postings_by_id(9001)
 
 
+def test_postings_result_sibling_smuggling_is_rejected(monkeypatch):
+    payload = postings_by_id(posting(9001)).replace(
+        b"</ListAccountPostingsByIdResult>",
+        (
+            f'<Unexpected xmlns="{NS}" />'
+            "</ListAccountPostingsByIdResult>"
+        ).encode(),
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        client.read_account_postings_by_id(9001)
+
+
+def test_order_result_sibling_smuggling_is_rejected(monkeypatch):
+    payload = order_details().replace(
+        b"</GetOrderDetailsResult>",
+        (
+            f'<Unexpected xmlns="{NS}" />'
+            "</GetOrderDetailsResult>"
+        ).encode(),
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        client.read_order_details(123)
+
+
 def test_repr_never_exposes_credentials(monkeypatch):
     client, _ = economic_client(monkeypatch)
     value = repr(client)

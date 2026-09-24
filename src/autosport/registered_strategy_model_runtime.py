@@ -16,7 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
-from ._strategy_model_factory_impl import MeanBaselineModel, TrainingPoint
+from ._strategy_model_factory_impl import MeanBaselineModel
 from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
 
@@ -341,17 +341,11 @@ class RegisteredStrategyModelRuntime:
             raise RegisteredStrategyModelRuntimeError(
                 "live feature is not available at decision time"
             )
-        point = TrainingPoint(
-            observed_at=observed_at,
-            feature=numeric_feature,
-            target=0.0,
-        )
-        try:
-            value = self._model.predict(point, decision_at=decision_at)
-        except ValueError as exc:
+        if _instant(self.training_cutoff, "model training_cutoff") > decision:
             raise RegisteredStrategyModelRuntimeError(
-                "registered model rejected prediction input"
-            ) from exc
+                "registered model training cutoff exceeds decision time"
+            )
+        value = self._model.mean_target
         if not math.isfinite(value) or value < 0.0 or value > 1.0:
             raise RegisteredStrategyModelRuntimeError(
                 "registered model output is not a probability"

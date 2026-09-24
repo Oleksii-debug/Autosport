@@ -423,6 +423,23 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertEqual(engine.outcomes, {"event-1|winner|alice": "void"})
 
 
+    def test_settlement_process_trust_boundary_is_explicit(self) -> None:
+        self.assertEqual(
+            settlement_module.SETTLEMENT_TAMPER_MODEL_VERSION,
+            "settlement-process-trust-v1",
+        )
+        self.assertEqual(
+            settlement_module.SETTLEMENT_TAMPER_MODEL_V1,
+            (
+                "assumes:trusted-cpython-runtime",
+                "assumes:trusted-installed-python-executables",
+                "guards:application-state-binding-descriptor-dependency-drift",
+                "out-of-scope:direct-function-code-mutation",
+                "out-of-scope:closure-cell-mutation",
+                "out-of-scope:interpreter-or-native-runtime-mutation",
+            ),
+        )
+
     def test_public_settlement_entry_class_bindings_are_immutable(self) -> None:
         canonical_record = SettlementEngine.record
         canonical_settle_ready = SettlementEngine.settle_ready

@@ -147,6 +147,46 @@ class MarketImpliedBaselineTests(unittest.TestCase):
             max_age=max_age,
         )
 
+    def test_caller_polymorphism_cannot_replace_canonical_market_history(self) -> None:
+        class ForgedStore(SQLiteMarketStore):
+            def events(self, event_id=None):
+                return []
+
+        forged = object.__new__(ForgedStore)
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            build_market_implied_baseline_evidence(
+                cohort_key="row-1",
+                store=forged,
+                outcome_authority=self.authority(),
+                decision_cutoff=self.CUTOFF,
+                max_age=timedelta(minutes=10),
+            )
+
+        self.store.events = lambda event_id=None: []  # type: ignore[method-assign]
+        with self.assertRaisesRegex(
+            MarketImpliedBaselineError,
+            "must not shadow events reader",
+        ):
+            self.evidence()
+        del self.store.events
+
+    def test_caller_polymorphism_cannot_replace_outcome_authority(self) -> None:
+        class ForgedAuthority(MarketSettlementOutcomeAuthority):
+            pass
+
+        forged = object.__new__(ForgedAuthority)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact MarketSettlementOutcomeAuthority",
+        ):
+            build_market_implied_baseline_evidence(
+                cohort_key="row-1",
+                store=self.store,
+                outcome_authority=forged,
+                decision_cutoff=self.CUTOFF,
+                max_age=timedelta(minutes=10),
+            )
+
     def test_complete_roster_yields_exact_probability_vector_without_authority_widening(self) -> None:
         self.persist()
         evidence = self.evidence()

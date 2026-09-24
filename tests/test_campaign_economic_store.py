@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -70,6 +71,43 @@ def test_store_exact_retry_restart_and_chain_roundtrip(tmp_path: Path) -> None:
         assert restarted.verify_chain() == (first, second)
     finally:
         fixture.doCleanups()
+
+
+def test_atomic_json_closes_raw_descriptor_when_fdopen_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "head.json"
+    captured: dict[str, object] = {}
+    original_mkstemp = economic_store_module.tempfile.mkstemp
+
+    def capture_mkstemp(*args, **kwargs):
+        descriptor, temp_name = original_mkstemp(*args, **kwargs)
+        captured["descriptor"] = descriptor
+        captured["temp_name"] = temp_name
+        return descriptor, temp_name
+
+    def fail_fdopen(descriptor: int, mode: str):
+        raise RuntimeError("fdopen transfer failed")
+
+    monkeypatch.setattr(
+        economic_store_module.tempfile,
+        "mkstemp",
+        capture_mkstemp,
+    )
+    monkeypatch.setattr(economic_store_module.os, "fdopen", fail_fdopen)
+
+    with pytest.raises(RuntimeError, match="fdopen transfer failed"):
+        economic_store_module._atomic_json(target, {"schema_version": 1})
+
+    descriptor = captured["descriptor"]
+    assert isinstance(descriptor, int)
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    temp_name = captured["temp_name"]
+    assert isinstance(temp_name, str)
+    assert not Path(temp_name).exists()
+    assert not target.exists()
 
 
 def test_successor_retry_recovers_crash_after_version_before_head(

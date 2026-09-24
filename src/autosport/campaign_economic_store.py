@@ -572,22 +572,43 @@ def _exclusive_create(path: Path, raw: bytes) -> None:
 
 def _atomic_json(path: Path, raw: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temp_path = Path(temp_name)
+    descriptor: int | None = None
+    temp_path: Path | None = None
     try:
-        with os.fdopen(descriptor, "wb") as handle:
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temp_path = Path(temp_name)
+        try:
+            handle = os.fdopen(descriptor, "wb")
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            else:
+                descriptor = None
+            raise
+        descriptor = None
+
+        with handle:
             handle.write(_canonical_bytes(raw))
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        temp_path = None
         _fsync_dir(path.parent)
     finally:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _fsync_dir(path: Path) -> None:

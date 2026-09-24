@@ -80,4 +80,4 @@ def test_partial_acquisition_stays_partial_even_with_typed_provider_failure() ->
     )
 
     assert completeness is BetfairObservationCompleteness.PARTIAL
-    assert reason == "acquisition_interrupted"
+    assert reason == "partial_provider_transient"

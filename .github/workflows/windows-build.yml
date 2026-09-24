@@ -93,6 +93,57 @@ jobs:
           "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Qualify packaged paths with spaces and Cyrillic
+        shell: pwsh
+        run: |
+          $matrixOutput = Join-Path $PWD 'dist/path-matrix'
+          python scripts/test_packaged_path_matrix.py `
+            --artifact-root $env:AUTOSPORT_PACKAGED_ROOT `
+            --executable-relative-path 'Autosport-Data.exe' `
+            --output-dir $matrixOutput `
+            --mode exit-zero `
+            --argument 'repair-workspace' `
+            --argument=--workspace `
+            --argument '{WORKSPACE_ROOT}'
+          if ($LASTEXITCODE -ne 0) { throw "Packaged path matrix exited $LASTEXITCODE" }
+          $matrixReport = Join-Path $matrixOutput 'path-matrix-report.json'
+          if (-not (Test-Path -LiteralPath $matrixReport -PathType Leaf)) { throw 'Packaged path matrix did not publish its JSON report' }
+          $matrixEvidence = Get-Content -LiteralPath $matrixReport -Raw -Encoding utf8 | ConvertFrom-Json
+          if ([string]$matrixEvidence.matrix_status -ne 'PASS') { throw "Packaged path matrix status is $($matrixEvidence.matrix_status)" }
+          if ($matrixEvidence.real_money_execution -ne $false -or $matrixEvidence.human_tested -ne $false -or $matrixEvidence.nvda_verified -ne $false -or $matrixEvidence.whole_product_complete -ne $false) {
+            throw 'Packaged path matrix attempted to promote protected truth flags'
+          }
+          if ([string]$matrixEvidence.launch_cwd_policy -ne 'UNRELATED_CASE_DIRECTORY') { throw 'Packaged path matrix did not prove unrelated launch CWD policy' }
+          if ([string]$matrixEvidence.workspace_policy -ne 'AUTOSPORT_WORKSPACE_PER_CASE_ABSOLUTE') { throw 'Packaged path matrix did not prove isolated absolute workspace policy' }
+          if ([string]::IsNullOrWhiteSpace([string]$matrixEvidence.privilege_context)) { throw 'Packaged path matrix omitted privilege context' }
+          if ($matrixEvidence.non_admin_verified -eq $true -and [string]$matrixEvidence.privilege_context -ne 'STANDARD_USER') {
+            throw 'Packaged path matrix promoted non-admin verification without STANDARD_USER context'
+          }
+
+          $guiMatrixOutput = Join-Path $PWD 'dist/path-matrix-gui'
+          python scripts/test_packaged_path_matrix.py `
+            --artifact-root $env:AUTOSPORT_PACKAGED_ROOT `
+            --executable-relative-path 'Autosport.exe' `
+            --output-dir $guiMatrixOutput `
+            --mode persistent `
+            --startup-seconds 5
+          if ($LASTEXITCODE -ne 0) { throw "Packaged GUI path matrix exited $LASTEXITCODE" }
+          $guiMatrixReport = Join-Path $guiMatrixOutput 'path-matrix-report.json'
+          if (-not (Test-Path -LiteralPath $guiMatrixReport -PathType Leaf)) { throw 'Packaged GUI path matrix did not publish its JSON report' }
+          $guiMatrixEvidence = Get-Content -LiteralPath $guiMatrixReport -Raw -Encoding utf8 | ConvertFrom-Json
+          if ([string]$guiMatrixEvidence.executable_relative_path -ne 'Autosport.exe') { throw 'Packaged GUI path matrix executable identity mismatch' }
+          if ([string]$guiMatrixEvidence.probe_mode -ne 'persistent') { throw 'Packaged GUI path matrix probe mode mismatch' }
+          if ([string]$guiMatrixEvidence.matrix_status -ne 'PASS') { throw "Packaged GUI path matrix status is $($guiMatrixEvidence.matrix_status)" }
+          if ([string]$guiMatrixEvidence.artifact_tree_sha256 -ne [string]$matrixEvidence.artifact_tree_sha256) { throw 'Packaged GUI and data path matrices did not use the same verified artifact tree' }
+          if ([string]$guiMatrixEvidence.launch_cwd_policy -ne 'UNRELATED_CASE_DIRECTORY' -or [string]$guiMatrixEvidence.workspace_policy -ne 'AUTOSPORT_WORKSPACE_PER_CASE_ABSOLUTE') {
+            throw 'Packaged GUI path matrix launch isolation policy mismatch'
+          }
+          if ($guiMatrixEvidence.non_admin_verified -ne $matrixEvidence.non_admin_verified -or [string]$guiMatrixEvidence.privilege_context -ne [string]$matrixEvidence.privilege_context) {
+            throw 'Packaged GUI and data path matrices disagree on machine privilege context'
+          }
+          if ($guiMatrixEvidence.real_money_execution -ne $false -or $guiMatrixEvidence.human_tested -ne $false -or $guiMatrixEvidence.nvda_verified -ne $false -or $guiMatrixEvidence.whole_product_complete -ne $false) {
+            throw 'Packaged GUI path matrix attempted to promote protected truth flags'
+          }
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
         run: ./scripts/nvda_evidence_package_smoke.ps1
@@ -252,6 +303,8 @@ jobs:
             dist/restart-recovery-audit.json
             dist/research-demo-audit.json
             dist/repair-workspace-package-smoke.json
+            dist/path-matrix/path-matrix-report.json
+            dist/path-matrix-gui/path-matrix-report.json
             dist/walk-forward-package-smoke.json
             dist/walk-forward-package-smoke-dataset
             dist/walk-forward-package-smoke-report.json

@@ -222,18 +222,18 @@ def run_product(
             cycles += 1
             _print_record("product_tick", runtime=runtime, value=result)
 
-            if max_cycles is not None and cycles >= max_cycles:
-                _print_record(
-                    "product_status",
-                    runtime=runtime,
-                    value=runtime.stop("max_cycles_reached"),
-                )
-                break
             if stop_request.requested:
                 _print_record(
                     "product_status",
                     runtime=runtime,
                     value=runtime.stop(stop_request.reason),
+                )
+                break
+            if max_cycles is not None and cycles >= max_cycles:
+                _print_record(
+                    "product_status",
+                    runtime=runtime,
+                    value=runtime.stop("max_cycles_reached"),
                 )
                 break
             if install_signal_handlers and sleep is time.sleep:

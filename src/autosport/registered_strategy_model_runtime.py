@@ -10,8 +10,10 @@ is owned by the product.
 from __future__ import annotations
 
 import math
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Final
 
@@ -89,6 +91,45 @@ def _instant(value: object, name: str) -> datetime:
             f"{name} must include timezone"
         )
     return parsed
+
+
+def _make_registered_strategy_runtime_issuance_gate():
+    issuance_token = object()
+    issuance_context: ContextVar[object | None] = ContextVar(
+        "autosport_registered_strategy_runtime_issuance",
+        default=None,
+    )
+
+    def require_issuance() -> None:
+        if issuance_context.get() is not issuance_token:
+            raise RegisteredStrategyModelRuntimeError(
+                "RegisteredStrategyModelRuntime must be issued by the canonical durable resolver"
+            )
+
+    def bind_resolver(implementation):
+        implementation_code = implementation.__code__
+
+        @wraps(implementation)
+        def guarded_resolver(*args, **kwargs):
+            if getattr(implementation, "__code__", None) is not implementation_code:
+                raise RegisteredStrategyModelRuntimeError(
+                    "registered-strategy runtime resolver authority changed"
+                )
+            marker = issuance_context.set(issuance_token)
+            try:
+                return implementation(*args, **kwargs)
+            finally:
+                issuance_context.reset(marker)
+
+        return guarded_resolver
+
+    return require_issuance, bind_resolver
+
+
+(
+    _require_registered_strategy_runtime_issuance,
+    _bind_registered_strategy_runtime_resolver,
+) = _make_registered_strategy_runtime_issuance_gate()
 
 
 def _require_causal_entry(
@@ -362,6 +403,46 @@ class RegisteredStrategyModelRuntime:
     authority_as_of: str
     training_cutoff: str
     _model: MeanBaselineModel = field(repr=False, compare=False)
+
+    def __post_init__(
+        self,
+        _require_issuance=_require_registered_strategy_runtime_issuance,
+    ) -> None:
+        _require_issuance()
+        _text(self.strategy_version_id, "strategy_version_id")
+        _sha256(self.strategy_record_sha256, "strategy_record_sha256")
+        _text(self.model_version_id, "model_version_id")
+        _sha256(self.model_record_sha256, "model_record_sha256")
+        _sha256(self.model_artifact_sha256, "model_artifact_sha256")
+        _sha256(self.model_identity_sha256, "model_identity_sha256")
+        _sha256(self.promotion_record_sha256, "promotion_record_sha256")
+        _text(self.experiment_id, "experiment_id")
+        _sha256(
+            self.reproducibility_bundle_sha256,
+            "reproducibility_bundle_sha256",
+        )
+        _text(self.canonical_strategy_id, "canonical_strategy_id")
+        _text(self.research_protocol_id, "research_protocol_id")
+        _text(self.dataset_snapshot_id, "dataset_snapshot_id")
+        _text(self.feature_set_id, "feature_set_id")
+        _instant(self.authority_as_of, "authority_as_of")
+        _instant(self.training_cutoff, "training_cutoff")
+        if type(self._model) is not MeanBaselineModel:
+            raise RegisteredStrategyModelRuntimeError(
+                "runtime executable must be the canonical MeanBaselineModel"
+            )
+        if self._model.model_id != self.model_version_id:
+            raise RegisteredStrategyModelRuntimeError(
+                "runtime executable model id does not match ModelVersion"
+            )
+        if self._model.identity_sha256 != self.model_identity_sha256:
+            raise RegisteredStrategyModelRuntimeError(
+                "runtime executable identity does not match durable model identity"
+            )
+        if self._model.training_cutoff != self.training_cutoff:
+            raise RegisteredStrategyModelRuntimeError(
+                "runtime executable training cutoff does not match durable lineage"
+            )
 
     def predict_value(
         self,
@@ -840,6 +921,12 @@ def resolve_registered_strategy_model(
         training_cutoff=rebuilt.training_cutoff,
         _model=rebuilt,
     )
+
+
+resolve_registered_strategy_model = _bind_registered_strategy_runtime_resolver(
+    resolve_registered_strategy_model
+)
+del _bind_registered_strategy_runtime_resolver
 
 
 __all__ = [

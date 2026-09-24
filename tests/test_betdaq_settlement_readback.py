@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from urllib.error import URLError
@@ -336,6 +337,10 @@ def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monk
     second_value = second.read_account_postings_by_id(9001)
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.readback_id == second_value.readback_id
+    assert (
+        first_value.postings[0].observation_id
+        == second_value.postings[0].observation_id
+    )
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
 
 
@@ -358,6 +363,15 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
     assert first_value.evidence.account_context_id != second_value.evidence.account_context_id
     assert first_value.evidence.evidence_id != second_value.evidence.evidence_id
     assert first_value.readback_id != second_value.readback_id
+    assert (
+        first_value.postings[0].observation_id
+        != second_value.postings[0].observation_id
+    )
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="posting evidence does not match readback authenticated context",
+    ):
+        replace(second_value, postings=first_value.postings)
 
 
 def test_transport_exception_is_sanitized(monkeypatch):

@@ -36,6 +36,7 @@ def _event(
     sequence: int = 7,
     odds: str = "2.10",
     metadata: dict[str, object] | None = None,
+    market_semantics_id: str | None = None,
 ) -> MarketEvent:
     return MarketEvent(
         event_id=event_id,
@@ -48,6 +49,7 @@ def _event(
         source_ts="2026-09-16T15:59:59+00:00",
         ingest_ts="2026-09-16T16:00:01+00:00",
         metadata=metadata or {"provider_market": "soccer-match-odds"},
+        market_semantics_id=market_semantics_id,
     )
 
 
@@ -68,6 +70,7 @@ def _forecast(
     forecast_id: str = "forecast-1",
     probability: str = "0.55",
     snapshot_hash: str | None = _SHA_B,
+    market_semantics_id: str | None = None,
 ) -> ForecastRecord:
     return ForecastRecord(
         quote_key=quote_key,
@@ -82,6 +85,7 @@ def _forecast(
         market_snapshot_hash=snapshot_hash,
         provenance={"split": "live-causal"},
         forecast_id=forecast_id,
+        market_semantics_id=market_semantics_id,
     )
 
 
@@ -97,6 +101,7 @@ def _forecast_ref(
             forecast_id=forecast_id,
             probability=probability,
             snapshot_hash=quote.market_snapshot_hash,
+            market_semantics_id=quote.market_semantics_id,
         ),
         quote,
     )
@@ -295,6 +300,78 @@ def test_forecast_reference_rejects_market_snapshot_mismatch() -> None:
         match="market snapshot does not match bound QuoteRef",
     ):
         ForecastRef.from_forecast(record, quote)
+
+
+def test_market_semantics_none_preserves_legacy_quote_and_forecast_v2_serialization() -> None:
+    quote = _quote(_event(market_semantics_id=None))
+    forecast = _forecast_ref(quote)
+
+    quote_payload = quote.to_dict()
+    forecast_payload = forecast.to_dict()
+
+    assert "market_semantics_id" not in quote_payload
+    assert forecast_payload["schema"] == "autosport.forecast_ref"
+    assert forecast_payload["schema_version"] == 2
+    assert "market_semantics_id" not in forecast_payload
+    assert QuoteRef.from_dict(quote_payload) == quote
+    assert ForecastRef.from_dict(forecast_payload) == forecast
+
+
+def test_concrete_market_semantics_round_trip_as_quote_evidence_and_forecast_v3() -> None:
+    semantics = "soccer:h2h:v1"
+    quote = _quote(_event(market_semantics_id=semantics))
+    forecast = _forecast_ref(quote)
+
+    assert quote.market_semantics_id == semantics
+    assert quote.to_dict()["market_semantics_id"] == semantics
+    payload = forecast.to_dict()
+    assert payload["schema"] == "autosport.forecast_ref"
+    assert payload["schema_version"] == 3
+    assert payload["market_semantics_id"] == semantics
+    assert QuoteRef.from_dict(quote.to_dict()) == quote
+    assert ForecastRef.from_dict(payload) == forecast
+
+
+def test_forecast_reference_rejects_market_semantics_mismatch_even_when_quote_key_matches() -> None:
+    quote = _quote(
+        _event(market_semantics_id="soccer:h2h:v1"),
+        snapshot_hash=_SHA_B,
+    )
+    record = _forecast(
+        quote.quote_key,
+        snapshot_hash=_SHA_B,
+        market_semantics_id="soccer:h2h:v2",
+    )
+
+    assert record.quote_key == quote.quote_key
+    with pytest.raises(
+        OpportunityContractError,
+        match="market_semantics_id does not match bound QuoteRef",
+    ):
+        ForecastRef.from_forecast(record, quote)
+
+
+def test_opportunity_rejects_forecast_quote_market_semantics_mismatch() -> None:
+    quote = _quote(
+        _event(market_semantics_id="soccer:h2h:v1"),
+        snapshot_hash=_SHA_B,
+    )
+    bound = _forecast_ref(quote)
+    tampered_payload = bound.to_dict()
+    tampered_payload["market_semantics_id"] = "soccer:h2h:v2"
+    mismatched = ForecastRef.from_dict(tampered_payload)
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="does not bind the exact opportunity quote snapshot",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            decision=OpportunityDecision.ACTIONABLE,
+            quotes=(quote,),
+            claims_probability_edge=True,
+            forecasts=(mismatched,),
+        )
 
 
 def test_predictive_forecast_is_bound_to_exact_quote_event_snapshot() -> None:

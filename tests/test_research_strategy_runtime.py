@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -182,6 +183,58 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             self.assertFalse((workspace / "market.db").exists())
             self.assertFalse((workspace / "run_registry.json").exists())
 
+    def test_forecast_market_semantics_survives_plan_parse_and_binds_replay_event(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = list(dataset.load_market_events())
+        raw = self._plan_dict()
+        decision = raw["decisions"][0]
+        trigger_key = decision["trigger_quote_key"]
+        decision_ts = decision["decision_ts"]
+        semantics = "table-tennis:winner:v1"
+
+        semantic_events = [
+            replace(event, market_semantics_id=semantics)
+            if event.quote_key == trigger_key and event.observed_ts == decision_ts
+            else event
+            for event in events
+        ]
+        latest = {}
+        trigger = None
+        for event in sorted(
+            semantic_events,
+            key=lambda item: (item.observed_ts, item.sequence, item.dedupe_key),
+        ):
+            latest[event.quote_key] = event
+            if event.quote_key == trigger_key and event.observed_ts == decision_ts:
+                trigger = event
+                break
+        self.assertIsNotNone(trigger)
+        assert trigger is not None
+
+        evidence_hash = market_event_evidence_hash(trigger)
+        snapshot_hash = research_market_snapshot_hash(latest, [trigger_key])
+        forecast_raw = decision["forecasts"][0]
+        evidence_raw = decision["evidence"][0]
+        forecast_raw["evidence_hashes"] = [evidence_hash]
+        forecast_raw["market_snapshot_hash"] = snapshot_hash
+        forecast_raw["market_semantics_id"] = semantics
+        evidence_raw["content_sha256"] = evidence_hash
+        evidence_raw["market_snapshot_hash"] = snapshot_hash
+
+        matching = ResearchStrategyPlan.from_dict(raw)
+        self.assertEqual(
+            matching.instructions[0].forecasts[0].market_semantics_id,
+            semantics,
+        )
+        matching.preflight(semantic_events)
+
+        forecast_raw["market_semantics_id"] = "table-tennis:winner:v2"
+        mismatched = ResearchStrategyPlan.from_dict(raw)
+        with self.assertRaisesRegex(
+            ValueError,
+            "ForecastRecord market_semantics_id does not match replay state",
+        ):
+            mismatched.preflight(semantic_events)
 
 if __name__ == "__main__":
     unittest.main()

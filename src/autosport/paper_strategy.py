@@ -61,16 +61,50 @@ class PaperValueAgent:
         self.stake = Decimal(str(stake))
         self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
         self.risk_policy = risk_policy or PaperRiskPolicy()
-        self._acted: set[tuple[str, str | None]] = set()
+        self._acted: set[str] = set()
 
     @staticmethod
-    def _event_settlement_identity(event: MarketEvent) -> tuple[str, str | None]:
-        return event.quote_key, event.market_semantics_id
+    def _forecast_matches_market_identity(
+        forecast: ForecastLike,
+        event: MarketEvent,
+    ) -> bool:
+        """Require forecast probability to describe the event's exact market identity."""
+
+        if forecast.quote_key != event.quote_key:
+            return False
+        if isinstance(forecast, ForecastRecord):
+            return forecast.market_semantics_id == event.market_semantics_id
+        # Legacy Forecast has no rule-identity field. It remains valid only for
+        # legacy events that likewise carry no canonical market semantics.
+        return event.market_semantics_id is None
+
+    @staticmethod
+    def _material_quote_identity(event: MarketEvent) -> str:
+        """Return the in-process duplicate key for one exact market-rules identity."""
+
+        if event.market_semantics_id is None:
+            # Preserve the exact historical duplicate key for legacy events.
+            return event.quote_key
+        canonical = json.dumps(
+            {
+                "quote_key": event.quote_key,
+                "market_semantics_id": event.market_semantics_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @classmethod
-    def _material_action_id(cls, context: AgentContext, event: MarketEvent) -> str:
-        """Stable logical commit identity mirroring the agent's quote-level duplicate guard."""
-
+    def _material_action_digest(
+        cls,
+        context: AgentContext,
+        event: MarketEvent,
+        *,
+        bind_market_semantics: bool,
+    ) -> str:
         identity = {
             "schema": _MATERIAL_ACTION_SCHEMA,
             "replay_run_id": context.replay_run_id,
@@ -78,10 +112,7 @@ class PaperValueAgent:
             "action": _MATERIAL_ACTION_NAME,
             "quote_key": event.quote_key,
         }
-        # Preserve the exact pre-market-semantics durable identity for legacy
-        # events. Adding a null field would change the hash and could create a
-        # second material-action lineage after upgrade.
-        if event.market_semantics_id is not None:
+        if bind_market_semantics and event.market_semantics_id is not None:
             identity["market_semantics_id"] = event.market_semantics_id
         canonical = json.dumps(
             identity,
@@ -91,6 +122,36 @@ class PaperValueAgent:
             allow_nan=False,
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _material_action_id(cls, context: AgentContext, event: MarketEvent) -> str:
+        """Stable commit identity bound to exact rules when those rules are known."""
+
+        return cls._material_action_digest(
+            context,
+            event,
+            bind_market_semantics=True,
+        )
+
+    @classmethod
+    def _legacy_material_action_id(
+        cls,
+        context: AgentContext,
+        event: MarketEvent,
+    ) -> str:
+        """Return the pre-market-semantics action id for upgrade safety checks."""
+
+        return cls._material_action_digest(
+            context,
+            event,
+            bind_market_semantics=False,
+        )
+
+    @staticmethod
+    def _decision_matches_market_identity(payload, event: MarketEvent) -> bool:
+        if event.market_semantics_id is None:
+            return "market_semantics_id" not in payload
+        return payload.get("market_semantics_id") == event.market_semantics_id
 
     @staticmethod
     def _strategy_reason(forecast: ForecastLike, expected_profit: Decimal, material_action_id: str) -> str:
@@ -112,6 +173,41 @@ class PaperValueAgent:
                 "PaperBook contains duplicate tickets for one material_action_id"
             )
         return matches[0] if matches else None
+
+    def _has_legacy_semantics_action_evidence(
+        self,
+        event: MarketEvent,
+        context: AgentContext,
+        material_action_id: str,
+    ) -> bool:
+        """Fence pre-binding durable actions that cannot prove exact market rules."""
+
+        if event.market_semantics_id is None:
+            return False
+        legacy_action_id = self._legacy_material_action_id(context, event)
+        if legacy_action_id == material_action_id:
+            return False
+
+        ledger = context.decision_ledger
+        if (
+            ledger is not None
+            and getattr(ledger, "path", None) is not None
+            and ledger.path.exists()
+            and any(
+                record.decision_id == legacy_action_id
+                for record in ledger.verified_records()
+            )
+        ):
+            return True
+        if self._material_action_ticket(context, legacy_action_id) is not None:
+            return True
+
+        runtime = context.paper_execution
+        return runtime is not None and any(
+            item.get("event_type") == "RUN_RESERVED"
+            and item.get("payload", {}).get("trigger_id") == legacy_action_id
+            for item in runtime.ledger.events()
+        )
 
     @staticmethod
     def _ticket_matches_event(ticket: PaperTicket, event: MarketEvent) -> bool:
@@ -211,7 +307,7 @@ class PaperValueAgent:
             or persisted.observed_ts != event.observed_ts
             or payload.get("material_action_id") != material_action_id
             or payload.get("quote_key") != event.quote_key
-            or payload.get("market_semantics_id") != event.market_semantics_id
+            or not self._decision_matches_market_identity(payload, event)
             or payload.get("ticket_id") != ticket.ticket_id
             or payload.get("stake") != str(ticket.stake)
             or not self._ticket_matches_event(ticket, event)
@@ -220,7 +316,7 @@ class PaperValueAgent:
                 "PaperBook and Decision Ledger material-action evidence do not match exactly"
             )
 
-        self._acted.add(self._event_settlement_identity(event))
+        self._acted.add(self._material_quote_identity(event))
         return True
 
     @staticmethod
@@ -272,10 +368,17 @@ class PaperValueAgent:
             return False
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
-        if self._event_settlement_identity(event) in self._acted or event.status != "open":
+        material_quote_identity = self._material_quote_identity(event)
+        if material_quote_identity in self._acted or event.status != "open":
             return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
+            return
+        if not self._forecast_matches_market_identity(forecast, event):
+            context.notes.append(
+                "paper-value forecast withheld: forecast market identity does not "
+                "match the canonical market event"
+            )
             return
         if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
             return
@@ -307,6 +410,15 @@ class PaperValueAgent:
             return
 
         material_action_id = self._material_action_id(context, event)
+        if self._has_legacy_semantics_action_evidence(
+            event,
+            context,
+            material_action_id,
+        ):
+            raise PaperDecisionReconciliationRequired(
+                "legacy paper-value material action lacks exact market-semantics identity"
+            )
+
         persisted: DecisionRecord | None = None
         if ledger is not None and getattr(ledger, "path", None) is not None and ledger.path.exists():
             if goal is None:
@@ -350,7 +462,7 @@ class PaperValueAgent:
                 or persisted.observed_ts != event.observed_ts
                 or payload.get("material_action_id") != material_action_id
                 or payload.get("quote_key") != event.quote_key
-                or payload.get("market_semantics_id") != event.market_semantics_id
+                or not self._decision_matches_market_identity(payload, event)
             ):
                 raise PaperDecisionReconciliationRequired(
                     "durable paper-value decision identity changed across restart"
@@ -437,7 +549,6 @@ class PaperValueAgent:
             if persisted is None:
                 payload = {
                     "quote_key": event.quote_key,
-                    "market_semantics_id": event.market_semantics_id,
                     "forecast_model": forecast.model_id,
                     "probability": str(forecast.probability),
                     "expected_profit_per_unit": str(expected_profit_per_unit),
@@ -464,6 +575,8 @@ class PaperValueAgent:
                             "market_snapshot_hash": forecast.market_snapshot_hash,
                         }
                     )
+                    if forecast.market_semantics_id is not None:
+                        payload["market_semantics_id"] = forecast.market_semantics_id
                 record = DecisionRecord(
                     replay_run_id=context.replay_run_id,
                     agent=self.name,
@@ -535,4 +648,4 @@ class PaperValueAgent:
                 "paper-value execution resolved a different durable #623 run"
             )
 
-        self._acted.add(self._event_settlement_identity(event))
+        self._acted.add(material_quote_identity)

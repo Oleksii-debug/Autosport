@@ -259,7 +259,10 @@ def _scientific_registry_binding_descriptor():
                     "scientific registry authority is unbound"
                 )
             registry, supervisor_path, registry_path = bound
-            if Path(instance.path) != supervisor_path or Path(registry.path) != registry_path:
+            if (
+                Path(instance.path) != supervisor_path
+                or Path(registry.path) != registry_path
+            ):
                 raise ResearchSupervisorError(
                     "scientific registry authority binding changed"
                 )
@@ -288,8 +291,9 @@ def _scientific_registry_binding_descriptor():
 
 
 class ResearchSupervisor:
-    scientific_registry = _scientific_registry_binding_descriptor()
     """Durable idempotent control seam for one scientific-research workspace."""
+
+    scientific_registry = _scientific_registry_binding_descriptor()
 
     def __init__(self, path: str | Path, scientific_registry: ScientificRegistry) -> None:
         if not isinstance(scientific_registry, ScientificRegistry):

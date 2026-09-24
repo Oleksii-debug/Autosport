@@ -30,6 +30,63 @@ class ProphetXEvidenceConflict(ProphetXOrderIdentityError):
     pass
 
 
+_CANONICAL_LEDGER_CLASS = RealExecutionLedger
+_CANONICAL_LEDGER_INIT = RealExecutionLedger.__init__
+_CANONICAL_LEDGER_INIT_CODE = RealExecutionLedger.__init__.__code__
+_CANONICAL_LEDGER_METHOD_NAMES = (
+    "verified_snapshot",
+    "provider_order_reference",
+    "bind_provider_assigned_order_id",
+    "provider_assigned_order_id",
+)
+_CANONICAL_LEDGER_METHODS = {
+    name: getattr(RealExecutionLedger, name)
+    for name in _CANONICAL_LEDGER_METHOD_NAMES
+}
+_CANONICAL_LEDGER_METHOD_CODES = {
+    name: getattr(method, "__code__", None)
+    for name, method in _CANONICAL_LEDGER_METHODS.items()
+}
+_CANONICAL_LEDGER_BIND_PROVIDER_ASSIGNED_ORDER_ID = (
+    _CANONICAL_LEDGER_METHODS["bind_provider_assigned_order_id"]
+)
+_CANONICAL_LEDGER_PROVIDER_ASSIGNED_ORDER_ID = (
+    _CANONICAL_LEDGER_METHODS["provider_assigned_order_id"]
+)
+
+
+def _require_canonical_provider_order_ledger(ledger: object) -> RealExecutionLedger:
+    """Require exact top-level ledger dispatch for durable provider OrderID truth."""
+
+    if (
+        RealExecutionLedger is not _CANONICAL_LEDGER_CLASS
+        or _CANONICAL_LEDGER_CLASS.__init__ is not _CANONICAL_LEDGER_INIT
+        or getattr(_CANONICAL_LEDGER_CLASS.__init__, "__code__", None)
+        is not _CANONICAL_LEDGER_INIT_CODE
+        or type(ledger) is not _CANONICAL_LEDGER_CLASS
+    ):
+        raise ProphetXOrderIdentityError(
+            "canonical execution ledger provider-order authority changed"
+        )
+    instance_state = vars(ledger)
+    for method_name in _CANONICAL_LEDGER_METHOD_NAMES:
+        expected_method = _CANONICAL_LEDGER_METHODS[method_name]
+        current_method = getattr(_CANONICAL_LEDGER_CLASS, method_name, None)
+        bound_method = getattr(ledger, method_name, None)
+        if (
+            current_method is not expected_method
+            or getattr(current_method, "__code__", None)
+            is not _CANONICAL_LEDGER_METHOD_CODES[method_name]
+            or method_name in instance_state
+            or getattr(bound_method, "__self__", None) is not ledger
+            or getattr(bound_method, "__func__", None) is not expected_method
+        ):
+            raise ProphetXOrderIdentityError(
+                "canonical execution ledger provider-order dispatch changed"
+            )
+    return ledger
+
+
 class ProphetXTransport(str, Enum):
     REST_DIRECT_LINK = "REST_DIRECT_LINK"
     FIX_ORDER_ENTRY = "FIX_ORDER_ENTRY"
@@ -318,14 +375,39 @@ def _bind_provider_assigned_order_id(
     provider_order_id: str,
 ) -> bool:
     try:
+        _require_canonical_provider_order_ledger(ledger)
+        ledger_path = ledger.path
         if load_identity(ledger, attempt_id=identity.attempt_id) != identity:
             return False
-        ledger.bind_provider_assigned_order_id(
+        _require_canonical_provider_order_ledger(ledger)
+        bound = _CANONICAL_LEDGER_BIND_PROVIDER_ASSIGNED_ORDER_ID(
+            ledger,
             attempt_id=identity.attempt_id,
             provider_id=PROPHETX_PROVIDER_ID,
             provider_order_id=provider_order_id,
         )
-    except (ExecutionIdentityConflict, ExecutionStateError):
+        if bound != provider_order_id or ledger.path != ledger_path:
+            return False
+        _require_canonical_provider_order_ledger(ledger)
+
+        # Positive correlation requires a restart-visible durable fact, not merely
+        # a successful method return from the caller-held ledger object.
+        restarted = object.__new__(_CANONICAL_LEDGER_CLASS)
+        _CANONICAL_LEDGER_INIT(restarted, ledger_path)
+        _require_canonical_provider_order_ledger(restarted)
+        durable = _CANONICAL_LEDGER_PROVIDER_ASSIGNED_ORDER_ID(
+            restarted,
+            attempt_id=identity.attempt_id,
+            provider_id=PROPHETX_PROVIDER_ID,
+        )
+        _require_canonical_provider_order_ledger(restarted)
+        if durable != provider_order_id:
+            return False
+    except (
+        ExecutionIdentityConflict,
+        ExecutionStateError,
+        ProphetXOrderIdentityError,
+    ):
         return False
     return True
 

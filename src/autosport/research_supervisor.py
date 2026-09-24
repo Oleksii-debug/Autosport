@@ -290,14 +290,33 @@ def _scientific_registry_binding_descriptor():
     return _ScientificRegistryBinding()
 
 
+_SCIENTIFIC_REGISTRY_BINDING = _scientific_registry_binding_descriptor()
+
+
 class ResearchSupervisor:
     """Durable idempotent control seam for one scientific-research workspace."""
 
-    scientific_registry = _scientific_registry_binding_descriptor()
+    scientific_registry = _SCIENTIFIC_REGISTRY_BINDING
+
+    def _assert_scientific_registry_class_binding(self) -> None:
+        live_binding = None
+        for owner in type(self).__mro__:
+            if "scientific_registry" in owner.__dict__:
+                live_binding = owner.__dict__["scientific_registry"]
+                break
+        if live_binding is not _SCIENTIFIC_REGISTRY_BINDING:
+            raise ResearchSupervisorError(
+                "scientific registry authority class binding changed"
+            )
+
+    def _scientific_registry_authority(self) -> ScientificRegistry:
+        self._assert_scientific_registry_class_binding()
+        return _SCIENTIFIC_REGISTRY_BINDING.__get__(self, type(self))
 
     def __init__(self, path: str | Path, scientific_registry: ScientificRegistry) -> None:
         if not isinstance(scientific_registry, ScientificRegistry):
             raise TypeError("scientific_registry must be ScientificRegistry")
+        self._assert_scientific_registry_class_binding()
         self.path = Path(path)
         self.scientific_registry = scientific_registry
         if self.path.parent.resolve() != scientific_registry.path.parent.resolve():
@@ -574,7 +593,7 @@ class ResearchSupervisor:
         for key, value in values:
             record_type = _SCIENTIFIC_BINDINGS.get(key)
             if record_type is not None:
-                entry = self.scientific_registry.get(record_type, value)
+                entry = self._scientific_registry_authority().get(record_type, value)
                 if entry is None:
                     raise ResearchSupervisorError(
                         f"binding references missing {record_type}:{value}"
@@ -606,7 +625,7 @@ class ResearchSupervisor:
         """Fail closed when individually valid scientific IDs cross causal lineages."""
 
         question_id = _text(run_question_id, "run_question_id")
-        question = self.scientific_registry.get("ResearchQuestion", question_id)
+        question = self._scientific_registry_authority().get("ResearchQuestion", question_id)
         if question is None:
             raise ResearchSupervisorError(
                 f"run references missing ResearchQuestion:{question_id}"
@@ -616,7 +635,7 @@ class ResearchSupervisor:
         hypothesis_id = bindings.get("hypothesis_id")
         hypothesis = None
         if hypothesis_id is not None:
-            hypothesis = self.scientific_registry.get("Hypothesis", hypothesis_id)
+            hypothesis = self._scientific_registry_authority().get("Hypothesis", hypothesis_id)
             if hypothesis is None:
                 raise ResearchSupervisorError(
                     f"binding references missing Hypothesis:{hypothesis_id}"
@@ -635,7 +654,7 @@ class ResearchSupervisor:
                     "research protocol requires explicit supervisor hypothesis binding"
                 )
 
-            protocol = self.scientific_registry.get("ResearchProtocol", protocol_id)
+            protocol = self._scientific_registry_authority().get("ResearchProtocol", protocol_id)
             if protocol is None:
                 raise ResearchSupervisorError(
                     f"binding references missing ResearchProtocol:{protocol_id}"
@@ -659,7 +678,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(
                     "research protocol lacks canonical hypothesis identity"
                 )
-            protocol_hypothesis = self.scientific_registry.get(
+            protocol_hypothesis = self._scientific_registry_authority().get(
                 "Hypothesis", protocol_hypothesis_id
             )
             if protocol_hypothesis is None:
@@ -695,7 +714,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(
                     "dataset snapshot requires explicit supervisor research_protocol_id binding"
                 )
-            dataset = self.scientific_registry.get(
+            dataset = self._scientific_registry_authority().get(
                 "DatasetSnapshot", dataset_snapshot_id
             )
             if dataset is None:
@@ -732,7 +751,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(
                     "feature set requires explicit supervisor research_protocol_id binding"
                 )
-            feature = self.scientific_registry.get("FeatureSet", feature_set_id)
+            feature = self._scientific_registry_authority().get("FeatureSet", feature_set_id)
             if feature is None:
                 raise ResearchSupervisorError(
                     f"binding references missing FeatureSet:{feature_set_id}"
@@ -750,7 +769,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(
                     "model version requires explicit supervisor research_protocol_id binding"
                 )
-            model = self.scientific_registry.get("ModelVersion", model_version_id)
+            model = self._scientific_registry_authority().get("ModelVersion", model_version_id)
             if model is None:
                 raise ResearchSupervisorError(
                     f"binding references missing ModelVersion:{model_version_id}"
@@ -782,7 +801,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(
                     "strategy version requires explicit supervisor research_protocol_id binding"
                 )
-            strategy = self.scientific_registry.get(
+            strategy = self._scientific_registry_authority().get(
                 "StrategyVersion", strategy_version_id
             )
             if strategy is None:
@@ -810,7 +829,7 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(
                     "evaluation bundle requires explicit supervisor research_protocol_id binding"
                 )
-            evaluation = self.scientific_registry.get(
+            evaluation = self._scientific_registry_authority().get(
                 "EvaluationBundle", evaluation_bundle_id
             )
             if evaluation is None:
@@ -852,7 +871,7 @@ class ResearchSupervisor:
 
         experiment_id = bindings.get("experiment_id")
         if experiment_id is not None:
-            experiment = self.scientific_registry.get("Experiment", experiment_id)
+            experiment = self._scientific_registry_authority().get("Experiment", experiment_id)
             if experiment is None:
                 raise ResearchSupervisorError(
                     f"binding references missing Experiment:{experiment_id}"
@@ -890,7 +909,7 @@ class ResearchSupervisor:
 
         promotion_decision_id = bindings.get("promotion_decision_id")
         if promotion_decision_id is not None:
-            decision = self.scientific_registry.get(
+            decision = self._scientific_registry_authority().get(
                 "PromotionDecision", promotion_decision_id
             )
             if decision is None:
@@ -921,7 +940,7 @@ class ResearchSupervisor:
 
         postmortem_id = bindings.get("postmortem_id")
         if postmortem_id is not None:
-            postmortem = self.scientific_registry.get("Postmortem", postmortem_id)
+            postmortem = self._scientific_registry_authority().get("Postmortem", postmortem_id)
             if postmortem is None:
                 raise ResearchSupervisorError(
                     f"binding references missing Postmortem:{postmortem_id}"
@@ -949,7 +968,7 @@ class ResearchSupervisor:
         drift_finding_id = merged.get("drift_finding_id")
         if drift_finding_id is None:
             return
-        finding = self.scientific_registry.get("DriftFinding", drift_finding_id)
+        finding = self._scientific_registry_authority().get("DriftFinding", drift_finding_id)
         if finding is None:
             raise ResearchSupervisorError(
                 f"binding references missing DriftFinding:{drift_finding_id}"
@@ -982,7 +1001,7 @@ class ResearchSupervisor:
             )
             if not exclusive_trigger_prefix.endswith(":"):
                 raise ValueError("exclusive_trigger_prefix must end with ':'")
-        question = self.scientific_registry.get("ResearchQuestion", trigger.question_id)
+        question = self._scientific_registry_authority().get("ResearchQuestion", trigger.question_id)
         if question is None:
             raise ResearchSupervisorError(
                 f"trigger references missing ResearchQuestion:{trigger.question_id}"

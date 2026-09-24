@@ -101,13 +101,43 @@ def _runtime_builder(
     *,
     expected_source_id: str | None = None,
 ) -> AutonomousProductRuntime:
-    """Compatibility wrapper; trusted worker authority does not depend on this name."""
+    """Compatibility/test seam; trusted worker authority never calls this path."""
 
-    return _PROFILED_RUNTIME_BUILDER(
-        workspace,
-        source_factory,
-        initial_bankroll,
-        expected_source_id=expected_source_id,
+    if expected_source_id is not None and (
+        type(expected_source_id) is not str
+        or not expected_source_id
+        or expected_source_id.strip() != expected_source_id
+    ):
+        raise ValueError("expected_source_id must be a non-empty trimmed string")
+    if expected_source_id is not None:
+        try:
+            require_product_owned_source_factory_identity(
+                source_factory=source_factory,
+                expected_provider_source_id=expected_source_id,
+            )
+        except TrustedRuntimeCodeProfileError as exc:
+            raise ProductEntrypointError(
+                "configured source factory is not product-owned by this build"
+            ) from exc
+    source = _validated_source(source_factory, workspace=workspace)
+    if expected_source_id is not None:
+        try:
+            require_product_owned_source_factory_identity(
+                source_factory=source_factory,
+                expected_provider_source_id=expected_source_id,
+            )
+        except TrustedRuntimeCodeProfileError as exc:
+            raise ProductEntrypointError(
+                "configured source factory changed during source construction"
+            ) from exc
+    if expected_source_id is not None and source.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "product source identity does not match the configured source"
+        )
+    return build_autonomous_product_runtime(
+        workspace=workspace,
+        source=source,
+        initial_bankroll=initial_bankroll,
     )
 
 

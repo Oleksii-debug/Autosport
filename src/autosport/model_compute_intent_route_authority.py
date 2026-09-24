@@ -502,6 +502,21 @@ def _build_store_init():
     authority_key = _CANONICAL_AUTHORITY_KEY
     error_type = ModelComputeIntentRouteAuthorityError
     runtime_bindings = WeakKeyDictionary()
+    authority_methods = tuple(
+        (
+            name,
+            method,
+            getattr(method, "__code__", None),
+        )
+        for name in (
+            "read_history",
+            "recover",
+            "prepare",
+            "abort",
+            "commit",
+        )
+        for method in (getattr(authority_type, name),)
+    )
 
     def require_runtime_binding(self) -> None:
         binding = runtime_bindings.get(self)
@@ -525,6 +540,13 @@ def _build_store_init():
         ) = binding
         try:
             instance_state = vars(self)
+            authority_instance_state = vars(authority)
+            authority_dispatch_changed = any(
+                name in authority_instance_state
+                or getattr(authority_type, name, None) is not method
+                or getattr(method, "__code__", None) is not method_code
+                for name, method, method_code in authority_methods
+            )
             if (
                 self.workspace is not workspace
                 or self.path is not path
@@ -533,6 +555,7 @@ def _build_store_init():
                     name in instance_state
                     for name in ("_recover", "issue_request", "resolve_current")
                 )
+                or authority_dispatch_changed
                 or type(authority) is not authority_type
                 or authority.authority_root != authority_root
                 or authority.workspace != authority_workspace

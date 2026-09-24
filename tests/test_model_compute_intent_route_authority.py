@@ -227,6 +227,42 @@ def test_live_authority_replacement_cannot_rebootstrap_after_local_state_loss(
         assert not alternate_authority.records_dir.exists()
 
 
+def test_authority_prepare_shadow_cannot_bypass_monotonic_dispatch(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="authority-dispatch")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        authority = store._authority
+        calls: list[str] = []
+
+        def forged_prepare(**_kwargs):
+            calls.append("prepare")
+            raise AssertionError("forged prepare must never run")
+
+        authority.prepare = forged_prepare
+        try:
+            with pytest.raises(
+                subject.ModelComputeIntentRouteAuthorityError,
+                match="runtime binding changed",
+            ):
+                _issue(store, router, intent)
+        finally:
+            del authority.prepare
+
+        assert calls == []
+        assert not store.path.exists()
+        assert router.get_request("intent-route-1") is None
+
+        request = _issue(store, router, intent)
+        assert request.request_id == "intent-route-1"
+
+
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
     intent = _canonical_intent(suffix="origin")
     issued_at = _proposal(intent) + timedelta(seconds=2)

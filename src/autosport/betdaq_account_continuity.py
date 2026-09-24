@@ -550,6 +550,8 @@ def require_reconciliation_history_compatible(
 
 
 def _build_evidence_issuer():
+    evidence_eq = BetdaqContinuousAccountEvidence.__eq__
+    evidence_eq_code = getattr(evidence_eq, "__code__", None)
     issued: dict[
         int,
         tuple[
@@ -599,7 +601,9 @@ def _build_evidence_issuer():
             record = issued.get(id(value))
             if record is None or record[0]() is not value:
                 return False
-            return value == record[1]
+            if getattr(evidence_eq, "__code__", None) is not evidence_eq_code:
+                return False
+            return evidence_eq(value, record[1]) is True
 
     return issue, is_issued
 

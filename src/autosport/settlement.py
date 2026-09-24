@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import Lock
-from weakref import WeakKeyDictionary
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from .domain import TicketStatus
 from .paper import PaperBook
@@ -74,7 +74,7 @@ class _SettlementEngineMeta(type):
         super().__delattr__(name)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True)
 class SettlementEngine(metaclass=_SettlementEngineMeta):
     """Version-1 deterministic settlement state. Strategy code never receives this state during replay."""
 
@@ -139,7 +139,10 @@ def _build_serialized_settlement_operations():
 
     authority_tokens: WeakKeyDictionary[
         OutcomeAuthorityToken,
-        tuple[int, tuple[tuple[object, object], ...]],
+        tuple[
+            ReferenceType[SettlementEngine],
+            tuple[tuple[object, object], ...],
+        ],
     ] = WeakKeyDictionary()
 
     def issue_outcomes_authority(
@@ -150,7 +153,7 @@ def _build_serialized_settlement_operations():
         if type(previous) is OutcomeAuthorityToken:
             authority_tokens.pop(previous, None)
         token = OutcomeAuthorityToken()
-        authority_tokens[token] = (id(engine), tuple(snapshot.items()))
+        authority_tokens[token] = (ref(engine), tuple(snapshot.items()))
         outcomes_authority_descriptor.__set__(engine, token)
 
     def guarded_post_init(self: SettlementEngine) -> None:
@@ -176,7 +179,7 @@ def _build_serialized_settlement_operations():
         if type(authorized) is not OutcomeAuthorityToken or type(raw) is not dict:
             raise ValueError("settlement outcome authority changed")
         binding = authority_tokens.get(authorized)
-        if binding is None or binding[0] != id(engine):
+        if binding is None or binding[0]() is not engine:
             raise ValueError("settlement outcome authority changed")
         expected = dict(binding[1])
         if raw != expected or (snapshot is not None and snapshot != expected):

@@ -542,22 +542,87 @@ def _build_provider_order_correlation_authority():
 
     identity_resolver = load_identity
     identity_resolver_code = getattr(identity_resolver, "__code__", None)
+    durable_attempt_facts = _durable_attempt_facts
     bind_impl = _bind_provider_assigned_order_id_impl
     reconciliation_impl = _reconciliation_disposition_impl
     normalize_impl = _normalize_fix_execution_reports_impl
+
+    module_globals = globals()
+    dependency_functions = (identity_resolver, durable_attempt_facts)
+    dependency_names = tuple(
+        sorted(
+            {
+                global_name
+                for helper in dependency_functions
+                for global_name in helper.__code__.co_names
+                if global_name in module_globals
+            }
+        )
+    )
+    dependency_graph = tuple(
+        (
+            dependency_name,
+            module_globals[dependency_name],
+            getattr(module_globals[dependency_name], "__code__", None),
+        )
+        for dependency_name in dependency_names
+    )
+    profile_map = _PROFILE_BY_VERSION
+    profile_entries = tuple(sorted(profile_map.items()))
+    json_module = json
+    json_loads = json.loads
+    json_loads_code = getattr(json_loads, "__code__", None)
+
+    def require_identity_resolver_graph() -> None:
+        for (
+            dependency_name,
+            expected_dependency,
+            expected_dependency_code,
+        ) in dependency_graph:
+            live_dependency = module_globals.get(dependency_name)
+            if (
+                live_dependency is not expected_dependency
+                or getattr(live_dependency, "__code__", None)
+                is not expected_dependency_code
+            ):
+                raise ProphetXOrderIdentityError(
+                    "canonical ProphetX identity transitive dependency changed"
+                )
+        if (
+            module_globals.get("json") is not json_module
+            or getattr(json_module, "loads", None) is not json_loads
+            or getattr(json_loads, "__code__", None) is not json_loads_code
+        ):
+            raise ProphetXOrderIdentityError(
+                "canonical ProphetX identity transitive dependency changed"
+            )
+        if (
+            module_globals.get("_PROFILE_BY_VERSION") is not profile_map
+            or len(profile_map) != len(profile_entries)
+            or any(
+                key not in profile_map or profile_map[key] is not expected_profile
+                for key, expected_profile in profile_entries
+            )
+        ):
+            raise ProphetXOrderIdentityError(
+                "canonical ProphetX identity profile authority changed"
+            )
 
     def bind_provider_order_id(
         ledger: RealExecutionLedger,
         identity: ProphetXOrderIdentity,
         provider_order_id: str,
     ) -> bool:
-        return bind_impl(
+        require_identity_resolver_graph()
+        result = bind_impl(
             ledger,
             identity,
             provider_order_id,
             identity_resolver=identity_resolver,
             identity_resolver_code=identity_resolver_code,
         )
+        require_identity_resolver_graph()
+        return result
 
     def reconciliation_disposition(
         identity: ProphetXOrderIdentity,

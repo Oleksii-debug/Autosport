@@ -105,7 +105,7 @@ def _build_wallet_stdlib_dispatch_authority():
     abstract_http_handler_type = AbstractHTTPHandler
     http_error_processor_type = HTTPErrorProcessor
 
-    canonical_opener_open = _canonical_wallet_opener_open
+    canonical_opener_open = opener_type.open
     canonical_opener_internal_open = opener_type._open
     canonical_opener_call_chain = opener_type._call_chain
     canonical_opener_error = opener_type.error
@@ -169,366 +169,402 @@ def _build_wallet_stdlib_dispatch_authority():
 del _build_wallet_stdlib_dispatch_authority
 
 
-def _make_provider_fetch(
-    opener: object,
-    max_response_bytes: int,
-):
-    """Capture one construction-time network primitive for positive wallet authority."""
+def _build_provider_fetch_factory():
+    """Freeze provider-fetch construction authority at module import."""
 
-    opener_type = type(opener)
-    if opener_type is not OpenerDirector:
-        raise ProphetXReadOnlyError(
-            "canonical ProphetX account network authority requires OpenerDirector"
-        )
-    if not _wallet_stdlib_dispatch_is_canonical():
-        raise ProphetXReadOnlyError(
-            "canonical ProphetX account network dispatch changed before construction"
-        )
+    stdlib_dispatch_is_canonical = _wallet_stdlib_dispatch_is_canonical
+    canonical_stdlib_opener_open = _canonical_wallet_opener_open
+    opener_class = OpenerDirector
+    request_class = Request
+    canonical_http_redirect_handler_type = HTTPRedirectHandler
+    canonical_proxy_handler_type = ProxyHandler
+    canonical_redirect_handler_type = _RejectRedirectHandler
+    canonical_https_handler_type = HTTPSHandler
+    canonical_abstract_http_handler_type = AbstractHTTPHandler
+    canonical_http_error_processor_type = HTTPErrorProcessor
+    ssl_context_type = ssl.SSLContext
+    cert_required = ssl.CERT_REQUIRED
+    response_type = ProphetXHttpResponse
+    error_type = ProphetXReadOnlyError
+    http_error_type = HTTPError
+    url_error_type = URLError
+    timeout_error_type = TimeoutError
+    os_error_type = OSError
+    http_exception_type = HTTPException
 
-    open_response = opener.open
-    request_type = Request
-    http_redirect_handler_type = HTTPRedirectHandler
-    proxy_handler_type = ProxyHandler
-    redirect_handler_type = _RejectRedirectHandler
-    https_handler_type = HTTPSHandler
-    abstract_http_handler_type = AbstractHTTPHandler
-    http_error_processor_type = HTTPErrorProcessor
+    def make_provider_fetch(
+        opener: object,
+        max_response_bytes: int,
+    ):
+        """Capture one construction-time network primitive for positive wallet authority."""
 
-    canonical_opener_open = opener_type.open
-    canonical_opener_internal_open = opener_type._open
-    canonical_opener_call_chain = opener_type._call_chain
-    canonical_opener_error = opener_type.error
-    canonical_redirect_request = redirect_handler_type.redirect_request
-    canonical_https_open = https_handler_type.https_open
-    canonical_https_request = https_handler_type.https_request
-    canonical_do_open = abstract_http_handler_type.do_open
-    canonical_https_response = http_error_processor_type.https_response
-
-    def tls_context_snapshot(context: object):
-        if type(context) is not ssl.SSLContext:
-            return None
-        try:
-            ciphers = tuple(
-                (
-                    cipher.get("id"),
-                    cipher.get("name"),
-                    cipher.get("protocol"),
-                    cipher.get("strength_bits"),
-                    cipher.get("alg_bits"),
-                    cipher.get("aead"),
-                    cipher.get("symmetric"),
-                    cipher.get("digest"),
-                    cipher.get("kea"),
-                    cipher.get("auth"),
-                )
-                for cipher in context.get_ciphers()
+        opener_type = type(opener)
+        if opener_type is not opener_class:
+            raise error_type(
+                "canonical ProphetX account network authority requires OpenerDirector"
             )
-            trust_anchors = tuple(
-                sorted(
-                    sha256(certificate).hexdigest()
-                    for certificate in context.get_ca_certs(binary_form=True)
-                )
+        if not stdlib_dispatch_is_canonical():
+            raise error_type(
+                "canonical ProphetX account network dispatch changed before construction"
             )
-            store_stats = tuple(sorted(context.cert_store_stats().items()))
-            return (
-                int(context.verify_mode),
-                context.check_hostname,
-                int(context.verify_flags),
-                int(context.minimum_version),
-                int(context.maximum_version),
-                int(context.options),
-                getattr(context, "hostname_checks_common_name", None),
-                getattr(context, "security_level", None),
-                store_stats,
-                trust_anchors,
-                ciphers,
-            )
-        except (AttributeError, TypeError, ValueError, ssl.SSLError):
-            return None
 
-    def dispatch_snapshot(current_opener: object):
-        records: list[tuple[str, object, tuple[object, ...]]] = []
-        for map_name in ("handle_open", "process_request", "process_response"):
-            mapping = getattr(current_opener, map_name, None)
-            if type(mapping) is not dict:
+        open_response = canonical_stdlib_opener_open.__get__(opener, opener_class)
+        request_type = request_class
+        http_redirect_handler_type = canonical_http_redirect_handler_type
+        proxy_handler_type = canonical_proxy_handler_type
+        redirect_handler_type = canonical_redirect_handler_type
+        https_handler_type = canonical_https_handler_type
+        abstract_http_handler_type = canonical_abstract_http_handler_type
+        http_error_processor_type = canonical_http_error_processor_type
+
+        canonical_opener_open = canonical_stdlib_opener_open
+        canonical_opener_internal_open = opener_type._open
+        canonical_opener_call_chain = opener_type._call_chain
+        canonical_opener_error = opener_type.error
+        canonical_redirect_request = redirect_handler_type.redirect_request
+        canonical_https_open = https_handler_type.https_open
+        canonical_https_request = https_handler_type.https_request
+        canonical_do_open = abstract_http_handler_type.do_open
+        canonical_https_response = http_error_processor_type.https_response
+
+        def tls_context_snapshot(context: object):
+            if type(context) is not ssl_context_type:
                 return None
-            for key, handlers in mapping.items():
-                if type(key) not in (str, int) or type(handlers) is not list:
-                    return None
-                records.append((map_name, key, tuple(handlers)))
-        error_mapping = getattr(current_opener, "handle_error", None)
-        if type(error_mapping) is not dict:
-            return None
-        for protocol, by_code in error_mapping.items():
-            if type(protocol) not in (str, int) or type(by_code) is not dict:
+            try:
+                ciphers = tuple(
+                    (
+                        cipher.get("id"),
+                        cipher.get("name"),
+                        cipher.get("protocol"),
+                        cipher.get("strength_bits"),
+                        cipher.get("alg_bits"),
+                        cipher.get("aead"),
+                        cipher.get("symmetric"),
+                        cipher.get("digest"),
+                        cipher.get("kea"),
+                        cipher.get("auth"),
+                    )
+                    for cipher in context.get_ciphers()
+                )
+                trust_anchors = tuple(
+                    sorted(
+                        sha256(certificate).hexdigest()
+                        for certificate in context.get_ca_certs(binary_form=True)
+                    )
+                )
+                store_stats = tuple(sorted(context.cert_store_stats().items()))
+                return (
+                    int(context.verify_mode),
+                    context.check_hostname,
+                    int(context.verify_flags),
+                    int(context.minimum_version),
+                    int(context.maximum_version),
+                    int(context.options),
+                    getattr(context, "hostname_checks_common_name", None),
+                    getattr(context, "security_level", None),
+                    store_stats,
+                    trust_anchors,
+                    ciphers,
+                )
+            except (AttributeError, TypeError, ValueError, ssl.SSLError):
                 return None
-            for code, handlers in by_code.items():
-                if type(code) not in (str, int) or type(handlers) is not list:
+
+        def dispatch_snapshot(current_opener: object):
+            records: list[tuple[str, object, tuple[object, ...]]] = []
+            for map_name in ("handle_open", "process_request", "process_response"):
+                mapping = getattr(current_opener, map_name, None)
+                if type(mapping) is not dict:
                     return None
-                records.append(
-                    (f"handle_error:{protocol}", code, tuple(handlers))
+                for key, handlers in mapping.items():
+                    if type(key) not in (str, int) or type(handlers) is not list:
+                        return None
+                    records.append((map_name, key, tuple(handlers)))
+            error_mapping = getattr(current_opener, "handle_error", None)
+            if type(error_mapping) is not dict:
+                return None
+            for protocol, by_code in error_mapping.items():
+                if type(protocol) not in (str, int) or type(by_code) is not dict:
+                    return None
+                for code, handlers in by_code.items():
+                    if type(code) not in (str, int) or type(handlers) is not list:
+                        return None
+                    records.append(
+                        (f"handle_error:{protocol}", code, tuple(handlers))
+                    )
+            records.sort(
+                key=lambda item: (
+                    item[0],
+                    type(item[1]).__name__,
+                    str(item[1]),
                 )
-        records.sort(
-            key=lambda item: (
-                item[0],
-                type(item[1]).__name__,
-                str(item[1]),
             )
-        )
-        return tuple(records)
+            return tuple(records)
 
-    expected_handlers_raw = getattr(opener, "handlers", None)
-    expected_dispatch = dispatch_snapshot(opener)
-    if type(expected_handlers_raw) is not list or expected_dispatch is None:
-        raise ProphetXReadOnlyError(
-            "canonical ProphetX account opener graph is not inspectable"
-        )
-    expected_handlers = tuple(expected_handlers_raw)
-
-    redirect_handlers = tuple(
-        handler
-        for handler in expected_handlers
-        if isinstance(handler, http_redirect_handler_type)
-    )
-    https_handlers = tuple(
-        handler
-        for handler in expected_handlers
-        if isinstance(handler, https_handler_type)
-    )
-    response_handlers = tuple(
-        handlers
-        for map_name, key, handlers in expected_dispatch
-        if map_name == "process_response" and key == "https"
-    )
-    if (
-        len(redirect_handlers) != 1
-        or type(redirect_handlers[0]) is not redirect_handler_type
-        or len(https_handlers) != 1
-        or type(https_handlers[0]) is not https_handler_type
-        or len(response_handlers) != 1
-        or len(response_handlers[0]) != 1
-        or type(response_handlers[0][0]) is not http_error_processor_type
-        or any(isinstance(handler, proxy_handler_type) for handler in expected_handlers)
-    ):
-        raise ProphetXReadOnlyError(
-            "canonical ProphetX account opener graph is invalid"
-        )
-    expected_redirect_handler = redirect_handlers[0]
-    expected_https_handler = https_handlers[0]
-    expected_error_processor = response_handlers[0][0]
-    expected_tls_context = getattr(expected_https_handler, "_context", None)
-    expected_tls_context_state = tls_context_snapshot(expected_tls_context)
-    legacy_check_hostname_missing = object()
-    expected_legacy_check_hostname = getattr(
-        expected_https_handler,
-        "_check_hostname",
-        legacy_check_hostname_missing,
-    )
-    if (
-        expected_tls_context_state is None
-        or expected_tls_context.verify_mode != ssl.CERT_REQUIRED
-        or expected_tls_context.check_hostname is not True
-        or expected_legacy_check_hostname
-        not in (legacy_check_hostname_missing, None)
-    ):
-        raise ProphetXReadOnlyError(
-            "canonical ProphetX account TLS verifier is invalid"
-        )
-
-    if (
-        getattr(open_response, "__self__", None) is not opener
-        or getattr(open_response, "__func__", None) is not canonical_opener_open
-    ):
-        raise ProphetXReadOnlyError(
-            "canonical ProphetX account opener dispatch is invalid"
-        )
-
-    def dispatch_matches(current, expected) -> bool:
-        if current is None or len(current) != len(expected):
-            return False
-        for actual, wanted in zip(current, expected):
-            if actual[0] != wanted[0] or actual[1] != wanted[1]:
-                return False
-            if len(actual[2]) != len(wanted[2]):
-                return False
-            if any(
-                actual_handler is not expected_handler
-                for actual_handler, expected_handler in zip(
-                    actual[2], wanted[2]
-                )
-            ):
-                return False
-        return True
-
-    def authority_is_current() -> bool:
-        if (
-            not _wallet_stdlib_dispatch_is_canonical()
-            or type(opener) is not opener_type
-            or opener_type.open is not canonical_opener_open
-            or opener_type._open is not canonical_opener_internal_open
-            or opener_type._call_chain is not canonical_opener_call_chain
-            or opener_type.error is not canonical_opener_error
-            or redirect_handler_type.redirect_request
-            is not canonical_redirect_request
-            or https_handler_type.https_open is not canonical_https_open
-            or https_handler_type.https_request is not canonical_https_request
-            or abstract_http_handler_type.do_open is not canonical_do_open
-            or http_error_processor_type.https_response
-            is not canonical_https_response
-        ):
-            return False
-
-        current_tls_context = getattr(expected_https_handler, "_context", None)
-        if (
-            current_tls_context is not expected_tls_context
-            or tls_context_snapshot(current_tls_context)
-            != expected_tls_context_state
-            or getattr(
-                expected_https_handler,
-                "_check_hostname",
-                legacy_check_hostname_missing,
+        expected_handlers_raw = getattr(opener, "handlers", None)
+        expected_dispatch = dispatch_snapshot(opener)
+        if type(expected_handlers_raw) is not list or expected_dispatch is None:
+            raise error_type(
+                "canonical ProphetX account opener graph is not inspectable"
             )
-            is not expected_legacy_check_hostname
-        ):
-            return False
+        expected_handlers = tuple(expected_handlers_raw)
 
-        opener_dict = getattr(opener, "__dict__", None)
-        if type(opener_dict) is not dict or any(
-            name in opener_dict for name in ("open", "_open", "_call_chain", "error")
-        ):
-            return False
-
-        handlers = getattr(opener, "handlers", None)
-        if type(handlers) is not list or len(handlers) != len(expected_handlers):
-            return False
-        if any(
-            current is not expected
-            for current, expected in zip(handlers, expected_handlers)
-        ):
-            return False
-        if any(isinstance(handler, proxy_handler_type) for handler in handlers):
-            return False
-
-        redirect_dict = getattr(expected_redirect_handler, "__dict__", None)
-        https_dict = getattr(expected_https_handler, "__dict__", None)
-        error_processor_dict = getattr(expected_error_processor, "__dict__", None)
-        if (
-            type(redirect_dict) is not dict
-            or "redirect_request" in redirect_dict
-            or type(https_dict) is not dict
-            or any(
-                name in https_dict
-                for name in ("https_open", "https_request", "do_open")
-            )
-            or type(error_processor_dict) is not dict
-            or "https_response" in error_processor_dict
-        ):
-            return False
-
-        current_dispatch = dispatch_snapshot(opener)
-        if not dispatch_matches(current_dispatch, expected_dispatch):
-            return False
-
-        dispatch_handlers = tuple(
-            handlers
-            for map_name, key, handlers in current_dispatch
-            if map_name == "handle_open" and key == "https"
+        redirect_handlers = tuple(
+            handler
+            for handler in expected_handlers
+            if isinstance(handler, http_redirect_handler_type)
         )
-        request_handlers = tuple(
-            handlers
-            for map_name, key, handlers in current_dispatch
-            if map_name == "process_request" and key == "https"
+        https_handlers = tuple(
+            handler
+            for handler in expected_handlers
+            if isinstance(handler, https_handler_type)
         )
-        response_handlers_now = tuple(
+        response_handlers = tuple(
             handlers
-            for map_name, key, handlers in current_dispatch
+            for map_name, key, handlers in expected_dispatch
             if map_name == "process_response" and key == "https"
         )
         if (
-            len(dispatch_handlers) != 1
-            or len(dispatch_handlers[0]) != 1
-            or dispatch_handlers[0][0] is not expected_https_handler
-            or len(request_handlers) != 1
-            or len(request_handlers[0]) != 1
-            or request_handlers[0][0] is not expected_https_handler
-            or len(response_handlers_now) != 1
-            or len(response_handlers_now[0]) != 1
-            or response_handlers_now[0][0] is not expected_error_processor
-            or any(
-                not any(handler is registered for registered in expected_handlers)
-                for _map_name, _key, mapped_handlers in current_dispatch
-                for handler in mapped_handlers
-            )
+            len(redirect_handlers) != 1
+            or type(redirect_handlers[0]) is not redirect_handler_type
+            or len(https_handlers) != 1
+            or type(https_handlers[0]) is not https_handler_type
+            or len(response_handlers) != 1
+            or len(response_handlers[0]) != 1
+            or type(response_handlers[0][0]) is not http_error_processor_type
+            or any(isinstance(handler, proxy_handler_type) for handler in expected_handlers)
         ):
-            return False
-        return True
-
-    def require_authority() -> None:
-        if not authority_is_current():
-            raise ProphetXReadOnlyError(
-                "canonical ProphetX account network authority changed"
+            raise error_type(
+                "canonical ProphetX account opener graph is invalid"
+            )
+        expected_redirect_handler = redirect_handlers[0]
+        expected_https_handler = https_handlers[0]
+        expected_error_processor = response_handlers[0][0]
+        expected_tls_context = getattr(expected_https_handler, "_context", None)
+        expected_tls_context_state = tls_context_snapshot(expected_tls_context)
+        legacy_check_hostname_missing = object()
+        expected_legacy_check_hostname = getattr(
+            expected_https_handler,
+            "_check_hostname",
+            legacy_check_hostname_missing,
+        )
+        if (
+            expected_tls_context_state is None
+            or expected_tls_context.verify_mode != cert_required
+            or expected_tls_context.check_hostname is not True
+            or expected_legacy_check_hostname
+            not in (legacy_check_hostname_missing, None)
+        ):
+            raise error_type(
+                "canonical ProphetX account TLS verifier is invalid"
             )
 
-    def fetch(
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        timeout_seconds: float,
-    ) -> ProphetXHttpResponse:
-        if url != BALANCE_URL:
-            raise ProphetXReadOnlyError(
-                "ProphetX transport target is outside the fixed balance origin"
+        if (
+            getattr(open_response, "__self__", None) is not opener
+            or getattr(open_response, "__func__", None) is not canonical_opener_open
+        ):
+            raise error_type(
+                "canonical ProphetX account opener dispatch is invalid"
             )
-        require_authority()
-        request = request_type(url, headers=dict(headers), method="GET")
-        try:
-            with canonical_opener_open(
-                opener, request, timeout=timeout_seconds
-            ) as response:
-                body = response.read(max_response_bytes + 1)
-                if len(body) > max_response_bytes:
-                    raise ProphetXReadOnlyError(
-                        "ProphetX response exceeded the size limit"
+
+        def dispatch_matches(current, expected) -> bool:
+            if current is None or len(current) != len(expected):
+                return False
+            for actual, wanted in zip(current, expected):
+                if actual[0] != wanted[0] or actual[1] != wanted[1]:
+                    return False
+                if len(actual[2]) != len(wanted[2]):
+                    return False
+                if any(
+                    actual_handler is not expected_handler
+                    for actual_handler, expected_handler in zip(
+                        actual[2], wanted[2]
                     )
-                content_length = response.headers.get("Content-Length")
-                if content_length is not None:
-                    stripped = content_length.strip()
-                    if (
-                        not stripped
-                        or not stripped.isascii()
-                        or not stripped.isdigit()
-                    ):
-                        raise ProphetXReadOnlyError(
-                            "ProphetX response Content-Length is invalid"
-                        )
-                    if int(stripped) != len(body):
-                        raise ProphetXReadOnlyError(
-                            "ProphetX response Content-Length does not match body"
-                        )
-                result = ProphetXHttpResponse(
-                    status=int(response.getcode()),
-                    final_url=str(response.geturl()),
-                    content_type=response.headers.get("Content-Type"),
-                    content_encoding=response.headers.get("Content-Encoding"),
-                    body=body,
+                ):
+                    return False
+            return True
+
+        def authority_is_current() -> bool:
+            if (
+                not stdlib_dispatch_is_canonical()
+                or type(opener) is not opener_type
+                or opener_type.open is not canonical_opener_open
+                or opener_type._open is not canonical_opener_internal_open
+                or opener_type._call_chain is not canonical_opener_call_chain
+                or opener_type.error is not canonical_opener_error
+                or redirect_handler_type.redirect_request
+                is not canonical_redirect_request
+                or https_handler_type.https_open is not canonical_https_open
+                or https_handler_type.https_request is not canonical_https_request
+                or abstract_http_handler_type.do_open is not canonical_do_open
+                or http_error_processor_type.https_response
+                is not canonical_https_response
+            ):
+                return False
+
+            current_tls_context = getattr(expected_https_handler, "_context", None)
+            if (
+                current_tls_context is not expected_tls_context
+                or tls_context_snapshot(current_tls_context)
+                != expected_tls_context_state
+                or getattr(
+                    expected_https_handler,
+                    "_check_hostname",
+                    legacy_check_hostname_missing,
+                )
+                is not expected_legacy_check_hostname
+            ):
+                return False
+
+            opener_dict = getattr(opener, "__dict__", None)
+            if type(opener_dict) is not dict or any(
+                name in opener_dict for name in ("open", "_open", "_call_chain", "error")
+            ):
+                return False
+
+            handlers = getattr(opener, "handlers", None)
+            if type(handlers) is not list or len(handlers) != len(expected_handlers):
+                return False
+            if any(
+                current is not expected
+                for current, expected in zip(handlers, expected_handlers)
+            ):
+                return False
+            if any(isinstance(handler, proxy_handler_type) for handler in handlers):
+                return False
+
+            redirect_dict = getattr(expected_redirect_handler, "__dict__", None)
+            https_dict = getattr(expected_https_handler, "__dict__", None)
+            error_processor_dict = getattr(expected_error_processor, "__dict__", None)
+            if (
+                type(redirect_dict) is not dict
+                or "redirect_request" in redirect_dict
+                or type(https_dict) is not dict
+                or any(
+                    name in https_dict
+                    for name in ("https_open", "https_request", "do_open")
+                )
+                or type(error_processor_dict) is not dict
+                or "https_response" in error_processor_dict
+            ):
+                return False
+
+            current_dispatch = dispatch_snapshot(opener)
+            if not dispatch_matches(current_dispatch, expected_dispatch):
+                return False
+
+            dispatch_handlers = tuple(
+                handlers
+                for map_name, key, handlers in current_dispatch
+                if map_name == "handle_open" and key == "https"
+            )
+            request_handlers = tuple(
+                handlers
+                for map_name, key, handlers in current_dispatch
+                if map_name == "process_request" and key == "https"
+            )
+            response_handlers_now = tuple(
+                handlers
+                for map_name, key, handlers in current_dispatch
+                if map_name == "process_response" and key == "https"
+            )
+            if (
+                len(dispatch_handlers) != 1
+                or len(dispatch_handlers[0]) != 1
+                or dispatch_handlers[0][0] is not expected_https_handler
+                or len(request_handlers) != 1
+                or len(request_handlers[0]) != 1
+                or request_handlers[0][0] is not expected_https_handler
+                or len(response_handlers_now) != 1
+                or len(response_handlers_now[0]) != 1
+                or response_handlers_now[0][0] is not expected_error_processor
+                or any(
+                    not any(handler is registered for registered in expected_handlers)
+                    for _map_name, _key, mapped_handlers in current_dispatch
+                    for handler in mapped_handlers
+                )
+            ):
+                return False
+            return True
+
+        def require_authority() -> None:
+            if not authority_is_current():
+                raise error_type(
+                    "canonical ProphetX account network authority changed"
+                )
+
+        def fetch(
+            url: str,
+            *,
+            headers: Mapping[str, str],
+            timeout_seconds: float,
+        ) -> ProphetXHttpResponse:
+            if url != BALANCE_URL:
+                raise error_type(
+                    "ProphetX transport target is outside the fixed balance origin"
                 )
             require_authority()
-            return result
-        except ProphetXReadOnlyError:
-            raise
-        except HTTPError as exc:
-            status = exc.code
-            exc.close()
-            raise ProphetXReadOnlyError(
-                f"ProphetX HTTP request failed with status {status}"
-            ) from None
-        except (URLError, TimeoutError, OSError, HTTPException):
-            raise ProphetXReadOnlyError("ProphetX network request failed") from None
+            request = request_type(url, headers=dict(headers), method="GET")
+            try:
+                with canonical_opener_open(
+                    opener, request, timeout=timeout_seconds
+                ) as response:
+                    body = response.read(max_response_bytes + 1)
+                    if len(body) > max_response_bytes:
+                        raise error_type(
+                            "ProphetX response exceeded the size limit"
+                        )
+                    content_length = response.headers.get("Content-Length")
+                    if content_length is not None:
+                        stripped = content_length.strip()
+                        if (
+                            not stripped
+                            or not stripped.isascii()
+                            or not stripped.isdigit()
+                        ):
+                            raise error_type(
+                                "ProphetX response Content-Length is invalid"
+                            )
+                        if int(stripped) != len(body):
+                            raise error_type(
+                                "ProphetX response Content-Length does not match body"
+                            )
+                    result = response_type(
+                        status=int(response.getcode()),
+                        final_url=str(response.geturl()),
+                        content_type=response.headers.get("Content-Type"),
+                        content_encoding=response.headers.get("Content-Encoding"),
+                        body=body,
+                    )
+                require_authority()
+                return result
+            except error_type:
+                raise
+            except http_error_type as exc:
+                status = exc.code
+                exc.close()
+                raise error_type(
+                    f"ProphetX HTTP request failed with status {status}"
+                ) from None
+            except (url_error_type, timeout_error_type, os_error_type, http_exception_type):
+                raise error_type("ProphetX network request failed") from None
 
-    return fetch
+        return fetch
 
-class UrllibProphetXHttpTransport:
-    def __init__(self, *, max_response_bytes: int = _MAX_RESPONSE_BYTES) -> None:
+
+    return make_provider_fetch
+
+
+_make_provider_fetch = _build_provider_fetch_factory()
+del _build_provider_fetch_factory
+
+def _build_transport_init():
+    provider_fetch_factory = _make_provider_fetch
+
+    def sealed_init(
+        self,
+        *,
+        max_response_bytes: int = _MAX_RESPONSE_BYTES,
+    ) -> None:
         if (
             not isinstance(max_response_bytes, int)
             or isinstance(max_response_bytes, bool)
@@ -543,10 +579,16 @@ class UrllibProphetXHttpTransport:
             _RejectRedirectHandler(),
             HTTPSHandler(context=tls_context),
         )
-        self._provider_fetch = _make_provider_fetch(
+        self._provider_fetch = provider_fetch_factory(
             self._opener,
             max_response_bytes,
         )
+
+    return sealed_init
+
+
+class UrllibProphetXHttpTransport:
+    __init__ = _build_transport_init()
 
     def get(
         self,
@@ -600,6 +642,8 @@ class UrllibProphetXHttpTransport:
         except (URLError, TimeoutError, OSError, HTTPException):
             raise ProphetXReadOnlyError("ProphetX network request failed") from None
 
+
+del _build_transport_init
 
 _CANONICAL_WALLET_GET = UrllibProphetXHttpTransport.get
 _PROVIDER_TRANSPORTS: WeakKeyDictionary[

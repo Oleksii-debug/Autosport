@@ -16,21 +16,66 @@ _MACHINE_MODE_ARITY = {
 }
 
 
+def _workspace_configuration_error_detail(error: ValueError) -> str:
+    """Render known workspace configuration failures without leaking English internals."""
+
+    from autosport.paths import WorkspaceConfigurationError, WorkspaceConfigurationReason
+
+    if not isinstance(error, WorkspaceConfigurationError):
+        return "Некоректне налаштування шляху до робочої теки."
+
+    details = {
+        WorkspaceConfigurationReason.AUTOSPORT_WORKSPACE_HOME_EXPANSION_FAILED: (
+            "Не вдалося розгорнути домашню теку в AUTOSPORT_WORKSPACE. "
+            "Вкажіть абсолютний шлях."
+        ),
+        WorkspaceConfigurationReason.AUTOSPORT_WORKSPACE_NOT_ABSOLUTE: (
+            "Шлях у AUTOSPORT_WORKSPACE має бути абсолютним."
+        ),
+        WorkspaceConfigurationReason.LOCALAPPDATA_NOT_ABSOLUTE: (
+            "Шлях у LOCALAPPDATA має бути абсолютним."
+        ),
+        WorkspaceConfigurationReason.HOME_RESOLUTION_FAILED: (
+            "Не вдалося визначити домашню теку. Вкажіть абсолютний шлях "
+            "у AUTOSPORT_WORKSPACE."
+        ),
+        WorkspaceConfigurationReason.HOME_NOT_ABSOLUTE: (
+            "Шлях до домашньої теки має бути абсолютним."
+        ),
+        WorkspaceConfigurationReason.RESOLVED_WORKSPACE_NOT_ABSOLUTE: (
+            "Визначений шлях до робочої теки має бути абсолютним."
+        ),
+    }
+    return details.get(
+        error.reason,
+        "Некоректне налаштування шляху до робочої теки.",
+    )
+
+
+def _workspace_configuration_error_message(detail: str) -> str:
+    return (
+        "Автоспорт не відкрив робочу теку через недійсну конфігурацію.\n\n"
+        f"{detail}\n\n"
+        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
+        "потім перезапустіть Автоспорт. "
+        "Економічний стан і стан виконання не змінено."
+    )
+
+
 def _show_workspace_configuration_error(detail: str) -> None:
     """Show an accessible native Windows error before any interactive GUI state opens."""
 
     import ctypes
 
-    title = "Автоспорт — помилка конфігурації workspace"
-    message = (
-        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        f"{detail}\n\n"
-        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
-        "потім перезапустіть Автоспорт. Economic і live state не змінено."
-    )
+    title = "Автоспорт — помилка конфігурації робочої теки"
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
-    ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
+    ctypes.windll.user32.MessageBoxW(
+        None,
+        _workspace_configuration_error_message(detail),
+        title,
+        0x00000010,
+    )
 
 
 def _probe_workspace_writable(workspace: Path) -> None:
@@ -123,17 +168,22 @@ def _run_interactive_gui() -> int:
     # `default_workspace()` remains the canonical path resolver. This packaged
     # boundary also requires its resolved result to be absolute so the current
     # main path implementation cannot silently make durable identity depend on CWD.
-    from autosport.paths import default_workspace
+    from autosport.paths import (
+        WorkspaceConfigurationError,
+        WorkspaceConfigurationReason,
+        default_workspace,
+    )
 
     try:
         workspace = default_workspace()
         if not workspace.is_absolute():
-            raise ValueError(
+            raise WorkspaceConfigurationError(
+                WorkspaceConfigurationReason.RESOLVED_WORKSPACE_NOT_ABSOLUTE,
                 "Resolved Autosport workspace must be an absolute path; "
-                "configure an absolute AUTOSPORT_WORKSPACE or LOCALAPPDATA value"
+                "configure an absolute AUTOSPORT_WORKSPACE or LOCALAPPDATA value",
             )
     except ValueError as exc:
-        _show_workspace_configuration_error(str(exc))
+        _show_workspace_configuration_error(_workspace_configuration_error_detail(exc))
         return 2
 
     try:

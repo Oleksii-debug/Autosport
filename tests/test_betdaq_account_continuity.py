@@ -764,6 +764,7 @@ def test_reconciliation_lower_helper_instance_shadow_cannot_report_success(
 
     assert not store_path.exists()
 
+
 @pytest.mark.parametrize(
     "helper_name",
     (

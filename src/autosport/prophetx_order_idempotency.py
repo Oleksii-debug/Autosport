@@ -35,6 +35,8 @@ _CANONICAL_LEDGER_INIT = RealExecutionLedger.__init__
 _CANONICAL_LEDGER_INIT_CODE = RealExecutionLedger.__init__.__code__
 _CANONICAL_LEDGER_METHOD_NAMES = (
     "verified_snapshot",
+    "attempt_state",
+    "bind_provider_order_reference",
     "provider_order_reference",
     "bind_provider_assigned_order_id",
     "provider_assigned_order_id",
@@ -270,7 +272,9 @@ def _durable_attempt_facts(
 ) -> tuple[ProphetXProfile, str]:
     """Read profile/effect only from ledger bytes already verified by canonical authority."""
 
-    snapshot = ledger.verified_snapshot()
+    canonical_ledger = _require_canonical_provider_order_ledger(ledger)
+    snapshot = _CANONICAL_LEDGER_METHODS["verified_snapshot"](canonical_ledger)
+    _require_canonical_provider_order_ledger(canonical_ledger)
     try:
         events = [
             json.loads(line)["event"]
@@ -320,15 +324,27 @@ def _durable_attempt_facts(
 def bind_before_effect(
     ledger: RealExecutionLedger, *, attempt_id: str
 ) -> ProphetXOrderIdentity:
-    if ledger.attempt_state(attempt_id) is not AttemptState.RESERVED:
+    canonical_ledger = _require_canonical_provider_order_ledger(ledger)
+    if (
+        _CANONICAL_LEDGER_METHODS["attempt_state"](canonical_ledger, attempt_id)
+        is not AttemptState.RESERVED
+    ):
         raise ProphetXOrderIdentityError(
             "ProphetX client order identity must be bound before external effect"
         )
-    _durable_attempt_facts(ledger, attempt_id)
-    reference = ledger.bind_provider_order_reference(
-        attempt_id=attempt_id, provider_id=PROPHETX_PROVIDER_ID
+    _durable_attempt_facts(canonical_ledger, attempt_id)
+    _require_canonical_provider_order_ledger(canonical_ledger)
+    reference = _CANONICAL_LEDGER_METHODS["bind_provider_order_reference"](
+        canonical_ledger,
+        attempt_id=attempt_id,
+        provider_id=PROPHETX_PROVIDER_ID,
     )
-    return load_identity(ledger, attempt_id=attempt_id, expected_reference=reference)
+    _require_canonical_provider_order_ledger(canonical_ledger)
+    return load_identity(
+        canonical_ledger,
+        attempt_id=attempt_id,
+        expected_reference=reference,
+    )
 
 
 def load_identity(
@@ -337,10 +353,15 @@ def load_identity(
     attempt_id: str,
     expected_reference: str | None = None,
 ) -> ProphetXOrderIdentity:
-    profile, effect = _durable_attempt_facts(ledger, attempt_id)
-    reference = ledger.provider_order_reference(
-        attempt_id=attempt_id, provider_id=PROPHETX_PROVIDER_ID
+    canonical_ledger = _require_canonical_provider_order_ledger(ledger)
+    profile, effect = _durable_attempt_facts(canonical_ledger, attempt_id)
+    _require_canonical_provider_order_ledger(canonical_ledger)
+    reference = _CANONICAL_LEDGER_METHODS["provider_order_reference"](
+        canonical_ledger,
+        attempt_id=attempt_id,
+        provider_id=PROPHETX_PROVIDER_ID,
     )
+    _require_canonical_provider_order_ledger(canonical_ledger)
     if reference is None:
         raise ProphetXOrderIdentityError(
             "attempt has no durable ProphetX client order identity"

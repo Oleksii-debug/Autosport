@@ -5,7 +5,6 @@ from decimal import Decimal
 from threading import Event, Thread
 from time import monotonic, sleep
 
-from autosport import _paper_value_execution_authority as _authority
 from autosport.agents import AgentContext
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg
@@ -160,7 +159,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     )
     target_post_witness = Event()
     release_target = Event()
-    original_execute = _authority._ORIGINAL_EXECUTE
+    original_execute_unlocked = PaperExecutionAdoptionRuntime._execute_unlocked
 
     def block_after_target_witness(
         self,
@@ -173,11 +172,14 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         evidence_registry=None,
         suspended_action_ids: frozenset[str] = frozenset(),
     ):
+        # This boundary is reached only after GENERAL risk admission has committed
+        # and while the runtime-wide execution lock is held. Test synchronization
+        # therefore cannot replace the protected PaperValue authority entry point.
         if trigger_id == target_decision_id:
             target_post_witness.set()
             if not release_target.wait(timeout=5):
                 raise AssertionError("target execution was not released")
-        return original_execute(
+        return original_execute_unlocked(
             self,
             prepared=prepared,
             trigger_id=trigger_id,
@@ -188,7 +190,11 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
             suspended_action_ids=suspended_action_ids,
         )
 
-    monkeypatch.setattr(_authority, "_ORIGINAL_EXECUTE", block_after_target_witness)
+    monkeypatch.setattr(
+        PaperExecutionAdoptionRuntime,
+        "_execute_unlocked",
+        block_after_target_witness,
+    )
 
     target_done = Event()
     competitor_done = Event()

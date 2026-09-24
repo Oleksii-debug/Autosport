@@ -38,6 +38,7 @@ _CANONICAL_LEDGER_METHOD_NAMES = (
     "attempt_state",
     "bind_provider_order_reference",
     "provider_order_reference",
+    "mark_unknown",
     "bind_provider_assigned_order_id",
     "provider_assigned_order_id",
 )
@@ -385,9 +386,33 @@ def mark_ambiguous_delivery(
     reason: str,
     observed_at: str,
 ) -> None:
-    if load_identity(ledger, attempt_id=identity.attempt_id) != identity:
+    canonical_ledger = _require_canonical_provider_order_ledger(ledger)
+    if load_identity(canonical_ledger, attempt_id=identity.attempt_id) != identity:
         raise ProphetXEvidenceConflict("ProphetX identity no longer matches durable attempt")
-    ledger.mark_unknown(identity.attempt_id, reason=reason, observed_at=observed_at)
+    _require_canonical_provider_order_ledger(canonical_ledger)
+    ledger_path = canonical_ledger.path
+    _CANONICAL_LEDGER_METHODS["mark_unknown"](
+        canonical_ledger,
+        identity.attempt_id,
+        reason=reason,
+        observed_at=observed_at,
+    )
+    _require_canonical_provider_order_ledger(canonical_ledger)
+
+    restarted = object.__new__(_CANONICAL_LEDGER_CLASS)
+    _CANONICAL_LEDGER_INIT(restarted, ledger_path)
+    _require_canonical_provider_order_ledger(restarted)
+    if (
+        _CANONICAL_LEDGER_METHODS["attempt_state"](
+            restarted,
+            identity.attempt_id,
+        )
+        is not AttemptState.UNKNOWN
+    ):
+        raise ProphetXOrderIdentityError(
+            "ambiguous delivery did not become durably UNKNOWN"
+        )
+    _require_canonical_provider_order_ledger(restarted)
 
 
 def _validate_provider_order_candidate_impl(

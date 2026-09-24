@@ -125,6 +125,54 @@ def _canonical_json_sha256(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _make_live_feature_observation_issuance_gate():
+    issuance_token = object()
+    issuance_context: ContextVar[object | None] = ContextVar(
+        "autosport_live_feature_observation_issuance",
+        default=None,
+    )
+
+    def require_issuance() -> None:
+        if issuance_context.get() is not issuance_token:
+            raise RegisteredStrategyLiveFeatureError(
+                "LiveFeatureObservation must be issued by the canonical product observer"
+            )
+
+    def bind_observer(implementation):
+        observation_type = LiveFeatureObservation
+        observation_post_init = observation_type.__post_init__
+        observation_post_init_code = observation_post_init.__code__
+        implementation_code = implementation.__code__
+
+        @wraps(implementation)
+        def guarded_observer(*args, **kwargs):
+            if (
+                LiveFeatureObservation is not observation_type
+                or observation_type.__post_init__ is not observation_post_init
+                or getattr(observation_type.__post_init__, "__code__", None)
+                is not observation_post_init_code
+                or getattr(implementation, "__code__", None) is not implementation_code
+            ):
+                raise RegisteredStrategyLiveFeatureError(
+                    "live feature observation issuance authority changed"
+                )
+            marker = issuance_context.set(issuance_token)
+            try:
+                return implementation(*args, **kwargs)
+            finally:
+                issuance_context.reset(marker)
+
+        return guarded_observer
+
+    return require_issuance, bind_observer
+
+
+(
+    _require_live_feature_observation_issuance,
+    _bind_live_feature_observer,
+) = _make_live_feature_observation_issuance_gate()
+
+
 @dataclass(frozen=True, slots=True)
 class RegisteredLiveFeatureAuthority:
     """Exact registry lineage authorizing one frozen live feature definition."""
@@ -190,7 +238,11 @@ class LiveFeatureObservation:
     authority_sha256: str
     evidence_sha256: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _require_issuance=_require_live_feature_observation_issuance,
+    ) -> None:
+        _require_issuance()
         _canonical_text("input_id", self.input_id)
         _canonical_text("quote_key", self.quote_key)
         if (
@@ -778,53 +830,10 @@ def observe_registered_strategy_live_features(
     return tuple(result)
 
 
-def _bind_live_feature_observation_issuance(implementation):
-    """Seal positive observation construction to the canonical product observer."""
-
-    observation_type = LiveFeatureObservation
-    original_init = observation_type.__init__
-    issuance_token = object()
-    issuance_context: ContextVar[object | None] = ContextVar(
-        "autosport_live_feature_observation_issuance",
-        default=None,
-    )
-
-    @wraps(original_init)
-    def guarded_init(self, *args, **kwargs):
-        if issuance_context.get() is not issuance_token:
-            raise RegisteredStrategyLiveFeatureError(
-                "LiveFeatureObservation must be issued by the canonical product observer"
-            )
-        return original_init(self, *args, **kwargs)
-
-    observation_type.__init__ = guarded_init
-    guarded_init_code = guarded_init.__code__
-    implementation_code = implementation.__code__
-
-    @wraps(implementation)
-    def guarded_observer(*args, **kwargs):
-        if (
-            LiveFeatureObservation is not observation_type
-            or observation_type.__init__ is not guarded_init
-            or getattr(observation_type.__init__, "__code__", None)
-            is not guarded_init_code
-            or getattr(implementation, "__code__", None) is not implementation_code
-        ):
-            raise RegisteredStrategyLiveFeatureError(
-                "live feature observation issuance authority changed"
-            )
-        marker = issuance_context.set(issuance_token)
-        try:
-            return implementation(*args, **kwargs)
-        finally:
-            issuance_context.reset(marker)
-
-    return guarded_observer
-
-
-observe_registered_strategy_live_features = _bind_live_feature_observation_issuance(
+observe_registered_strategy_live_features = _bind_live_feature_observer(
     observe_registered_strategy_live_features
 )
+del _bind_live_feature_observer
 
 
 __all__ = [

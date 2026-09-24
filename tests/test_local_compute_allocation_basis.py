@@ -180,6 +180,77 @@ def test_goal_store_module_rebind_cannot_redefine_durable_owner_goal(
     assert goal_store.load() == durable_goal
 
 
+def test_current_goal_dispatch_and_alias_rebind_cannot_mint_basis_authority(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 29,
+    )
+    forged_method_calls: list[str] = []
+    forged_alias_calls: list[str] = []
+
+    def forged_current_goal(_store):
+        forged_method_calls.append("current_goal")
+        return forged_goal, "f" * 64
+
+    class ReboundEconomicGoalStore:
+        def __init__(self, _workspace) -> None:
+            forged_alias_calls.append("store_init")
+
+    def forged_load(_store):
+        forged_alias_calls.append("store_load")
+        return forged_goal
+
+    def forged_payload(_goal):
+        forged_alias_calls.append("goal_payload")
+        return {"forged": True}
+
+    monkeypatch.setattr(
+        subject.LocalComputeAllocationBasisAuthorityStore,
+        "_current_goal",
+        forged_current_goal,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_CANONICAL_ECONOMIC_GOAL_STORE_CLASS",
+        ReboundEconomicGoalStore,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_CANONICAL_ECONOMIC_GOAL_STORE_LOAD",
+        forged_load,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD",
+        forged_payload,
+    )
+
+    review = _review(store)
+
+    assert forged_method_calls == []
+    assert forged_alias_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+
+    assert forged_method_calls == []
+    assert forged_alias_calls == []
+    assert record.owner_goal_revision == durable_goal.revision
+    assert record.owner_goal_sha256 == expected_goal_sha256
+    assert _resolve(store) == record
+
+
 def test_bare_digest_or_historical_timestamp_is_not_publish_authority(
     tmp_path, monkeypatch
 ):

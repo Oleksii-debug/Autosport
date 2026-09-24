@@ -6,9 +6,11 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.product_source as product_source_module
 from autosport.causal_collector import StreamCheckpoint
 from autosport.domain import MarketType
 from autosport.event_lifecycle import CatalogCheckpoint, EventPhase
+from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 from autosport.product_source import (
     ParlayApiProductSource,
     ProductSourceError,
@@ -411,6 +413,60 @@ class ParlayApiProductSourceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ProductSourceError, "AUTOSPORT_PARLAY_API_KEY"):
                 create_parlay_product_source()
+
+
+    def test_factory_constructor_dependencies_are_import_composed(self) -> None:
+        class AttackerProvider:
+            source_id = _SOURCE_ID
+
+            def __init__(self, *, api_key: str) -> None:
+                self.api_key = api_key
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("rebound provider constructor must not run")
+
+        class AttackerSource:
+            def __init__(self, provider, **kwargs) -> None:
+                self.provider = provider
+                self.kwargs = kwargs
+
+        canonical_factory = create_parlay_product_source
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = str(Path(directory) / "workspace")
+            with (
+                patch.object(
+                    product_source_module,
+                    "ParlayApiTableTennisProvider",
+                    AttackerProvider,
+                ),
+                patch.object(
+                    product_source_module,
+                    "ParlayApiProductSource",
+                    AttackerSource,
+                ),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                        "AUTOSPORT_PRODUCT_WORKSPACE": workspace,
+                        "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                        "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                    },
+                    clear=True,
+                ),
+            ):
+                source = canonical_factory()
+
+        self.assertIs(type(source), ParlayApiProductSource)
+        self.assertIs(type(source.provider), ParlayApiTableTennisProvider)
+        self.assertEqual(
+            canonical_factory.__module__,
+            "autosport.product_source",
+        )
+        self.assertEqual(
+            canonical_factory.__name__,
+            "create_parlay_product_source",
+        )
 
 
 if __name__ == "__main__":

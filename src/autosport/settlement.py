@@ -10,6 +10,33 @@ from .paper import PaperBook
 VALID_OUTCOMES = {"win", "loss", "void"}
 
 
+
+
+
+def _build_public_entry_class_guard(name: str):
+    """Guard a SettlementEngine class binding even through type.__setattr__."""
+
+    class PublicEntryClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            return instance.__dict__[name]
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError(
+                "canonical settlement public entry binding is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError(
+                "canonical settlement public entry binding is immutable"
+            )
+
+    return PublicEntryClassGuard()
+
+
 class _SettlementEngineMeta(type):
     """Seal authority-bearing public settlement entry bindings after composition."""
 
@@ -424,5 +451,12 @@ def _build_serialized_settlement_operations():
 SettlementEngine.record, SettlementEngine.settle_ready = (
     _build_serialized_settlement_operations()
 )
+# A metaclass data descriptor is intentionally installed only after the canonical
+# functions exist in SettlementEngine.__dict__.  Unlike an __setattr__ override
+# alone, type.__setattr__/type.__delattr__ still honor data descriptors on the
+# metaclass, so direct base-metaclass mutation cannot replace these public gates.
+_SettlementEngineMeta.record = _build_public_entry_class_guard("record")
+_SettlementEngineMeta.settle_ready = _build_public_entry_class_guard("settle_ready")
 SettlementEngine._public_entry_bindings_sealed = True
+del _build_public_entry_class_guard
 del _build_serialized_settlement_operations

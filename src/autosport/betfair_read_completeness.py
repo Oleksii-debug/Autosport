@@ -318,69 +318,69 @@ class BetfairReadCompletenessObserver:
         seen: set[str] = set()
         pages: list[tuple[int, int, bool, str]] = []
         offset = 0
-        try:
-            for _ in range(max_pages):
+        for _ in range(max_pages):
+            try:
                 page = self._client.read_current_orders_page(
                     from_record=offset,
                     record_count=page_size,
                     customer_order_refs=customer_order_refs,
                     market_ids=market_ids,
                 )
-                pages.append(
-                    (
-                        page.from_record,
-                        page.record_count,
-                        page.more_available,
-                        page.evidence.source_payload_sha256,
-                    )
+            except BetfairReadOnlyError as exc:
+                completeness, code = _classify_failure(exc, partial=bool(pages))
+                return self._paged_result(
+                    "listCurrentOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    completeness,
+                    code,
                 )
-                if not _extend_unique(items, seen, page.orders):
-                    return self._paged_result(
-                        "listCurrentOrders",
-                        query_sha,
-                        attempt_id,
-                        started,
-                        pages,
-                        items,
-                        BetfairObservationCompleteness.PARTIAL,
-                        "cross_page_duplicate",
-                    )
-                if not page.more_available:
-                    completeness, failure_code = _provider_end_completeness(pages)
-                    return self._paged_result(
-                        "listCurrentOrders",
-                        query_sha,
-                        attempt_id,
-                        started,
-                        pages,
-                        items,
-                        completeness,
-                        failure_code,
-                    )
-                if not page.orders:
-                    return self._paged_result(
-                        "listCurrentOrders",
-                        query_sha,
-                        attempt_id,
-                        started,
-                        pages,
-                        items,
-                        BetfairObservationCompleteness.PARTIAL,
-                        "pagination_cannot_advance",
-                    )
-                offset += len(page.orders)
-        except BetfairReadOnlyError as exc:
-            completeness, code = _classify_failure(exc, partial=bool(pages))
-            return self._paged_result(
-                "listCurrentOrders",
-                query_sha,
-                attempt_id,
-                started,
-                pages,
-                items,
-                completeness,
-                code,
+            pages.append(
+                (
+                    page.from_record,
+                    page.record_count,
+                    page.more_available,
+                    page.evidence.source_payload_sha256,
+                )
             )
+            if not _extend_unique(items, seen, page.orders):
+                return self._paged_result(
+                    "listCurrentOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    BetfairObservationCompleteness.PARTIAL,
+                    "cross_page_duplicate",
+                )
+            if not page.more_available:
+                completeness, failure_code = _provider_end_completeness(pages)
+                return self._paged_result(
+                    "listCurrentOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    completeness,
+                    failure_code,
+                )
+            if not page.orders:
+                return self._paged_result(
+                    "listCurrentOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    BetfairObservationCompleteness.PARTIAL,
+                    "pagination_cannot_advance",
+                )
+            offset += len(page.orders)
         return self._paged_result(
             "listCurrentOrders",
             query_sha,
@@ -418,8 +418,8 @@ class BetfairReadCompletenessObserver:
         seen: set[str] = set()
         pages: list[tuple[int, int, bool, str]] = []
         offset = 0
-        try:
-            for _ in range(max_pages):
+        for _ in range(max_pages):
+            try:
                 page = self._client.read_cleared_orders_page(
                     from_record=offset,
                     record_count=page_size,
@@ -428,61 +428,61 @@ class BetfairReadCompletenessObserver:
                     customer_order_refs=customer_order_refs,
                     market_ids=market_ids,
                 )
-                pages.append(
-                    (
-                        page.from_record,
-                        page.record_count,
-                        page.more_available,
-                        page.evidence.source_payload_sha256,
-                    )
+            except BetfairReadOnlyError as exc:
+                completeness, code = _classify_failure(exc, partial=bool(pages))
+                return self._paged_result(
+                    "listClearedOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    completeness,
+                    code,
                 )
-                if not _extend_unique(items, seen, page.orders):
-                    return self._paged_result(
-                        "listClearedOrders",
-                        query_sha,
-                        attempt_id,
-                        started,
-                        pages,
-                        items,
-                        BetfairObservationCompleteness.PARTIAL,
-                        "cross_page_duplicate",
-                    )
-                if not page.more_available:
-                    completeness, failure_code = _provider_end_completeness(pages)
-                    return self._paged_result(
-                        "listClearedOrders",
-                        query_sha,
-                        attempt_id,
-                        started,
-                        pages,
-                        items,
-                        completeness,
-                        failure_code,
-                    )
-                if not page.orders:
-                    return self._paged_result(
-                        "listClearedOrders",
-                        query_sha,
-                        attempt_id,
-                        started,
-                        pages,
-                        items,
-                        BetfairObservationCompleteness.PARTIAL,
-                        "pagination_cannot_advance",
-                    )
-                offset += len(page.orders)
-        except BetfairReadOnlyError as exc:
-            completeness, code = _classify_failure(exc, partial=bool(pages))
-            return self._paged_result(
-                "listClearedOrders",
-                query_sha,
-                attempt_id,
-                started,
-                pages,
-                items,
-                completeness,
-                code,
+            pages.append(
+                (
+                    page.from_record,
+                    page.record_count,
+                    page.more_available,
+                    page.evidence.source_payload_sha256,
+                )
             )
+            if not _extend_unique(items, seen, page.orders):
+                return self._paged_result(
+                    "listClearedOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    BetfairObservationCompleteness.PARTIAL,
+                    "cross_page_duplicate",
+                )
+            if not page.more_available:
+                completeness, failure_code = _provider_end_completeness(pages)
+                return self._paged_result(
+                    "listClearedOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    completeness,
+                    failure_code,
+                )
+            if not page.orders:
+                return self._paged_result(
+                    "listClearedOrders",
+                    query_sha,
+                    attempt_id,
+                    started,
+                    pages,
+                    items,
+                    BetfairObservationCompleteness.PARTIAL,
+                    "pagination_cannot_advance",
+                )
+            offset += len(page.orders)
         return self._paged_result(
             "listClearedOrders",
             query_sha,

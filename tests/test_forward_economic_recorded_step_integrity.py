@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.forward_economic_evidence as forward_evidence
 from autosport.forward_economic_evidence import (
     AlphaAllocation,
     BetSide,
@@ -294,3 +295,57 @@ def test_record_fails_closed_before_append_on_private_step_identity_drift() -> N
         accumulator.record(_observation(1), resolver)
 
     assert len(accumulator._steps) == 1
+
+def test_recorded_step_guard_rejects_to_payload_dispatch_rebind(monkeypatch) -> None:
+    accumulator, _resolver = _filled_accumulator(event_count=1)
+
+    def forged_to_payload(_self: object) -> dict[str, object]:
+        return {"schema_version": "forged"}
+
+    monkeypatch.setattr(
+        forward_evidence.ForwardEconomicStep,
+        "to_payload",
+        forged_to_payload,
+    )
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        accumulator.summary()
+
+
+def test_recorded_step_guard_rejects_to_payload_code_mutation() -> None:
+    accumulator, _resolver = _filled_accumulator(event_count=1)
+    method = forward_evidence.ForwardEconomicStep.to_payload
+    original_code = method.__code__
+
+    def forged_to_payload(_self: object) -> dict[str, object]:
+        raise AssertionError("tampered to_payload body must not execute")
+
+    try:
+        method.__code__ = forged_to_payload.__code__
+        with pytest.raises(
+            ForwardEconomicEvidenceError,
+            match="internal recorded step identity executable integrity drift",
+        ):
+            accumulator.summary()
+    finally:
+        method.__code__ = original_code
+
+
+def test_recorded_step_guard_rejects_canonical_digest_rebind(monkeypatch) -> None:
+    accumulator, _resolver = _filled_accumulator(event_count=1)
+
+    monkeypatch.setattr(
+        forward_evidence,
+        "_canonical_digest",
+        lambda _value: "0" * 64,
+    )
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        accumulator.summary()
+

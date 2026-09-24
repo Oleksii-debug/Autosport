@@ -8,6 +8,7 @@ import pytest
 from autosport.forward_economic_evidence import (
     AlphaAllocation,
     BetSide,
+    EconomicCostCausality,
     FamilywiseAlphaRegistry,
     ForwardDecisionObservation,
     ForwardEconomicEvidenceAccumulator,
@@ -72,6 +73,9 @@ def _none(
     cost: str = "0",
     cost_incurred_at: datetime | None = None,
     cost_available_at: datetime | None = None,
+    cost_causality: EconomicCostCausality = EconomicCostCausality.DECISION_CAUSED,
+    cost_class_id: str | None = None,
+    cost_allocation_authority_sha256: str | None = None,
 ) -> ResolvedPolicyOutcome:
     kwargs: dict[str, object] = {}
     if cost_available_at is not None:
@@ -80,6 +84,9 @@ def _none(
             economic_cost_evidence_sha256=_sha(13 + obs.sequence),
             economic_cost_incurred_at=cost_incurred_at,
             economic_cost_available_at=cost_available_at,
+            economic_cost_causality=cost_causality,
+            economic_cost_class_id=cost_class_id,
+            economic_cost_allocation_authority_sha256=cost_allocation_authority_sha256,
         )
     return ResolvedPolicyOutcome(
         policy_id=policy_id,
@@ -161,6 +168,9 @@ def test_predecision_incurred_cost_can_be_proven_later_without_retimestamping() 
         cost="60",
         cost_incurred_at=incurred_at,
         cost_available_at=available_at,
+        cost_causality=EconomicCostCausality.PREEXISTING_SHARED,
+        cost_class_id="campaign-shared-cost",
+        cost_allocation_authority_sha256=_sha(30),
     )
 
     # The economic debit belongs to the frozen campaign/member at its canonical
@@ -210,6 +220,9 @@ def test_realized_drawdown_uses_cost_incidence_not_late_evidence_availability() 
         cost="60",
         cost_incurred_at=T0 + timedelta(hours=2),
         cost_available_at=T0 + timedelta(hours=5),
+        cost_causality=EconomicCostCausality.PREEXISTING_SHARED,
+        cost_class_id="campaign-shared-cost",
+        cost_allocation_authority_sha256=_sha(30),
     )
     mapping[(2, "challenger")] = _executed(
         "challenger",

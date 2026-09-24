@@ -174,9 +174,10 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
 
     def test_rest_exact_order_correlation_is_only_a_candidate_not_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
-            identity = bind_before_effect(
-                _ledger(Path(tmp) / "execution.jsonl"), attempt_id="try-1"
-            )
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
             matched = _evidence(
                 identity,
                 ProphetXEvidenceKind.ORDER_STATE,
@@ -191,11 +192,35 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
             )
             self.assertEqual(
                 reconciliation_disposition(identity, matched),
+                ProphetXReconciliationDisposition.CONFLICT,
+            )
+            self.assertEqual(
+                reconciliation_disposition(identity, matched, ledger=ledger),
                 ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE,
             )
             self.assertEqual(
-                reconciliation_disposition(identity, unrelated),
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1", provider_id="prophetx"
+                ),
+                "provider-order-7",
+            )
+            self.assertEqual(
+                reconciliation_disposition(identity, unrelated, ledger=ledger),
                 ProphetXReconciliationDisposition.UNRELATED_PROVIDER_EVIDENCE,
+            )
+            conflicting = _evidence(
+                identity,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id="provider-order-8",
+                effect_fingerprint=identity.effect_fingerprint,
+            )
+            self.assertEqual(
+                reconciliation_disposition(
+                    identity,
+                    conflicting,
+                    ledger=RealExecutionLedger(path),
+                ),
+                ProphetXReconciliationDisposition.CONFLICT,
             )
 
     def test_economic_or_transport_conflict_fails_closed(self):
@@ -306,13 +331,13 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
 
     def test_fix_exec_reports_dedupe_and_order_by_provider_time_not_arrival(self):
         with tempfile.TemporaryDirectory() as tmp:
-            identity = bind_before_effect(
-                _ledger(
-                    Path(tmp) / "execution.jsonl",
-                    PROPHETX_SANDBOX_FIX_PROFILE.bookmaker_profile_version,
-                ),
-                attempt_id="try-1",
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(
+                path,
+                PROPHETX_SANDBOX_FIX_PROFILE.bookmaker_profile_version,
             )
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
             later = ProphetXFixExecutionReport(
                 "exec-2",
                 identity.client_order_id,
@@ -331,10 +356,21 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 "NEW",
                 "0",
             )
+            with self.assertRaisesRegex(
+                ProphetXOrderIdentityError,
+                "require durable provider order id binding",
+            ):
+                normalize_fix_execution_reports(identity, (later, earlier, earlier))
             normalized = normalize_fix_execution_reports(
-                identity, (later, earlier, earlier)
+                identity, (later, earlier, earlier), ledger=ledger
             )
             self.assertEqual([item.exec_id for item in normalized], ["exec-1", "exec-2"])
+            self.assertEqual(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1", provider_id="prophetx"
+                ),
+                "order-1",
+            )
 
     def test_conflicting_duplicate_fix_exec_id_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +435,89 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 normalize_fix_execution_reports(identity, (wrong_client,))
             with self.assertRaisesRegex(ProphetXEvidenceConflict, "economics"):
                 normalize_fix_execution_reports(identity, (wrong_economics,))
+
+    def test_fix_provider_order_id_conflict_is_atomic_and_restart_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(
+                path,
+                PROPHETX_SANDBOX_FIX_PROFILE.bookmaker_profile_version,
+            )
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            first = ProphetXFixExecutionReport(
+                "exec-1",
+                identity.client_order_id,
+                "order-A",
+                "2026-09-22T20:00:40+00:00",
+                identity.effect_fingerprint,
+                "NEW",
+                "0",
+            )
+            normalize_fix_execution_reports(identity, (first,), ledger=ledger)
+            restarted = RealExecutionLedger(path)
+
+            conflict = ProphetXFixExecutionReport(
+                "exec-2",
+                identity.client_order_id,
+                "order-B",
+                "2026-09-22T20:00:50+00:00",
+                identity.effect_fingerprint,
+                "PARTIAL_FILL",
+                "1",
+            )
+            with self.assertRaisesRegex(
+                ProphetXEvidenceConflict,
+                "conflicts with durable attempt",
+            ):
+                normalize_fix_execution_reports(
+                    identity, (conflict,), ledger=restarted
+                )
+            self.assertEqual(
+                restarted.provider_assigned_order_id(
+                    attempt_id="try-1", provider_id="prophetx"
+                ),
+                "order-A",
+            )
+
+            second_path = Path(tmp) / "second.jsonl"
+            second = _ledger(
+                second_path,
+                PROPHETX_SANDBOX_FIX_PROFILE.bookmaker_profile_version,
+            )
+            second_identity = bind_before_effect(second, attempt_id="try-1")
+            second.mark_submitted("try-1", submitted_at=SUBMITTED)
+            batch_a = ProphetXFixExecutionReport(
+                "exec-1",
+                second_identity.client_order_id,
+                "order-A",
+                "2026-09-22T20:00:40+00:00",
+                second_identity.effect_fingerprint,
+                "NEW",
+                "0",
+            )
+            batch_b = ProphetXFixExecutionReport(
+                "exec-2",
+                second_identity.client_order_id,
+                "order-B",
+                "2026-09-22T20:00:50+00:00",
+                second_identity.effect_fingerprint,
+                "PARTIAL_FILL",
+                "1",
+            )
+            with self.assertRaisesRegex(
+                ProphetXEvidenceConflict,
+                "conflict on provider assigned order id",
+            ):
+                normalize_fix_execution_reports(
+                    second_identity, (batch_a, batch_b), ledger=second
+                )
+            self.assertIsNone(
+                second.provider_assigned_order_id(
+                    attempt_id="try-1", provider_id="prophetx"
+                )
+            )
+
 
     def test_capability_matrix_is_transport_specific(self):
         self.assertEqual(

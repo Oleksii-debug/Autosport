@@ -12,7 +12,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Iterable
 
-from .real_execution_ledger import AttemptState, RealExecutionLedger
+from .real_execution_ledger import (
+    AttemptState,
+    ExecutionIdentityConflict,
+    ExecutionStateError,
+    RealExecutionLedger,
+)
 
 PROPHETX_PROVIDER_ID = "prophetx"
 
@@ -307,9 +312,29 @@ def mark_ambiguous_delivery(
     ledger.mark_unknown(identity.attempt_id, reason=reason, observed_at=observed_at)
 
 
+def _bind_provider_assigned_order_id(
+    ledger: RealExecutionLedger,
+    identity: ProphetXOrderIdentity,
+    provider_order_id: str,
+) -> bool:
+    try:
+        if load_identity(ledger, attempt_id=identity.attempt_id) != identity:
+            return False
+        ledger.bind_provider_assigned_order_id(
+            attempt_id=identity.attempt_id,
+            provider_id=PROPHETX_PROVIDER_ID,
+            provider_order_id=provider_order_id,
+        )
+    except (ExecutionIdentityConflict, ExecutionStateError):
+        return False
+    return True
+
+
 def reconciliation_disposition(
     identity: ProphetXOrderIdentity,
     evidence: ProphetXProviderEvidence,
+    *,
+    ledger: RealExecutionLedger | None = None,
 ) -> ProphetXReconciliationDisposition:
     """Return correlation candidates only; never mint #1634/#530 provider truth."""
 
@@ -330,17 +355,23 @@ def reconciliation_disposition(
             evidence.kind is ProphetXEvidenceKind.ORDER_STATE
             and evidence.provider_order_id
         ):
+            if ledger is None or not _bind_provider_assigned_order_id(
+                ledger, identity, evidence.provider_order_id
+            ):
+                return ProphetXReconciliationDisposition.CONFLICT
             return ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE
         return ProphetXReconciliationDisposition.WAIT_EXTERNAL_EVIDENCE
 
     if evidence.kind is ProphetXEvidenceKind.FIX_ORDER_STATUS_UNKNOWN:
         return ProphetXReconciliationDisposition.PROVIDER_NOT_FOUND_CANDIDATE
     if evidence.kind is ProphetXEvidenceKind.FIX_EXECUTION_REPORT:
-        return (
-            ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE
-            if evidence.provider_order_id
-            else ProphetXReconciliationDisposition.CONFLICT
-        )
+        if not evidence.provider_order_id:
+            return ProphetXReconciliationDisposition.CONFLICT
+        if ledger is None or not _bind_provider_assigned_order_id(
+            ledger, identity, evidence.provider_order_id
+        ):
+            return ProphetXReconciliationDisposition.CONFLICT
+        return ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE
     return ProphetXReconciliationDisposition.WAIT_EXTERNAL_EVIDENCE
 
 
@@ -368,12 +399,15 @@ def retry_disposition(
 def normalize_fix_execution_reports(
     identity: ProphetXOrderIdentity,
     reports: Iterable[ProphetXFixExecutionReport],
+    *,
+    ledger: RealExecutionLedger | None = None,
 ) -> tuple[ProphetXFixExecutionReport, ...]:
     if identity.transport is not ProphetXTransport.FIX_ORDER_ENTRY:
         raise ProphetXOrderIdentityError(
             "FIX execution reports cannot be applied to a REST identity"
         )
     by_exec_id: dict[str, ProphetXFixExecutionReport] = {}
+    provider_order_ids: set[str] = set()
     for report in reports:
         if report.client_order_id != identity.client_order_id:
             raise ProphetXEvidenceConflict(
@@ -381,12 +415,31 @@ def normalize_fix_execution_reports(
             )
         if report.effect_fingerprint != identity.effect_fingerprint:
             raise ProphetXEvidenceConflict("FIX report economics mismatch durable attempt")
+        provider_order_ids.add(report.provider_order_id)
+        if len(provider_order_ids) > 1:
+            raise ProphetXEvidenceConflict(
+                "FIX reports conflict on provider assigned order id"
+            )
         prior = by_exec_id.get(report.exec_id)
         if prior is not None and prior != report:
             raise ProphetXEvidenceConflict(
                 "same FIX ExecID has conflicting provider evidence"
             )
         by_exec_id[report.exec_id] = report
+
+    if by_exec_id:
+        if ledger is None:
+            raise ProphetXOrderIdentityError(
+                "FIX execution reports require durable provider order id binding"
+            )
+        provider_order_id = next(iter(provider_order_ids))
+        if not _bind_provider_assigned_order_id(
+            ledger, identity, provider_order_id
+        ):
+            raise ProphetXEvidenceConflict(
+                "FIX provider assigned order id conflicts with durable attempt"
+            )
+
     return tuple(
         sorted(
             by_exec_id.values(),

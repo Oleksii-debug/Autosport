@@ -149,3 +149,8 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.
 from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
+
+# A still-live account snapshot is an ephemeral remote-provider capability. Reusing
+# its idempotency identity from another canonical acquirer is allowed only when the
+# exact in-memory Betfair credentials match the origin that issued the live object.
+from . import _account_snapshot_acquisition_origin_binding as _account_snapshot_acquisition_origin_binding  # noqa: F401,E402

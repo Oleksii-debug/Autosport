@@ -1792,13 +1792,10 @@ class PersistentLiveDecisionLoop:
                     for event in snapshot.events
                 }
             )
-            health_decisions = {
-                source_id: health_gate.provider_health(
-                    source_id,
-                    as_of=as_of,
-                )
-                for source_id in source_ids
-            }
+            health_decisions = health_gate.provider_health_snapshot(
+                tuple(source_ids),
+                as_of=as_of,
+            )
 
         snapshots: dict[str, MirrorSnapshot] = {}
         for input_id, raw_snapshot in raw_snapshots.items():

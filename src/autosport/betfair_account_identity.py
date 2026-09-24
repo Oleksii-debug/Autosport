@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import sha256
+from hashlib import blake2b, sha256
 import hmac
 import json
 import urllib.request as _urllib_request
@@ -226,7 +226,7 @@ def _make_account_identity_authority():
         identity_projection_material, "__code__", None
     )
     sha256_fn = sha256
-    hmac_digest = hmac.digest
+    keyed_digest_fn = blake2b
     hmac_compare_digest = hmac.compare_digest
     token_hex_fn = token_hex
     weakref_fn = ref
@@ -377,7 +377,11 @@ def _make_account_identity_authority():
             + b"\x00"
             + credentials.session_token.encode("utf-8")
         )
-        return hmac_digest(process_hmac_key, material, "sha256")
+        return keyed_digest_fn(
+            material,
+            key=process_hmac_key,
+            digest_size=32,
+        ).digest()
 
     def identity_projection_material_for(
         value: BetfairAuthenticatedAccountIdentity,
@@ -407,15 +411,15 @@ def _make_account_identity_authority():
     def issued_identity_digest(
         value: BetfairAuthenticatedAccountIdentity,
     ) -> str:
-        # Hidden issuance integrity uses a process-local keyed digest over the
-        # same deterministic scalar projection as the public identity_id. It
-        # intentionally does not depend on json.dumps/JSONEncoder executable
-        # state, so JSON-code mutation cannot mask post-issuance DTO mutation.
-        return hmac_digest(
-            process_hmac_key,
+        # Hidden issuance integrity uses a closure-captured native keyed
+        # BLAKE2b primitive over the same deterministic scalar projection as
+        # the public identity_id. The native type has no mutable Python
+        # bytecode surface, unlike hmac.digest/json.dumps.
+        return keyed_digest_fn(
             identity_projection_material_for(value),
-            "sha256",
-        ).hex()
+            key=process_hmac_key,
+            digest_size=32,
+        ).hexdigest()
 
     def identity_projection_dependencies_are_current() -> bool:
         return bool(
@@ -423,6 +427,8 @@ def _make_account_identity_authority():
             and getattr(_identity_projection_material, "__code__", None)
             is identity_projection_material_code
             and sha256 is sha256_fn
+            and blake2b is keyed_digest_fn
+            and hmac.compare_digest is hmac_compare_digest
             and IDENTITY_SCHEMA == identity_schema
             and IDENTITY_SCHEMA_VERSION == identity_schema_version
         )

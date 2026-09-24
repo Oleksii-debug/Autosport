@@ -692,12 +692,11 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 )
 
             self.assertEqual(attacker_calls, [])
-            self.assertEqual(
+            self.assertIsNone(
                 RealExecutionLedger(path).provider_assigned_order_id(
                     attempt_id="try-1",
                     provider_id="prophetx",
-                ),
-                "provider-order-captured",
+                )
             )
 
     def test_economic_or_transport_conflict_fails_closed(self):

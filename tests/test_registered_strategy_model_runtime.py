@@ -11,7 +11,10 @@ from autosport.registered_strategy_model_runtime import (
     RegisteredStrategyModelRuntimeError,
     resolve_registered_strategy_model,
 )
-from autosport.strategy_model_factory import FactoryArtifactStore, WalkForwardEvaluationConfig
+from autosport.strategy_model_factory import (
+    FactoryArtifactStore,
+    WalkForwardEvaluationConfig,
+)
 
 
 A = "a" * 64

@@ -430,6 +430,9 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 self.provider = provider
                 self.kwargs = kwargs
 
+        def forbidden_required_env(_name: str) -> str:
+            raise AssertionError("rebound environment resolver must not run")
+
         canonical_factory = create_parlay_product_source
         with tempfile.TemporaryDirectory() as directory:
             workspace = str(Path(directory) / "workspace")
@@ -447,9 +450,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 patch.object(
                     product_source_module,
                     "_required_env",
-                    lambda _name: (_ for _ in ()).throw(
-                        AssertionError("rebound environment resolver must not run")
-                    ),
+                    forbidden_required_env,
                 ),
                 patch.dict(
                     "os.environ",

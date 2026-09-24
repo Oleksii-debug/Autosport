@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 from threading import Event, Thread
+from time import monotonic, sleep
 
 from autosport import _paper_value_execution_authority as _authority
 from autosport.agents import AgentContext
-from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -20,19 +21,6 @@ from autosport.paper_execution_reality import (
 )
 from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.risk import PaperRiskPolicy
-
-
-class _AppendWitnessLedger(JsonlDecisionLedger):
-    """Expose when the competing stale decision has become durable."""
-
-    def __init__(self, path, appended: Event) -> None:
-        super().__init__(path)
-        self._appended = appended
-
-    def append(self, record: DecisionRecord) -> str:
-        digest = super().append(record)
-        self._appended.set()
-        return digest
 
 
 def _runtime(tmp_path, book: PaperBook) -> PaperExecutionAdoptionRuntime:
@@ -146,25 +134,18 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     target_agent = _agent(target_event, policy)
     competitor_agent = _agent(competitor_event, policy)
 
-    target_dir = tmp_path / "target"
-    competitor_dir = tmp_path / "competitor"
-    target_dir.mkdir()
-    competitor_dir.mkdir()
-    competitor_appended = Event()
+    decision_ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
     target_context = AgentContext(
         book,
         replay_run_id="replay-target",
-        decision_ledger=JsonlDecisionLedger(target_dir / "decisions.jsonl"),
+        decision_ledger=decision_ledger,
         paper_execution=runtime,
         paper_provider_accounts=(("provider-a", "account-a"),),
     )
     competitor_context = AgentContext(
         book,
         replay_run_id="replay-competitor",
-        decision_ledger=_AppendWitnessLedger(
-            competitor_dir / "decisions.jsonl",
-            competitor_appended,
-        ),
+        decision_ledger=decision_ledger,
         paper_execution=runtime,
         paper_provider_accounts=(("provider-a", "account-a"),),
     )
@@ -172,6 +153,10 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     target_decision_id = target_agent._material_action_id(
         target_context,
         target_event,
+    )
+    competitor_decision_id = competitor_agent._material_action_id(
+        competitor_context,
+        competitor_event,
     )
     target_post_witness = Event()
     release_target = Event()
@@ -229,7 +214,16 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         # The competitor can still make its earlier proposal/decision durable, but
         # must block before the shared runtime authorization/execution section.
         competitor_thread.start()
-        assert competitor_appended.wait(timeout=5)
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            if any(
+                record.decision_id == competitor_decision_id
+                for record in decision_ledger.verified_records()
+            ):
+                break
+            sleep(0.01)
+        else:
+            raise AssertionError("competing durable decision was not observed")
         assert not competitor_done.wait(timeout=0.25)
     finally:
         release_target.set()
@@ -259,5 +253,9 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     assert len(reserved) == 1
     assert reserved[0].get("payload", {}).get("trigger_id") == target_decision_id
 
-    assert len(tuple(target_context.decision_ledger.verified_records())) == 1
-    assert len(tuple(competitor_context.decision_ledger.verified_records())) == 1
+    durable_records = tuple(decision_ledger.verified_records())
+    assert len(durable_records) == 2
+    assert {record.decision_id for record in durable_records} == {
+        target_decision_id,
+        competitor_decision_id,
+    }

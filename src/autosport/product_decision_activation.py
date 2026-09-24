@@ -1424,16 +1424,10 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     authority_id = MONOTONIC_AUTHORITY_ID
     activation_filename = "product_decision_activation.json"
 
-    canonical_authority_root_resolver = _product_activation_authority_root
-    frozen_authority_root = canonical_authority_root_resolver()
-    if (
-        not isinstance(frozen_authority_root, path_type)
-        or not frozen_authority_root.is_absolute()
-    ):
-        raise ProductDecisionActivationError(
-            "product decision activation authority root must be absolute"
-        )
-    authority_error_type = MonotonicWorkspaceAuthorityError
+    canonical_authority_root = _product_activation_authority_root
+    canonical_authority_root_code = getattr(canonical_authority_root, "__code__", None)
+    canonical_init = store_class.__dict__.get("__init__")
+    canonical_init_code = getattr(canonical_init, "__code__", None)
     constructor_authorities: weakref.WeakKeyDictionary[
         ProductDecisionActivationStore, MonotonicWorkspaceAuthority
     ] = weakref.WeakKeyDictionary()
@@ -1671,6 +1665,14 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             raise ProductDecisionActivationError(
                 "product decision activation store must be the exact canonical class"
             )
+        if (
+            _product_activation_authority_root is not canonical_authority_root
+            or getattr(_product_activation_authority_root, "__code__", None)
+            is not canonical_authority_root_code
+        ):
+            raise ProductDecisionActivationError(
+                "product decision activation authority root resolver changed"
+            )
         try:
             workspace = store.workspace
             path = store.path
@@ -1690,7 +1692,12 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 "product decision activation constructor binding state is unavailable"
             )
 
-        expected_root = frozen_authority_root
+        try:
+            expected_root = canonical_authority_root()
+        except (OSError, RuntimeError) as exc:
+            raise ProductDecisionActivationError(
+                "cannot resolve product decision activation authority root"
+            ) from exc
 
         if (
             not isinstance(workspace, path_type)
@@ -2051,32 +2058,15 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     ) -> None:
         """Construct one store and bind its exact nested authority in closure state."""
 
-        if type(self) is not store_class:
+        live_init = canonical_init
+        if getattr(live_init, "__code__", None) is not canonical_init_code:
             raise ProductDecisionActivationError(
-                "product decision activation store must be the exact canonical class"
-            )
-        if store_class.FILE_NAME != activation_filename:
-            raise ProductDecisionActivationError(
-                "canonical product decision activation store namespace changed"
+                "canonical product decision activation constructor authority changed"
             )
         require_workspace_binding_dispatch()
-        resolved_workspace = path_type(workspace).absolute().resolve(strict=False)
-        activation_path = resolved_workspace / activation_filename
-        try:
-            authority = authority_type(
-                workspace=resolved_workspace,
-                domain=authority_domain,
-                key=activation_filename,
-                authority_root=frozen_authority_root,
-            )
-        except authority_error_type as exc:
-            raise ProductDecisionActivationError(
-                "cannot bind product decision activation anti-rollback authority"
-            ) from exc
-        self.workspace = resolved_workspace
-        self.path = activation_path
-        self._authority = authority
+        canonical_init(self, workspace)
         require_workspace_binding_dispatch()
+        authority = self._authority
         binding = authority.workspace_binding
         constructor_authorities[self] = authority
         constructor_binding_states[self] = (

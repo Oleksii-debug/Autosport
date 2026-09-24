@@ -502,6 +502,44 @@ def test_same_object_payload_mutation_revokes_product_issuance_authority(
     assert store.latest_snapshot() is None
 
 
+def test_issued_evidence_equality_rebind_cannot_preserve_mutated_authority(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    assert current.snapshot.balance is not None
+    forged_balance = replace(
+        current.snapshot.balance,
+        available_balance=Decimal("999.99"),
+    )
+    forged_snapshot = replace(current.snapshot, balance=forged_balance)
+    object.__setattr__(current, "snapshot", forged_snapshot)
+
+    monkeypatch.setattr(
+        BetdaqContinuousAccountEvidence,
+        "__eq__",
+        lambda _left, _right: True,
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="product-issued BETDAQ continuity evidence",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert store.latest_snapshot() is None
+    assert not store_path.exists()
+
+
 def test_reconciliation_store_subclass_cannot_bypass_canonical_durability(
     monkeypatch,
     tmp_path,

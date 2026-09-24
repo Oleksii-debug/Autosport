@@ -15,6 +15,11 @@ from .continuous_session import (
 )
 from .product_entrypoint import ProductEntrypointError, _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .trusted_runtime_code_profile import (
+    TrustedRuntimeCodeProfile,
+    issue_trusted_runtime_code_profile,
+    revoke_trusted_runtime_code_profile,
+)
 
 
 RuntimeBuilder = Callable[[Path, str, str], AutonomousProductRuntime]
@@ -111,11 +116,19 @@ class ProductGuiWorker:
         self._runtime: AutonomousProductRuntime | None = None
         self._stop_event = threading.Event()
         self._stop_reason = "operator_stop"
+        self._trusted_runtime_profile: TrustedRuntimeCodeProfile | None = None
 
     @property
     def busy(self) -> bool:
         with self._lock:
             return self._busy
+
+    @property
+    def trusted_runtime_profile(self) -> TrustedRuntimeCodeProfile | None:
+        """Return the current process-issued profile, never a persisted authority."""
+
+        with self._lock:
+            return self._trusted_runtime_profile
 
     def start(
         self,
@@ -150,6 +163,10 @@ class ProductGuiWorker:
         with self._lock:
             if self._busy:
                 return False
+            if self._trusted_runtime_profile is not None:
+                raise RuntimeError(
+                    "trusted runtime profile remained active after prior run"
+                )
             self._messages = queue.Queue()
             self._busy = True
             self._stop_event = threading.Event()
@@ -269,6 +286,7 @@ class ProductGuiWorker:
         poll_seconds: float,
     ) -> None:
         runtime: AutonomousProductRuntime | None = None
+        runtime_profile: TrustedRuntimeCodeProfile | None = None
         terminal_error: BaseException | None = None
         stopped_status: ContinuousSessionStatus | None = None
         stop_reason: str | None = None
@@ -299,6 +317,14 @@ class ProductGuiWorker:
                 stopped_status = runtime.stop(stop_reason)
             else:
                 started_status = runtime.start()
+                if expected_source_id is not None:
+                    runtime_profile = issue_trusted_runtime_code_profile(
+                        runtime,
+                        source_factory=source_factory,
+                        expected_provider_source_id=expected_source_id,
+                    )
+                    with self._lock:
+                        self._trusted_runtime_profile = runtime_profile
                 self._messages.put(
                     ProductGuiMessage(kind="STARTED", status=started_status)
                 )
@@ -329,6 +355,11 @@ class ProductGuiWorker:
                 except BaseException:
                     pass
         finally:
+            if runtime_profile is not None:
+                revoke_trusted_runtime_code_profile(runtime_profile)
+                with self._lock:
+                    if self._trusted_runtime_profile is runtime_profile:
+                        self._trusted_runtime_profile = None
             if runtime is not None:
                 try:
                     runtime.close()

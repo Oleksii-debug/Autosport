@@ -16,6 +16,10 @@ class CloseFailure(RuntimeError):
     pass
 
 
+class CloseInterrupt(KeyboardInterrupt):
+    pass
+
+
 class InstallFailure(RuntimeError):
     pass
 
@@ -29,7 +33,7 @@ class _Runtime:
         self,
         *,
         tick_failure: Exception | None = None,
-        close_failure: Exception | None = None,
+        close_failure: BaseException | None = None,
     ) -> None:
         self.tick_failure = tick_failure
         self.close_failure = close_failure
@@ -73,6 +77,29 @@ def test_tick_failure_remains_primary_when_close_also_fails(
     runtime = _Runtime(
         tick_failure=TickFailure("tick"),
         close_failure=CloseFailure("close"),
+    )
+    _install_runtime(monkeypatch, runtime)
+
+    with pytest.raises(entrypoint.ProductRuntimeError) as caught:
+        entrypoint.run_product(
+            workspace=tmp_path,
+            source_factory="ignored:factory",
+            max_cycles=1,
+            install_signal_handlers=False,
+        )
+
+    assert caught.value.error_type == "TickFailure"
+    assert isinstance(caught.value.__cause__, TickFailure)
+    assert runtime.close_calls == 1
+
+
+def test_tick_failure_remains_primary_when_close_raises_baseexception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _Runtime(
+        tick_failure=TickFailure("tick"),
+        close_failure=CloseInterrupt("close interrupt"),
     )
     _install_runtime(monkeypatch, runtime)
 

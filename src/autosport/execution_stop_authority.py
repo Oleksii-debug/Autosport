@@ -279,7 +279,49 @@ def _exclusive_file_lock(
         ) from exc
 
 
-class ExecutionStopAuthority:
+def _build_execution_stop_authority_meta():
+    """Fence final positive STOP entry bindings after import composition."""
+
+    protected_names = frozenset(
+        {
+            "current",
+            "decision",
+            "assert_execution_allowed",
+            "admission_lease",
+        }
+    )
+    sealed = False
+    integrity_error = ExecutionStopIntegrityError
+
+    class ExecutionStopAuthorityMeta(type):
+        def __setattr__(cls, name, value) -> None:
+            nonlocal sealed
+            if sealed and name in protected_names:
+                raise integrity_error(
+                    "canonical public STOP authority entry binding is immutable"
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name) -> None:
+            nonlocal sealed
+            if sealed and name in protected_names:
+                raise integrity_error(
+                    "canonical public STOP authority entry binding is immutable"
+                )
+            super().__delattr__(name)
+
+        def _seal_positive_entry_bindings(cls) -> None:
+            nonlocal sealed
+            sealed = True
+
+    return ExecutionStopAuthorityMeta
+
+
+_ExecutionStopAuthorityMeta = _build_execution_stop_authority_meta()
+del _build_execution_stop_authority_meta
+
+
+class ExecutionStopAuthority(metaclass=_ExecutionStopAuthorityMeta):
     """Durable, explicit, fail-closed execution STOP/ARM authority.
 
     The journal is authoritative. Every command is hash chained and revisioned.
@@ -1738,6 +1780,29 @@ ExecutionStopAuthority._anchor_path = _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTO
 ExecutionStopAuthority._lock_path = _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR
 del _build_sealed_authority_coordinate
 
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_NAMES = frozenset(
+    {"path", "_anchor_path", "_lock_path"}
+)
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPES = tuple(
+    type(descriptor)
+    for descriptor in (
+        _CANONICAL_ADMISSION_PATH_DESCRIPTOR,
+        _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR,
+        _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR,
+    )
+)
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_GRAPHS = tuple(
+    tuple(descriptor_type.__dict__.items())
+    for descriptor_type in _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPES
+)
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_CODES = tuple(
+    tuple(
+        (name, getattr(value, "__code__", None))
+        for name, value in graph
+    )
+    for graph in _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_GRAPHS
+)
+
 
 _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
@@ -1850,13 +1915,39 @@ def _require_canonical_admission_graph() -> None:
         raise ExecutionStopIntegrityError(
             "canonical execution admission authority class changed"
         )
+    for descriptor_type, expected_graph, expected_codes in zip(
+        _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPES,
+        _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_GRAPHS,
+        _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_CODES,
+    ):
+        live_graph = descriptor_type.__dict__
+        if len(live_graph) != len(expected_graph):
+            raise ExecutionStopIntegrityError(
+                "canonical STOP coordinate descriptor dispatch graph changed"
+            )
+        code_by_name = dict(expected_codes)
+        for member_name, expected_member in expected_graph:
+            live_member = live_graph.get(member_name)
+            if (
+                live_member is not expected_member
+                or getattr(live_member, "__code__", None)
+                is not code_by_name[member_name]
+            ):
+                raise ExecutionStopIntegrityError(
+                    "canonical STOP coordinate descriptor dispatch graph changed"
+                )
+
     expected_codes = dict(_CANONICAL_ADMISSION_GRAPH_CODES)
+    authority_class_dict = _CANONICAL_ADMISSION_AUTHORITY_CLASS.__dict__
     for method_name, expected_method in _CANONICAL_ADMISSION_GRAPH:
-        live_method = getattr(
-            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
-            method_name,
-            None,
-        )
+        if method_name in _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_NAMES:
+            live_method = authority_class_dict.get(method_name)
+        else:
+            live_method = getattr(
+                _CANONICAL_ADMISSION_AUTHORITY_CLASS,
+                method_name,
+                None,
+            )
         if (
             live_method is not expected_method
             or getattr(live_method, "__code__", None)
@@ -2257,6 +2348,11 @@ ExecutionStopAuthority.decision = _canonical_guarded_public_decision
 ExecutionStopAuthority.assert_execution_allowed = (
     _canonical_guarded_public_assert_execution_allowed
 )
+
+# Final positive entry names are now composed. Ordinary class assignment or
+# deletion must not replace the entry point before its sealed verifier can run.
+ExecutionStopAuthority._seal_positive_entry_bindings()
+
 del _canonical_guarded_public_current
 del _canonical_guarded_public_decision
 del _canonical_guarded_public_assert_execution_allowed

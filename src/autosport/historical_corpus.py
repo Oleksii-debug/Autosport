@@ -904,39 +904,62 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-build-historical-corpus",
         description=(
-            "Assemble selected authenticated table-tennis historical snapshots and separate sealed "
-            "outcomes into a governed replay corpus; new explicit-sport captures use schema-v3 while "
-            "legacy captures remain schema-v2 without inventing event-level sport truth."
+            "Збирає вибрані автентифіковані історичні знімки настільного тенісу та окремі "
+            "запечатані результати у керований корпус для replay. Нові захоплення з явним видом "
+            "спорту використовують schema-v3; legacy-захоплення залишаються schema-v2 без "
+            "вигадування істини про вид спорту на рівні події."
         ),
     )
     parser.add_argument(
         "--snapshot",
         action="append",
         nargs=2,
-        metavar=("MARKET_JSONL", "EVIDENCE_JSON"),
+        metavar=("РИНКОВИЙ_JSONL", "EVIDENCE_JSON"),
         required=True,
-        help="captured market JSONL plus matching machine evidence; repeat for each snapshot",
+        help=(
+            "захоплений ринковий JSONL і відповідний машинний evidence JSON; "
+            "повторіть параметр для кожного знімка"
+        ),
     )
     parser.add_argument(
         "--results",
         type=Path,
         required=True,
+        metavar="РЕЗУЛЬТАТИ_JSON",
         help=(
-            "separate sealed results JSON with outcome provenance naming a sibling source artifact "
-            "whose SHA-256 and normalized outcome labels are verified during assembly; provenance "
-            "schema 2 additionally requires verified append-only correction lineage"
+            "окремий запечатаний JSON результатів із provenance результатів, що посилається "
+            "на сусідній вихідний артефакт; під час складання перевіряються його SHA-256 та "
+            "нормалізовані outcome labels, а provenance schema 2 додатково потребує перевіреної "
+            "append-only correction lineage"
         ),
     )
     parser.add_argument(
         "--governance-proof",
         type=Path,
         required=True,
-        help="external non-secret rights/retention verification JSON",
+        metavar="GOVERNANCE_JSON",
+        help="зовнішній JSON без секретів із перевіркою прав і строків зберігання",
     )
-    parser.add_argument("--output", type=Path, required=True, help="new output dataset directory; never overwritten")
-    parser.add_argument("--name", required=True, help="human-readable corpus name")
-    parser.add_argument("--outcome-reveal-after", required=True, help="ISO-8601 causal outcome reveal timestamp")
-    parser.add_argument("--imported-at", required=True, help="explicit ISO-8601 import timestamp")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="КАТАЛОГ",
+        help="новий каталог вихідного dataset; наявний каталог не перезаписується",
+    )
+    parser.add_argument("--name", required=True, metavar="НАЗВА", help="людинозрозуміла назва корпусу")
+    parser.add_argument(
+        "--outcome-reveal-after",
+        required=True,
+        metavar="ISO_8601",
+        help="каузальний момент розкриття результату у форматі ISO-8601",
+    )
+    parser.add_argument(
+        "--imported-at",
+        required=True,
+        metavar="ISO_8601",
+        help="явний момент імпорту у форматі ISO-8601",
+    )
     return parser
 
 

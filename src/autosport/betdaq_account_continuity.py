@@ -19,9 +19,9 @@ continuity only; stronger account-identity truth remains explicitly false.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal
 from hashlib import sha256
 import json
 from threading import Lock
@@ -46,7 +46,9 @@ from .bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
     BookmakerCapabilityProfile,
+    BookmakerCapabilityState,
     BookmakerPositionObservation,
+    BookmakerPositionState,
 )
 from .bookmaker_account_reconciliation import BookmakerAccountReconciliationStore
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
@@ -561,13 +563,102 @@ def require_reconciliation_history_compatible(
 
 
 def _build_evidence_issuer():
-    evidence_eq = BetdaqContinuousAccountEvidence.__eq__
-    evidence_eq_code = getattr(evidence_eq, "__code__", None)
+    # Product issuance must not depend on Python's generic copy protocol.  A caller
+    # can add __deepcopy__/__reduce__ hooks to an otherwise canonical frozen
+    # dataclass without changing its class identity or the constructor/validation
+    # methods used by the continuity graph.  Instead, freeze one closure-owned,
+    # immutable structural state using the exact slot descriptors captured here.
+    record_classes = (
+        BetdaqAuthenticatedPrincipalContext,
+        BetdaqContinuousAccountEvidence,
+        BetdaqAuthenticatedAccountContext,
+        BetdaqSoapEvidence,
+        BetdaqBalanceObservation,
+        BetdaqOrderObservation,
+        BetdaqCurrentOrderBook,
+        BetdaqAccountEvidence,
+        BookmakerCapabilityFact,
+        BookmakerCapabilityProfile,
+        BookmakerBalanceObservation,
+        BookmakerPositionObservation,
+        BookmakerAccountSnapshot,
+    )
+    record_specs = {
+        record_class: (
+            record_class.__name__,
+            tuple(
+                (field_name, vars(record_class)[field_name])
+                for field_name in getattr(record_class, "__slots__", ())
+                if (
+                    field_name != "__weakref__"
+                    and field_name in vars(record_class)
+                )
+            ),
+        )
+        for record_class in record_classes
+    }
+    enum_classes = (
+        BookmakerCapability,
+        BookmakerCapabilityState,
+        BookmakerPositionState,
+    )
+    decimal_as_tuple = Decimal.as_tuple
+
+    def freeze_state(value: object) -> tuple[object, ...]:
+        value_type = type(value)
+        if value is None:
+            return ("none",)
+        if value_type is bool:
+            return ("bool", value)
+        if value_type is int:
+            return ("int", value)
+        if value_type is str:
+            return ("str", value)
+        if value_type is Decimal:
+            decimal_tuple = decimal_as_tuple(value)
+            return (
+                "decimal",
+                decimal_tuple.sign,
+                tuple(decimal_tuple.digits),
+                decimal_tuple.exponent,
+            )
+        if value_type in enum_classes:
+            return (
+                "enum",
+                value_type.__name__,
+                object.__getattribute__(value, "_name_"),
+                object.__getattribute__(value, "_value_"),
+            )
+        if value_type is tuple:
+            return ("tuple", tuple(freeze_state(item) for item in value))
+        if value_type is frozenset:
+            return (
+                "frozenset",
+                frozenset(freeze_state(item) for item in value),
+            )
+        record_spec = record_specs.get(value_type)
+        if record_spec is None:
+            raise BetdaqAccountContinuityError(
+                "issued BETDAQ continuity evidence contains an unsupported state type"
+            )
+        record_name, field_descriptors = record_spec
+        return (
+            "record",
+            record_name,
+            tuple(
+                (
+                    field_name,
+                    freeze_state(field_descriptor.__get__(value, value_type)),
+                )
+                for field_name, field_descriptor in field_descriptors
+            ),
+        )
+
     issued: dict[
         int,
         tuple[
             ReferenceType[BetdaqContinuousAccountEvidence],
-            BetdaqContinuousAccountEvidence,
+            tuple[object, ...],
         ],
     ] = {}
     lock = Lock()
@@ -583,11 +674,7 @@ def _build_evidence_issuer():
             source_evidence=source_evidence,
             principal_context=principal_context,
         )
-        # Exact outer-object identity is not enough for positive authority: frozen
-        # dataclasses can still be changed with object.__setattr__. Keep a deep
-        # immutable issuance snapshot so any same-object payload mutation revokes
-        # the receipt before it can reach durable #790 reconciliation.
-        baseline = deepcopy(value)
+        baseline_state = freeze_state(value)
         key = id(value)
 
         def release(
@@ -602,7 +689,7 @@ def _build_evidence_issuer():
 
         value_ref = ref(value, release)
         with lock:
-            issued[key] = (value_ref, baseline)
+            issued[key] = (value_ref, baseline_state)
         return value
 
     def is_issued(value: object) -> bool:
@@ -612,9 +699,11 @@ def _build_evidence_issuer():
             record = issued.get(id(value))
             if record is None or record[0]() is not value:
                 return False
-            if getattr(evidence_eq, "__code__", None) is not evidence_eq_code:
+            try:
+                current_state = freeze_state(value)
+            except BetdaqAccountContinuityError:
                 return False
-            return evidence_eq(value, record[1]) is True
+            return current_state == record[1]
 
     return issue, is_issued
 

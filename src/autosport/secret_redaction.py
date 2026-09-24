@@ -122,6 +122,7 @@ _KEY_SIMPLE_ESCAPES = {
     "t": "\\t",
     "v": "\\v",
 }
+_KEY_OCTAL_ESCAPE_RE = re.compile(r"\\(?P<octal>[0-7]{1,3})")
 
 
 def _decode_escaped_key_for_classification(value: str) -> str:
@@ -139,8 +140,12 @@ def _decode_escaped_key_for_classification(value: str) -> str:
             return match.group(0)
 
     decoded = _KEY_ESCAPE_RE.sub(replace, value)
-    return _KEY_SIMPLE_ESCAPE_RE.sub(
+    decoded = _KEY_SIMPLE_ESCAPE_RE.sub(
         lambda match: _KEY_SIMPLE_ESCAPES[match.group("simple")],
+        decoded,
+    )
+    return _KEY_OCTAL_ESCAPE_RE.sub(
+        lambda match: chr(int(match.group("octal"), 8)),
         decoded,
     )
 

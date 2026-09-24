@@ -11,6 +11,7 @@ from autosport.webview2_runtime_preflight import (
     WEBVIEW2_CLIENT_GUID,
     WEBVIEW2_HKCU_SUBKEY,
     WEBVIEW2_HKLM_SUBKEY,
+    WEBVIEW2_RELEASE_POLICY_ROOT_SUBKEY,
     RegistryObservationStatus,
     RegistryRead,
     RegistryTarget,
@@ -164,6 +165,8 @@ def test_x86_process_on_64bit_windows_uses_explicit_32bit_machine_view() -> None
     key = _FakeRegistryKey()
     calls = []
     def open_key(root, subkey, reserved, access):
+        if subkey.startswith(WEBVIEW2_RELEASE_POLICY_ROOT_SUBKEY + "\\"):
+            raise FileNotFoundError("no WebView2 release policy")
         calls.append((root, subkey, reserved, access))
         return key
     fake.OpenKey = open_key

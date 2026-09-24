@@ -807,7 +807,7 @@ def test_admission_lease_rejects_monotonic_recover_class_substitution_on_old_arm
 
     with pytest.raises(
         ExecutionStopIntegrityError,
-        match="canonical monotonic authority helper graph changed",
+        match="canonical monotonic authority dependency class graph changed",
     ):
         with restarted.admission_lease():
             pytest.fail(

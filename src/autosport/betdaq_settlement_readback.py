@@ -35,6 +35,8 @@ _REQUEST_ELEMENT = {
 }
 _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
+_CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
+_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
 
 
 class BetdaqEconomicReadbackError(RuntimeError):
@@ -519,12 +521,6 @@ class BetdaqEconomicReadbackClient:
         if method not in _READ_METHODS:
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
-        try:
-            _account._require_canonical_account_transport(client._transport)
-        except Exception:
-            raise BetdaqEconomicReadbackError(
-                "canonical BETDAQ economic evidence requires product-owned HTTPS transport"
-            ) from None
         request_identity = _canonical_sha256(
             {
                 "schema": _ECONOMIC_SCHEMA,
@@ -539,8 +535,16 @@ class BetdaqEconomicReadbackClient:
             "SOAPAction": f'"{_account._EXTERNAL_NS}{method}"',
         }
         with client._call_lock:
+            transport = client._transport
             try:
-                payload = client._transport.post(
+                _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT(transport)
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic evidence requires product-owned HTTPS transport"
+                ) from None
+            try:
+                payload = _CANONICAL_ACCOUNT_HTTPS_POST(
+                    transport,
                     _account._SECURE_ENDPOINT,
                     headers=headers,
                     body=body,

@@ -603,6 +603,31 @@ def _build_evidence_issuer():
         BookmakerPositionState,
     )
     decimal_as_tuple = Decimal.as_tuple
+    replace_record = replace
+
+    def clone_snapshot(
+        snapshot: BookmakerAccountSnapshot,
+    ) -> BookmakerAccountSnapshot:
+        profile = replace_record(
+            snapshot.profile,
+            facts=tuple(replace_record(fact) for fact in snapshot.profile.facts),
+        )
+        balance = (
+            None
+            if snapshot.balance is None
+            else replace_record(snapshot.balance)
+        )
+        return replace_record(
+            snapshot,
+            profile=profile,
+            balance=balance,
+            open_positions=tuple(
+                replace_record(position) for position in snapshot.open_positions
+            ),
+            settled_positions=tuple(
+                replace_record(position) for position in snapshot.settled_positions
+            ),
+        )
 
     def freeze_state(value: object) -> tuple[object, ...]:
         value_type = type(value)
@@ -659,6 +684,7 @@ def _build_evidence_issuer():
         tuple[
             ReferenceType[BetdaqContinuousAccountEvidence],
             tuple[object, ...],
+            BetdaqContinuousAccountEvidence,
         ],
     ] = {}
     lock = Lock()
@@ -675,6 +701,16 @@ def _build_evidence_issuer():
             principal_context=principal_context,
         )
         baseline_state = freeze_state(value)
+        private_snapshot = clone_snapshot(snapshot)
+        private_evidence = BetdaqContinuousAccountEvidence(
+            snapshot=private_snapshot,
+            source_evidence=source_evidence,
+            principal_context=replace_record(principal_context),
+        )
+        if freeze_state(private_evidence) != baseline_state:
+            raise BetdaqAccountContinuityError(
+                "private BETDAQ continuity evidence does not match issued state"
+            )
         key = id(value)
 
         def release(
@@ -689,21 +725,25 @@ def _build_evidence_issuer():
 
         value_ref = ref(value, release)
         with lock:
-            issued[key] = (value_ref, baseline_state)
+            issued[key] = (value_ref, baseline_state, private_evidence)
         return value
 
-    def is_issued(value: object) -> bool:
+    def is_issued(
+        value: object,
+    ) -> BetdaqContinuousAccountEvidence | None:
         if type(value) is not BetdaqContinuousAccountEvidence:
-            return False
+            return None
         with lock:
             record = issued.get(id(value))
             if record is None or record[0]() is not value:
-                return False
+                return None
             try:
                 current_state = freeze_state(value)
             except BetdaqAccountContinuityError:
-                return False
-            return current_state == record[1]
+                return None
+            if current_state != record[1]:
+                return None
+            return record[2]
 
     return issue, is_issued
 
@@ -1175,17 +1215,18 @@ def _build_canonical_continuity_authority():
     ) -> bool:
         require_composition_graph()
         require_store(store)
-        if not is_issued_evidence(evidence):
+        issued_evidence = is_issued_evidence(evidence)
+        if issued_evidence is None:
             raise continuity_error(
                 "reconciliation requires product-issued BETDAQ continuity evidence"
             )
         latest = latest_snapshot(store)
         require_composition_graph()
         require_store(store)
-        require_history_compatible(latest, evidence)
+        require_history_compatible(latest, issued_evidence)
         require_composition_graph()
         require_store(store)
-        appended = append_snapshot(store, evidence.snapshot)
+        appended = append_snapshot(store, issued_evidence.snapshot)
         require_composition_graph()
         require_store(store)
         return appended

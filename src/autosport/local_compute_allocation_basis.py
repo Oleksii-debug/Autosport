@@ -793,10 +793,76 @@ def _build_allocation_basis_store_runtime():
     goal_parser = goal_store_load_globals.get("economic_goal_from_json")
     goal_parser_code = getattr(goal_parser, "__code__", None)
     goal_to_payload_code = getattr(goal_to_payload, "__code__", None)
-    if goal_parser_code is None or goal_to_payload_code is None:
+    goal_contract_type = goal_store_load_globals.get("EconomicGoalContract")
+    if (
+        goal_parser_code is None
+        or goal_to_payload_code is None
+        or not isinstance(goal_contract_type, type)
+    ):
         raise LocalComputeAllocationBasisError(
             "canonical EconomicGoal parser authority is unavailable"
         )
+
+    # Seal the project-owned transitive parser/serializer dependency graph.
+    # Capturing only economic_goal_from_json is insufficient because its exact
+    # code still resolves strict_json_loads/economic_goal_from_payload and their
+    # helper/type bindings from mutable defining-module globals.
+    goal_dependency_seal: dict[
+        tuple[int, str],
+        tuple[dict[str, object], str, object, object | None],
+    ] = {}
+    pending_goal_functions = [goal_parser, goal_to_payload]
+    seen_goal_functions: set[int] = set()
+    while pending_goal_functions:
+        function = pending_goal_functions.pop()
+        function_id = id(function)
+        if function_id in seen_goal_functions:
+            continue
+        seen_goal_functions.add(function_id)
+        function_code = getattr(function, "__code__", None)
+        function_globals = getattr(function, "__globals__", None)
+        if function_code is None or type(function_globals) is not dict:
+            continue
+        for global_name in function_code.co_names:
+            if global_name not in function_globals:
+                continue
+            value = function_globals[global_name]
+            value_code = getattr(value, "__code__", None)
+            key = (id(function_globals), global_name)
+            existing = goal_dependency_seal.get(key)
+            if existing is not None and (
+                existing[2] is not value or existing[3] is not value_code
+            ):
+                raise LocalComputeAllocationBasisError(
+                    "canonical EconomicGoal dependency graph is inconsistent"
+                )
+            goal_dependency_seal[key] = (
+                function_globals,
+                global_name,
+                value,
+                value_code,
+            )
+            if (
+                value_code is not None
+                and str(getattr(value, "__module__", "")).startswith("autosport.")
+            ):
+                pending_goal_functions.append(value)
+    frozen_goal_dependencies = tuple(goal_dependency_seal.values())
+
+    goal_contract_slots = tuple(getattr(goal_contract_type, "__slots__", ()))
+    if not goal_contract_slots:
+        raise LocalComputeAllocationBasisError(
+            "canonical EconomicGoal value authority is unavailable"
+        )
+    goal_contract_descriptors = tuple(
+        (name, goal_contract_type.__dict__.get(name))
+        for name in goal_contract_slots
+    )
+    if any(descriptor is None for _name, descriptor in goal_contract_descriptors):
+        raise LocalComputeAllocationBasisError(
+            "canonical EconomicGoal descriptor authority is unavailable"
+        )
+
     json_dumps = json.dumps
     sha256 = hashlib.sha256
     object_new = object.__new__
@@ -1054,6 +1120,29 @@ def _build_allocation_basis_store_runtime():
             raise error_type(
                 "current EconomicGoal parser authority changed"
             )
+        for (
+            defining_globals,
+            global_name,
+            canonical_value,
+            canonical_code,
+        ) in frozen_goal_dependencies:
+            live_value = defining_globals.get(global_name)
+            if (
+                live_value is not canonical_value
+                or (
+                    canonical_code is not None
+                    and getattr(live_value, "__code__", None)
+                    is not canonical_code
+                )
+            ):
+                raise error_type(
+                    "current EconomicGoal transitive parser authority changed"
+                )
+        for name, canonical_descriptor in goal_contract_descriptors:
+            if goal_contract_type.__dict__.get(name) is not canonical_descriptor:
+                raise error_type(
+                    "current EconomicGoal value descriptor authority changed"
+                )
 
     def sealed_current_goal(self):
         require_state(self)
@@ -1064,6 +1153,11 @@ def _build_allocation_basis_store_runtime():
             goal_store = object_new(goal_store_reader_type)
             object_setattr(goal_store, "path", goal_path)
             goal = goal_store_load(goal_store)
+            require_goal_parser_authority()
+            if type(goal) is not goal_contract_type:
+                raise error_type(
+                    "current EconomicGoal value must have exact canonical type"
+                )
             payload = goal_to_payload(goal)
             durable_bytes = path_read_bytes(goal_path)
             expected_bytes = (
@@ -1087,6 +1181,23 @@ def _build_allocation_basis_store_runtime():
                 separators=(",", ":"),
                 allow_nan=False,
             ).encode("utf-8")
+            contract_payload = payload.get("contract") if type(payload) is dict else None
+            if type(contract_payload) is not dict:
+                raise error_type(
+                    "current EconomicGoal canonical projection is invalid"
+                )
+            goal_id = _text(contract_payload.get("goal_id"), "owner_goal_id")
+            goal_revision = contract_payload.get("revision")
+            if type(goal_revision) is not int or goal_revision <= 0:
+                raise error_type(
+                    "current EconomicGoal revision is invalid"
+                )
+            goal_bankroll_id = _text(
+                contract_payload.get("bankroll_id"),
+                "owner_bankroll_id",
+            )
+            goal_currency = _currency(contract_payload.get("currency"))
+            goal_sha256 = sha256(raw).hexdigest()
             require_goal_parser_authority()
         except Exception as exc:
             if isinstance(exc, error_type):
@@ -1094,7 +1205,13 @@ def _build_allocation_basis_store_runtime():
             raise error_type(
                 "current durable EconomicGoal is required"
             ) from exc
-        return goal, sha256(raw).hexdigest()
+        return (
+            goal_id,
+            goal_revision,
+            goal_bankroll_id,
+            goal_currency,
+            goal_sha256,
+        )
 
     def authority_call(self, name: str, **kwargs):
         require_state(self)
@@ -1310,7 +1427,13 @@ class LocalComputeAllocationBasisAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             self._records = self._load()
-            goal, goal_sha256 = self._current_goal()
+            (
+                goal_id,
+                goal_revision,
+                goal_bankroll_id,
+                goal_currency,
+                goal_sha256,
+            ) = self._current_goal()
             return _prepare_owner_review(
                 basis_id=basis_id,
                 backend_id=backend_id,
@@ -1323,10 +1446,10 @@ class LocalComputeAllocationBasisAuthorityStore:
                 total_allocable_cost=total_allocable_cost,
                 request_denominator=request_denominator,
                 measurement_document=measurement_document,
-                currency=goal.currency,
-                owner_goal_id=goal.goal_id,
-                owner_goal_revision=goal.revision,
-                owner_bankroll_id=goal.bankroll_id,
+                currency=goal_currency,
+                owner_goal_id=goal_id,
+                owner_goal_revision=goal_revision,
+                owner_bankroll_id=goal_bankroll_id,
                 owner_goal_sha256=goal_sha256,
             )
 
@@ -1350,12 +1473,18 @@ class LocalComputeAllocationBasisAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             self._records = self._load()
-            goal, goal_sha256 = self._current_goal()
+            (
+                goal_id,
+                goal_revision,
+                goal_bankroll_id,
+                goal_currency,
+                goal_sha256,
+            ) = self._current_goal()
             if (
-                review.currency != goal.currency
-                or review.owner_goal_id != goal.goal_id
-                or review.owner_goal_revision != goal.revision
-                or review.owner_bankroll_id != goal.bankroll_id
+                review.currency != goal_currency
+                or review.owner_goal_id != goal_id
+                or review.owner_goal_revision != goal_revision
+                or review.owner_bankroll_id != goal_bankroll_id
                 or review.owner_goal_sha256 != goal_sha256
             ):
                 raise LocalComputeAllocationBasisError(
@@ -1367,11 +1496,11 @@ class LocalComputeAllocationBasisAuthorityStore:
                     continue
                 if (
                     existing.owner_review_sha256 == review.review_sha256
-                    and existing.owner_goal_id == goal.goal_id
-                    and existing.owner_goal_revision == goal.revision
-                    and existing.owner_bankroll_id == goal.bankroll_id
+                    and existing.owner_goal_id == goal_id
+                    and existing.owner_goal_revision == goal_revision
+                    and existing.owner_bankroll_id == goal_bankroll_id
                     and existing.owner_goal_sha256 == goal_sha256
-                    and existing.currency == goal.currency
+                    and existing.currency == goal_currency
                 ):
                     return existing
                 raise LocalComputeAllocationBasisError(
@@ -1515,10 +1644,16 @@ class LocalComputeAllocationBasisAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             records = self._load()
-            goal, goal_sha256 = self._current_goal()
+            (
+                goal_id,
+                goal_revision,
+                goal_bankroll_id,
+                goal_currency,
+                goal_sha256,
+            ) = self._current_goal()
             if (
-                goal.bankroll_id != canonical_bankroll
-                or goal.currency != canonical_currency
+                goal_bankroll_id != canonical_bankroll
+                or goal_currency != canonical_currency
             ):
                 raise LocalComputeAllocationBasisError(
                     "decision bankroll/currency does not match current owner EconomicGoal"
@@ -1532,11 +1667,11 @@ class LocalComputeAllocationBasisAuthorityStore:
                 and record.model_id == canonical_model
                 and record.config_sha256 == canonical_config
                 and record.allocation_policy_id == canonical_policy
-                and record.owner_goal_id == goal.goal_id
-                and record.owner_goal_revision == goal.revision
-                and record.owner_bankroll_id == goal.bankroll_id
+                and record.owner_goal_id == goal_id
+                and record.owner_goal_revision == goal_revision
+                and record.owner_bankroll_id == goal_bankroll_id
                 and record.owner_goal_sha256 == goal_sha256
-                and record.currency == goal.currency
+                and record.currency == goal_currency
             ]
             if len(matches) > 1:
                 raise LocalComputeAllocationBasisError(

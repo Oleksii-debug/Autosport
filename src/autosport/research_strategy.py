@@ -152,6 +152,31 @@ def research_market_snapshot_hash(
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchScenarioIdentity:
+    """Structured research-only identity for opaque scenario quote keys."""
+
+    quote_key: str
+    event_id: str
+    market_id: str
+    selection_id: str
+    sport: str | None = None
+
+    def __post_init__(self) -> None:
+        # Reuse the canonical candidate quote-identity boundary instead of
+        # decoding the opaque sport-v2 serialization inside research code.
+        probe = CandidateLeg(
+            self.quote_key,
+            self.event_id,
+            Decimal("1"),
+            Decimal("1"),
+            self.market_id,
+            self.selection_id,
+            sport=self.sport,
+        )
+        probe.ticket_identity()
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchReplayInstruction:
     decision_id: str
     trigger_quote_key: str
@@ -162,6 +187,7 @@ class ResearchReplayInstruction:
     forecasts: tuple[ForecastRecord, ...]
     evidence: tuple[ResearchEvidence, ...]
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None
+    scenario_identities: tuple[ResearchScenarioIdentity, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.decision_id or not self.trigger_quote_key:
@@ -187,6 +213,39 @@ class ResearchReplayInstruction:
             )
         if not self.groups:
             raise ValueError("research decision scenario groups are required")
+        scenario_keys = {
+            outcome.quote_key
+            for group in self.groups
+            for outcome in group.outcomes
+        }
+        scenario_identity_keys: list[str] = []
+        for identity in self.scenario_identities:
+            if not isinstance(identity, ResearchScenarioIdentity):
+                raise TypeError(
+                    "research decision scenario_identities must contain ResearchScenarioIdentity"
+                )
+            scenario_identity_keys.append(identity.quote_key)
+        if len(scenario_identity_keys) != len(set(scenario_identity_keys)):
+            raise ValueError("research decision has duplicate structured scenario identity")
+        unexpected_scenario_identities = set(scenario_identity_keys).difference(
+            scenario_keys
+        )
+        if unexpected_scenario_identities:
+            raise ValueError(
+                "research decision structured scenario identity is not present in scenario groups: "
+                + ",".join(sorted(unexpected_scenario_identities))
+            )
+        missing_sport_identities = sorted(
+            quote_key
+            for quote_key in scenario_keys
+            if quote_key.startswith("sport-v2-")
+            and quote_key not in set(scenario_identity_keys)
+        )
+        if missing_sport_identities:
+            raise ValueError(
+                "sport-qualified research scenario outcome requires structured identity: "
+                + ",".join(missing_sport_identities)
+            )
         if self.risk_of_ruin_evidence is not None:
             if not isinstance(self.risk_of_ruin_evidence, RiskOfRuinEvidence):
                 raise TypeError(
@@ -287,14 +346,24 @@ class ResearchStrategyPlan:
             ),
         )
         first_observed_quote_times: dict[str, Any] = {}
-        first_observed_event_times: dict[str, Any] = {}
-        first_observed_market_times: dict[tuple[str, str], Any] = {}
+        # Keep legacy keys for legacy pipe identities while also carrying the
+        # sport-qualified structured keys used by opaque sport-v2 identities.
+        first_observed_event_times: dict[Any, Any] = {}
+        first_observed_market_times: dict[Any, Any] = {}
         for event in ordered:
             observed_time = parse_iso_timestamp(event.observed_ts)
             first_observed_quote_times.setdefault(event.quote_key, observed_time)
             first_observed_event_times.setdefault(event.event_id, observed_time)
+            first_observed_event_times.setdefault(
+                (event.sport, event.event_id),
+                observed_time,
+            )
             first_observed_market_times.setdefault(
                 (event.event_id, event.market_id),
+                observed_time,
+            )
+            first_observed_market_times.setdefault(
+                (event.sport, event.event_id, event.market_id),
                 observed_time,
             )
         for event in ordered:
@@ -308,6 +377,7 @@ class ResearchStrategyPlan:
                 first_observed_event_times,
                 first_observed_market_times,
                 parse_iso_timestamp(instruction.decision_ts),
+                instruction.scenario_identities,
             )
             _validate_market_binding(instruction, latest)
             processed.add(instruction.decision_id)
@@ -392,7 +462,12 @@ def _validate_market_binding(
     latest_quotes: dict[str, MarketEvent],
 ) -> None:
     decision_time = parse_iso_timestamp(instruction.decision_ts)
-    _validate_scenario_space_binding(instruction.groups, latest_quotes, decision_time)
+    _validate_scenario_space_binding(
+        instruction.groups,
+        latest_quotes,
+        decision_time,
+        instruction.scenario_identities,
+    )
     candidate_keys = tuple(leg.quote_key for leg in instruction.candidate.legs)
     snapshot_hash = research_market_snapshot_hash(latest_quotes, candidate_keys)
     forecasts = instruction.forecasts_by_quote
@@ -446,15 +521,32 @@ def _validate_market_binding(
             raise ValueError(f"ForecastRecord snapshot hash does not match replay state: {leg.quote_key}")
 
 
+def _scenario_identity_index(
+    scenario_identities: tuple[ResearchScenarioIdentity, ...],
+) -> dict[str, ResearchScenarioIdentity]:
+    by_quote: dict[str, ResearchScenarioIdentity] = {}
+    for identity in scenario_identities:
+        if not isinstance(identity, ResearchScenarioIdentity):
+            raise TypeError(
+                "scenario_identities must contain ResearchScenarioIdentity"
+            )
+        if identity.quote_key in by_quote:
+            raise ValueError("duplicate structured research scenario identity")
+        by_quote[identity.quote_key] = identity
+    return by_quote
+
+
 def _validate_scenario_future_identity(
     groups: tuple[ScenarioGroup, ...],
     first_observed_quote_times: dict[str, Any],
-    first_observed_event_times: dict[str, Any],
-    first_observed_market_times: dict[tuple[str, str], Any],
+    first_observed_event_times: dict[Any, Any],
+    first_observed_market_times: dict[Any, Any],
     decision_time,
+    scenario_identities: tuple[ResearchScenarioIdentity, ...] = (),
 ) -> None:
     """Reject replay quote, event, or market identities not yet knowable at decision time."""
 
+    identity_by_quote = _scenario_identity_index(scenario_identities)
     for group in groups:
         for outcome in group.outcomes:
             first_observed = first_observed_quote_times.get(outcome.quote_key)
@@ -463,10 +555,55 @@ def _validate_scenario_future_identity(
                     "research scenario outcome identity first appears after decision: "
                     f"{outcome.quote_key}"
                 )
+
+            identity = identity_by_quote.get(outcome.quote_key)
+            if identity is not None:
+                event_key = (identity.sport, identity.event_id)
+                first_event_observed = first_observed_event_times.get(event_key)
+                if first_event_observed is None and identity.sport is None:
+                    first_event_observed = first_observed_event_times.get(
+                        identity.event_id
+                    )
+                if (
+                    first_event_observed is not None
+                    and first_event_observed > decision_time
+                ):
+                    raise ValueError(
+                        "research scenario event identity first appears after decision: "
+                        f"{identity.event_id}"
+                    )
+
+                market_key = (
+                    identity.sport,
+                    identity.event_id,
+                    identity.market_id,
+                )
+                first_market_observed = first_observed_market_times.get(market_key)
+                if first_market_observed is None and identity.sport is None:
+                    first_market_observed = first_observed_market_times.get(
+                        (identity.event_id, identity.market_id)
+                    )
+                if (
+                    first_market_observed is not None
+                    and first_market_observed > decision_time
+                ):
+                    raise ValueError(
+                        "research scenario market identity first appears after decision: "
+                        f"{identity.event_id}|{identity.market_id}"
+                    )
+                continue
+
+            if outcome.quote_key.startswith("sport-v2-"):
+                raise ValueError(
+                    "sport-qualified research scenario outcome requires structured identity: "
+                    f"{outcome.quote_key}"
+                )
+
             future_event_matches = sorted(
                 event_id
                 for event_id, first_event_observed in first_observed_event_times.items()
-                if first_event_observed > decision_time
+                if isinstance(event_id, str)
+                and first_event_observed > decision_time
                 and outcome.quote_key.startswith(f"{event_id}|")
             )
             if future_event_matches:
@@ -477,10 +614,12 @@ def _validate_scenario_future_identity(
                 )
             future_market_matches = sorted(
                 (
-                    (event_id, market_id)
-                    for (event_id, market_id), first_market_observed in first_observed_market_times.items()
-                    if first_market_observed > decision_time
-                    and outcome.quote_key.startswith(f"{event_id}|{market_id}|")
+                    key
+                    for key, first_market_observed in first_observed_market_times.items()
+                    if isinstance(key, tuple)
+                    and len(key) == 2
+                    and first_market_observed > decision_time
+                    and outcome.quote_key.startswith(f"{key[0]}|{key[1]}|")
                 ),
                 key=lambda item: (item[0], item[1]),
             )
@@ -496,9 +635,11 @@ def _validate_scenario_space_binding(
     groups: tuple[ScenarioGroup, ...],
     latest_quotes: dict[str, MarketEvent],
     decision_time,
+    scenario_identities: tuple[ResearchScenarioIdentity, ...] = (),
 ) -> None:
     """Bind observed replay-market outcomes without banning abstract complement scenarios."""
 
+    identity_by_quote = _scenario_identity_index(scenario_identities)
     for group in groups:
         outcome_keys = {outcome.quote_key for outcome in group.outcomes}
         observed_outcomes: list[MarketEvent] = []
@@ -516,17 +657,19 @@ def _validate_scenario_space_binding(
             continue
 
         market_identities = {
-            (event.event_id, event.market_id) for event in observed_outcomes
+            (event.sport, event.event_id, event.market_id)
+            for event in observed_outcomes
         }
         if len(market_identities) != 1:
             raise ValueError(
                 f"research scenario group must bind one replay event/market: {group.group_id}"
             )
-        event_id, market_id = next(iter(market_identities))
+        sport, event_id, market_id = next(iter(market_identities))
         replay_market_keys = {
             event.quote_key
             for event in latest_quotes.values()
-            if event.event_id == event_id
+            if event.sport == sport
+            and event.event_id == event_id
             and event.market_id == market_id
             and parse_iso_timestamp(event.observed_ts) <= decision_time
         }
@@ -539,7 +682,27 @@ def _validate_scenario_space_binding(
 
         market_prefix = f"{event_id}|{market_id}|"
         for quote_key in sorted(outcome_keys - replay_market_keys):
-            if quote_key.startswith(market_prefix) and quote_key[len(market_prefix) :]:
+            identity = identity_by_quote.get(quote_key)
+            if identity is not None:
+                if (
+                    identity.sport,
+                    identity.event_id,
+                    identity.market_id,
+                ) == (sport, event_id, market_id):
+                    raise ValueError(
+                        f"research scenario outcome absent from replay state: {quote_key}"
+                    )
+                continue
+            if quote_key.startswith("sport-v2-"):
+                raise ValueError(
+                    "sport-qualified research scenario outcome requires structured identity: "
+                    f"{quote_key}"
+                )
+            if (
+                sport is None
+                and quote_key.startswith(market_prefix)
+                and quote_key[len(market_prefix) :]
+            ):
                 raise ValueError(
                     f"research scenario outcome absent from replay state: {quote_key}"
                 )
@@ -603,6 +766,42 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
     return leg
 
 
+def _scenario_identity_from_dict(raw: Any) -> ResearchScenarioIdentity | None:
+    if not isinstance(raw, dict):
+        raise ValueError("research scenario outcome must be an object")
+    quote_key = raw.get("quote_key")
+    if not isinstance(quote_key, str) or not quote_key or quote_key.strip() != quote_key:
+        raise ValueError(
+            "research scenario outcome quote_key must be a non-empty canonical string"
+        )
+
+    present = [field in raw for field in ("event_id", "market_id", "selection_id")]
+    if any(present) and not all(present):
+        raise ValueError(
+            "research scenario outcome event_id, market_id, and selection_id must be provided together"
+        )
+    sport = _canonical_identity_field(raw, "sport") if "sport" in raw else None
+    if sport is not None and not all(present):
+        raise ValueError(
+            "sport-qualified research scenario outcome requires structured event_id, market_id, and selection_id"
+        )
+    if not all(present):
+        if quote_key.startswith("sport-v2-"):
+            raise ValueError(
+                "sport-qualified research scenario outcome requires structured identity"
+            )
+        return None
+
+    identity = ResearchScenarioIdentity(
+        quote_key=quote_key,
+        event_id=_canonical_identity_field(raw, "event_id"),
+        market_id=_canonical_identity_field(raw, "market_id"),
+        selection_id=_canonical_identity_field(raw, "selection_id"),
+        sport=sport,
+    )
+    return identity
+
+
 def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     if not isinstance(raw, dict):
         raise ValueError("research decision must be an object")
@@ -631,22 +830,27 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     if not isinstance(groups_raw, list) or not groups_raw:
         raise ValueError("research decision scenario_groups must be a non-empty list")
     groups: list[ScenarioGroup] = []
+    scenario_identities: list[ResearchScenarioIdentity] = []
     for group_raw in groups_raw:
         if not isinstance(group_raw, dict):
             raise ValueError("research scenario group must be an object")
         outcomes_raw = group_raw.get("outcomes")
         if not isinstance(outcomes_raw, list):
             raise ValueError("research scenario group outcomes must be a list")
-        outcomes = tuple(
-            ScenarioOutcome(
-                str(outcome["quote_key"]),
-                Decimal(str(outcome["probability"]))
-                if outcome.get("probability") is not None
-                else None,
+        outcomes: list[ScenarioOutcome] = []
+        for outcome_raw in outcomes_raw:
+            identity = _scenario_identity_from_dict(outcome_raw)
+            if identity is not None:
+                scenario_identities.append(identity)
+            outcomes.append(
+                ScenarioOutcome(
+                    str(outcome_raw["quote_key"]),
+                    Decimal(str(outcome_raw["probability"]))
+                    if outcome_raw.get("probability") is not None
+                    else None,
+                )
             )
-            for outcome in outcomes_raw
-        )
-        groups.append(ScenarioGroup(str(group_raw["group_id"]), outcomes))
+        groups.append(ScenarioGroup(str(group_raw["group_id"]), tuple(outcomes)))
 
     forecasts_raw = raw.get("forecasts")
     if not isinstance(forecasts_raw, list) or not forecasts_raw:
@@ -673,6 +877,7 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         forecasts=forecasts,
         evidence=evidence,
         risk_of_ruin_evidence=risk_of_ruin_evidence,
+        scenario_identities=tuple(scenario_identities),
     )
 
 

@@ -293,20 +293,27 @@ def _timeout(value: object) -> float:
     return numeric
 
 
-def _canonical_observed_at(value: object) -> str:
+def _canonical_observed_at(
+    value: object,
+    _fromisoformat=datetime.fromisoformat,
+    _timezone_utc=timezone.utc,
+) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ProphetXDiscoveryPayloadError("product observation time must be canonical ISO-8601 text")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = _fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ProphetXDiscoveryPayloadError("product observation time must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ProphetXDiscoveryPayloadError("product observation time must be timezone-aware")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(_timezone_utc).isoformat().replace("+00:00", "Z")
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+def _utc_now_iso(
+    _now=datetime.now,
+    _timezone_utc=timezone.utc,
+) -> str:
+    return _now(_timezone_utc).isoformat().replace("+00:00", "Z")
 
 
 def _clock_origin_verified(

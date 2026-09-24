@@ -17,7 +17,7 @@ from typing import Final
 
 from ._strategy_model_factory_impl import MeanBaselineModel
 from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
-from .strategy_model_factory import FactoryArtifactStore
+from .strategy_model_factory import FactoryArtifactStore, WalkForwardEvaluationConfig
 
 
 SCIENTIFIC_REGISTRY_FILE: Final = "scientific_registry.json"
@@ -472,6 +472,31 @@ def resolve_registered_strategy_model(
         protocol.payload.get("protocol_sha256"),
         "ResearchProtocol protocol_sha256",
     )
+    dataset_manifest_sha256 = _sha256(
+        dataset.payload.get("manifest_sha256"),
+        "DatasetSnapshot manifest_sha256",
+    )
+    protocol_dataset_manifest_sha256 = _sha256(
+        protocol.payload.get("dataset_manifest_sha256"),
+        "ResearchProtocol dataset_manifest_sha256",
+    )
+    if dataset_manifest_sha256 != protocol_dataset_manifest_sha256:
+        raise RegisteredStrategyModelRuntimeError(
+            "DatasetSnapshot manifest does not match ResearchProtocol"
+        )
+    protocol_binding = protocol.payload.get("binding")
+    if type(protocol_binding) is not dict:
+        raise RegisteredStrategyModelRuntimeError(
+            "ResearchProtocol lacks frozen binding"
+        )
+    try:
+        evaluation_config = WalkForwardEvaluationConfig.from_frozen_text(
+            protocol_binding.get("evaluation_design")
+        )
+    except ValueError as exc:
+        raise RegisteredStrategyModelRuntimeError(
+            "ResearchProtocol evaluation_design is not canonical"
+        ) from exc
 
     for earlier_type, earlier_id, label in (
         ("ResearchProtocol", research_protocol_id, "ResearchProtocol -> ModelVersion"),
@@ -622,6 +647,22 @@ def resolve_registered_strategy_model(
         raise RegisteredStrategyModelRuntimeError(
             "promoted model artifact is unavailable or hash-invalid"
         ) from exc
+    artifact_training_manifest_sha256 = _sha256(
+        artifact.get("training_points_manifest_sha256"),
+        "model artifact training_points_manifest_sha256",
+    )
+    if artifact_training_manifest_sha256 != dataset_manifest_sha256:
+        raise RegisteredStrategyModelRuntimeError(
+            "model artifact training manifest does not match durable dataset"
+        )
+    artifact_evaluator_config_sha256 = _sha256(
+        artifact.get("evaluator_config_sha256"),
+        "model artifact evaluator_config_sha256",
+    )
+    if artifact_evaluator_config_sha256 != evaluation_config.config_sha256:
+        raise RegisteredStrategyModelRuntimeError(
+            "model artifact evaluator config does not match ResearchProtocol"
+        )
     rebuilt = _decode_mean_baseline_artifact(
         artifact,
         model=model,

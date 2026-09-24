@@ -3,11 +3,18 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.continuous_session as continuous_session_module
 import autosport.domain as domain_module
 import autosport.paper as paper_module
+import autosport.session as session_module
 import autosport.settlement as settlement_module
+from autosport.continuous_session import (
+    ContinuousSessionCoordinator,
+    ContinuousSessionError,
+)
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
+from autosport.session import AutosportSession
 from autosport.settlement import SettlementEngine
 
 
@@ -23,6 +30,77 @@ def _closure_value(function, name: str):
 
 
 class SettlementRecordConcurrencyTests(unittest.TestCase):
+    def test_product_consumers_reject_settlement_engine_constructor_rebind(
+        self,
+    ) -> None:
+        constructed: list[str] = []
+
+        class ForgedSettlementEngine:
+            def __init__(self) -> None:
+                constructed.append("forged")
+
+            def record(self, _outcomes) -> None:
+                constructed.append("record")
+
+            def settle_ready(self, _book):
+                constructed.append("settle")
+                return ["forged-ticket"]
+
+        coordinator = object.__new__(ContinuousSessionCoordinator)
+        with patch.object(
+            continuous_session_module,
+            "SettlementEngine",
+            ForgedSettlementEngine,
+        ):
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "settlement engine constructor origin changed",
+            ):
+                coordinator._settle(resolutions=(object(),))
+
+        replay_session = object.__new__(AutosportSession)
+        with patch.object(
+            session_module,
+            "SettlementEngine",
+            ForgedSettlementEngine,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "settlement engine constructor origin changed",
+            ):
+                replay_session._run_dataset_locked(
+                    object(),
+                    market_events=[],
+                    verified_sports=(),
+                )
+
+        self.assertEqual(constructed, [])
+
+    def test_product_consumers_reject_constructor_origin_override_argument(
+        self,
+    ) -> None:
+        coordinator = object.__new__(ContinuousSessionCoordinator)
+        with self.assertRaisesRegex(
+            TypeError,
+            "settlement engine origin is internal product authority",
+        ):
+            coordinator._settle(
+                resolutions=(),
+                _settlement_engine_type=object,
+            )
+
+        replay_session = object.__new__(AutosportSession)
+        with self.assertRaisesRegex(
+            TypeError,
+            "settlement engine origin is internal product authority",
+        ):
+            replay_session._run_dataset_locked(
+                object(),
+                market_events=[],
+                verified_sports=(),
+                _settlement_engine_type=object,
+            )
+
     def test_module_lock_rebind_cannot_split_record_from_settlement_commit(
         self,
     ) -> None:

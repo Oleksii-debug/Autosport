@@ -371,6 +371,28 @@ def refresh_owner_economic_authority_surface(app: Any) -> None:
         app.owner_economic_authority_readback.insert("end", line)
 
 
+
+def _owner_economic_dialog_close_handler(app: Any, dialog: Any) -> Any:
+    """Destroy the owner dialog and restore keyboard focus to its canonical F9 opener."""
+
+    def close() -> None:
+        dialog.destroy()
+        opener = getattr(app, "owner_economic_authority_button", None)
+        focus_set = getattr(opener, "focus_set", None)
+        if not callable(focus_set):
+            return
+        after_idle = getattr(app, "after_idle", None)
+        if callable(after_idle):
+            after_idle(focus_set)
+        else:
+            # Minimal/headless fixtures may not expose an event-loop scheduler.
+            focus_set()
+
+    protocol = getattr(dialog, "protocol", None)
+    if callable(protocol):
+        protocol("WM_DELETE_WINDOW", close)
+    return close
+
 def _show_owner_economic_dialog(app: Any) -> None:
     """Present one keyboard-first owner contract workflow; display never writes."""
 
@@ -390,11 +412,13 @@ def _show_owner_economic_dialog(app: Any) -> None:
         OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"],
     )
 
+    close_dialog = _owner_economic_dialog_close_handler(app, dialog)
+
     def add_close_button(parent: Any) -> Any:
         close_button = ttk.Button(
             parent,
             text=text("ui.windows.owner_authority.button.close"),
-            command=dialog.destroy,
+            command=close_dialog,
             takefocus=True,
         )
         tk_uia.set_acc_name(close_button, text("ui.windows.owner_authority.button.close"))
@@ -561,7 +585,7 @@ def _show_owner_economic_dialog(app: Any) -> None:
     close_button = ttk.Button(
         button_row,
         text=text("ui.windows.owner_authority.button.close"),
-        command=dialog.destroy,
+        command=close_dialog,
         takefocus=True,
     )
     close_button.pack(side="right")

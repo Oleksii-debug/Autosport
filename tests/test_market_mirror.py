@@ -315,7 +315,7 @@ class MarketMirrorTests(unittest.TestCase):
         )
         self.assertEqual(tuple(event.selection_id for event in active), ("open",))
 
-    def test_active_snapshot_excludes_future_expired_and_bad_time_entries(self) -> None:
+    def test_active_snapshot_excludes_future_expired_and_rejects_bad_time_ingress(self) -> None:
         mirror = MarketMirror()
         mirror.apply(
             self.event(

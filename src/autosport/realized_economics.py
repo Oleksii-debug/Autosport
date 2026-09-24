@@ -1,11 +1,75 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    Rounded,
+    Underflow,
+    localcontext,
+)
+
+
+_MONEY_CONTEXT = Context(
+    prec=50,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+    flags=[],
+    traps=[InvalidOperation, DivisionByZero, Overflow, Underflow, Inexact, Rounded],
+)
+_RATIO_CONTEXT = Context(
+    prec=50,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+    flags=[],
+    traps=[InvalidOperation, DivisionByZero, Overflow, Underflow],
+)
+
+
+def _arithmetic_error(exc: DecimalException) -> ValueError:
+    return ValueError(
+        "realized economics are not representable in the canonical Decimal context"
+    )
+
+
+def _money_add(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        with localcontext(_MONEY_CONTEXT):
+            return left + right
+    except DecimalException as exc:
+        raise _arithmetic_error(exc) from exc
+
+
+def _money_subtract(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        with localcontext(_MONEY_CONTEXT):
+            return left - right
+    except DecimalException as exc:
+        raise _arithmetic_error(exc) from exc
+
+
+def _ratio(numerator: Decimal, denominator: Decimal) -> Decimal:
+    try:
+        with localcontext(_RATIO_CONTEXT):
+            return numerator / denominator
+    except DecimalException as exc:
+        raise _arithmetic_error(exc) from exc
 
 
 def _finite_decimal(value: object, field: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise ValueError(f"{field} must be a finite Decimal")
     return value
 
@@ -71,21 +135,21 @@ def summarize_realized_economics(
         if stake < 0:
             raise ValueError(f"stakes[{index}] must be non-negative")
 
-        turnover += stake
-        balance += pnl
+        turnover = _money_add(turnover, stake)
+        balance = _money_add(balance, pnl)
         if balance < 0:
             raise ValueError("realized economic path cannot produce negative bankroll")
         if balance > peak:
             peak = balance
-        drawdown = peak - balance
+        drawdown = _money_subtract(peak, balance)
         if drawdown > max_drawdown:
             max_drawdown = drawdown
             max_drawdown_peak = peak
 
-    net_pnl = balance - start
-    return_on_start = net_pnl / start
-    return_on_turnover = None if turnover == 0 else net_pnl / turnover
-    max_drawdown_fraction = max_drawdown / max_drawdown_peak
+    net_pnl = _money_subtract(balance, start)
+    return_on_start = _ratio(net_pnl, start)
+    return_on_turnover = None if turnover == 0 else _ratio(net_pnl, turnover)
+    max_drawdown_fraction = _ratio(max_drawdown, max_drawdown_peak)
 
     return RealizedEconomicReport(
         starting_bankroll=start,

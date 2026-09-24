@@ -34,7 +34,11 @@ from .betdaq_account_readonly import (
     BetdaqAccountReadOnlyClient,
     BetdaqAccountReadOnlyError,
     BetdaqAuthenticatedAccountContext,
+    BetdaqBalanceObservation,
     BetdaqCredentials,
+    BetdaqCurrentOrderBook,
+    BetdaqOrderObservation,
+    BetdaqSoapEvidence,
 )
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -853,6 +857,41 @@ def _build_canonical_continuity_authority():
         (
             "BetdaqContinuousAccountEvidence",
             BetdaqContinuousAccountEvidence,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        # The outer issued-evidence equality is invoked non-virtually, but generated
+        # dataclass equality still dispatches into source_evidence.__eq__ and its
+        # nested provider evidence.  Seal that complete subtree so a nested equality
+        # callback cannot mutate the outer receipt between equality tuple capture and
+        # durable #790 admission.
+        (
+            "BetdaqAuthenticatedAccountContext",
+            BetdaqAuthenticatedAccountContext,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        (
+            "BetdaqSoapEvidence",
+            BetdaqSoapEvidence,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        (
+            "BetdaqBalanceObservation",
+            BetdaqBalanceObservation,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        (
+            "BetdaqOrderObservation",
+            BetdaqOrderObservation,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        (
+            "BetdaqCurrentOrderBook",
+            BetdaqCurrentOrderBook,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+        (
+            "BetdaqAccountEvidence",
+            BetdaqAccountEvidence,
             ("__init__", "__post_init__", "__eq__"),
         ),
         (

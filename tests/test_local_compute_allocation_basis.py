@@ -597,3 +597,83 @@ def test_tampered_document_bytes_fail_before_resolution(tmp_path, monkeypatch):
 
     with pytest.raises(MonotonicWorkspaceAuthorityError):
         subject.LocalComputeAllocationBasisAuthorityStore(store.workspace)
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_load_bound_history",
+        "_load_history",
+        "_validate_workspace_binding",
+        "_new_terminal_record",
+        "_append_record",
+    ),
+)
+def test_lower_authority_class_dispatch_rebind_fails_closed(
+    tmp_path, monkeypatch, helper_name
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    calls: list[str] = []
+
+    def forged_helper(*_args, **_kwargs):
+        calls.append(helper_name)
+        return None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            MonotonicWorkspaceAuthority,
+            helper_name,
+            forged_helper,
+        )
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="authority dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_load_bound_history",
+        "_append_record",
+    ),
+)
+def test_lower_authority_instance_shadow_fails_closed(
+    tmp_path, monkeypatch, helper_name
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    authority = store._authority
+    calls: list[str] = []
+
+    def forged_helper(*_args, **_kwargs):
+        calls.append(helper_name)
+        return None
+
+    setattr(authority, helper_name, forged_helper)
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="authority dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        delattr(authority, helper_name)
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record

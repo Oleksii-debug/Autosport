@@ -20,6 +20,7 @@ def _leg() -> TicketLeg:
 
 def test_allowed_admission_evaluates_and_opens_inside_one_workspace_lock(tmp_path):
     book = PaperBook("1000")
+    book.save(tmp_path / "paper_book.json")
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("0.10"),
         max_committed_fraction=Decimal("0.20"),
@@ -47,8 +48,31 @@ def test_allowed_admission_evaluates_and_opens_inside_one_workspace_lock(tmp_pat
     assert result.ticket.ticket_id in persisted.tickets
 
 
+def test_missing_canonical_book_fails_closed_without_bootstrap(tmp_path):
+    book = PaperBook("1000")
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="canonical paper_book.json must already exist",
+    ):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must not create a second bootstrap authority",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+
+    assert not (tmp_path / "paper_book.json").exists()
+    assert book.balance == Decimal("1000")
+    assert book.tickets == {}
+
+
 def test_denied_admission_does_not_mutate_paper_book(tmp_path):
     book = PaperBook("1000")
+    book.save(tmp_path / "paper_book.json")
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("0.01"),
         max_committed_fraction=Decimal("0.20"),
@@ -179,6 +203,7 @@ def test_risk_context_bankroll_identity_must_match_persisted_ticket(tmp_path):
 
 def test_matching_risk_context_remains_admissible(tmp_path):
     book = PaperBook("1000")
+    book.save(tmp_path / "paper_book.json")
     context = ProposedTicketRiskContext(
         legs=(_leg(),),
         bankroll_id="bankroll-1",

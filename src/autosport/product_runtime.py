@@ -79,9 +79,6 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         return self._authority_active
 
     def acquire(self) -> None:
-        # A product runtime lease is a one-shot lifetime capability. Reacquiring the
-        # same mutable lock object after release could resurrect an old runtime object
-        # after ownership has moved elsewhere.
         if self._acquired_once:
             raise WorkspaceEconomicLockError(
                 "product runtime workspace authority cannot be reacquired"
@@ -91,8 +88,6 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         self._authority_active = True
 
     def release(self) -> None:
-        # Revoke product authority before attempting OS teardown. Even if unlock/close
-        # later reports an error, callers must never treat ownership as positively held.
         self._authority_active = False
         super().release()
 
@@ -402,7 +397,7 @@ class _ManifestStore:
             )
         return ProductCompositionManifest(
             source_id=source_id,
-            initial_bankroll=normalized_bankroll,
+            initial_bankroll=initial_bankroll,
             settlement_authority_identity=settlement_authority_identity,
         )
 

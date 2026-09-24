@@ -1415,6 +1415,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
 
     store_class = ProductDecisionActivationStore
     authority_type = MonotonicWorkspaceAuthority
+    path_type = Path
     authority_domain = _ACTIVATION_AUTHORITY_DOMAIN
     activation_filename = "product_decision_activation.json"
     canonical_derive = store_class.__dict__.get("_derive")
@@ -1445,8 +1446,8 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 "product decision activation store construction state changed"
             ) from exc
         if (
-            type(workspace) is not Path
-            or type(path) is not Path
+            not isinstance(workspace, path_type)
+            or not isinstance(path, path_type)
             or path != workspace / activation_filename
             or type(authority) is not authority_type
             or authority.workspace != workspace

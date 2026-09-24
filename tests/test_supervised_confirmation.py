@@ -477,3 +477,57 @@ def test_copied_nonempty_confirmation_state_cannot_be_adopted_in_fresh_namespace
         match="independent monotonic authority",
     ):
         SupervisedConfirmationAuthority(copied, clock=clock)
+
+def test_audit_only_receipt_resolution_does_not_advance_clock_authority(
+    tmp_path,
+    monkeypatch,
+):
+    machine_root = tmp_path / "machine-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(machine_root.resolve()),
+    )
+    clock = FakeClock()
+    path = tmp_path / "operator-confirmations.jsonl"
+    authority = SupervisedConfirmationAuthority(path, clock=clock)
+    review = _prepare(authority)
+
+    clock.advance(seconds=5)
+    receipt = authority.confirm_review(
+        review_id=review.review_id,
+        expected_review_sha256=review.review_sha256,
+    )
+    legitimate_time = clock.value + timedelta(seconds=1)
+
+    def monotonic_snapshot():
+        return tuple(
+            (item.relative_to(machine_root).as_posix(), item.read_bytes())
+            for item in sorted(machine_root.rglob("*"))
+            if item.is_file()
+        )
+
+    journal_before = path.read_bytes()
+    checkpoint_before = authority.checkpoint_path.read_bytes()
+    monotonic_before = monotonic_snapshot()
+    assert monotonic_before
+
+    clock.advance(seconds=3600)
+    audit = authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    )
+    assert audit.receipt == receipt
+    assert audit.review == review
+    assert path.read_bytes() == journal_before
+    assert authority.checkpoint_path.read_bytes() == checkpoint_before
+    assert monotonic_snapshot() == monotonic_before
+
+    clock.value = legitimate_time
+    current = authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=True,
+    )
+    assert current.receipt == receipt
+    assert current.review == review

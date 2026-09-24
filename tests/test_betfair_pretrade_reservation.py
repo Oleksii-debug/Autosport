@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from autosport import betfair_account_readonly as _readonly
+import autosport.betfair_pretrade_reservation as reservation_module
 from autosport.betfair_account_funds_precheck import (
     evaluate_betfair_account_funds,
 )
@@ -228,6 +229,80 @@ def test_understated_funds_precheck_cannot_underreserve_durable_action(
             funds_precheck=understated,
             execution_ledger=ledger,
         )
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_ledger_view",
+        "worst_case_incremental_exposure",
+        "require_authoritative_funds_precheck",
+    ),
+)
+def test_reservation_admission_rejects_module_helper_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    helper_name: str,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("sealed", side="LAY", odds="20", stake="10")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    attacker_calls: list[str] = []
+
+    def attacker(*_args, **_kwargs):
+        attacker_calls.append(helper_name)
+        raise AssertionError("attacker reservation helper executed")
+
+    monkeypatch.setattr(reservation_module, helper_name, attacker)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation admission helper dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=precheck,
+            execution_ledger=ledger,
+        )
+
+    assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_reservation_admission_rejects_instance_insert_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("insert-shadow", stake="25")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    insert_calls: list[str] = []
+
+    def fake_insert(*_args, **_kwargs) -> None:
+        insert_calls.append("insert")
+
+    store._insert = fake_insert
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation store admission dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=precheck,
+            execution_ledger=ledger,
+        )
+
+    assert insert_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
 
 
 def test_local_reservations_close_same_balance_double_spend(

@@ -23,13 +23,30 @@ class PaperAdmissionResult:
 
 
 def _positive_decimal(value: Decimal | str) -> Decimal:
-    try:
-        amount = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError("stake must be a finite positive decimal") from exc
+    if type(value) is Decimal:
+        amount = value
+    elif type(value) is str:
+        try:
+            amount = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("stake must be a finite positive decimal") from exc
+    else:
+        raise ValueError("stake must be a finite positive decimal")
     if not amount.is_finite() or amount <= 0:
         raise ValueError("stake must be a finite positive decimal")
     return amount
+
+
+def _sync_book_state(target: PaperBook, source: PaperBook) -> None:
+    """Refresh one exact caller view from the validated canonical durable book."""
+
+    PaperBook._validate_loaded_state(source)
+    target.initial_bankroll = source.initial_bankroll
+    target.balance = source.balance
+    target.tickets = dict(source.tickets)
+    target._lifecycle = list(source._lifecycle)
+    target._settlement_times = dict(source._settlement_times)
+    PaperBook._validate_loaded_state(target)
 
 
 def _validate_context_binding(
@@ -90,10 +107,12 @@ def admit_paper_ticket(
     evaluating against stale economic state.
     """
 
-    if not isinstance(book, PaperBook):
-        raise TypeError("book must be a PaperBook")
-    if not isinstance(risk_policy, PaperRiskPolicy):
-        raise TypeError("risk_policy must be a PaperRiskPolicy")
+    if type(book) is not PaperBook:
+        raise TypeError("book must be an exact PaperBook")
+    if type(risk_policy) is not PaperRiskPolicy:
+        raise TypeError("risk_policy must be an exact PaperRiskPolicy")
+    if context is not None and type(context) is not ProposedTicketRiskContext:
+        raise TypeError("context must be an exact ProposedTicketRiskContext or None")
     if type(legs) is not tuple or not legs:
         raise ValueError("legs must be a non-empty canonical tuple")
 
@@ -107,12 +126,26 @@ def admit_paper_ticket(
         currency=currency,
     )
 
-    with WorkspaceEconomicLock(workspace):
-        decision = risk_policy.evaluate(book, amount, context=context)
+    root = Path(workspace).expanduser().resolve(strict=False)
+    book_path = root / "paper_book.json"
+
+    with WorkspaceEconomicLock(root):
+        # The lock alone is insufficient if this caller was constructed before a
+        # different process committed a newer PaperBook. Re-read the one durable
+        # workspace book only after owning the economic writer lock.
+        if book_path.exists():
+            canonical_book = PaperBook.load(book_path)
+        else:
+            PaperBook._validate_loaded_state(book)
+            book.save(book_path)
+            canonical_book = PaperBook.load(book_path)
+
+        decision = risk_policy.evaluate(canonical_book, amount, context=context)
         if not decision.allowed:
+            _sync_book_state(book, canonical_book)
             return PaperAdmissionResult(risk=decision, ticket=None)
 
-        ticket = book.open_ticket(
+        opened = canonical_book.open_ticket(
             legs,
             amount,
             reason=reason,
@@ -122,4 +155,18 @@ def admit_paper_ticket(
             bankroll_id=bankroll_id,
             currency=currency,
         )
-        return PaperAdmissionResult(risk=decision, ticket=ticket)
+        # Publish the mutation while the same lock is still held. PaperBook.save
+        # uses atomic replacement; a save failure leaves the prior durable state
+        # intact and the caller view has not yet been mutated.
+        canonical_book.save(book_path)
+        persisted = PaperBook.load(book_path)
+        persisted_ticket = persisted.tickets.get(opened.ticket_id)
+        if persisted_ticket is None:
+            raise RuntimeError(
+                "persisted PaperBook lost the ticket opened inside admission"
+            )
+        _sync_book_state(book, persisted)
+        return PaperAdmissionResult(
+            risk=decision,
+            ticket=book.tickets[persisted_ticket.ticket_id],
+        )

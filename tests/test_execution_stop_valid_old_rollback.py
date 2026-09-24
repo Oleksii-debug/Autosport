@@ -295,6 +295,60 @@ def test_product_root_module_rebind_cannot_reauthorize_valid_old_armed(
     assert not forged_root.exists()
 
 
+def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    authority = _initialized(path)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-instance-shadow",
+        expected_revision=1,
+        command_id="arm-r2-instance-shadow",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-instance-shadow",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+
+    shadow_calls: list[str] = []
+
+    def forged_current() -> object:
+        shadow_calls.append("current")
+        return armed
+
+    def forged_current_unlocked() -> object:
+        shadow_calls.append("_current_unlocked")
+        return armed
+
+    monkeypatch.setattr(restarted, "current", forged_current)
+    monkeypatch.setattr(
+        restarted,
+        "_current_unlocked",
+        forged_current_unlocked,
+    )
+
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+    assert shadow_calls == []
+
+
 def test_admission_lease_rejects_product_root_selector_class_rebind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

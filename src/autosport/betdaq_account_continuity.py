@@ -903,6 +903,21 @@ def _build_canonical_continuity_authority():
         )
         for class_name, expected_class, descriptor_names in class_dispatch_specs
     )
+    class_field_descriptor_graph = tuple(
+        (
+            class_name,
+            expected_class,
+            tuple(
+                (
+                    field_name,
+                    vars(expected_class)[field_name],
+                )
+                for field_name in getattr(expected_class, "__slots__", ())
+                if field_name != "__weakref__" and field_name in vars(expected_class)
+            ),
+        )
+        for class_name, expected_class, _descriptor_names in class_dispatch_specs
+    )
 
     def require_composition_graph() -> None:
         expected_codes = dict(helper_codes)
@@ -953,6 +968,16 @@ def _build_canonical_continuity_authority():
                     raise continuity_error(
                         "canonical BETDAQ continuity class dispatch changed: "
                         f"{class_name}.{descriptor_name}"
+                    )
+        for class_name, expected_class, field_descriptors in class_field_descriptor_graph:
+            for field_name, expected_field_descriptor in field_descriptors:
+                if (
+                    vars(expected_class).get(field_name)
+                    is not expected_field_descriptor
+                ):
+                    raise continuity_error(
+                        "canonical BETDAQ continuity field descriptor changed: "
+                        f"{class_name}.{field_name}"
                     )
         # Issuance and the matching positive predicate are closure-only. Re-exposing
         # either module name creates an alternate caller-visible minting/admission

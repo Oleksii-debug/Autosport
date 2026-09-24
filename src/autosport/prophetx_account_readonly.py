@@ -768,16 +768,23 @@ class ProphetXReadOnlyClient:
             f"adapter_version={ADAPTER_VERSION!r}, environment='sandbox')"
         )
 
-    def read_wallet(self) -> ProphetXWalletObservation:
+    def read_wallet(
+        self,
+        *,
+        _authority_resolver=None,
+    ) -> ProphetXWalletObservation:
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "Authorization": f"Bearer {self._session.access_token}",
         }
         canonical_transport = _PROVIDER_TRANSPORTS.get(self)
+        authority_resolver = (
+            _authority_resolver or _require_canonical_network_authority
+        )
         authoritative_fetch = None
         if canonical_transport is not None:
-            authoritative_fetch = _require_canonical_network_authority(self)
+            authoritative_fetch = authority_resolver(self)
             response = authoritative_fetch(
                 BALANCE_URL,
                 headers=headers,
@@ -792,8 +799,7 @@ class ProphetXReadOnlyClient:
         self._validate_http_response(response)
         if (
             authoritative_fetch is not None
-            and _require_canonical_network_authority(self)
-            is not authoritative_fetch
+            and authority_resolver(self) is not authoritative_fetch
         ):
             raise ProphetXReadOnlyError(
                 "canonical ProphetX account network authority changed during acquisition"
@@ -962,15 +968,44 @@ class ProphetXReadOnlyClient:
     def _build_provider_origin_issuers(
         read_wallet_impl,
         require_sync_impl,
-        require_origin_impl,
         profile_for_impl,
+        provider_transports,
+        provider_fetches,
+        canonical_transport_type,
+        canonical_wallet_get,
+        error_type,
     ):
-        """Bind positive issuance to import-time class-body method identities."""
+        """Bind positive issuance to captured provider-origin authorities."""
+
+        def authoritative_network_fetch(client):
+            canonical = provider_transports.get(client)
+            expected_fetch = provider_fetches.get(client)
+            if (
+                canonical is None
+                or type(canonical) is not canonical_transport_type
+                or client._transport is not canonical
+                or type(canonical).get is not canonical_wallet_get
+                or expected_fetch is None
+                or canonical._provider_fetch is not expected_fetch
+            ):
+                raise error_type(
+                    "canonical ProphetX account authority requires "
+                    "product-owned transport"
+                )
+            return expected_fetch
 
         def authoritative_wallet(client):
-            wallet = read_wallet_impl(client)
+            expected_fetch = authoritative_network_fetch(client)
+            wallet = read_wallet_impl(
+                client,
+                _authority_resolver=authoritative_network_fetch,
+            )
+            if authoritative_network_fetch(client) is not expected_fetch:
+                raise error_type(
+                    "canonical ProphetX account network authority changed "
+                    "during acquisition"
+                )
             require_sync_impl(wallet)
-            require_origin_impl(client)
             return wallet
 
         def capability_profile(self) -> BookmakerCapabilityProfile:
@@ -985,13 +1020,13 @@ class ProphetXReadOnlyClient:
             if not isinstance(requested_capabilities, frozenset):
                 raise TypeError("requested_capabilities must be a frozenset")
             if not requested_capabilities:
-                raise ProphetXReadOnlyError(
+                raise error_type(
                     "at least one account capability must be requested"
                 )
             if requested_capabilities != frozenset(
                 {BookmakerCapability.BALANCE_READ}
             ):
-                raise ProphetXReadOnlyError(
+                raise error_type(
                     "ProphetX wallet adapter implements only balance_read"
                 )
 
@@ -1024,17 +1059,20 @@ class ProphetXReadOnlyClient:
 
         return capability_profile, read_account_snapshot
 
-    # Positive provider/account issuance never resolves read_wallet (or the
-    # supporting validation/profile helpers) through the caller-writable
-    # instance namespace. Public read_wallet remains available for structural
-    # parsing tests, while these two authority-bearing methods retain the exact
-    # class-body callables captured here.
+    # Positive provider/account issuance never resolves read_wallet or the
+    # provider-origin resolver through caller-writable instance/module aliases.
+    # Public read_wallet keeps its structural parsing seam, while these two
+    # authority-bearing methods use captured registry objects and exact callables.
     capability_profile, read_account_snapshot = (
         _build_provider_origin_issuers.__func__(
             read_wallet,
             _require_synchronized_wallet.__func__,
-            _require_provider_origin_authority,
             _profile_for,
+            _PROVIDER_TRANSPORTS,
+            _PROVIDER_FETCHES,
+            UrllibProphetXHttpTransport,
+            _CANONICAL_WALLET_GET,
+            ProphetXReadOnlyError,
         )
     )
     del _build_provider_origin_issuers

@@ -10,9 +10,19 @@ from .localization import text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
 from .ui_model import evaluation_lines, result_summary, ticket_lines
+from .windows_emergency_stop import EmergencyStopResult, WindowsEmergencyStopBridge
 
 
 WINDOWS_BANKROLL_AUTOMATION_ID = 205
+WINDOWS_EMERGENCY_STOP_AUTOMATION_ID = 209
+WINDOWS_EMERGENCY_STOP_HOTKEY = "<Control-Shift-s>"
+WINDOWS_EMERGENCY_STOP_LABEL = "Аварійний STOP виконання / Emergency execution STOP (Ctrl+Shift+S)"
+WINDOWS_EMERGENCY_STOP_DESCRIPTION = (
+    "Негайно фіксує канонічний durable STOP нових виконань; "
+    "не стверджує, що вже запущений worker або feed зупинився. / "
+    "Immediately records the canonical durable STOP for new execution; "
+    "does not claim an already-running worker or feed has drained."
+)
 
 
 def _safe_exception_detail(exc: BaseException) -> str:
@@ -35,7 +45,11 @@ def _safe_exception_detail(exc: BaseException) -> str:
 class WindowsAutosportApp(AutosportApp):
     """Windows product GUI with recovery orchestration kept off the Tk/UIA thread."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        execution_stop_bridge: WindowsEmergencyStopBridge | None = None,
+    ) -> None:
         self.recovery_worker: OneShotRecoveryWorker | None = None
         self._recovery_view: RecoverySessionView | None = None
         self._recovery_blocked_workspace: Path | None = None
@@ -45,6 +59,17 @@ class WindowsAutosportApp(AutosportApp):
         self._recovery_blocked_workspaces: set[Path] = set()
         super().__init__()
         self.recovery_worker = OneShotRecoveryWorker()
+        if execution_stop_bridge is not None:
+            self.execution_stop_bridge = execution_stop_bridge
+        else:
+            try:
+                self.execution_stop_bridge = WindowsEmergencyStopBridge.for_workspace(
+                    self.workspace
+                )
+            except Exception:
+                # The GUI must remain available to report the fail-closed STOP
+                # failure instead of crashing before the operator can act.
+                self.execution_stop_bridge = WindowsEmergencyStopBridge(None)
 
     def _build(self) -> None:
         super()._build()
@@ -79,6 +104,25 @@ class WindowsAutosportApp(AutosportApp):
         else:
             self.bank_summary.pack(fill="x", pady=(12, 4), before=before)
 
+        self.emergency_stop_button = ttk.Button(
+            frame,
+            text=WINDOWS_EMERGENCY_STOP_LABEL,
+            command=self.activate_execution_stop,
+            takefocus=True,
+        )
+        if before is None:
+            self.emergency_stop_button.pack(fill="x", pady=(0, 8))
+        else:
+            self.emergency_stop_button.pack(fill="x", pady=(0, 8), before=before)
+        # bind_all keeps the shortcut reachable from focused child widgets and
+        # grabbed Tk modal surfaces. It is intentionally independent of all
+        # replay/live busy-control enable/disable paths.
+        self.bind_all(
+            WINDOWS_EMERGENCY_STOP_HOTKEY,
+            lambda _event: self.activate_execution_stop(),
+            add="+",
+        )
+
     def _configure_accessibility(self) -> None:
         super()._configure_accessibility()
         tk_uia.set_acc_name(self.bank_summary, text("ui.accessibility.bankroll.name"))
@@ -87,6 +131,31 @@ class WindowsAutosportApp(AutosportApp):
             text("ui.accessibility.bankroll.description"),
         )
         tk_uia.set_automation_id(self.bank_summary, WINDOWS_BANKROLL_AUTOMATION_ID)
+        tk_uia.set_acc_name(self.emergency_stop_button, WINDOWS_EMERGENCY_STOP_LABEL)
+        tk_uia.set_acc_description(
+            self.emergency_stop_button,
+            WINDOWS_EMERGENCY_STOP_DESCRIPTION,
+        )
+        tk_uia.set_automation_id(
+            self.emergency_stop_button,
+            WINDOWS_EMERGENCY_STOP_AUTOMATION_ID,
+        )
+
+    def activate_execution_stop(self) -> EmergencyStopResult:
+        bridge = self.__dict__.get("execution_stop_bridge")
+        if bridge is None:
+            bridge = WindowsEmergencyStopBridge(None)
+        result = bridge.activate()
+        announcement = result.accessible_message
+        if result.error:
+            announcement = f"{announcement} [{result.error}]"
+        self.status.set(announcement)
+        self._append_log(announcement)
+        tk_uia.set_acc_description(self.emergency_stop_button, announcement)
+        self.emergency_stop_button.focus_set()
+        if not result.stopped:
+            self.bell()
+        return result
 
     @property
     def _recovery_busy(self) -> bool:

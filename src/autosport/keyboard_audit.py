@@ -5,7 +5,12 @@ from typing import Any
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
-from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
+from .windows_gui import (
+    WINDOWS_BANKROLL_AUTOMATION_ID,
+    WINDOWS_EMERGENCY_STOP_AUTOMATION_ID,
+    WINDOWS_EMERGENCY_STOP_HOTKEY,
+    WindowsAutosportApp,
+)
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 
@@ -17,6 +22,7 @@ _ACTION_BINDINGS = {
     "<Control-l>": "live_refresh",
     "<Control-Alt-Left>": "shell_previous",
     "<Control-Alt-Right>": "shell_next",
+    WINDOWS_EMERGENCY_STOP_HOTKEY: "emergency_stop",
 }
 _FOCUS_BINDINGS = {
     "<F2>": "shell_navigation",
@@ -54,6 +60,7 @@ _FOCUSABLE_CONTROLS = (
     "evaluation",
     "log",
     "bankroll",
+    "emergency_stop",
 )
 
 
@@ -110,6 +117,8 @@ def summarize_keyboard_contract(
     def automation_id_for(name: str) -> int:
         if name == "bankroll":
             return WINDOWS_BANKROLL_AUTOMATION_ID
+        if name == "emergency_stop":
+            return WINDOWS_EMERGENCY_STOP_AUTOMATION_ID
         if name in workbench_names:
             return WORKBENCH_AUTOMATION_IDS[workbench_names[name]]
         if name.startswith("shell_") or name.startswith("owner_economic_"):
@@ -147,8 +156,9 @@ def summarize_keyboard_contract(
         "failures": failures,
         "evidence_scope": (
             "in-process packaged Windows GUI keyboard contract: action shortcuts and shell cycling are bound, "
-            "F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus the manual "
-            "calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
+            "F2/F6/F7/F8/F9/F10 focus shortcuts are executed, Ctrl+Shift+S emergency STOP is globally "
+            "bound, and critical shell/STOP controls plus the manual calculation workbench are reachable "
+            "through forward Tab and reverse Shift+Tab traversal; "
             "not physical keyboard or NVDA speech proof"
         ),
         "human_tested": False,
@@ -182,6 +192,7 @@ def _critical_widgets(
         "evaluation": app.evaluation,
         "log": app.log,
         "bankroll": app.bank_summary,
+        "emergency_stop": app.emergency_stop_button,
         "manual_calculation_open": app.manual_calculation_button,
     }
     if workbench_dialog is not None:
@@ -230,10 +241,13 @@ def _tab_reachable_controls(
 
 
 def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
-    return {
-        sequence: bool(str(app.bind(sequence) or "").strip())
-        for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS)
-    }
+    bindings: dict[str, bool] = {}
+    for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS):
+        if sequence == WINDOWS_EMERGENCY_STOP_HOTKEY:
+            bindings[sequence] = bool(str(app.bind_all(sequence) or "").strip())
+        else:
+            bindings[sequence] = bool(str(app.bind(sequence) or "").strip())
+    return bindings
 
 
 def _execute_focus_shortcuts(

@@ -623,21 +623,27 @@ class ContinuousEventLifecycle:
             retire_input=retire_input,
         )
 
-    def assess_evidence(
-        self,
-        identity: str,
+    @staticmethod
+    def _validate_evidence_inputs(
+        store: SQLiteMarketStore,
+        required_history: timedelta,
+    ) -> None:
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be SQLiteMarketStore")
+        if (
+            not isinstance(required_history, timedelta)
+            or required_history < timedelta(0)
+        ):
+            raise ValueError("required_history must be a non-negative timedelta")
+
+    @staticmethod
+    def _assess_record_evidence(
+        record: EventLifecycleRecord,
         store: SQLiteMarketStore,
         *,
         as_of: str,
         required_history: timedelta,
     ) -> EventEvidenceAssessment:
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be SQLiteMarketStore")
-        if not isinstance(required_history, timedelta) or required_history < timedelta(0):
-            raise ValueError("required_history must be a non-negative timedelta")
-        record = self.get(identity)
-        if record is None:
-            raise KeyError(f"unknown catalog event {identity!r}")
         cutoff = _instant(as_of, "as_of")
         required_seconds = int(required_history.total_seconds())
         first_discovered = _instant(
@@ -684,7 +690,11 @@ class ContinuousEventLifecycle:
             settlement_visible = (
                 record.settlement_ref is not None
                 and record.settlement_discovered_at is not None
-                and _instant(record.settlement_discovered_at, "settlement_discovered_at") <= cutoff
+                and _instant(
+                    record.settlement_discovered_at,
+                    "settlement_discovered_at",
+                )
+                <= cutoff
             )
             detail = (
                 "completed with settlement provenance reference; outcome authority is external"
@@ -734,6 +744,25 @@ class ContinuousEventLifecycle:
             detail="required captured history is causally available",
         )
 
+    def assess_evidence(
+        self,
+        identity: str,
+        store: SQLiteMarketStore,
+        *,
+        as_of: str,
+        required_history: timedelta,
+    ) -> EventEvidenceAssessment:
+        self._validate_evidence_inputs(store, required_history)
+        record = self.get(identity)
+        if record is None:
+            raise KeyError(f"unknown catalog event {identity!r}")
+        return self._assess_record_evidence(
+            record,
+            store,
+            as_of=as_of,
+            required_history=required_history,
+        )
+
     def register_eligible(
         self,
         store: SQLiteMarketStore,
@@ -744,22 +773,37 @@ class ContinuousEventLifecycle:
         identities: Iterable[str] | None = None,
         retire_input: Callable[[str], object] | None = None,
     ) -> tuple[str, ...]:
-        """Register evidence-sufficient events through the existing live-loop seam."""
+        """Register evidence-sufficient events through one validated lifecycle snapshot."""
         if not callable(register_input):
             raise TypeError("register_input must be callable")
-        selected = (
-            {record.identity for record in self.records()}
-            if identities is None
-            else set(identities)
-        )
+
+        # Pin one fully validated durable snapshot for this operation. Re-reading
+        # the complete JSON document for each identity made the repeated live-loop
+        # path O(n^2) in lifecycle parsing/validation work and could also mix
+        # different durable generations inside one eligibility pass.
+        raw = self._read()
+        records = {
+            identity: EventLifecycleRecord.from_dict(value)
+            for identity, value in raw["events"].items()
+        }
+        selected = set(records) if identities is None else set(identities)
+
         registered: list[str] = []
         for identity in sorted(selected):
-            record = self.get(identity)
+            exact_identity = _text(identity, "identity")
+            record = records.get(exact_identity)
             if record is None:
-                raise CatalogLifecycleError(f"unknown catalog event {identity!r}")
+                raise CatalogLifecycleError(
+                    f"unknown catalog event {exact_identity!r}"
+                )
             input_id = f"catalog:{record.identity}"
-            assessment = self.assess_evidence(
-                identity,
+
+            # Preserve the existing validation boundary without reloading durable
+            # lifecycle state. Public assess_evidence() remains unchanged in
+            # semantics and still resolves its own current durable record.
+            self._validate_evidence_inputs(store, required_history)
+            assessment = self._assess_record_evidence(
+                record,
                 store,
                 as_of=as_of,
                 required_history=required_history,
@@ -770,9 +814,6 @@ class ContinuousEventLifecycle:
                 continue
             if not assessment.eligible:
                 continue
-            record = self.get(identity)
-            assert record is not None
-            input_id = f"catalog:{record.identity}"
             register_input(
                 input_id,
                 source_ids=record.source_id,
@@ -781,3 +822,4 @@ class ContinuousEventLifecycle:
             )
             registered.append(input_id)
         return tuple(registered)
+

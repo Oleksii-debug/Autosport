@@ -244,7 +244,7 @@ class SupervisorSnapshot:
 
 def _scientific_registry_binding_descriptor():
     bindings: WeakKeyDictionary[
-        object, tuple[ScientificRegistry, Path, Path]
+        object, tuple[ScientificRegistry, Path, Path, Path, Path]
     ] = WeakKeyDictionary()
 
     class _ScientificRegistryBinding:
@@ -258,10 +258,27 @@ def _scientific_registry_binding_descriptor():
                 raise ResearchSupervisorError(
                     "scientific registry authority is unbound"
                 )
-            registry, supervisor_path, registry_path = bound
+            (
+                registry,
+                supervisor_path,
+                registry_path,
+                resolved_supervisor_path,
+                resolved_registry_path,
+            ) = bound
+            current_supervisor_path = Path(instance.path)
+            current_registry_path = Path(registry.path)
+            try:
+                current_resolved_supervisor_path = current_supervisor_path.resolve()
+                current_resolved_registry_path = current_registry_path.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise ResearchSupervisorError(
+                    "scientific registry authority path cannot be resolved"
+                ) from exc
             if (
-                Path(instance.path) != supervisor_path
-                or Path(registry.path) != registry_path
+                current_supervisor_path != supervisor_path
+                or current_registry_path != registry_path
+                or current_resolved_supervisor_path != resolved_supervisor_path
+                or current_resolved_registry_path != resolved_registry_path
             ):
                 raise ResearchSupervisorError(
                     "scientific registry authority binding changed"
@@ -271,7 +288,22 @@ def _scientific_registry_binding_descriptor():
         def __set__(self, instance, value) -> None:
             if not isinstance(value, ScientificRegistry):
                 raise TypeError("scientific_registry must be ScientificRegistry")
-            binding = (value, Path(instance.path), Path(value.path))
+            supervisor_path = Path(instance.path)
+            registry_path = Path(value.path)
+            try:
+                resolved_supervisor_path = supervisor_path.resolve()
+                resolved_registry_path = registry_path.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise ResearchSupervisorError(
+                    "scientific registry authority path cannot be resolved"
+                ) from exc
+            binding = (
+                value,
+                supervisor_path,
+                registry_path,
+                resolved_supervisor_path,
+                resolved_registry_path,
+            )
             current = bindings.get(instance)
             if current is None:
                 bindings[instance] = binding

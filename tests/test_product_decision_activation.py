@@ -356,6 +356,75 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertEqual(self._verify(), canonical)
         self.assertEqual(self.store.load(), canonical)
 
+    def test_store_workspace_rebind_cannot_cross_sign_foreign_start_authority(
+        self,
+    ) -> None:
+        alternate_workspace = self.test_root / "workspace-b"
+        alternate_workspace.mkdir()
+        for source in self.workspace.iterdir():
+            if source.is_file():
+                (alternate_workspace / source.name).write_bytes(source.read_bytes())
+
+        composition_path = alternate_workspace / "product_composition.json"
+        alternate_composition = json.loads(
+            composition_path.read_text(encoding="utf-8")
+        )
+        alternate_composition["source_id"] = "provider-b"
+        self._write_json(composition_path, alternate_composition)
+        alternate_registry = ScientificRegistry(
+            alternate_workspace / "scientific_registry.json"
+        )
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "construction state is immutable",
+        ):
+            self.store.workspace = alternate_workspace
+
+        # Bypass the normal slot write fence to prove the authority-bearing methods
+        # independently reject a split-brain object: derive workspace B while path
+        # and the genuine monotonic authority still belong to workspace A.
+        object.__setattr__(self.store, "workspace", alternate_workspace)
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "construction state changed",
+        ):
+            self.store.initialize_owner(
+                scientific_registry=alternate_registry,
+                strategy_version_id=self.STRATEGY_ID,
+                economic_goal=self.goal,
+                risk_policy=self.risk,
+                execution_config=self.execution,
+            )
+
+        canonical_path = self.workspace / "product_decision_activation.json"
+        self.assertFalse(canonical_path.exists())
+
+        object.__setattr__(self.store, "workspace", self.workspace)
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+
+        object.__setattr__(self.store, "workspace", alternate_workspace)
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "construction state changed",
+        ):
+            self.store.load()
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "construction state changed",
+        ):
+            self.store.verify(
+                scientific_registry=alternate_registry,
+                strategy_version_id=self.STRATEGY_ID,
+                economic_goal=self.goal,
+                risk_policy=self.risk,
+                execution_config=self.execution,
+            )
+
+        object.__setattr__(self.store, "workspace", self.workspace)
+        self.assertEqual(self.store.load(), canonical)
+
     def test_activation_filename_rebind_cannot_create_second_namespace(self) -> None:
         committed = self._initialize()
         canonical_path = self.store.path

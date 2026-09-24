@@ -56,6 +56,7 @@ _MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
 # sample-adequacy rule. The current exact CP implementation performs 240
 # high-precision bisection evaluations with O(k) recurrence work per step.
 _MAX_SUPPORTED_FIXED_N_OBSERVATIONS = 10_000
+_MAX_SUPPORTED_EVALUATED_STAKES = 10_000
 _UNSUPPORTED_RESOURCE_DOMAIN = "UNSUPPORTED_RESOURCE_DOMAIN"
 _CP_BASE_WORKING_PRECISION = 70
 _CP_INPUT_SCALE_GUARD_DIGITS = 16
@@ -75,7 +76,7 @@ class RiskEvidenceClass(StrEnum):
 
 
 class RiskOfRuinEvaluationError(ValueError):
-    """The requested evaluation is malformed or statistically unqualified."""
+    """The request is malformed, outside resource support, or statistically unqualified."""
 
 
 class RiskOfRuinIssuanceError(RuntimeError):
@@ -371,6 +372,12 @@ class RiskOfRuinEvaluationRequest:
         if type(self.evaluated_stakes) is not tuple or not self.evaluated_stakes:
             raise RiskOfRuinEvaluationError(
                 "evaluated_stakes must be a non-empty tuple"
+            )
+        if len(self.evaluated_stakes) > _MAX_SUPPORTED_EVALUATED_STAKES:
+            raise RiskOfRuinEvaluationError(
+                f"{_UNSUPPORTED_RESOURCE_DOMAIN}: evaluated stake vector "
+                "exceeds the current implementation work budget; this is not "
+                "a statistical validity or sample-adequacy judgment"
             )
         for stake in self.evaluated_stakes:
             if _decimal(stake, "evaluated_stake") <= 0:

@@ -10,12 +10,28 @@ from .paper import PaperBook
 
 VALID_OUTCOMES = {"win", "loss", "void"}
 
+# Descriptive only: this contract is not consulted to grant settlement authority.
+# The canonical guards below operate inside one trusted CPython process. They fail
+# closed on supported application-level state, binding, descriptor, and dependency
+# drift, but they do not claim to survive arbitrary mutation of the executable
+# objects or runtime that implement the guards themselves. A process with that
+# capability is inside the trusted computing base and must be treated as compromised.
+SETTLEMENT_TAMPER_MODEL_VERSION = "settlement-process-trust-v1"
+SETTLEMENT_TAMPER_MODEL_V1 = (
+    "assumes:trusted-cpython-runtime",
+    "assumes:trusted-installed-python-executables",
+    "guards:application-state-binding-descriptor-dependency-drift",
+    "out-of-scope:direct-function-code-mutation",
+    "out-of-scope:closure-cell-mutation",
+    "out-of-scope:interpreter-or-native-runtime-mutation",
+)
+
 
 
 
 
 def _build_public_entry_class_guard(name: str):
-    """Guard a SettlementEngine class binding even through type.__setattr__."""
+    """Guard a public class binding inside the declared trusted-process model."""
 
     class PublicEntryClassGuard:
         __slots__ = ()
@@ -39,7 +55,7 @@ def _build_public_entry_class_guard(name: str):
 
 
 class _SettlementEngineMeta(type):
-    """Seal authority-bearing public settlement entry bindings after composition."""
+    """Seal public entry bindings against supported application-level retargeting."""
 
     def __setattr__(cls, name: str, value: object) -> None:
         if (
@@ -76,7 +92,12 @@ class _SettlementEngineMeta(type):
 
 @dataclass(slots=True, weakref_slot=True)
 class SettlementEngine(metaclass=_SettlementEngineMeta):
-    """Version-1 deterministic settlement state. Strategy code never receives this state during replay."""
+    """Version-1 deterministic settlement state.
+
+    Strategy code never receives this state during replay. Tamper-resistance claims
+    are scoped by SETTLEMENT_TAMPER_MODEL_V1; arbitrary same-process executable or
+    interpreter mutation is not represented as an independently protected root.
+    """
 
     _public_entry_bindings_sealed = False
     outcomes: dict[str, str] = field(default_factory=dict)
@@ -217,9 +238,11 @@ def _build_serialized_settlement_operations():
             raise ValueError("settlement outcome authority changed")
         return raw
 
-    # Freeze the exact class-level executable graph that this boundary calls
-    # directly or through PaperBook.settle()/validation. Capturing only the class
-    # object is insufficient because its attributes remain mutable.
+    # Capture the exact class-level executable graph that this boundary calls
+    # directly or through PaperBook.settle()/validation. Within the declared
+    # trusted-process model, descriptor/code checks are defense in depth against
+    # application-level drift. They are not a claim that Python can self-attest
+    # against arbitrary mutation of the currently trusted executable objects.
     paper_dispatch_names = (
         "settle",
         "_validate_loaded_state",
@@ -257,11 +280,12 @@ def _build_serialized_settlement_operations():
     settlement_result = paper_book_type._settlement_result
     settle_book = paper_book_type.settle
 
-    # Capturing a Python function freezes its code object, not the values it
-    # resolves from its module globals at call time. Seal the same-module global
-    # dependency graph reachable from the PaperBook methods above so a caller
-    # cannot transiently rebind TicketStatus, Decimal/context helpers, or another
-    # PaperBook helper without changing any class descriptor.
+    # Function identity alone does not bind the module globals resolved at call
+    # time. Capture the same-module global dependency graph reachable from the
+    # PaperBook methods above so supported application-level rebinding of
+    # TicketStatus, Decimal/context helpers, or another PaperBook helper fails
+    # closed. Exact code-object checks here are defense in depth within the same
+    # trusted-process boundary, not an external executable-integrity root.
     paper_module_globals = descriptor_function(
         paper_book_type.__dict__["settle"]
     ).__globals__

@@ -10,35 +10,67 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
+# This gate describes the semantic HTML/WebView2 surface that ships in the
+# package.  It intentionally validates externally observable UIA semantics, not
+# the legacy Tk widget contract that preceded the WebView2 migration.
 $expected = @(
-    [ordered]@{ key = 'choose_dataset'; automation_id = '101'; name = 'Вибрати набір даних для повтору'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'run_replay'; automation_id = '102'; name = 'Запустити паперовий повтор'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'replay_speed'; automation_id = '103'; name = 'Швидкість повтору'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
-    [ordered]@{ key = 'live_mode'; automation_id = '104'; name = 'Режим живого спостереження'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
-    [ordered]@{ key = 'live_refresh'; automation_id = '105'; name = 'Оновити поточний знімок'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'strategy'; automation_id = '106'; name = 'Стратегія повтору'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
-    [ordered]@{ key = 'research_plan'; automation_id = '107'; name = 'Вибрати план дослідження'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'repair_workspace'; automation_id = '108'; name = 'Відновити робочу область'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'tickets'; automation_id = '201'; name = 'Паперові квитки і результати'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false },
-    [ordered]@{ key = 'live_quotes'; automation_id = '203'; name = 'Поточні котирування'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'evaluation'; automation_id = '204'; name = 'Оцінювання та докази портфеля'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'bankroll'; automation_id = '205'; name = 'Віртуальний банк'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
-    [ordered]@{ key = 'shell_navigation'; automation_id = '301'; name = 'Навігація екранами Автоспорт'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
-    [ordered]@{ key = 'shell_state'; automation_id = '302'; name = 'Стан вибраної поверхні'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
-    [ordered]@{ key = 'shell_open'; automation_id = '303'; name = 'Перейти до робочої поверхні'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'shell_details'; automation_id = '304'; name = 'Контракт вибраного екрана'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'owner_economic_open'; automation_id = '305'; name = 'Економічні межі власника'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'owner_economic_status'; automation_id = '306'; name = 'Стан економічних меж власника'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
-    [ordered]@{ key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; require_named_rows = $true },
-    [ordered]@{ key = 'manual_calculation_open'; automation_id = '330'; name = 'Відкрити робочу поверхню ручних розрахунків'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'manual_calculation_operation'; automation_id = '331'; name = 'Операція ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
-    [ordered]@{ key = 'manual_calculation_input'; automation_id = '332'; name = 'Вхідні значення ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false },
-    [ordered]@{ key = 'manual_calculation_calculate'; automation_id = '333'; name = 'Обчислити ручний результат'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'manual_calculation_result'; automation_id = '334'; name = 'Результат і evidence ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $false; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true; allow_disabled = $true },
-    [ordered]@{ key = 'manual_calculation_clear'; automation_id = '335'; name = 'Очистити ручні значення'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
-    [ordered]@{ key = 'manual_calculation_close'; automation_id = '336'; name = 'Закрити ручні розрахунки'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false }
+    [ordered]@{ key = 'choose_dataset'; automation_id = '101'; name = 'Вибрати та перевірити набір даних'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'run_replay'; automation_id = '102'; name = 'Запустити симуляційний повтор'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'replay_speed'; automation_id = '103'; name = 'Швидкість повтору'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; child_types = @() },
+    [ordered]@{ key = 'live_mode'; automation_id = '104'; name = 'Режим живих даних'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; child_types = @() },
+    [ordered]@{ key = 'live_refresh'; automation_id = '105'; name = 'Оновити поточні котирування'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'strategy'; automation_id = '106'; name = 'Стратегія повтору'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; child_types = @() },
+    [ordered]@{ key = 'research_plan'; automation_id = '107'; name = 'Вибрати план дослідження'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'repair_workspace'; automation_id = '108'; name = 'Відновити робочу область'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'tickets'; automation_id = '201'; name = 'Паперові квитки і результати'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.Table'; child_types = @('ControlType.DataItem', 'ControlType.Row') },
+    [ordered]@{ key = 'log'; automation_id = '202'; name = 'Журнал виконання'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; child_types = @() },
+    [ordered]@{ key = 'live_quotes'; automation_id = '203'; name = 'Поточні котирування'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; child_types = @('ControlType.ListItem') },
+    [ordered]@{ key = 'evaluation'; automation_id = '204'; name = 'Оцінювання та докази портфеля'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; child_types = @('ControlType.ListItem') },
+    [ordered]@{ key = 'bankroll'; automation_id = '205'; name = 'Віртуальний банк'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_value_read_only = $true; child_types = @() },
+    [ordered]@{ key = 'shell_navigation'; automation_id = '301'; name = 'Навігація екранами Автоспорт'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; child_types = @() },
+    [ordered]@{ key = 'shell_state'; automation_id = '302'; name = 'Стан вибраної поверхні'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_value_read_only = $true; child_types = @() },
+    [ordered]@{ key = 'shell_open'; automation_id = '303'; name = 'Перейти до робочої поверхні'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'shell_details'; automation_id = '304'; name = 'Контракт вибраного екрана'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; child_types = @('ControlType.ListItem') },
+    [ordered]@{ key = 'owner_economic_open'; automation_id = '305'; name = 'Економічні межі власника'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'owner_economic_status'; automation_id = '306'; name = 'Стан економічних меж власника'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_value_read_only = $true; child_types = @() },
+    [ordered]@{ key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; child_types = @('ControlType.ListItem') },
+    [ordered]@{ key = 'manual_calculation_open'; automation_id = '330'; name = 'Відкрити робочу поверхню ручних розрахунків'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'manual_calculation_operation'; automation_id = '331'; name = 'Операція ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; child_types = @() },
+    [ordered]@{ key = 'manual_calculation_input'; automation_id = '332'; name = 'Вхідні значення ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; child_types = @() },
+    [ordered]@{ key = 'manual_calculation_calculate'; automation_id = '333'; name = 'Обчислити ручний результат'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'manual_calculation_result'; automation_id = '334'; name = 'Результат і evidence ручного розрахунку'; required_pattern = 'Value'; require_external_focus = $false; expected_control_type = 'ControlType.Edit'; require_value_read_only = $true; allow_disabled = $true; child_types = @() },
+    [ordered]@{ key = 'manual_calculation_clear'; automation_id = '335'; name = 'Очистити ручні значення'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
+    [ordered]@{ key = 'manual_calculation_close'; automation_id = '336'; name = 'Закрити ручні розрахунки'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() }
 )
+
+function Get-ExternalActionPattern {
+    param([System.Windows.Automation.AutomationElement]$Element)
+
+    $invokeObject = $null
+    if ($Element.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$invokeObject
+    ) -and $null -ne $invokeObject) {
+        return [pscustomobject]@{ Kind = 'Invoke'; Pattern = $invokeObject }
+    }
+
+    # Chromium/WebView2 can expose an HTML button through the legacy-accessible
+    # bridge even when UIA InvokePattern is absent.  A non-empty default action
+    # is the externally observable activation contract; simply being focusable
+    # is not enough to pass this gate.
+    $legacyObject = $null
+    if ($Element.TryGetCurrentPattern(
+        [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern,
+        [ref]$legacyObject
+    ) -and $null -ne $legacyObject) {
+        $legacy = [System.Windows.Automation.LegacyIAccessiblePattern]$legacyObject
+        $defaultAction = [string]$legacy.Current.DefaultAction
+        if (-not [string]::IsNullOrWhiteSpace($defaultAction)) {
+            return [pscustomobject]@{ Kind = 'LegacyIAccessible'; Pattern = $legacy }
+        }
+    }
+    return $null
+}
 
 function Test-Pattern {
     param(
@@ -46,19 +78,49 @@ function Test-Pattern {
         [string]$PatternName
     )
     if ([string]::IsNullOrWhiteSpace($PatternName)) { return $true }
-    switch ($PatternName) {
-        'Invoke' { $pattern = [System.Windows.Automation.InvokePattern]::Pattern }
-        'Value' { $pattern = [System.Windows.Automation.ValuePattern]::Pattern }
-        default { throw "Unsupported UIA pattern: $PatternName" }
+    if ($PatternName -eq 'Action') {
+        return $null -ne (Get-ExternalActionPattern -Element $Element)
     }
-    $patternObject = $null
-    return $Element.TryGetCurrentPattern($pattern, [ref]$patternObject)
+    if ($PatternName -eq 'Value') {
+        $patternObject = $null
+        return $Element.TryGetCurrentPattern(
+            [System.Windows.Automation.ValuePattern]::Pattern,
+            [ref]$patternObject
+        )
+    }
+    throw "Unsupported UIA pattern: $PatternName"
 }
 
-function Get-NamedListItemCount {
+function Invoke-ExternalAction {
     param([System.Windows.Automation.AutomationElement]$Element)
 
-    $count = 0
+    $action = Get-ExternalActionPattern -Element $Element
+    if ($null -eq $action) {
+        throw "control exposes neither InvokePattern nor LegacyIAccessible default action"
+    }
+    if ($action.Kind -eq 'Invoke') {
+        ([System.Windows.Automation.InvokePattern]$action.Pattern).Invoke()
+        return
+    }
+    if ($action.Kind -eq 'LegacyIAccessible') {
+        ([System.Windows.Automation.LegacyIAccessiblePattern]$action.Pattern).DoDefaultAction()
+        return
+    }
+    throw "unsupported external action kind '$($action.Kind)'"
+}
+
+function Get-SemanticChildStats {
+    param(
+        [System.Windows.Automation.AutomationElement]$Element,
+        [string[]]$AllowedTypes
+    )
+
+    $candidateCount = 0
+    $namedCount = 0
+    $unnamedCount = 0
+    if ($null -eq $AllowedTypes -or $AllowedTypes.Count -eq 0) {
+        return [pscustomobject]@{ CandidateCount = 0; NamedCount = 0; UnnamedCount = 0 }
+    }
     $descendants = $Element.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition
@@ -66,16 +128,24 @@ function Get-NamedListItemCount {
     foreach ($item in $descendants) {
         try {
             $typeName = [string]$item.Current.ControlType.ProgrammaticName
+            if (-not ($AllowedTypes -contains $typeName)) { continue }
+            $candidateCount += 1
             $itemName = [string]$item.Current.Name
-            if ($typeName -eq 'ControlType.ListItem' -and -not [string]::IsNullOrWhiteSpace($itemName)) {
-                $count += 1
+            if ([string]::IsNullOrWhiteSpace($itemName)) {
+                $unnamedCount += 1
+            } else {
+                $namedCount += 1
             }
         } catch {
-            # A fragment can disappear while the provider refreshes; missing rows
-            # are caught by the zero-count fail-closed check below.
+            # A fragment can disappear during projection. A later complete
+            # collection snapshot still has to satisfy the semantic checks.
         }
     }
-    return $count
+    return [pscustomobject]@{
+        CandidateCount = $candidateCount
+        NamedCount = $namedCount
+        UnnamedCount = $unnamedCount
+    }
 }
 
 function Get-ProcessFamilyIds {
@@ -110,14 +180,8 @@ function Find-UiaRootForProcessFamily {
                 )
                 if ($null -ne $element) { return $element }
             }
-        } catch {
-            # A bootstrap/child process can turn over while the one-file app starts.
-        }
+        } catch {}
     }
-
-    # MainWindowHandle belongs to the PyInstaller GUI child, not necessarily the
-    # launcher returned by Start-Process. Fall back to the desktop UIA tree so a
-    # valid child window is still externally discoverable by its real process ID.
     try {
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $desktop.FindAll(
@@ -125,13 +189,9 @@ function Find-UiaRootForProcessFamily {
             [System.Windows.Automation.Condition]::TrueCondition
         )
         foreach ($window in $windows) {
-            if ($ProcessIds -contains [int]$window.Current.ProcessId) {
-                return $window
-            }
+            if ($ProcessIds -contains [int]$window.Current.ProcessId) { return $window }
         }
-    } catch {
-        # UIA can lag process creation briefly; the bounded caller retries.
-    }
+    } catch {}
     return $null
 }
 
@@ -160,9 +220,7 @@ function Find-UiaElementForProcessFamily {
             )
             if ($null -ne $element) { return $element }
         }
-    } catch {
-        # The UIA tree may change while a dialog opens; bounded callers retry.
-    }
+    } catch {}
     return $null
 }
 
@@ -195,8 +253,22 @@ function Find-UiaRootWithElementForProcessFamily {
                 return [pscustomobject]@{ Root = $window; Element = $element }
             }
         }
-    } catch {
-        # The UIA tree may change while WebView2 publishes its semantic subtree.
+    } catch {}
+    return $null
+}
+
+function Wait-ForUiaElement {
+    param(
+        [int]$RootProcessId,
+        [string]$AutomationId,
+        [DateTime]$Deadline
+    )
+
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        $ids = @(Get-ProcessFamilyIds -RootProcessId $RootProcessId)
+        $element = Find-UiaElementForProcessFamily -ProcessIds $ids -AutomationId $AutomationId
+        if ($null -ne $element) { return $element }
+        Start-Sleep -Milliseconds 100
     }
     return $null
 }
@@ -204,7 +276,7 @@ function Find-UiaRootWithElementForProcessFamily {
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
-    evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; list keyboard focus is separately gated by the same fresh-extracted EXE keyboard audit; not NVDA speech or physical-human proof'
+    evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; semantic HTML collections may be legitimately empty at startup; not NVDA speech or physical-human proof'
     launcher_process_id = $null
     process_id = $null
     process_family_ids = @()
@@ -241,11 +313,8 @@ try {
         throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
     }
 
-    # A native top-level window can be visible before the embedded WebView2
-    # accessibility provider has projected its semantic DOM into UIA. Treating
-    # those two states as equivalent makes the external gate race startup. Keep
-    # one bounded startup deadline and bind readiness to the same top-level root
-    # whose accessibility tree is reported below.
+    # Native host visibility is not semantic readiness. Wait for one stable DOM
+    # control and bind the audit root to that same WebView2 top-level window.
     $semanticReady = $null
     while ([DateTime]::UtcNow -lt $deadline) {
         $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
@@ -268,40 +337,45 @@ try {
         $report.failures += 'main window has no external UIA Name'
     }
 
+    # Owner/manual details are intentionally hidden in the semantic document at
+    # startup. Exercise the real external activation contract before auditing the
+    # controls inside those panels; inspecting hidden descendants would be a false
+    # negative and skipping activation would fail to prove keyboard-operable flow.
+    $ownerOpen = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '305'
+    if ($null -eq $ownerOpen) {
+        $report.failures += 'automation_id=305: cannot open owner economic panel for external UIA audit'
+    } else {
+        try {
+            Invoke-ExternalAction -Element $ownerOpen
+            $ownerDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(5, $TimeoutSeconds))
+            $ownerProbe = Wait-ForUiaElement -RootProcessId $process.Id -AutomationId '306' -Deadline $ownerDeadline
+            if ($null -eq $ownerProbe) {
+                $report.failures += 'automation_id=306: owner economic panel did not become externally inspectable'
+            }
+        } catch {
+            $report.failures += "owner economic panel open failed: $($_.Exception.Message)"
+        }
+    }
+
+    $manualOpen = $semanticReady
+    try {
+        Invoke-ExternalAction -Element $manualOpen
+        $manualDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(5, $TimeoutSeconds))
+        $manualProbe = Wait-ForUiaElement -RootProcessId $process.Id -AutomationId '331' -Deadline $manualDeadline
+        if ($null -eq $manualProbe) {
+            $report.failures += 'automation_id=331: manual calculation panel did not become externally inspectable'
+        }
+    } catch {
+        $report.failures += "manual calculation panel open failed: $($_.Exception.Message)"
+    }
+
+    $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+    $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $descendants = $uiaRoot.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition
     )
     $report.descendant_count = $descendants.Count
-
-    $manualOpen = $semanticReady
-    if ($null -eq $manualOpen) {
-        $report.failures += 'automation_id=330: cannot open manual calculation workbench for external UIA audit'
-    } else {
-        try {
-            $invokeObject = $null
-            if (-not $manualOpen.TryGetCurrentPattern(
-                [System.Windows.Automation.InvokePattern]::Pattern,
-                [ref]$invokeObject
-            )) {
-                throw 'manual calculation open control has no InvokePattern'
-            }
-            ([System.Windows.Automation.InvokePattern]$invokeObject).Invoke()
-            $dialogDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(5, $TimeoutSeconds))
-            $dialogProbe = $null
-            while ([DateTime]::UtcNow -lt $dialogDeadline) {
-                $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-                $dialogProbe = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '331'
-                if ($null -ne $dialogProbe) { break }
-                Start-Sleep -Milliseconds 100
-            }
-            if ($null -eq $dialogProbe) {
-                $report.failures += 'automation_id=331: manual calculation dialog did not become externally inspectable'
-            }
-        } catch {
-            $report.failures += "manual calculation dialog open failed: $($_.Exception.Message)"
-        }
-    }
 
     foreach ($spec in $expected) {
         $element = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id)
@@ -315,6 +389,7 @@ try {
         $focusable = [bool]$element.Current.IsKeyboardFocusable
         $enabled = [bool]$element.Current.IsEnabled
         $patternOk = Test-Pattern -Element $element -PatternName $spec.required_pattern
+
         $valueReadOnlyRequired = [bool]$spec.require_value_read_only
         $valueReadOnly = $null
         if ($valueReadOnlyRequired) {
@@ -332,10 +407,8 @@ try {
                 $valueReadOnly = $null
             }
         }
-        $namedRowCount = 0
-        if ([bool]$spec.require_named_rows) {
-            $namedRowCount = Get-NamedListItemCount -Element $element
-        }
+
+        $childStats = Get-SemanticChildStats -Element $element -AllowedTypes @($spec.child_types)
         $record = [ordered]@{
             key = $spec.key
             automation_id = [string]$element.Current.AutomationId
@@ -345,13 +418,14 @@ try {
             expected_control_type = $spec.expected_control_type
             keyboard_focusable = $focusable
             keyboard_focus_required_by_external_gate = [bool]$spec.require_external_focus
-            keyboard_focus_gate_owner = if ([bool]$spec.require_external_focus) { 'external_uia_property' } else { 'fresh_extraction_keyboard_audit' }
             enabled = $enabled
             required_pattern = $spec.required_pattern
             required_pattern_available = $patternOk
             value_read_only_required = $valueReadOnlyRequired
             value_read_only = $valueReadOnly
-            named_list_item_count = $namedRowCount
+            semantic_child_count = $childStats.CandidateCount
+            named_semantic_child_count = $childStats.NamedCount
+            unnamed_semantic_child_count = $childStats.UnnamedCount
         }
         $report.controls += $record
 
@@ -364,17 +438,17 @@ try {
         if ([bool]$spec.require_external_focus -and -not $focusable) {
             $report.failures += "automation_id=$($spec.automation_id): not externally keyboard-focusable"
         }
-        if ([bool]$spec.require_named_rows -and $namedRowCount -lt 1) {
-            $report.failures += "automation_id=$($spec.automation_id): no externally exposed named ListItem rows"
-        }
         if (-not $enabled -and -not [bool]$spec.allow_disabled) {
-            $report.failures += "automation_id=$($spec.automation_id): externally disabled at startup"
+            $report.failures += "automation_id=$($spec.automation_id): externally disabled at audit time"
         }
         if (-not $patternOk) {
             $report.failures += "automation_id=$($spec.automation_id): missing external UIA $($spec.required_pattern) pattern"
         }
         if ($valueReadOnlyRequired -and $valueReadOnly -ne $true) {
             $report.failures += "automation_id=$($spec.automation_id): external UIA ValuePattern is writable or read-only state unavailable"
+        }
+        if ($childStats.UnnamedCount -gt 0) {
+            $report.failures += "automation_id=$($spec.automation_id): exposes $($childStats.UnnamedCount) unnamed semantic collection items"
         }
     }
 

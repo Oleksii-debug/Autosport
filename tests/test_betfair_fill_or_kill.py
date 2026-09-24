@@ -280,6 +280,46 @@ class BetfairFillOrKillTests(unittest.TestCase):
             ):
                 BetfairFillOrKillStructuralEvidence(**{flag: True})
 
+    def test_text_ingress_is_resource_bounded_before_projection(self):
+        oversized = "x" * 513
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "market_id text input exceeds resource bound",
+        ):
+            self._request(market_id=oversized)
+
+        request = self._request()
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "bet_id text input exceeds resource bound",
+        ):
+            self._report(request, bet_id=oversized)
+
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "request_projection_sha256 text input exceeds resource bound",
+        ):
+            BetfairFillOrKillImmediateReport(
+                request_projection_sha256="a" * 513,
+                response_sha256=self.RESPONSE_SHA,
+                top_status="SUCCESS",
+                instruction_status="SUCCESS",
+                size_matched="0",
+                average_price_matched="0",
+            )
+
+    def test_selection_length_fails_at_provider_bound_before_generic_text_path(self):
+        with patch(
+            "autosport.betfair_fill_or_kill._text",
+            side_effect=AssertionError("generic text materialization must not execute"),
+        ) as text_parser:
+            with self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "signed-long domain",
+            ):
+                self._request(selection_id="9" * 5000)
+        text_parser.assert_not_called()
+
     def test_oversized_decimal_text_fails_before_decimal_parser(self):
         oversized = "1" * 513
         with patch(

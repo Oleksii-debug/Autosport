@@ -1085,6 +1085,9 @@ def _build_canonical_reservation_admission_authority():
         "_LEDGER_STATE",
         "RealExecutionLedger",
         "ExecutionAction",
+        "sqlite3",
+        "sha256",
+        "Path",
         "AttemptState",
         "EventType",
         "BetfairExposureReservation",
@@ -1123,6 +1126,8 @@ def _build_canonical_reservation_admission_authority():
     read_all = store_methods["_read_all"]
     admission_error = BetfairPreTradeReservationError
     reservation_type = BetfairExposureReservation
+    db_filename = _DB_FILENAME
+    venue_id = _VENUE_ID
 
     def require_dispatch(store: object) -> BetfairPreTradeReservationStore:
         module_globals = globals()
@@ -1130,9 +1135,18 @@ def _build_canonical_reservation_admission_authority():
             module_globals.get("BetfairPreTradeReservationStore") is not store_class
             or type(store) is not store_class
             or getattr(reserve_impl, "__code__", None) is not reserve_impl_code
+            or module_globals.get("_DB_FILENAME") != db_filename
+            or module_globals.get("_VENUE_ID") != venue_id
         ):
             raise admission_error(
                 "canonical Betfair reservation admission authority changed"
+            )
+        if (
+            store.path != store.execution_workspace / db_filename
+            or store.execution_workspace != store.execution_workspace.resolve()
+        ):
+            raise admission_error(
+                "canonical Betfair reservation store binding changed"
             )
         instance_state = vars(store)
         for name in store_method_names:

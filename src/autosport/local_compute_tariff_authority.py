@@ -30,6 +30,7 @@ from .json_integrity import strict_json_loads
 from .local_compute_allocation_basis import (
     LocalComputeAllocationBasisAuthorityStore,
     LocalComputeAllocationBasisRecord,
+    local_compute_monotonic_authority_root,
 )
 from .monotonic_workspace_authority import (
     AuthorityPhase,
@@ -47,6 +48,21 @@ _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE: Final = re.compile(r"^[A-Z]{3}$")
 _MAX_INTEGER_DIGITS: Final = 24
 _MAX_FRACTIONAL_DIGITS: Final = 18
+
+# Downstream tariff authority must consume the exact canonical allocation-basis
+# implementation and machine-root contract imported from its stack parent.
+_CANONICAL_ALLOCATION_BASIS_STORE_CLASS: Final = (
+    LocalComputeAllocationBasisAuthorityStore
+)
+_CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT: Final = (
+    LocalComputeAllocationBasisAuthorityStore.resolve_current
+)
+_CANONICAL_LOCAL_COMPUTE_MONOTONIC_AUTHORITY_ROOT: Final = (
+    local_compute_monotonic_authority_root
+)
+_CANONICAL_ECONOMIC_GOAL_STORE_CLASS: Final = EconomicGoalStore
+_CANONICAL_ECONOMIC_GOAL_STORE_LOAD: Final = EconomicGoalStore.load
+_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD: Final = economic_goal_to_payload
 
 
 class LocalComputeTariffError(ValueError):
@@ -152,7 +168,9 @@ def _digest(payload: object) -> str:
 
 
 def _goal_sha256(goal: object) -> str:
-    return _digest(economic_goal_to_payload(goal))  # type: ignore[arg-type]
+    return _digest(
+        _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD(goal)  # type: ignore[arg-type]
+    )
 
 
 def _authoritative_utc_now() -> str:
@@ -352,31 +370,84 @@ def _intervals_overlap(
     return left_before_right_end and right_before_left_end
 
 
+def _build_tariff_store_init():
+    """Bind tariff and basis stores to one canonical LOCAL-compute root."""
+
+    root_resolver = _CANONICAL_LOCAL_COMPUTE_MONOTONIC_AUTHORITY_ROOT
+    root_code = getattr(root_resolver, "__code__", None)
+    root_closure = getattr(root_resolver, "__closure__", None)
+    try:
+        root_closure_state = tuple(
+            cell.cell_contents for cell in (root_closure or ())
+        )
+    except ValueError as exc:
+        raise LocalComputeTariffError(
+            "canonical local-compute authority root closure is invalid"
+        ) from exc
+
+    path_type = Path
+    basis_store_type = _CANONICAL_ALLOCATION_BASIS_STORE_CLASS
+    authority_type = MonotonicWorkspaceAuthority
+    lock_type = WorkspaceEconomicLock
+    file_name = FILE_NAME
+    authority_domain = AUTHORITY_DOMAIN
+    authority_key = AUTHORITY_KEY
+    error_type = LocalComputeTariffError
+
+    def sealed_init(self, workspace: str | Path) -> None:
+        if getattr(root_resolver, "__code__", None) is not root_code:
+            raise error_type(
+                "canonical local-compute authority root resolver code changed"
+            )
+        live_closure = getattr(root_resolver, "__closure__", None)
+        try:
+            live_closure_state = tuple(
+                cell.cell_contents for cell in (live_closure or ())
+            )
+        except ValueError as exc:
+            raise error_type(
+                "canonical local-compute authority root closure changed"
+            ) from exc
+        if (
+            len(live_closure_state) != len(root_closure_state)
+            or any(
+                current is not frozen
+                for current, frozen in zip(
+                    live_closure_state,
+                    root_closure_state,
+                )
+            )
+        ):
+            raise error_type(
+                "canonical local-compute authority root closure changed"
+            )
+
+        self.workspace = path_type(workspace).absolute().resolve(strict=False)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.path = self.workspace / file_name
+        self._basis_store = basis_store_type(self.workspace)
+        tariff_root = root_resolver()
+        if self._basis_store._authority.authority_root != tariff_root:
+            raise error_type(
+                "tariff and allocation basis authority roots differ"
+            )
+        self._authority = authority_type(
+            workspace=self.workspace,
+            domain=authority_domain,
+            key=authority_key,
+            authority_root=tariff_root,
+        )
+        with lock_type(self.workspace):
+            self._recover()
+            self._records = self._load()
+
+    return sealed_init
+
+
 class LocalComputeTariffAuthorityStore:
     """Creation-only owner tariff store with independent rollback fencing."""
 
-    def __init__(
-        self,
-        workspace: str | Path,
-        *,
-        authority_root: str | Path | None = None,
-    ) -> None:
-        self.workspace = Path(workspace).absolute()
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / FILE_NAME
-        self._basis_store = LocalComputeAllocationBasisAuthorityStore(
-            self.workspace,
-            authority_root=authority_root,
-        )
-        self._authority = MonotonicWorkspaceAuthority(
-            workspace=self.workspace,
-            domain=AUTHORITY_DOMAIN,
-            key=AUTHORITY_KEY,
-            authority_root=authority_root,
-        )
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            self._records = self._load()
+    __init__ = _build_tariff_store_init()
 
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None
@@ -424,7 +495,8 @@ class LocalComputeTariffAuthorityStore:
 
     def _current_goal(self):
         try:
-            goal = EconomicGoalStore(self.workspace).load()
+            goal_store = _CANONICAL_ECONOMIC_GOAL_STORE_CLASS(self.workspace)
+            goal = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(goal_store)
         except Exception as exc:
             raise LocalComputeTariffError(
                 "current durable EconomicGoal is required for local compute tariff authority"
@@ -433,7 +505,7 @@ class LocalComputeTariffAuthorityStore:
 
     def _basis_authority(self) -> LocalComputeAllocationBasisAuthorityStore:
         authority = self._basis_store
-        if type(authority) is not LocalComputeAllocationBasisAuthorityStore:
+        if type(authority) is not _CANONICAL_ALLOCATION_BASIS_STORE_CLASS:
             raise LocalComputeTariffError(
                 "local compute allocation basis authority instance is not canonical"
             )
@@ -464,7 +536,7 @@ class LocalComputeTariffAuthorityStore:
         canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
         canonical_basis_id = _text(allocation_basis_id, "allocation_basis_id")
         goal_for_basis, _ = self._current_goal()
-        basis = LocalComputeAllocationBasisAuthorityStore.resolve_current(
+        basis = _CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT(
             self._basis_authority(),
             basis_id=canonical_basis_id,
             backend_id=canonical_backend,
@@ -697,7 +769,7 @@ class LocalComputeTariffAuthorityStore:
 
         if resolved is None:
             return None
-        basis = LocalComputeAllocationBasisAuthorityStore.resolve_current(
+        basis = _CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT(
             self._basis_authority(),
             basis_id=resolved.allocation_basis_id,
             backend_id=resolved.backend_id,

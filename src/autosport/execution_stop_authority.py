@@ -1473,39 +1473,13 @@ def _build_sealed_admission_lease():
     """
 
     module_globals = globals()
-    sealed_names = tuple(
-        sorted(
-            name
-            for name in module_globals
-            if name.startswith("_CANONICAL_ADMISSION_")
-            or name
-            in {
-                "_canonical",
-                "_digest",
-                "_exclusive_file_lock",
-                "_parse_json_object",
-                "_sha256",
-                "_sync_directory",
-                "_require_canonical_admission_graph",
-                "AuthorityPhase",
-                "ExecutionAuthorityMode",
-                "ExecutionStopAuthority",
-                "ExecutionStopIntegrityError",
-                "ExecutionStoppedError",
-                "MonotonicWorkspaceAuthority",
-                "Path",
-                "hashlib",
-                "json",
-                "os",
-                "stat",
-                "tempfile",
-                "threading",
-                "uuid",
-            }
-        )
-    )
+    # Positive admission is rare and security-critical. Freeze every module
+    # binding that existed when the canonical lease was built, rather than
+    # maintaining a hand-written allowlist that can miss a deeper helper
+    # constant or callable. New unrelated globals are harmless because the
+    # frozen code cannot resolve names that did not exist in its code objects.
     sealed_bindings = tuple(
-        (name, module_globals[name]) for name in sealed_names
+        (name, module_globals[name]) for name in sorted(module_globals)
     )
     authority_mode = ExecutionAuthorityMode
     stopped_error = ExecutionStoppedError

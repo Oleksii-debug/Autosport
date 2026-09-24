@@ -12,15 +12,18 @@ VALID_OUTCOMES = {"win", "loss", "void"}
 
 # Descriptive only: this contract is not consulted to grant settlement authority.
 # The canonical guards below operate inside one trusted CPython process. They fail
-# closed on supported application-level state, binding, descriptor, and dependency
-# drift, but they do not claim to survive arbitrary mutation of the executable
-# objects or runtime that implement the guards themselves. A process with that
-# capability is inside the trusted computing base and must be treated as compromised.
+# closed on supported ordinary application-level state, binding, descriptor, and
+# dependency drift. They do not claim to survive direct reflective mutation of the
+# guarding class/metaclass graph through builtin type operations, arbitrary mutation
+# of the executable objects, or runtime mutation that implements the guards
+# themselves. A process with that capability is inside the trusted computing base
+# and must be treated as compromised.
 SETTLEMENT_TAMPER_MODEL_VERSION = "settlement-process-trust-v1"
 SETTLEMENT_TAMPER_MODEL_V1 = (
     "assumes:trusted-cpython-runtime",
     "assumes:trusted-installed-python-executables",
-    "guards:application-state-binding-descriptor-dependency-drift",
+    "guards:ordinary-application-state-binding-descriptor-dependency-drift",
+    "out-of-scope:direct-builtin-type-class-metaclass-mutation",
     "out-of-scope:direct-function-code-mutation",
     "out-of-scope:closure-cell-mutation",
     "out-of-scope:interpreter-or-native-runtime-mutation",
@@ -55,7 +58,7 @@ def _build_public_entry_class_guard(name: str):
 
 
 class _SettlementEngineMeta(type):
-    """Seal public entry bindings against supported application-level retargeting."""
+    """Seal public entry bindings against supported ordinary application retargeting."""
 
     def __setattr__(cls, name: str, value: object) -> None:
         if (
@@ -95,8 +98,9 @@ class SettlementEngine(metaclass=_SettlementEngineMeta):
     """Version-1 deterministic settlement state.
 
     Strategy code never receives this state during replay. Tamper-resistance claims
-    are scoped by SETTLEMENT_TAMPER_MODEL_V1; arbitrary same-process executable or
-    interpreter mutation is not represented as an independently protected root.
+    are scoped by SETTLEMENT_TAMPER_MODEL_V1; arbitrary same-process reflective
+    class/metaclass, executable, or interpreter mutation is not represented as an
+    independently protected root.
     """
 
     _public_entry_bindings_sealed = False

@@ -9,6 +9,7 @@ import autosport.betdaq_account_readonly as betdaq_account_module
 from autosport.betdaq_account_continuity import (
     BetdaqAccountContinuityClient,
     BetdaqAccountContinuityError,
+    BetdaqAuthenticatedPrincipalContext,
     BetdaqAccountContinuityMigrationRequiredError,
     BetdaqContinuousAccountEvidence,
     append_to_reconciliation,

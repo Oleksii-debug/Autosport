@@ -186,59 +186,88 @@ def _authority_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _product_monotonic_authority_root() -> Path:
-    """Resolve one product-owned machine-state root without env retargeting."""
+def _build_product_monotonic_authority_root():
+    """Freeze the product root resolver's OS dependencies at import time."""
 
-    if os.name == "nt":
+    os_name = os.name
+    path_type = Path
+    error_type = ModelComputeIntentRouteAuthorityError
+
+    if os_name == "nt":
         try:
             import ctypes
 
-            buffer = ctypes.create_unicode_buffer(32768)
-            result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
-                None,
-                0x001C,  # CSIDL_LOCAL_APPDATA
-                None,
-                0,
-                buffer,
-            )
-        except (AttributeError, OSError, ValueError) as exc:
-            raise ModelComputeIntentRouteAuthorityError(
+            create_unicode_buffer = ctypes.create_unicode_buffer
+            get_folder_path = ctypes.windll.shell32.SHGetFolderPathW  # type: ignore[attr-defined]
+        except (AttributeError, ImportError) as exc:
+            raise error_type(
                 "cannot resolve product-owned Windows authority root"
             ) from exc
-        if result != 0 or not buffer.value:
-            raise ModelComputeIntentRouteAuthorityError(
-                "cannot resolve product-owned Windows authority root"
-            )
-        base = Path(buffer.value)
-        relative = (
-            Path("Autosport")
-            / "application-state"
-            / "monotonic-authority-v1"
-        )
-    else:
-        try:
-            import pwd
 
-            home = pwd.getpwuid(os.getuid()).pw_dir
-        except (AttributeError, ImportError, KeyError, OSError) as exc:
-            raise ModelComputeIntentRouteAuthorityError(
+        def resolve() -> Path:
+            try:
+                buffer = create_unicode_buffer(32768)
+                result = get_folder_path(
+                    None,
+                    0x001C,  # CSIDL_LOCAL_APPDATA
+                    None,
+                    0,
+                    buffer,
+                )
+            except (AttributeError, OSError, ValueError) as exc:
+                raise error_type(
+                    "cannot resolve product-owned Windows authority root"
+                ) from exc
+            if result != 0 or not buffer.value:
+                raise error_type(
+                    "cannot resolve product-owned Windows authority root"
+                )
+            base = path_type(buffer.value)
+            relative = (
+                path_type("Autosport")
+                / "application-state"
+                / "monotonic-authority-v1"
+            )
+            if not base.is_absolute():
+                raise error_type(
+                    "product-owned monotonic authority root must be absolute"
+                )
+            return base / relative
+
+        return resolve
+
+    try:
+        import pwd
+
+        getuid = os.getuid
+        getpwuid = pwd.getpwuid
+    except (AttributeError, ImportError) as exc:
+        raise error_type(
+            "cannot resolve product-owned POSIX authority root"
+        ) from exc
+
+    def resolve() -> Path:
+        try:
+            home = getpwuid(getuid()).pw_dir
+        except (KeyError, OSError) as exc:
+            raise error_type(
                 "cannot resolve product-owned POSIX authority root"
             ) from exc
-        base = Path(home) / ".local" / "state"
-        relative = Path("autosport") / "monotonic-authority-v1"
+        base = path_type(home) / ".local" / "state"
+        relative = path_type("autosport") / "monotonic-authority-v1"
+        if not base.is_absolute():
+            raise error_type(
+                "product-owned monotonic authority root must be absolute"
+            )
+        return base / relative
 
-    if not base.is_absolute():
-        raise ModelComputeIntentRouteAuthorityError(
-            "product-owned monotonic authority root must be absolute"
-        )
-    return base / relative
+    return resolve
 
 
+_product_monotonic_authority_root = _build_product_monotonic_authority_root()
 _CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT: Final = (
     _product_monotonic_authority_root
 )
-
-
 def _intent_identity(intent: OpportunityIntent) -> dict[str, str]:
     if type(intent) is not _CANONICAL_OPPORTUNITY_INTENT_CLASS:
         raise ModelComputeIntentRouteAuthorityError(
@@ -444,25 +473,77 @@ def _state_payload(
     }
 
 
+def _build_store_init():
+    """Bind machine-root selection to import-time closure-owned authority."""
+
+    root_resolver = _CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT
+    root_code = getattr(root_resolver, "__code__", None)
+    root_closure = getattr(root_resolver, "__closure__", None)
+    try:
+        root_closure_state = tuple(
+            cell.cell_contents for cell in (root_closure or ())
+        )
+    except ValueError as exc:
+        raise ModelComputeIntentRouteAuthorityError(
+            "canonical product authority root closure is invalid"
+        ) from exc
+
+    path_type = Path
+    authority_type = MonotonicWorkspaceAuthority
+    lock_type = WorkspaceEconomicLock
+    file_name = _CANONICAL_FILE_NAME
+    authority_domain = _CANONICAL_AUTHORITY_DOMAIN
+    authority_key = _CANONICAL_AUTHORITY_KEY
+    error_type = ModelComputeIntentRouteAuthorityError
+
+    def sealed_init(self, workspace: str | Path) -> None:
+        if getattr(root_resolver, "__code__", None) is not root_code:
+            raise error_type(
+                "canonical product authority root resolver code changed"
+            )
+        live_closure = getattr(root_resolver, "__closure__", None)
+        try:
+            live_closure_state = tuple(
+                cell.cell_contents for cell in (live_closure or ())
+            )
+        except ValueError as exc:
+            raise error_type(
+                "canonical product authority root closure changed"
+            ) from exc
+        if (
+            len(live_closure_state) != len(root_closure_state)
+            or any(
+                current is not frozen
+                for current, frozen in zip(
+                    live_closure_state,
+                    root_closure_state,
+                )
+            )
+        ):
+            raise error_type(
+                "canonical product authority root closure changed"
+            )
+
+        self.workspace = path_type(workspace).absolute().resolve(strict=False)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.path = self.workspace / file_name
+        self._authority = authority_type(
+            workspace=self.workspace,
+            domain=authority_domain,
+            key=authority_key,
+            authority_root=root_resolver(),
+        )
+        with lock_type(self.workspace):
+            self._recover()
+            self._records = self._load()
+
+    return sealed_init
+
+
 class ModelComputeIntentRouteAuthorityStore:
     """Creation-only issuance authority with restart-safe exact re-resolution."""
 
-    def __init__(
-        self,
-        workspace: str | Path,
-    ) -> None:
-        self.workspace = Path(workspace).absolute().resolve(strict=False)
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / _CANONICAL_FILE_NAME
-        self._authority = MonotonicWorkspaceAuthority(
-            workspace=self.workspace,
-            domain=_CANONICAL_AUTHORITY_DOMAIN,
-            key=_CANONICAL_AUTHORITY_KEY,
-            authority_root=_CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT(),
-        )
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            self._records = self._load()
+    __init__ = _build_store_init()
 
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None

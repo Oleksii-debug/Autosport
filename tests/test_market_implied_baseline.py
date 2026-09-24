@@ -170,6 +170,44 @@ class MarketImpliedBaselineTests(unittest.TestCase):
             self.evidence()
         del self.store.events
 
+    def test_time_normalization_cannot_replace_canonical_market_history(self) -> None:
+        store = self.store
+        forged_rows = tuple(
+            self.event(selection, "3.00", sequence)
+            for sequence, selection in enumerate(("away", "draw", "home"), start=1)
+        )
+        forged_reads = 0
+
+        def forged_events(event_id=None):
+            nonlocal forged_reads
+            forged_reads += 1
+            return list(forged_rows)
+
+        class RebindingCutoff(datetime):
+            def astimezone(self, tz=None):
+                store.events = forged_events  # type: ignore[method-assign]
+                return super().astimezone(tz)
+
+        cutoff = RebindingCutoff(
+            2026,
+            9,
+            18,
+            15,
+            5,
+            tzinfo=timezone.utc,
+        )
+        try:
+            with self.assertRaisesRegex(
+                MarketImpliedBaselineError,
+                "must not shadow events reader",
+            ):
+                self.evidence(cutoff=cutoff)
+            self.assertEqual(forged_reads, 0)
+        finally:
+            namespace = getattr(store, "__dict__", {})
+            if "events" in namespace:
+                del store.events
+
     def test_caller_polymorphism_cannot_replace_outcome_authority(self) -> None:
         class ForgedAuthority(MarketSettlementOutcomeAuthority):
             pass

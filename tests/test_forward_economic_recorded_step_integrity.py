@@ -423,3 +423,53 @@ def test_summary_rejects_transitive_json_encoder_publication_split(
     monkeypatch.setattr(encoder_type, "encode", original_encode)
     assert accumulator.summary().evidence_sha256 == baseline.evidence_sha256
 
+
+
+def test_recorded_step_guard_rejects_json_encoder_bootstrap_rebind_before_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoder_type = forward_evidence.json.JSONEncoder
+    forged_calls = 0
+
+    def forged_encode(self: object, value: object) -> str:
+        nonlocal forged_calls
+        forged_calls += 1
+        raise AssertionError("forged JSONEncoder.encode must not execute")
+
+    monkeypatch.setattr(encoder_type, "encode", forged_encode)
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        ForwardEconomicEvidenceAccumulator(_protocol())
+
+    # The executable fence runs before raw_init, so a pre-construction encoder
+    # replacement cannot define protocol identity or the private empty-prefix
+    # evidence baseline.
+    assert forged_calls == 0
+
+
+def test_recorded_step_guard_rejects_json_encoder_factory_rebind_before_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoder_module = forward_evidence.json.encoder
+    forged_calls = 0
+
+    def forged_factory(*args: object, **kwargs: object) -> object:
+        nonlocal forged_calls
+        forged_calls += 1
+        raise AssertionError("forged JSON encoder factory must not execute")
+
+    monkeypatch.setattr(encoder_module, "c_make_encoder", forged_factory)
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        ForwardEconomicEvidenceAccumulator(_protocol())
+
+    # The lower encoder factory is part of the canonical json.dumps execution
+    # graph on CPython and must be sealed before any accumulator authority can
+    # bootstrap from it.
+    assert forged_calls == 0

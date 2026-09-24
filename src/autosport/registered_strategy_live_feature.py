@@ -619,13 +619,13 @@ def observe_registered_strategy_live_features(
             )
         if event.source_ts is not None:
             source_timestamp = _instant("MarketEvent.source_ts", event.source_ts)
-            if source_timestamp > observed:
-                raise RegisteredStrategyLiveFeatureError(
-                    "provider source timestamp is after local observation"
-                )
             if source_timestamp > decision:
                 raise RegisteredStrategyLiveFeatureError(
                     "provider source timestamp is after decision time"
+                )
+            if source_timestamp > observed:
+                raise RegisteredStrategyLiveFeatureError(
+                    "provider source timestamp is after local observation"
                 )
             freshness_timestamp = source_timestamp
         else:

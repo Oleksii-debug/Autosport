@@ -29,6 +29,7 @@ from urllib.request import (
 from .domain import MarketEvent
 from .integrity import atomic_write_json, durable_path_lock
 from .parlayapi_provider import (
+    HttpJsonResponse,
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
     ProviderTransportError,

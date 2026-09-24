@@ -549,6 +549,148 @@ def test_canonical_account_issuance_ignores_module_registry_rebind(
     assert network_calls == []
 
 
+
+@pytest.mark.parametrize("operation", ["profile", "snapshot"])
+def test_canonical_account_issuance_rejects_captured_registry_object_mutation(
+    operation: str,
+):
+    """Legacy exported maps cannot mutate the closure-owned positive authority."""
+
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    forged_fetch_calls: list[str] = []
+
+    def forged_fetch(url, *, headers, timeout_seconds):
+        del headers, timeout_seconds
+        forged_fetch_calls.append(url)
+        return http_response()
+
+    # On the predecessor these names were the exact WeakKeyDictionary objects
+    # captured by positive issuance. Mutating both the registry entry and live
+    # transport fetch therefore made the forged fetch internally self-consistent.
+    subject._PROVIDER_TRANSPORTS[client] = client._transport
+    subject._PROVIDER_FETCHES[client] = forged_fetch
+    client._transport._provider_fetch = forged_fetch  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="requires product-owned transport",
+    ):
+        if operation == "profile":
+            client.capability_profile()
+        else:
+            client.read_account_snapshot(
+                frozenset({BookmakerCapability.BALANCE_READ})
+            )
+
+    assert forged_fetch_calls == []
+
+
+def test_authenticated_account_context_ignores_caller_account_and_venue_labels():
+    first = ProphetXReadOnlyClient(
+        ProphetXSessionToken("same-live-session-token"),
+        clock=lambda: FIXED_NOW,
+        venue_id="caller-venue-a",
+        account_id="caller-account-a",
+    )
+    second = ProphetXReadOnlyClient(
+        ProphetXSessionToken("same-live-session-token"),
+        clock=lambda: FIXED_NOW,
+        venue_id="caller-venue-b",
+        account_id="caller-account-b",
+    )
+
+    _, first_context = subject._RESOLVE_PROVIDER_ORIGIN(first)
+    _, second_context = subject._RESOLVE_PROVIDER_ORIGIN(second)
+
+    assert first_context is second_context
+    assert first_context.venue_id == "prophetx"
+    assert first_context.session_context_id.startswith(
+        "prophetx-auth-context:"
+    )
+    assert first_context.session_context_id not in {
+        "caller-account-a",
+        "caller-account-b",
+    }
+    assert first_context.stable_account_identity_proven is False
+    assert first_context.cross_session_equivalence_proven is False
+
+    structural, _ = client_for(http_response())
+    wallet = structural.read_wallet()
+    profile = first._profile_for(
+        wallet,
+        account_context=first_context,
+    )
+    assert profile.venue_id == "prophetx"
+    assert profile.account_id == first_context.session_context_id
+    assert profile.account_id not in {
+        "caller-account-a",
+        "caller-account-b",
+    }
+    assert (
+        BookmakerCapability.ACCOUNT_IDENTITY_READ
+        not in {fact.capability for fact in profile.facts}
+    )
+    assert "same-live-session-token" not in repr(first_context)
+    assert "same-live-session-token" not in profile.account_id
+
+
+def test_distinct_bearer_sessions_cannot_collapse_under_same_caller_label():
+    first = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-token-a"),
+        clock=lambda: FIXED_NOW,
+        venue_id="same-caller-venue",
+        account_id="same-caller-account",
+    )
+    second = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-token-b"),
+        clock=lambda: FIXED_NOW,
+        venue_id="same-caller-venue",
+        account_id="same-caller-account",
+    )
+
+    _, first_context = subject._RESOLVE_PROVIDER_ORIGIN(first)
+    _, second_context = subject._RESOLVE_PROVIDER_ORIGIN(second)
+
+    assert first_context is not second_context
+    assert (
+        first_context.session_context_id
+        != second_context.session_context_id
+    )
+    assert first_context.venue_id == second_context.venue_id == "prophetx"
+
+
+def test_bearer_session_rotation_invalidates_positive_authority_before_network(
+    monkeypatch,
+):
+    session = ProphetXSessionToken("session-token-before")
+    client = ProphetXReadOnlyClient(
+        session,
+        clock=lambda: FIXED_NOW,
+        account_id="caller-friendly-label",
+    )
+    network_calls: list[str] = []
+
+    def forbidden_connect(connection):
+        network_calls.append(type(connection).__name__)
+        raise AssertionError("network must not start after auth-context rotation")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", forbidden_connect)
+    object.__setattr__(session, "access_token", "session-token-after")
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="authenticated account context changed",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert network_calls == []
+
+
 @pytest.mark.parametrize("operation", ["profile", "snapshot"])
 def test_canonical_wallet_origin_rejects_module_balance_url_rebind_before_network(
     monkeypatch,

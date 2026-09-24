@@ -43,18 +43,6 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.test_root = Path(self._tmp.name)
         self.workspace = self.test_root / "workspace"
         self.workspace.mkdir()
-        self.machine_state_base = self.test_root / "machine-state"
-        self.authority_root = (
-            self.machine_state_base
-            / "autosport"
-            / "product-decision-activation-authority-v1"
-        )
-        self._machine_state_patch = mock.patch(
-            "autosport.product_decision_activation._product_machine_state_base",
-            return_value=self.machine_state_base,
-        )
-        self._machine_state_patch.start()
-        self.addCleanup(self._machine_state_patch.stop)
         self.registry = ScientificRegistry.initialize_pristine(
             self.workspace / "scientific_registry.json"
         )
@@ -87,6 +75,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self._write_composition(source_id="provider-a", bankroll="1000")
         self._write_risk(self.risk, self.goal)
         self.store = ProductDecisionActivationStore(self.workspace)
+        self.authority_root = self.store._authority.authority_root
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -867,6 +856,36 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         self.assertFalse(self.store.path.exists())
         self.assertEqual(committed.strategy_version_id, self.STRATEGY_ID)
+
+    def test_preconstruction_root_rebind_cannot_redirect_start_authority(self) -> None:
+        forged_base = self.test_root / "forged-machine-state"
+        forged_calls: list[str] = []
+
+        def forged_machine_state_base() -> Path:
+            forged_calls.append("called")
+            return forged_base
+
+        with mock.patch.object(
+            activation_module,
+            "_product_machine_state_base",
+            side_effect=forged_machine_state_base,
+        ), mock.patch.object(
+            activation_module,
+            "_PRODUCT_AUTHORITY_ROOT_NAME",
+            "forged-activation-authority",
+        ):
+            store = ProductDecisionActivationStore(self.workspace)
+            self.store = store
+            committed = self._initialize()
+            self.assertEqual(store._authority.authority_root, self.authority_root)
+            self.assertEqual(forged_calls, [])
+            self.assertFalse(forged_base.exists())
+
+        reopened = ProductDecisionActivationStore(self.workspace)
+        self.assertEqual(reopened._authority.authority_root, self.authority_root)
+        self.assertEqual(reopened.load(), committed)
+        self.assertEqual(forged_calls, [])
+        self.assertFalse(forged_base.exists())
 
     def test_process_environment_cannot_repoint_activation_authority_root(self) -> None:
         env_root_a = self.test_root / "operator-root-a"

@@ -630,14 +630,26 @@ class HeadlessCollectorService:
         raise AssertionError("unreachable retry loop")
 
     def _check_storage_budget(self) -> None:
-        try:
-            size = self.delta_store.path.stat().st_size
-        except FileNotFoundError:
-            size = 0
-        if size >= self.config.max_store_bytes:
+        path = self.delta_store.path
+
+        def current_size(candidate: Path) -> int:
+            try:
+                return candidate.stat().st_size
+            except FileNotFoundError:
+                return 0
+
+        # max_page_count bounds logical database pages, but WAL mode may retain
+        # multiple historical frames for the same pages while a reader pins an old
+        # snapshot.  Those bytes are part of the collector's live durable footprint
+        # and must not be invisible to the operator storage budget.
+        db_bytes = current_size(path)
+        wal_bytes = current_size(Path(f"{path}-wal"))
+        footprint_bytes = db_bytes + wal_bytes
+        if footprint_bytes >= self.config.max_store_bytes:
             raise CollectorRetentionRequiredError(
-                "RETENTION_REQUIRED: collector durable store reached configured byte budget; "
-                "run explicit pin-aware compaction or enlarge the budget, then retry"
+                "RETENTION_REQUIRED: collector durable DB+WAL footprint reached "
+                "configured byte budget; run explicit pin-aware compaction or enlarge "
+                "the budget, then retry"
             )
 
     def run_cycle(self) -> CollectorCycleResult:

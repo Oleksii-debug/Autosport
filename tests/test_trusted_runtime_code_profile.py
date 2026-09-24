@@ -8,7 +8,9 @@ import threading
 import pytest
 
 import autosport.product_gui_worker as worker_module
+import autosport.product_source as product_source_module
 import autosport.trusted_runtime_code_profile as profile_module
+from autosport.product_entrypoint import ProductEntrypointError
 from autosport.product_gui_worker import ProductGuiWorker
 from autosport.trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfileError,
@@ -124,6 +126,53 @@ def test_profile_requires_exact_closed_registry_binding_before_issuance(
             source_factory=_FACTORY_SPEC,
             expected_provider_source_id=_PROVIDER_SOURCE_ID,
         )
+
+
+
+
+
+def test_registered_symbol_drift_fails_before_profile_or_runtime_construction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_profile_runtime(monkeypatch)
+    runtime = _ProfileRuntime(tmp_path)
+
+    monkeypatch.setattr(
+        product_source_module,
+        "create_parlay_product_source",
+        lambda: SimpleNamespace(source_id=_PROVIDER_SOURCE_ID),
+    )
+
+    with pytest.raises(
+        TrustedRuntimeCodeProfileError,
+        match="callable identity has drifted",
+    ):
+        issue_trusted_runtime_code_profile(
+            runtime,
+            source_factory=_FACTORY_SPEC,
+            expected_provider_source_id=_PROVIDER_SOURCE_ID,
+        )
+
+    source_constructed = False
+
+    def forbidden_source(*_args, **_kwargs):
+        nonlocal source_constructed
+        source_constructed = True
+        raise AssertionError("drifted registered factory must fail before source build")
+
+    monkeypatch.setattr(worker_module, "_validated_source", forbidden_source)
+    with pytest.raises(
+        ProductEntrypointError,
+        match="not product-owned by this build",
+    ):
+        worker_module._runtime_builder(
+            tmp_path,
+            _FACTORY_SPEC,
+            "10000",
+            expected_source_id=_PROVIDER_SOURCE_ID,
+        )
+    assert source_constructed is False
 
 
 def test_profile_serializes_one_active_runtime_per_workspace(

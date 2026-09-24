@@ -388,23 +388,39 @@ def run_product(
         # may replace the causal start/tick/STOP/setup failure. If the product body
         # succeeded, preserve the first cleanup failure instead of allowing a later
         # cleanup symptom to overwrite it.
-        primary_failure_active = sys.exc_info()[0] is not None
-        cleanup_failure: Exception | None = None
+        primary_failure = sys.exc_info()[1]
+        cleanup_failure: BaseException | None = None
         try:
             runtime.close()
-        except Exception as exc:
-            if not primary_failure_active:
+        except BaseException as exc:
+            if primary_failure is None:
                 cleanup_failure = exc
+            else:
+                try:
+                    primary_failure.add_note(
+                        "runtime close also failed during cleanup: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                except BaseException:
+                    pass
 
         for signum in reversed(installed_handlers):
             try:
                 signal.signal(signum, previous_handlers[signum])
-            except Exception as exc:
-                if not primary_failure_active and cleanup_failure is None:
+            except BaseException as exc:
+                if primary_failure is None and cleanup_failure is None:
                     cleanup_failure = exc
+                elif primary_failure is not None:
+                    try:
+                        primary_failure.add_note(
+                            "signal handler restoration also failed during cleanup: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    except BaseException:
+                        pass
 
         if cleanup_failure is not None:
-            if started:
+            if started and isinstance(cleanup_failure, Exception):
                 raise ProductRuntimeError(
                     type(cleanup_failure).__name__
                 ) from cleanup_failure

@@ -729,3 +729,52 @@ def test_reconciliation_lower_helper_instance_shadow_cannot_report_success(
         append_to_reconciliation(store, current)
 
     assert not store_path.exists()
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_credential_material",
+        "_require_canonical_source_authority",
+        "_require_canonical_source_instance",
+        "_principal_context",
+        "_project_snapshot",
+        "_issue_continuous_evidence",
+    ),
+)
+def test_positive_continuity_rejects_post_import_composition_helper_rebind(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    del tmp_path  # parity with other filesystem-backed authority falsifiers
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    attacker_calls: list[str] = []
+
+    def attacker(*args, **kwargs):
+        del args, kwargs
+        attacker_calls.append(helper_name)
+        raise AssertionError("attacker-controlled continuity helper executed")
+
+    monkeypatch.setattr(
+        continuity_module,
+        helper_name,
+        attacker,
+        raising=False,
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="canonical BETDAQ continuity",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert attacker_calls == []
+    assert opener.calls == []
+

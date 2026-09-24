@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 
+import autosport.strategy_model_factory as factory_module
 from autosport._strategy_model_factory_impl import MeanBaselineModel
+from autosport.integrity import atomic_write_json
 from autosport.registered_strategy_model_runtime import (
     RegisteredStrategyModelRuntimeError,
     resolve_registered_strategy_model,
 )
+from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import (
     FactoryArtifactStore,
     WalkForwardEvaluationConfig,
@@ -23,6 +26,7 @@ C = "c" * 64
 D = "d" * 64
 E = "e" * 64
 F = "f" * 64
+RUNTIME_AFTER_PUBLICATION = "2999-01-01T00:00:00Z"
 
 EVALUATION_CONFIG = WalkForwardEvaluationConfig()
 EVALUATION_DESIGN = EVALUATION_CONFIG.frozen_text
@@ -113,6 +117,13 @@ def _write_workspace(
         training_points_manifest_sha256=artifact_training_points_manifest_sha256,
     )
     model_artifact_sha256 = store.write("model", "model-v1", artifact)
+    transaction_artifacts: list[dict[str, str]] = [
+        {
+            "kind": "model",
+            "identity": "model-v1",
+            "sha256": model_artifact_sha256,
+        }
+    ]
 
     protocol = _entry(
         "ResearchProtocol",
@@ -264,6 +275,13 @@ def _write_workspace(
             "model-v2",
             second_artifact,
         )
+        transaction_artifacts.append(
+            {
+                "kind": "model",
+                "identity": "model-v2",
+                "sha256": second_artifact_sha256,
+            }
+        )
         records.extend(
             (
                 _entry(
@@ -323,17 +341,35 @@ def _write_workspace(
             )
         )
 
+    final_state = {"schema_version": 1, "records": records}
     registry_path = workspace / "scientific_registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
         json.dumps(
-            {"schema_version": 1, "records": records},
+            final_state,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ),
         encoding="utf-8",
     )
+
+    registry = ScientificRegistry(registry_path)
+    transaction = {
+        "schema_version": 1,
+        "phase": "prepared",
+        "original_registry_sha256": factory_module._registry_state_sha256(
+            {"schema_version": 1, "records": []}
+        ),
+        "final_registry_sha256": factory_module._registry_state_sha256(final_state),
+        "artifacts": sorted(
+            transaction_artifacts,
+            key=lambda item: (item["kind"], item["identity"]),
+        ),
+    }
+    atomic_write_json(factory_module._publish_transaction_path(registry), transaction)
+    factory_module._record_committed_factory_publish(registry, store)
+
     return model_artifact_sha256, store.path_for_testing("model", "model-v1")
 
 
@@ -345,7 +381,7 @@ def test_resolves_exact_promoted_model_and_predicts_without_caller_callable(
     runtime = resolve_registered_strategy_model(
         tmp_path,
         strategy_version_id="strategy-v1",
-        as_of="2026-01-01T00:01:00Z",
+        as_of=RUNTIME_AFTER_PUBLICATION,
     )
 
     assert runtime.strategy_version_id == "strategy-v1"
@@ -364,7 +400,7 @@ def test_rejects_prediction_before_model_training_cutoff(tmp_path: Path) -> None
     runtime = resolve_registered_strategy_model(
         tmp_path,
         strategy_version_id="strategy-v1",
-        as_of="2026-01-01T00:01:00Z",
+        as_of=RUNTIME_AFTER_PUBLICATION,
     )
 
     with pytest.raises(
@@ -388,7 +424,7 @@ def test_rejects_activation_of_nonchampion_strategy(tmp_path: Path) -> None:
         resolve_registered_strategy_model(
             tmp_path,
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:02:00Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -403,7 +439,7 @@ def test_rejects_model_artifact_tampering(tmp_path: Path) -> None:
         resolve_registered_strategy_model(
             tmp_path,
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:01:00Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -432,7 +468,7 @@ def test_rejects_unsupported_or_cross_signed_model_family(
         resolve_registered_strategy_model(
             tmp_path,
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:01:00Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -448,7 +484,7 @@ def test_rejects_backfilled_feature_contract_that_did_not_precede_model(
         resolve_registered_strategy_model(
             tmp_path,
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:01:00Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -460,7 +496,7 @@ def test_generic_model_value_is_not_promoted_to_probability_semantics(
     runtime = resolve_registered_strategy_model(
         tmp_path,
         strategy_version_id="strategy-v1",
-        as_of="2026-01-01T00:01:00Z",
+        as_of=RUNTIME_AFTER_PUBLICATION,
     )
 
     assert runtime.predict_value(
@@ -481,7 +517,7 @@ def test_rejects_promotion_protocol_digest_mismatch(tmp_path: Path) -> None:
         resolve_registered_strategy_model(
             tmp_path,
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:01:00Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -500,7 +536,7 @@ def test_model_artifact_training_manifest_must_match_durable_dataset(
         resolve_registered_strategy_model(
             tmp_path.resolve(),
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:00:12Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -519,7 +555,7 @@ def test_dataset_manifest_must_match_frozen_research_protocol(
         resolve_registered_strategy_model(
             tmp_path.resolve(),
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:00:12Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )
 
 
@@ -538,5 +574,39 @@ def test_model_artifact_evaluator_config_must_match_frozen_research_protocol(
         resolve_registered_strategy_model(
             tmp_path.resolve(),
             strategy_version_id="strategy-v1",
-            as_of="2026-01-01T00:00:12Z",
+            as_of=RUNTIME_AFTER_PUBLICATION,
+        )
+
+
+def test_rejects_byte_perfect_model_published_after_historical_as_of(
+    tmp_path: Path,
+) -> None:
+    _write_workspace(tmp_path)
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="published after runtime as_of",
+    ):
+        resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-01T00:01:00Z",
+        )
+
+
+def test_rejects_model_without_transaction_bound_publication_receipt(
+    tmp_path: Path,
+) -> None:
+    _write_workspace(tmp_path)
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    store._publish_commit_ledger_path().unlink()
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="lacks canonical factory publication authority",
+    ):
+        resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of=RUNTIME_AFTER_PUBLICATION,
         )

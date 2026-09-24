@@ -670,6 +670,57 @@ def resolve_registered_strategy_model(
         experiment=experiment,
     )
 
+    try:
+        publication = artifact_store.publication_receipt(
+            "model",
+            model_id,
+            expected_sha256=model_artifact_sha256,
+        )
+    except (OSError, ValueError) as exc:
+        raise RegisteredStrategyModelRuntimeError(
+            "promoted model lacks canonical factory publication authority"
+        ) from exc
+    publication_record_sha256 = _sha256(
+        publication.get("record_sha256"),
+        "factory publication record_sha256",
+    )
+    publication_final_registry_sha256 = _sha256(
+        publication.get("final_registry_sha256"),
+        "factory publication final_registry_sha256",
+    )
+    publication_committed_at = _text(
+        publication.get("committed_at"),
+        "factory publication committed_at",
+    )
+    if _instant(
+        publication_committed_at,
+        "factory publication committed_at",
+    ) > decision_time:
+        raise RegisteredStrategyModelRuntimeError(
+            "promoted model artifact was published after runtime as_of"
+        )
+    publication_artifacts = publication.get("artifacts")
+    if type(publication_artifacts) is not list:
+        raise RegisteredStrategyModelRuntimeError(
+            "factory publication artifact binding is invalid"
+        )
+    exact_publication_matches = [
+        entry
+        for entry in publication_artifacts
+        if type(entry) is dict
+        and entry.get("kind") == "model"
+        and entry.get("identity") == model_id
+        and entry.get("sha256") == model_artifact_sha256
+    ]
+    if len(exact_publication_matches) != 1:
+        raise RegisteredStrategyModelRuntimeError(
+            "factory publication does not bind the exact promoted model artifact"
+        )
+    if not publication_record_sha256 or not publication_final_registry_sha256:
+        raise RegisteredStrategyModelRuntimeError(
+            "factory publication authority is incomplete"
+        )
+
     if _instant(rebuilt.training_cutoff, "model training_cutoff") > _instant(
         model.available_at,
         "ModelVersion available_at",

@@ -215,6 +215,66 @@ def test_admission_lease_rejects_product_root_selector_class_rebind(
 
 
 
+def test_admission_lease_rejects_selective_monotonic_history_prefix_hiding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = _initialized(path)
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-prefix-hide",
+        expected_revision=1,
+        command_id="arm-r2-prefix-hide",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+    monotonic = authority._monotonic_authority()
+    records_dir = monotonic.records_dir
+    armed_record_names = {entry.name for entry in records_dir.iterdir()}
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-prefix-hide",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+    complete_record_names = {entry.name for entry in records_dir.iterdir()}
+    assert armed_record_names < complete_record_names
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+
+    path_class = stop_module._monotonic_authority_module.Path
+    canonical_iterdir = path_class.iterdir
+    forged_calls: list[Path] = []
+
+    def selective_iterdir(candidate: Path):
+        entries = list(canonical_iterdir(candidate))
+        if candidate == records_dir:
+            forged_calls.append(candidate)
+            return iter(
+                entry for entry in entries if entry.name in armed_record_names
+            )
+        return iter(entries)
+
+    monkeypatch.setattr(path_class, "iterdir", selective_iterdir)
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical monotonic authority filesystem dispatch graph changed",
+    ):
+        with restarted.admission_lease():
+            pytest.fail("hidden newer STOP suffix yielded an execution lease")
+
+    assert forged_calls == []
+
+
 def test_admission_lease_rejects_monotonic_recover_class_substitution_on_old_arm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -26,7 +27,11 @@ from typing import Final, Mapping
 from .economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from .integrity import atomic_write_json, sha256_file
 from .json_integrity import strict_json_loads
-from .monotonic_workspace_authority import AuthorityPhase, MonotonicWorkspaceAuthority
+from .monotonic_workspace_authority import (
+    AUTHORITY_ID,
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+)
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -755,8 +760,8 @@ def _validate_publication_available_at(
     return available_instant
 
 
-def _build_allocation_basis_store_init():
-    """Bind one LOCAL-compute namespace to the product machine root."""
+def _build_allocation_basis_store_runtime():
+    """Bind one LOCAL-compute namespace and exact authority object."""
 
     root_resolver = local_compute_monotonic_authority_root
     root_code = getattr(root_resolver, "__code__", None)
@@ -776,9 +781,23 @@ def _build_allocation_basis_store_init():
     file_name = FILE_NAME
     authority_domain = AUTHORITY_DOMAIN
     authority_key = AUTHORITY_KEY
+    authority_id = AUTHORITY_ID
     error_type = LocalComputeAllocationBasisError
+    sha256 = hashlib.sha256
+    sealed_state = weakref.WeakKeyDictionary()
+    authority_methods = {
+        "read_history": authority_type.read_history,
+        "recover": authority_type.recover,
+        "prepare": authority_type.prepare,
+        "abort": authority_type.abort,
+        "commit": authority_type.commit,
+    }
+    authority_method_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in authority_methods.items()
+    }
 
-    def sealed_init(self, workspace: str | Path) -> None:
+    def canonical_root() -> Path:
         if getattr(root_resolver, "__code__", None) is not root_code:
             raise error_type(
                 "canonical product authority root resolver code changed"
@@ -805,32 +824,148 @@ def _build_allocation_basis_store_init():
             raise error_type(
                 "canonical product authority root closure changed"
             )
+        root = root_resolver()
+        if not isinstance(root, path_type) or not root.is_absolute():
+            raise error_type(
+                "canonical product authority root is invalid"
+            )
+        return root
 
-        self.workspace = path_type(workspace).absolute().resolve(strict=False)
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / file_name
-        self._authority = authority_type(
-            workspace=self.workspace,
+    def require_state(self) -> None:
+        try:
+            (
+                frozen_workspace,
+                frozen_path,
+                frozen_authority,
+                frozen_root,
+            ) = sealed_state[self]
+        except (KeyError, TypeError) as exc:
+            raise error_type(
+                "allocation basis authority state is not sealed"
+            ) from exc
+
+        if (
+            self.workspace is not frozen_workspace
+            or self.path is not frozen_path
+            or self._authority is not frozen_authority
+            or canonical_root() != frozen_root
+        ):
+            raise error_type(
+                "allocation basis authority state changed"
+            )
+
+        authority = frozen_authority
+        if type(authority) is not authority_type:
+            raise error_type(
+                "allocation basis authority state changed"
+            )
+        instance_state = getattr(authority, "__dict__", {})
+        for name, method in authority_methods.items():
+            live = getattr(authority_type, name, None)
+            if (
+                name in instance_state
+                or live is not method
+                or getattr(live, "__code__", None)
+                is not authority_method_codes[name]
+            ):
+                raise error_type(
+                    "allocation basis authority dispatch changed"
+                )
+
+        binding = authority.workspace_binding
+        workspace_instance_id = authority.workspace_instance_id
+        namespace_material = "\0".join(
+            (
+                authority_id,
+                workspace_instance_id,
+                authority_domain,
+                authority_key,
+            )
+        ).encode("utf-8")
+        namespace_sha256 = sha256(namespace_material).hexdigest()
+        expected_journal_dir = (
+            frozen_root
+            / "journals"
+            / namespace_sha256[:2]
+            / namespace_sha256
+        )
+        expected_records_dir = expected_journal_dir / "records"
+        expected_namespace_marker = (
+            frozen_root
+            / "namespace-bindings"
+            / namespace_sha256[:2]
+            / f"{namespace_sha256}.json"
+        )
+        expected_path_binding = (
+            frozen_root
+            / "workspace-bindings"
+            / binding.workspace_locator_sha256[:2]
+            / f"{binding.workspace_locator_sha256}.json"
+        )
+        if (
+            authority.workspace != frozen_workspace
+            or authority.authority_root != frozen_root
+            or authority.domain != authority_domain
+            or authority.key != authority_key
+            or authority.namespace_sha256 != namespace_sha256
+            or authority.journal_dir != expected_journal_dir
+            or authority.records_dir != expected_records_dir
+            or authority.namespace_marker_path
+            != expected_namespace_marker
+            or binding.workspace != frozen_workspace
+            or binding.authority_root != frozen_root
+            or binding.workspace_instance_id != workspace_instance_id
+            or binding.workspace_marker_path
+            != authority.workspace_binding_path
+            or binding.path_binding_path != expected_path_binding
+        ):
+            raise error_type(
+                "allocation basis authority coordinates changed"
+            )
+
+    def sealed_init(self, workspace: str | Path) -> None:
+        authority_root = canonical_root()
+        workspace_path = (
+            path_type(workspace).absolute().resolve(strict=False)
+        )
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        state_path = workspace_path / file_name
+        authority = authority_type(
+            workspace=workspace_path,
             domain=authority_domain,
             key=authority_key,
-            authority_root=root_resolver(),
+            authority_root=authority_root,
         )
-        with lock_type(self.workspace):
+        self.workspace = workspace_path
+        self.path = state_path
+        self._authority = authority
+        sealed_state[self] = (
+            workspace_path,
+            state_path,
+            authority,
+            authority_root,
+        )
+        require_state(self)
+        with lock_type(workspace_path):
             self._recover()
             self._records = self._load()
 
-    return sealed_init
+    return sealed_init, require_state
 
+
+_STORE_INIT, _STORE_STATE_GUARD = _build_allocation_basis_store_runtime()
 
 class LocalComputeAllocationBasisAuthorityStore:
     """Creation-only owner-reviewed basis store with rollback fencing."""
 
-    __init__ = _build_allocation_basis_store_init()
+    __slots__ = ("workspace", "path", "_authority", "_records", "__weakref__")
+    __init__ = _STORE_INIT
 
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None
 
-    def _recover(self) -> None:
+    def _recover(self, _require_state=_STORE_STATE_GUARD) -> None:
+        _require_state(self)
         observed = self._observed_sha256()
         history = self._authority.read_history()
         if history and history[-1].phase is AuthorityPhase.PREPARE:
@@ -1185,6 +1320,8 @@ class LocalComputeAllocationBasisAuthorityStore:
             "durable causal observation authority"
         )
 
+
+del _STORE_INIT, _STORE_STATE_GUARD
 __all__ = [
     "LocalComputeAllocationBasisAuthorityStore",
     "LocalComputeAllocationBasisError",

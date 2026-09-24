@@ -10,7 +10,10 @@ import pytest
 
 import autosport.local_compute_allocation_basis as subject
 from autosport.economic_goal_store import EconomicGoalStore, economic_goal_to_payload
-from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthorityError
+from autosport.monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from autosport.owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     build_initial_owner_contract,
@@ -414,6 +417,70 @@ def test_deleted_basis_state_cannot_reset_monotonic_authority(
 
     with pytest.raises(MonotonicWorkspaceAuthorityError):
         subject.LocalComputeAllocationBasisAuthorityStore(store.workspace)
+
+
+def test_exact_alternate_authority_object_cannot_retarget_store(
+    tmp_path, monkeypatch
+):
+    workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    canonical_authority = store._authority
+    alternate_root = tmp_path / "alternate-machine-authority"
+    alternate_authority = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        domain=canonical_authority.domain,
+        key=canonical_authority.key,
+        authority_root=alternate_root,
+    )
+
+    object.__setattr__(store, "_authority", alternate_authority)
+    with pytest.raises(
+        subject.LocalComputeAllocationBasisError,
+        match="authority state changed",
+    ):
+        store.publish_owner_basis(review, confirmed=True)
+
+    assert not store.path.exists()
+    assert not alternate_root.exists()
+
+    object.__setattr__(store, "_authority", canonical_authority)
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert canonical_authority.authority_root == canonical_root
+    assert _resolve(store) == record
+
+
+def test_authority_method_shadow_cannot_bypass_machine_history(
+    tmp_path, monkeypatch
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    authority = store._authority
+    calls: list[str] = []
+
+    def forged_prepare(**_kwargs):
+        calls.append("prepare")
+        return None
+
+    authority.prepare = forged_prepare
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="authority dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        del authority.prepare
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
 
 
 def test_machine_authority_root_cannot_be_retargeted_after_local_state_loss(

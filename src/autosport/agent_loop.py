@@ -2349,6 +2349,12 @@ class AgentLoopRuntime:
             if deadline_at is None
             else _timestamp_identity(deadline_at, "deadline_at")
         )
+        handoff_at = _timestamp_identity(at, "at")
+        recovery_only = (
+            normalized_deadline is not None
+            and _instant(handoff_at, "at")
+            > _instant(normalized_deadline, "deadline_at")
+        )
         state = self._read()
         if AgentLoopPhase(state["phase"]) is not AgentLoopPhase.RESEARCH_HANDOFF:
             current_run = state["current"]["research_run_id"]
@@ -2398,22 +2404,56 @@ class AgentLoopRuntime:
             created_at=requested_at,
         )
         registry = supervisor.scientific_registry
-        registry.append(question)
+        question_record = registry.get("ResearchQuestion", question.question_id)
+        if recovery_only:
+            if question_record is None:
+                raise AgentLoopError(
+                    "research deadline expired before durable research-question publication"
+                )
+            if (
+                question_record.available_at != question.available_at
+                or question_record.payload != question.to_payload()
+            ):
+                raise ConflictingAgentLoopEvidenceError(
+                    "durable research question conflicts with AgentLoop recovery"
+                )
+        else:
+            registry.append(question)
+            question_record = registry.get("ResearchQuestion", question.question_id)
+            if question_record is None:
+                raise AgentLoopError(
+                    "research question was not durably published"
+                )
 
         event = ExternalResearchTrigger(
             source_kind=ResearchTriggerSource.RECOVERY,
             source_scope=f"agent-loop:{loop_id}",
             source_event_id=postmortem["postmortem_id"],
             question_id=question.question_id,
-            question_record_sha256=registry.get(
-                "ResearchQuestion", question.question_id
-            ).record_sha256,
+            question_record_sha256=question_record.record_sha256,
             source_evidence_sha256=question.source_sha256,
             source_observed_at=requested_at,
             requested_at=requested_at,
             budget_units=budget_units,
             deadline_at=normalized_deadline,
         )
+        if recovery_only:
+            trigger = event.to_research_trigger()
+            try:
+                existing_run = supervisor.status(trigger.run_id)
+            except KeyError as exc:
+                raise AgentLoopError(
+                    "research deadline expired before durable supervisor acceptance"
+                ) from exc
+            if (
+                existing_run.trigger_id != trigger.trigger_id
+                or existing_run.question_id != trigger.question_id
+                or existing_run.budget_units != trigger.budget_units
+                or existing_run.deadline_at != trigger.deadline_at
+            ):
+                raise ConflictingAgentLoopEvidenceError(
+                    "durable supervisor run conflicts with AgentLoop recovery"
+                )
         receipt = ResearchTriggerAdapter(supervisor).accept(event)
         handoff = {
             "postmortem_id": postmortem["postmortem_id"],

@@ -777,13 +777,22 @@ def _build_canonical_continuity_authority():
     dependency_functions = tuple(
         helper for _name, helper in helper_graph
     ) + (issue_evidence, is_issued_evidence)
+    explicitly_checked_authority_globals = frozenset(
+        {
+            "BetdaqAccountReadOnlyClient",
+            "BookmakerAccountReconciliationStore",
+        }
+    )
     dependency_names = tuple(
         sorted(
             {
                 global_name
                 for helper in dependency_functions
                 for global_name in helper.__code__.co_names
-                if global_name in module_globals
+                if (
+                    global_name in module_globals
+                    and global_name not in explicitly_checked_authority_globals
+                )
             }
         )
     )

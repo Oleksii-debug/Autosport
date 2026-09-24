@@ -123,12 +123,44 @@ def _market_event_from_canonical_json(raw: object) -> MarketEvent:
     return event
 
 
+def _market_identity(event: MarketEvent) -> tuple[object, ...]:
+    return (
+        event.sport,
+        event.event_id,
+        event.market_id,
+        event.selection_id,
+        event.market_type.value,
+        event.market_semantics_id,
+    )
+
 
 class ReferenceTargetInclusionPolicy(str, Enum):
     """Whether the target provider may participate in the reference universe."""
 
     EXCLUDE = "EXCLUDE"
     INCLUDE = "INCLUDE"
+
+
+class ReferencePriceResolutionState(str, Enum):
+    """Decision-time truth level of one reference-price resolution."""
+
+    INSUFFICIENT_REFERENCE_EVIDENCE = "INSUFFICIENT_REFERENCE_EVIDENCE"
+    PREDECLARED_CONSENSUS_REFERENCE = "PREDECLARED_CONSENSUS_REFERENCE"
+
+
+class ReferenceCandidateNamespace(str, Enum):
+    """The frozen source namespace accounted for by a candidate record."""
+
+    TRANSPORT_SOURCE = "TRANSPORT_SOURCE"
+    PRICE_SOURCE = "PRICE_SOURCE"
+
+
+class ReferenceCandidateDisposition(str, Enum):
+    """Why one frozen candidate did or did not participate in the resolution."""
+
+    QUALIFIED_OBSERVATION = "QUALIFIED_OBSERVATION"
+    PRESENT_UNQUALIFIED = "PRESENT_UNQUALIFIED"
+    MISSING_REQUIRED_OBSERVATION = "MISSING_REQUIRED_OBSERVATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +466,356 @@ class ReferencePriceEvidence:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceCandidateCoverage:
+    """Self-contained accounting record for one frozen reference candidate.
+
+    Missing candidates deliberately carry no synthetic quote. Present candidates retain
+    exact canonical MarketEvent bytes so the negative decision record remains
+    reproducible after restart instead of collapsing absence into an omitted row.
+    """
+
+    namespace: ReferenceCandidateNamespace
+    source_id: str
+    disposition: ReferenceCandidateDisposition
+    event_canonical_jsons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.namespace) is not ReferenceCandidateNamespace:
+            raise ReferencePriceEvidenceError(
+                "candidate namespace must be ReferenceCandidateNamespace"
+            )
+        source_id = _text(self.source_id, "candidate source_id")
+        if type(self.disposition) is not ReferenceCandidateDisposition:
+            raise ReferencePriceEvidenceError(
+                "candidate disposition must be ReferenceCandidateDisposition"
+            )
+        if type(self.event_canonical_jsons) is not tuple:
+            raise ReferencePriceEvidenceError(
+                "candidate event_canonical_jsons must be an exact tuple"
+            )
+
+        canonical_events: list[str] = []
+        for raw in self.event_canonical_jsons:
+            event = _market_event_from_canonical_json(raw)
+            if self.namespace is ReferenceCandidateNamespace.TRANSPORT_SOURCE:
+                observed_source = event.source_id
+            else:
+                observed_source = _text(
+                    event.metadata.get("bookmaker_key"),
+                    "reference observation metadata.bookmaker_key",
+                )
+            if observed_source != source_id:
+                raise ReferencePriceEvidenceError(
+                    "candidate event bytes do not match candidate source namespace"
+                )
+            canonical_events.append(_canonical_json(event.to_dict()))
+
+        canonical = tuple(
+            sorted(
+                canonical_events,
+                key=lambda raw: hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            )
+        )
+        if len(set(canonical)) != len(canonical):
+            raise ReferencePriceEvidenceError(
+                "candidate event_canonical_jsons must not contain duplicates"
+            )
+        if (
+            self.namespace is ReferenceCandidateNamespace.PRICE_SOURCE
+            and len(canonical) > 1
+        ):
+            raise ReferencePriceEvidenceError(
+                "one independent price source cannot contribute multiple candidate observations"
+            )
+        if (
+            self.disposition
+            is ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+            and canonical
+        ):
+            raise ReferencePriceEvidenceError(
+                "missing candidate cannot carry observation bytes"
+            )
+        if (
+            self.disposition
+            is not ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+            and not canonical
+        ):
+            raise ReferencePriceEvidenceError(
+                "present candidate disposition requires observation bytes"
+            )
+        object.__setattr__(self, "source_id", source_id)
+        object.__setattr__(self, "event_canonical_jsons", canonical)
+
+    @property
+    def event_sha256s(self) -> tuple[str, ...]:
+        return tuple(
+            hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            for raw in self.event_canonical_jsons
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "namespace": self.namespace.value,
+            "source_id": self.source_id,
+            "disposition": self.disposition.value,
+            "event_sha256s": list(self.event_sha256s),
+            "event_canonical_jsons": list(self.event_canonical_jsons),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReferencePriceDecisionResolution:
+    """Target-bound result that preserves explicit insufficiency by absence."""
+
+    target_event_canonical_json: str
+    protocol: ReferencePriceProtocol
+    decision_ts: str
+    candidates: tuple[ReferenceCandidateCoverage, ...]
+    state: ReferencePriceResolutionState
+    consensus_evidence: ReferencePriceEvidence | None
+    resolution_id: str = field(init=False)
+    provider_origin_verified: bool = field(default=False, init=False)
+    executable_quote_verified: bool = field(default=False, init=False)
+    fair_probability_verified: bool = field(default=False, init=False)
+    fill_fidelity_verified: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.protocol) is not ReferencePriceProtocol:
+            raise ReferencePriceEvidenceError(
+                "resolution protocol must be exact ReferencePriceProtocol"
+            )
+        if type(self.state) is not ReferencePriceResolutionState:
+            raise ReferencePriceEvidenceError(
+                "resolution state must be ReferencePriceResolutionState"
+            )
+        target = _market_event_from_canonical_json(self.target_event_canonical_json)
+        target_price_source_id = _text(
+            target.metadata.get("bookmaker_key"),
+            "target event metadata.bookmaker_key",
+        )
+        if target_price_source_id != self.protocol.target_price_source_id:
+            raise ReferencePriceEvidenceError(
+                "target event price-source identity does not match frozen protocol"
+            )
+        target_semantics = target.metadata.get("price_semantics")
+        if target_semantics != self.protocol.price_semantics:
+            raise ReferencePriceEvidenceError(
+                "target event price_semantics does not match frozen protocol"
+            )
+
+        decision = _instant(self.decision_ts, "decision_ts")
+        normalized_decision = decision.astimezone(timezone.utc).isoformat()
+        object.__setattr__(self, "decision_ts", normalized_decision)
+        object.__setattr__(
+            self,
+            "target_event_canonical_json",
+            _canonical_json(target.to_dict()),
+        )
+
+        if type(self.candidates) is not tuple or any(
+            type(candidate) is not ReferenceCandidateCoverage
+            for candidate in self.candidates
+        ):
+            raise ReferencePriceEvidenceError(
+                "resolution candidates must be an exact tuple of ReferenceCandidateCoverage"
+            )
+        ordered = tuple(
+            sorted(
+                self.candidates,
+                key=lambda candidate: (
+                    candidate.namespace.value,
+                    candidate.source_id,
+                ),
+            )
+        )
+        keys = tuple(
+            (candidate.namespace, candidate.source_id)
+            for candidate in ordered
+        )
+        expected_keys = tuple(
+            sorted(
+                (
+                    (
+                        ReferenceCandidateNamespace.TRANSPORT_SOURCE,
+                        source_id,
+                    )
+                    for source_id in self.protocol.eligible_source_ids
+                ),
+                key=lambda item: (item[0].value, item[1]),
+            )
+        ) + tuple(
+            sorted(
+                (
+                    (
+                        ReferenceCandidateNamespace.PRICE_SOURCE,
+                        source_id,
+                    )
+                    for source_id in self.protocol.eligible_price_source_ids
+                ),
+                key=lambda item: (item[0].value, item[1]),
+            )
+        )
+        expected_keys = tuple(
+            sorted(expected_keys, key=lambda item: (item[0].value, item[1]))
+        )
+        if keys != expected_keys:
+            raise ReferencePriceEvidenceError(
+                "resolution candidates must exactly cover both frozen source universes"
+            )
+        object.__setattr__(self, "candidates", ordered)
+
+        target_identity = _market_identity(target)
+        for candidate in ordered:
+            for raw in candidate.event_canonical_jsons:
+                event = _market_event_from_canonical_json(raw)
+                if _market_identity(event) != target_identity:
+                    raise ReferencePriceEvidenceError(
+                        "candidate event market identity does not match target event"
+                    )
+                if event.metadata.get("price_semantics") != self.protocol.price_semantics:
+                    raise ReferencePriceEvidenceError(
+                        "candidate event price_semantics does not match frozen protocol"
+                    )
+
+        transport_event_bytes: set[str] = set()
+        price_source_event_bytes: set[str] = set()
+        for candidate in ordered:
+            event_bytes = set(candidate.event_canonical_jsons)
+            if candidate.namespace is ReferenceCandidateNamespace.TRANSPORT_SOURCE:
+                transport_event_bytes.update(event_bytes)
+            else:
+                price_source_event_bytes.update(event_bytes)
+        if transport_event_bytes != price_source_event_bytes:
+            raise ReferencePriceEvidenceError(
+                "candidate namespace projections must contain identical observation bytes"
+            )
+
+        missing = tuple(
+            candidate
+            for candidate in ordered
+            if candidate.disposition
+            is ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+        )
+        if self.state is ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE:
+            if self.consensus_evidence is not None:
+                raise ReferencePriceEvidenceError(
+                    "insufficient reference resolution cannot carry numeric consensus evidence"
+                )
+            if not missing:
+                raise ReferencePriceEvidenceError(
+                    "insufficient reference resolution requires explicit missing candidates"
+                )
+            if any(
+                candidate.disposition
+                is ReferenceCandidateDisposition.QUALIFIED_OBSERVATION
+                for candidate in ordered
+            ):
+                raise ReferencePriceEvidenceError(
+                    "insufficient reference resolution cannot label candidates qualified"
+                )
+        else:
+            if type(self.consensus_evidence) is not ReferencePriceEvidence:
+                raise ReferencePriceEvidenceError(
+                    "consensus reference resolution requires exact ReferencePriceEvidence"
+                )
+            if missing or any(
+                candidate.disposition
+                is not ReferenceCandidateDisposition.QUALIFIED_OBSERVATION
+                for candidate in ordered
+            ):
+                raise ReferencePriceEvidenceError(
+                    "consensus reference resolution requires every frozen candidate qualified"
+                )
+            if self.consensus_evidence.protocol_id != self.protocol.protocol_id:
+                raise ReferencePriceEvidenceError(
+                    "consensus evidence protocol does not match resolution protocol"
+                )
+            if self.consensus_evidence.decision_ts != normalized_decision:
+                raise ReferencePriceEvidenceError(
+                    "consensus evidence decision cutoff does not match resolution"
+                )
+            consensus_identity = (
+                self.consensus_evidence.sport,
+                self.consensus_evidence.event_id,
+                self.consensus_evidence.market_id,
+                self.consensus_evidence.selection_id,
+                self.consensus_evidence.market_type,
+                self.consensus_evidence.market_semantics_id,
+            )
+            if consensus_identity != target_identity:
+                raise ReferencePriceEvidenceError(
+                    "consensus evidence market identity does not match target event"
+                )
+
+            consensus_by_transport: dict[str, set[str]] = {
+                source_id: set() for source_id in self.protocol.eligible_source_ids
+            }
+            consensus_by_price_source: dict[str, set[str]] = {
+                source_id: set()
+                for source_id in self.protocol.eligible_price_source_ids
+            }
+            for observation in self.consensus_evidence.observations:
+                consensus_by_transport[observation.source_id].add(
+                    observation.event_canonical_json
+                )
+                consensus_by_price_source[observation.price_source_id].add(
+                    observation.event_canonical_json
+                )
+            for candidate in ordered:
+                expected_events = (
+                    consensus_by_transport[candidate.source_id]
+                    if candidate.namespace
+                    is ReferenceCandidateNamespace.TRANSPORT_SOURCE
+                    else consensus_by_price_source[candidate.source_id]
+                )
+                if set(candidate.event_canonical_jsons) != expected_events:
+                    raise ReferencePriceEvidenceError(
+                        "qualified candidate bytes do not match consensus evidence"
+                    )
+
+        object.__setattr__(
+            self,
+            "resolution_id",
+            _canonical_json_sha256(_resolution_identity_payload(self)),
+        )
+
+    @property
+    def target_event_sha256(self) -> str:
+        return hashlib.sha256(
+            self.target_event_canonical_json.encode("utf-8")
+        ).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        payload = _resolution_identity_payload(self)
+        payload["resolution_id"] = self.resolution_id
+        return payload
+
+
+def _resolution_identity_payload(
+    resolution: ReferencePriceDecisionResolution,
+) -> dict[str, object]:
+    return {
+        "schema": "autosport.reference_price_decision_resolution",
+        "schema_version": 1,
+        "protocol": resolution.protocol.to_dict(),
+        "decision_ts": resolution.decision_ts,
+        "target_event_sha256": resolution.target_event_sha256,
+        "target_event_canonical_json": resolution.target_event_canonical_json,
+        "state": resolution.state.value,
+        "candidates": [candidate.to_dict() for candidate in resolution.candidates],
+        "consensus_evidence": (
+            None
+            if resolution.consensus_evidence is None
+            else resolution.consensus_evidence.to_dict()
+        ),
+        "provider_origin_verified": False,
+        "executable_quote_verified": False,
+        "fair_probability_verified": False,
+        "fill_fidelity_verified": False,
+    }
+
+
 def _median_band(values: tuple[Decimal, ...]) -> tuple[Decimal, Decimal]:
     ordered = tuple(sorted(values))
     midpoint = len(ordered) // 2
@@ -729,4 +1111,144 @@ def build_reference_price_evidence(
         protocol=protocol,
         decision_ts=decision.astimezone(timezone.utc).isoformat(),
         observations=observations,
+    )
+
+
+def resolve_reference_price_decision_evidence(
+    events: Iterable[MarketEvent],
+    *,
+    target_event: MarketEvent,
+    decision_ts: str,
+    protocol: ReferencePriceProtocol,
+) -> ReferencePriceDecisionResolution:
+    """Resolve complete consensus or explicit frozen-universe insufficiency.
+
+    Missing frozen candidates are evidence, not permission to shrink the universe.
+    This envelope is deliberately structural: it records exact bytes and absence but
+    does not promote caller-provided events to provider-origin, fair-value, executable,
+    fill, profit or betting authority.
+    """
+
+    if type(protocol) is not ReferencePriceProtocol:
+        raise ReferencePriceEvidenceError(
+            "protocol must be exact ReferencePriceProtocol"
+        )
+    decision = _instant(decision_ts, "decision_ts")
+    normalized_decision = decision.astimezone(timezone.utc).isoformat()
+
+    target = _canonical_market_event(target_event)
+    target_price_source_id = _text(
+        target.metadata.get("bookmaker_key"),
+        "target event metadata.bookmaker_key",
+    )
+    if target_price_source_id != protocol.target_price_source_id:
+        raise ReferencePriceEvidenceError(
+            "target event price-source identity does not match frozen protocol"
+        )
+    if target.metadata.get("price_semantics") != protocol.price_semantics:
+        raise ReferencePriceEvidenceError(
+            "target event price_semantics does not match frozen protocol"
+        )
+    target_json = _canonical_json(target.to_dict())
+    target_identity = _market_identity(target)
+
+    canonical = tuple(_canonical_market_event(event) for event in tuple(events))
+    observations = tuple(
+        ReferenceObservation.from_event(event)
+        for event in canonical
+    )
+
+    by_transport: dict[str, list[str]] = {
+        source_id: [] for source_id in protocol.eligible_source_ids
+    }
+    by_price_source: dict[str, list[str]] = {
+        source_id: [] for source_id in protocol.eligible_price_source_ids
+    }
+    seen_price_sources: set[str] = set()
+
+    for observation in observations:
+        event = observation.market_event()
+        if _market_identity(event) != target_identity:
+            raise ReferencePriceEvidenceError(
+                "reference observations must bind the exact target market selection"
+            )
+        if observation.source_id not in by_transport:
+            raise ReferencePriceEvidenceError(
+                "reference observation transport source is outside frozen eligible universe"
+            )
+        if event.metadata.get("price_semantics") != protocol.price_semantics:
+            raise ReferencePriceEvidenceError(
+                "reference observation price_semantics does not match frozen protocol"
+            )
+        price_source_id = observation.price_source_id
+        if price_source_id not in by_price_source:
+            raise ReferencePriceEvidenceError(
+                "reference observation price source is outside frozen eligible universe"
+            )
+        if price_source_id in seen_price_sources:
+            raise ReferencePriceEvidenceError(
+                "reference observations require distinct independent price source_ids; "
+                "the same bookmaker/source-of-price cannot gain multiple consensus votes"
+            )
+        seen_price_sources.add(price_source_id)
+        by_transport[observation.source_id].append(observation.event_canonical_json)
+        by_price_source[price_source_id].append(observation.event_canonical_json)
+
+    missing_transport = {
+        source_id for source_id, values in by_transport.items() if not values
+    }
+    missing_price_sources = {
+        source_id for source_id, values in by_price_source.items() if not values
+    }
+    has_missing = bool(missing_transport or missing_price_sources)
+
+    def candidate_records(
+        disposition_for_present: ReferenceCandidateDisposition,
+    ) -> tuple[ReferenceCandidateCoverage, ...]:
+        records: list[ReferenceCandidateCoverage] = []
+        for namespace, mapping in (
+            (ReferenceCandidateNamespace.TRANSPORT_SOURCE, by_transport),
+            (ReferenceCandidateNamespace.PRICE_SOURCE, by_price_source),
+        ):
+            for source_id, values in mapping.items():
+                records.append(
+                    ReferenceCandidateCoverage(
+                        namespace=namespace,
+                        source_id=source_id,
+                        disposition=(
+                            ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+                            if not values
+                            else disposition_for_present
+                        ),
+                        event_canonical_jsons=tuple(values),
+                    )
+                )
+        return tuple(records)
+
+    if has_missing:
+        return ReferencePriceDecisionResolution(
+            target_event_canonical_json=target_json,
+            protocol=protocol,
+            decision_ts=normalized_decision,
+            candidates=candidate_records(
+                ReferenceCandidateDisposition.PRESENT_UNQUALIFIED
+            ),
+            state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+            consensus_evidence=None,
+        )
+
+    consensus = build_reference_price_evidence(
+        canonical,
+        decision_ts=normalized_decision,
+        protocol=protocol,
+    )
+    return ReferencePriceDecisionResolution(
+        target_event_canonical_json=target_json,
+        protocol=protocol,
+        decision_ts=normalized_decision,
+        candidates=candidate_records(
+            ReferenceCandidateDisposition.QUALIFIED_OBSERVATION
+        ),
+        state=ReferencePriceResolutionState.PREDECLARED_CONSENSUS_REFERENCE,
+        consensus_evidence=consensus,
     )

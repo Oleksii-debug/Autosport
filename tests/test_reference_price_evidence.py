@@ -6,10 +6,17 @@ import unittest
 
 from autosport.domain import MarketEvent, MarketType
 from autosport.reference_price_evidence import (
+    ReferenceCandidateCoverage,
+    ReferenceCandidateDisposition,
+    ReferenceCandidateNamespace,
+    ReferenceObservation,
+    ReferencePriceDecisionResolution,
     ReferencePriceEvidenceError,
     ReferencePriceProtocol,
+    ReferencePriceResolutionState,
     ReferenceTargetInclusionPolicy,
     build_reference_price_evidence,
+    resolve_reference_price_decision_evidence,
 )
 
 
@@ -656,6 +663,458 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                 decision_ts=self.DECISION,
                 protocol=protocol,
                 max_age_seconds=60,
+            )
+
+
+    def target_event(self, odds: str = "2.05") -> MarketEvent:
+        return self.event(
+            "target-transport",
+            odds,
+            bookmaker_key="target-provider",
+            sequence=99,
+        )
+
+    def test_missing_frozen_sources_are_explicit_insufficient_not_numeric_consensus(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        resolution = resolve_reference_price_decision_evidence(
+            (
+                self.event("provider-b", "2.10", sequence=2),
+                self.event("provider-a", "2.00", sequence=1),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+
+        self.assertIs(
+            resolution.state,
+            ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+        )
+        self.assertIsNone(resolution.consensus_evidence)
+        self.assertFalse(resolution.provider_origin_verified)
+        self.assertFalse(resolution.executable_quote_verified)
+        self.assertFalse(resolution.fair_probability_verified)
+        self.assertFalse(resolution.fill_fidelity_verified)
+        missing = {
+            (candidate.namespace, candidate.source_id)
+            for candidate in resolution.candidates
+            if candidate.disposition
+            is ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+        }
+        self.assertEqual(
+            missing,
+            {
+                (ReferenceCandidateNamespace.TRANSPORT_SOURCE, "provider-c"),
+                (ReferenceCandidateNamespace.PRICE_SOURCE, "provider-c"),
+            },
+        )
+        payload = resolution.to_dict()
+        self.assertEqual(
+            payload["state"],
+            "INSUFFICIENT_REFERENCE_EVIDENCE",
+        )
+        self.assertIsNone(payload["consensus_evidence"])
+        self.assertNotIn("median_decimal_odds", payload)
+
+    def test_all_reference_candidates_missing_remains_explicit_and_deterministic(
+        self,
+    ) -> None:
+        protocol = self.protocol(("provider-a", "provider-b"))
+        first = resolve_reference_price_decision_evidence(
+            (),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        second = resolve_reference_price_decision_evidence(
+            (),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+
+        self.assertEqual(first.resolution_id, second.resolution_id)
+        self.assertEqual(first.to_dict(), second.to_dict())
+        self.assertEqual(
+            {
+                candidate.disposition
+                for candidate in first.candidates
+            },
+            {ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION},
+        )
+        self.assertEqual(len(first.candidates), 4)
+
+    def test_insufficient_resolution_is_permutation_stable_and_binds_target_bytes(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        a = self.event("provider-a", "2.00", sequence=1)
+        b = self.event("provider-b", "2.10", sequence=2)
+        forward = resolve_reference_price_decision_evidence(
+            (a, b),
+            target_event=self.target_event("2.05"),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        reverse = resolve_reference_price_decision_evidence(
+            (b, a),
+            target_event=self.target_event("2.05"),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        changed_target = resolve_reference_price_decision_evidence(
+            (a, b),
+            target_event=self.target_event("2.06"),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+
+        self.assertEqual(forward.resolution_id, reverse.resolution_id)
+        self.assertEqual(forward.to_dict(), reverse.to_dict())
+        self.assertNotEqual(forward.resolution_id, changed_target.resolution_id)
+        self.assertNotEqual(
+            forward.target_event_sha256,
+            changed_target.target_event_sha256,
+        )
+
+    def test_complete_resolution_delegates_to_existing_strict_consensus_builder(
+        self,
+    ) -> None:
+        protocol = self.protocol(("provider-a", "provider-b"))
+        events = (
+            self.event("provider-a", "2.00", sequence=1),
+            self.event("provider-b", "2.10", sequence=2),
+        )
+        direct = build_reference_price_evidence(
+            events,
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        resolution = resolve_reference_price_decision_evidence(
+            events,
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+
+        self.assertIs(
+            resolution.state,
+            ReferencePriceResolutionState.PREDECLARED_CONSENSUS_REFERENCE,
+        )
+        self.assertIsNotNone(resolution.consensus_evidence)
+        assert resolution.consensus_evidence is not None
+        self.assertEqual(resolution.consensus_evidence.evidence_id, direct.evidence_id)
+        self.assertEqual(
+            {
+                candidate.disposition
+                for candidate in resolution.candidates
+            },
+            {ReferenceCandidateDisposition.QUALIFIED_OBSERVATION},
+        )
+
+    def test_missing_coverage_cannot_hide_unexpected_or_duplicate_price_sources(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "transport source is outside frozen eligible universe",
+        ):
+            resolve_reference_price_decision_evidence(
+                (
+                    self.event("provider-a", "2.00"),
+                    self.event("provider-x", "2.10"),
+                ),
+                target_event=self.target_event(),
+                decision_ts=self.DECISION,
+                protocol=protocol,
+            )
+
+        aggregator_protocol = self.protocol(
+            ("aggregator",),
+            eligible_price_source_ids=("book-a", "book-b", "book-c"),
+            minimum_sources=2,
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "distinct independent price source_ids",
+        ):
+            resolve_reference_price_decision_evidence(
+                (
+                    self.event(
+                        "aggregator",
+                        "2.00",
+                        bookmaker_key="book-a",
+                        sequence=1,
+                    ),
+                    self.event(
+                        "aggregator",
+                        "2.10",
+                        bookmaker_key="book-a",
+                        sequence=2,
+                    ),
+                ),
+                target_event=self.target_event(),
+                decision_ts=self.DECISION,
+                protocol=aggregator_protocol,
+            )
+
+    def test_resolution_target_price_source_must_match_frozen_protocol(self) -> None:
+        protocol = self.protocol(("provider-a", "provider-b"))
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "target event price-source identity",
+        ):
+            resolve_reference_price_decision_evidence(
+                (),
+                target_event=self.event(
+                    "other-target-transport",
+                    "2.05",
+                    bookmaker_key="other-target",
+                ),
+                decision_ts=self.DECISION,
+                protocol=protocol,
+            )
+
+    def test_public_resolution_constructor_rejects_cross_market_candidate_bytes(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event("provider-a", "2.00", sequence=1),
+                self.event("provider-b", "2.10", sequence=2),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        wrong_json = ReferenceObservation.from_event(
+            self.event(
+                "provider-a",
+                "2.00",
+                selection_id="other-selection",
+            )
+        ).event_canonical_json
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=candidate.disposition,
+                    event_canonical_jsons=(wrong_json,),
+                )
+                if candidate.namespace
+                is ReferenceCandidateNamespace.TRANSPORT_SOURCE
+                and candidate.source_id == "provider-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "candidate event market identity",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+                consensus_evidence=None,
+            )
+
+    def test_insufficient_constructor_rejects_present_missing_namespace_contradiction(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("aggregator",),
+            eligible_price_source_ids=("book-a", "book-b"),
+            minimum_sources=2,
+        )
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event(
+                    "aggregator",
+                    "2.00",
+                    bookmaker_key="book-a",
+                    sequence=1,
+                ),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=(
+                        ReferenceCandidateDisposition.MISSING_REQUIRED_OBSERVATION
+                    ),
+                    event_canonical_jsons=(),
+                )
+                if candidate.namespace is ReferenceCandidateNamespace.PRICE_SOURCE
+                and candidate.source_id == "book-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "candidate namespace projections must contain identical observation bytes",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+                consensus_evidence=None,
+            )
+
+    def test_insufficient_constructor_rejects_alternate_dual_namespace_bytes(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("aggregator",),
+            eligible_price_source_ids=("book-a", "book-b"),
+            minimum_sources=2,
+        )
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event(
+                    "aggregator",
+                    "2.00",
+                    bookmaker_key="book-a",
+                    sequence=1,
+                ),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        alternate_json = ReferenceObservation.from_event(
+            self.event(
+                "aggregator",
+                "9.00",
+                bookmaker_key="book-a",
+                sequence=1,
+            )
+        ).event_canonical_json
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=ReferenceCandidateDisposition.PRESENT_UNQUALIFIED,
+                    event_canonical_jsons=(alternate_json,),
+                )
+                if candidate.namespace is ReferenceCandidateNamespace.PRICE_SOURCE
+                and candidate.source_id == "book-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "candidate namespace projections must contain identical observation bytes",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+                consensus_evidence=None,
+            )
+
+    def test_positive_resolution_constructor_binds_candidate_bytes_to_consensus(
+        self,
+    ) -> None:
+        protocol = self.protocol(("provider-a", "provider-b"))
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event("provider-a", "2.00", sequence=1),
+                self.event("provider-b", "2.10", sequence=2),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        alternate_json = ReferenceObservation.from_event(
+            self.event("provider-a", "9.00", sequence=1)
+        ).event_canonical_json
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=candidate.disposition,
+                    event_canonical_jsons=(alternate_json,),
+                )
+                if candidate.namespace
+                is ReferenceCandidateNamespace.TRANSPORT_SOURCE
+                and candidate.source_id == "provider-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "qualified candidate bytes do not match consensus evidence",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.PREDECLARED_CONSENSUS_REFERENCE,
+                consensus_evidence=legitimate.consensus_evidence,
+            )
+
+    def test_missing_resolution_does_not_launder_incompatible_price_semantics(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "price_semantics does not match frozen protocol",
+        ):
+            resolve_reference_price_decision_evidence(
+                (
+                    self.event(
+                        "provider-a",
+                        "2.00",
+                        price_semantics="last_traded_price",
+                    ),
+                    self.event("provider-b", "2.10"),
+                ),
+                target_event=self.target_event(),
+                decision_ts=self.DECISION,
+                protocol=protocol,
             )
 
 

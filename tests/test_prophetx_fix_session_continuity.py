@@ -86,7 +86,7 @@ def test_restart_keeps_sequence_state_and_does_not_daily_reset() -> None:
             identity,
             provider_logon_msg_seq_num=42,
             observed_at=T2,
-            disconnected_since="2026-09-22T23:59:00+00:00",
+            disconnected_since=T1,
         )
         assert plan.disposition is ReconnectDisposition.RESUME
         assert plan.reset_seq_num_flag_candidate is False
@@ -99,7 +99,7 @@ def test_provider_lower_sequence_is_reset_candidate_and_requires_reconciliation(
         store = ProphetXFixContinuityStore(Path(tmp) / "state.sqlite3")
         identity = ident()
         cp = store.initialize_session(identity, observed_at=T0)
-        store.checkpoint_sequences(
+        cp = store.checkpoint_sequences(
             identity,
             expected_revision=cp.revision,
             next_expected_inbound=50,
@@ -115,11 +115,12 @@ def test_provider_lower_sequence_is_reset_candidate_and_requires_reconciliation(
         assert plan.disposition is ReconnectDisposition.RESET_PROVIDER_SEQUENCE_LOWER
         assert plan.reset_seq_num_flag_candidate is True
         assert plan.application_reconciliation_required is True
-        reset = store.record_reset(plan, observed_at="2026-09-23T00:03:00+00:00")
-        assert reset.next_expected_inbound == 1
-        assert reset.next_outbound == 1
-        assert reset.reset_epoch == 1
-        assert reset.application_reconciliation_required is True
+        with pytest.raises(
+            ProphetXFixContractError,
+            match="product-owned reconnect causal authority",
+        ):
+            store.record_reset(plan, observed_at="2026-09-23T00:03:00+00:00")
+        assert store.load_checkpoint(identity) == cp
 
 
 def test_local_store_loss_caller_flag_cannot_mint_reset_authority() -> None:
@@ -220,6 +221,16 @@ def test_disconnect_over_seven_days_forces_reset_and_reconciliation() -> None:
         assert plan.disposition is ReconnectDisposition.RESET_RESEND_WINDOW_EXCEEDED
         assert plan.reset_seq_num_flag_candidate is True
         assert plan.application_reconciliation_required is True
+        before = store.load_checkpoint(identity)
+        with pytest.raises(
+            ProphetXFixContractError,
+            match="product-owned reconnect causal authority",
+        ):
+            store.record_reset(
+                plan,
+                observed_at="2026-09-23T00:00:02+00:00",
+            )
+        assert store.load_checkpoint(identity) == before
 
 
 def test_exactly_seven_days_does_not_force_pruned_window_reset() -> None:

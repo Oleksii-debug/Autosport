@@ -251,13 +251,62 @@ class HistoricalSnapshotTests(unittest.TestCase):
         request_init_calls: list[str] = []
         forged_connection_calls: list[str] = []
 
+        class ForgedHeaders:
+            def items(self):
+                return [("Content-Type", "application/json")]
+
+            def get(self, _name, default=None):
+                return default
+
+        class ForgedResponse:
+            def __init__(self) -> None:
+                self.status = 200
+                self.reason = "OK"
+                self.headers = ForgedHeaders()
+                self.url = None
+                self.msg = "OK"
+                self._body = json.dumps(_payload()).encode("utf-8")
+                self._read = False
+
+            def read(self) -> bytes:
+                if self._read:
+                    return b""
+                self._read = True
+                return self._body
+
+            def geturl(self):
+                return self.url
+
+            def close(self) -> None:
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                self.close()
+
         class ForgedHTTPSConnection:
             def __init__(self, *args, **kwargs) -> None:
                 del args, kwargs
                 forged_connection_calls.append("init")
-                # This models the transient bypass: restore the checked module
-                # global as soon as the forged class has already been selected.
+                self.sock = None
+                # This models the transient bypass: the genuine HTTPSHandler has
+                # already selected this class, so restoring the checked module
+                # global here makes the later authority check look canonical.
                 http_client.HTTPSConnection = original_https_connection
+
+            def set_debuglevel(self, _level) -> None:
+                return None
+
+            def request(self, *_args, **_kwargs) -> None:
+                return None
+
+            def getresponse(self):
+                return ForgedResponse()
+
+            def close(self) -> None:
+                return None
 
         def forged_request_init(request, *args, **kwargs):
             original_request_init(request, *args, **kwargs)

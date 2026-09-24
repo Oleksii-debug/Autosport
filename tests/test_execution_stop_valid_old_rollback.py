@@ -245,6 +245,56 @@ def test_posix_passwd_resolver_retarget_cannot_reauthorize_valid_old_armed(
     assert not forged_home.exists()
 
 
+def test_product_root_module_rebind_cannot_reauthorize_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    product_root = stop_module._CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT
+    authority = _initialized(path)
+    assert authority._monotonic_authority().authority_root == product_root
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-root-global",
+        expected_revision=1,
+        command_id="arm-r2-root-global",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-root-global",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+
+    forged_root = tmp_path / "forged-product-root"
+    monkeypatch.setattr(
+        stop_module,
+        "_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT",
+        forged_root,
+    )
+    restarted = ExecutionStopAuthority(path)
+
+    # The exported root snapshot is not a live authority input. All public STOP
+    # reads stay on the import-bound root that contains the newer STOP high-water
+    # mark, even outside the separately sealed provider admission lease.
+    assert restarted._monotonic_authority().authority_root == product_root
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+    assert not forged_root.exists()
+
+
 def test_admission_lease_rejects_product_root_selector_class_rebind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

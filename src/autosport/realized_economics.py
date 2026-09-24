@@ -62,6 +62,7 @@ def summarize_realized_economics(
     balance = start
     peak = start
     max_drawdown = Decimal("0")
+    max_drawdown_peak = start
     turnover = Decimal("0")
 
     for index, (pnl_raw, stake_raw) in enumerate(zip(realized_pnls, stakes)):
@@ -79,11 +80,12 @@ def summarize_realized_economics(
         drawdown = peak - balance
         if drawdown > max_drawdown:
             max_drawdown = drawdown
+            max_drawdown_peak = peak
 
     net_pnl = balance - start
     return_on_start = net_pnl / start
     return_on_turnover = None if turnover == 0 else net_pnl / turnover
-    max_drawdown_fraction = max_drawdown / peak
+    max_drawdown_fraction = max_drawdown / max_drawdown_peak
 
     return RealizedEconomicReport(
         starting_bankroll=start,

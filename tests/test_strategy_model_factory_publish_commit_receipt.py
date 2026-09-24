@@ -267,6 +267,17 @@ def test_publish_commit_clock_cannot_be_retargeted_by_module_datetime_rebind(
 
     monkeypatch.setattr(factory_module, "datetime", BackdatedDatetime)
     monkeypatch.setattr(factory_module, "timezone", ReboundTimezone)
+    monkeypatch.setattr(
+        factory_module,
+        "_canonical_publish_commit_utc_now",
+        lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(TypeError):
+        store._append_publish_commit_record(
+            transaction,
+            _utc_now=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
 
     receipt = factory_module._record_committed_factory_publish(registry, store)
 

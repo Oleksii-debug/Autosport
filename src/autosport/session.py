@@ -103,19 +103,46 @@ def _build_settlement_consumer_class_guard(name: str):
 class _AutosportSessionMeta(type):
     """Seal the trusted settlement consumer entry inside the process TCB."""
 
+    def __init_subclass__(mcls, **kwargs) -> None:
+        raise TypeError("canonical settlement consumer metaclass is not extensible")
+
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        protected = {"_run_dataset_locked", "_settlement_consumer_bindings_sealed"}
+        inherits_sealed_consumer = any(
+            any(
+                ancestor.__dict__.get(
+                    "_settlement_consumer_bindings_sealed",
+                    False,
+                )
+                for ancestor in base.__mro__
+            )
+            for base in bases
+        )
+        if inherits_sealed_consumer and protected.intersection(namespace):
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
+
     def __setattr__(cls, name: str, value: object) -> None:
-        if (
-            cls.__dict__.get("_settlement_consumer_bindings_sealed", False)
-            and name in {"_run_dataset_locked", "_settlement_consumer_bindings_sealed"}
-        ):
+        sealed = any(
+            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in {
+            "_run_dataset_locked",
+            "_settlement_consumer_bindings_sealed",
+        }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
         super().__setattr__(name, value)
 
     def __delattr__(cls, name: str) -> None:
-        if (
-            cls.__dict__.get("_settlement_consumer_bindings_sealed", False)
-            and name in {"_run_dataset_locked", "_settlement_consumer_bindings_sealed"}
-        ):
+        sealed = any(
+            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in {
+            "_run_dataset_locked",
+            "_settlement_consumer_bindings_sealed",
+        }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
         super().__delattr__(name)
 

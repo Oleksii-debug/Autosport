@@ -27,6 +27,19 @@ def _v2_payload() -> dict[str, object]:
     }
 
 
+def test_activation_rejects_legacy_v1_product_composition_schema(tmp_path) -> None:
+    payload = {
+        "schema": "autosport.autonomous_product_composition",
+        "schema_version": 1,
+        "source_id": "provider-a",
+        "initial_bankroll": "1000",
+    }
+    _write_composition(tmp_path, payload)
+
+    with pytest.raises(ProductDecisionActivationError, match="schema"):
+        _product_composition(tmp_path)
+
+
 def test_activation_rejects_future_product_composition_schema(tmp_path) -> None:
     payload = _v2_payload()
     payload["schema_version"] = 3

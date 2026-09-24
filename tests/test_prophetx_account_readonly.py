@@ -395,6 +395,49 @@ def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(
     assert calls == []
 
 
+def test_default_transport_owns_explicit_secure_tls_context():
+    transport = UrllibProphetXHttpTransport()
+    opener = transport._opener  # type: ignore[attr-defined]
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is HTTPSHandler
+    )
+    context = https_handler._context
+
+    assert type(context) is ssl.SSLContext
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    if hasattr(https_handler, "_check_hostname"):
+        assert https_handler._check_hostname is None
+
+
+def test_canonical_wallet_authority_rejects_legacy_hostname_override_before_network(
+    monkeypatch,
+):
+    client, calls = canonical_client_for(monkeypatch, http_response())
+    opener = client._transport._opener  # type: ignore[attr-defined]
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is HTTPSHandler
+    )
+    if not hasattr(https_handler, "_check_hostname"):
+        pytest.skip("legacy HTTPSHandler hostname override is absent")
+
+    https_handler._check_hostname = False
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network authority changed",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert calls == []
+
+
 def test_failed_unmatched_balance_sync_is_preserved_but_cannot_mint_account_snapshot():
     failed = GOOD_BODY.replace(b'"succeed"', b'"failed"')
     client, _ = client_for(

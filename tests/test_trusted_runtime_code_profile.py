@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+import inspect
 import threading
 
 import pytest
@@ -255,113 +256,49 @@ def test_runtime_drift_revokes_positive_profile_resolution(
     _clear_started_product_runtime_origin(runtime)
 
 
-def test_canonical_worker_registers_after_start_and_clears_on_stop(
+def test_injected_builder_cannot_become_profiled_after_alias_rebind(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     runtime = _BlockingRuntime()
-    registered: list[tuple[object, str, str]] = []
-    issued: list[object] = []
-    revoked: list[object] = []
-    cleared: list[object] = []
-    profile = object()
+    builder_called = False
+    registered = False
+    issued = False
 
-    def build(
+    def attacker_builder(
         _workspace: Path,
         _source_factory: str,
         _bankroll: str,
         *,
         expected_source_id: str | None = None,
     ) -> _BlockingRuntime:
-        assert expected_source_id == _PROVIDER_SOURCE_ID
-        return runtime
-
-    def register(
-        value: object,
-        *,
-        source_factory: str,
-        expected_provider_source_id: str,
-    ) -> None:
-        registered.append((value, source_factory, expected_provider_source_id))
-
-    def issue(value: object) -> object:
-        issued.append(value)
-        return profile
-
-    monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
-    monkeypatch.setattr(
-        worker_module,
-        "_register_started_product_runtime_origin",
-        register,
-    )
-    monkeypatch.setattr(worker_module, "issue_trusted_runtime_code_profile", issue)
-    monkeypatch.setattr(
-        worker_module,
-        "revoke_trusted_runtime_code_profile",
-        lambda value: revoked.append(value) or True,
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "_clear_started_product_runtime_origin",
-        lambda value: cleared.append(value),
-    )
-
-    worker = ProductGuiWorker(runtime_builder=build)
-    assert worker.start(
-        workspace=tmp_path,
-        source_factory=_FACTORY_SPEC,
-        expected_source_id=_PROVIDER_SOURCE_ID,
-        poll_seconds=60.0,
-    )
-    assert runtime.tick_entered.wait(2.0)
-
-    assert registered == [(runtime, _FACTORY_SPEC, _PROVIDER_SOURCE_ID)]
-    assert issued == [runtime]
-    assert worker.trusted_runtime_profile is profile
-    started = worker.poll()
-    assert started is not None
-    assert started.kind == "STARTED"
-
-    assert worker.request_stop("operator_stop")
-    runtime.release_tick.set()
-    assert worker.join(2.0)
-
-    assert runtime.stop_reason == "operator_stop"
-    assert runtime.closed is True
-    assert revoked == [profile]
-    assert cleared == [runtime]
-    assert worker.trusted_runtime_profile is None
-
-
-def test_stop_during_start_cannot_register_or_publish_trusted_profile(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    runtime = _BlockingStartRuntime()
-    registered = False
-    issued = False
-
-    def build(
-        _workspace: Path,
-        _source_factory: str,
-        _bankroll: str,
-        *,
-        expected_source_id: str | None = None,
-    ) -> _BlockingStartRuntime:
+        nonlocal builder_called
+        builder_called = True
         assert expected_source_id == _PROVIDER_SOURCE_ID
         return runtime
 
     def forbidden_register(*_args, **_kwargs) -> None:
         nonlocal registered
         registered = True
-        raise AssertionError("STOP won before trusted origin registration")
+        raise AssertionError("injected builder must never mint trusted origin")
 
     def forbidden_issue(*_args, **_kwargs) -> object:
         nonlocal issued
         issued = True
-        raise AssertionError("STOP won before trusted profile issuance")
+        raise AssertionError("injected builder must never mint trusted profile")
 
-    monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
+    # This reproduces the former self-authorizing alias attack: the attacker
+    # controls both the mutable module alias and the constructor argument.
+    monkeypatch.setattr(
+        worker_module,
+        "_CANONICAL_RUNTIME_BUILDER",
+        attacker_builder,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_PROFILED_RUNTIME_BUILDER",
+        attacker_builder,
+    )
     monkeypatch.setattr(
         worker_module,
         "_register_started_product_runtime_origin",
@@ -373,25 +310,60 @@ def test_stop_during_start_cannot_register_or_publish_trusted_profile(
         forbidden_issue,
     )
 
-    worker = ProductGuiWorker(runtime_builder=build)
+    worker = ProductGuiWorker(runtime_builder=attacker_builder)
     assert worker.start(
         workspace=tmp_path,
         source_factory=_FACTORY_SPEC,
         expected_source_id=_PROVIDER_SOURCE_ID,
-        poll_seconds=60.0,
+        poll_seconds=1.0,
     )
-    assert runtime.start_entered.wait(2.0)
-
-    assert worker.request_stop("operator_stop")
-    runtime.release_start.set()
     assert worker.join(2.0)
 
+    assert builder_called is False
     assert registered is False
     assert issued is False
     assert worker.trusted_runtime_profile is None
-    assert runtime.stop_reason == "operator_stop"
-    assert runtime.closed is True
+    terminal = worker.poll()
+    assert terminal is not None
+    assert terminal.kind == "ERROR"
+    assert terminal.error_type == "ProductEntrypointError"
 
+def test_profiled_worker_root_captures_transitive_dependencies_once(
+    monkeypatch,
+) -> None:
+    kwdefaults = ProductGuiWorker._run.__kwdefaults__
+    assert kwdefaults is not None
+    captured = kwdefaults["_profiled_runtime_builder"]
+    assert captured is worker_module._PROFILED_RUNTIME_BUILDER
+
+    closure = inspect.getclosurevars(captured).nonlocals
+    validated_source = closure["validated_source"]
+    runtime_factory = closure["runtime_factory"]
+    source_identity_check = closure["source_identity_check"]
+
+    def attacker(*_args, **_kwargs):
+        raise AssertionError("mutable module binding must not redirect profiled root")
+
+    monkeypatch.setattr(worker_module, "_validated_source", attacker)
+    monkeypatch.setattr(worker_module, "build_autonomous_product_runtime", attacker)
+    monkeypatch.setattr(
+        worker_module,
+        "require_product_owned_source_factory_identity",
+        attacker,
+    )
+    monkeypatch.setattr(worker_module, "_PROFILED_RUNTIME_BUILDER", attacker)
+    monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", attacker)
+
+    after = inspect.getclosurevars(
+        ProductGuiWorker._run.__kwdefaults__["_profiled_runtime_builder"]
+    ).nonlocals
+    assert ProductGuiWorker._run.__kwdefaults__["_profiled_runtime_builder"] is captured
+    assert after["validated_source"] is validated_source
+    assert after["runtime_factory"] is runtime_factory
+    assert after["source_identity_check"] is source_identity_check
+    assert after["validated_source"] is not attacker
+    assert after["runtime_factory"] is not attacker
+    assert after["source_identity_check"] is not attacker
 
 def test_arbitrary_headless_builder_never_enters_trusted_profile_path(
     tmp_path: Path,
@@ -428,7 +400,7 @@ def test_arbitrary_headless_builder_never_enters_trusted_profile_path(
     assert worker.trusted_runtime_profile is None
 
 
-def test_failed_runtime_start_cannot_register_or_publish_trusted_profile(
+def test_injected_builder_without_expected_identity_remains_unprofiled(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -444,23 +416,19 @@ def test_failed_runtime_start_cannot_register_or_publish_trusted_profile(
         _workspace: Path,
         _source_factory: str,
         _bankroll: str,
-        *,
-        expected_source_id: str | None = None,
     ) -> _FailingStartRuntime:
-        assert expected_source_id == _PROVIDER_SOURCE_ID
         return runtime
 
     def forbidden_register(*_args, **_kwargs) -> None:
         nonlocal registered
         registered = True
-        raise AssertionError("origin registration must follow successful runtime.start")
+        raise AssertionError("unprofiled builder cannot register trusted origin")
 
     def forbidden_issue(*_args, **_kwargs) -> object:
         nonlocal issued
         issued = True
-        raise AssertionError("profile issuance must follow successful runtime.start")
+        raise AssertionError("unprofiled builder cannot issue trusted profile")
 
-    monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
     monkeypatch.setattr(
         worker_module,
         "_register_started_product_runtime_origin",
@@ -475,8 +443,7 @@ def test_failed_runtime_start_cannot_register_or_publish_trusted_profile(
     worker = ProductGuiWorker(runtime_builder=build)
     assert worker.start(
         workspace=tmp_path,
-        source_factory=_FACTORY_SPEC,
-        expected_source_id=_PROVIDER_SOURCE_ID,
+        source_factory="external.module:factory",
         poll_seconds=1.0,
     )
     assert worker.join(2.0)
@@ -487,3 +454,4 @@ def test_failed_runtime_start_cannot_register_or_publish_trusted_profile(
     terminal = worker.poll()
     assert terminal is not None
     assert terminal.kind == "ERROR"
+

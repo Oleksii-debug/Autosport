@@ -266,7 +266,11 @@ def test_canonical_network_live_app_snapshot_is_quantity_aware_and_authoritative
     assert assessment.market_version_price_lock_proven is False
     assert assessment.execution_fill_proven is False
     assert assessment.realized_price_proven is False
+    assert assessment.server_current_provider_authority_proven is False
+    assert assessment.provider_write_authorized is False
     assert assessment.real_money_authorized is False
+    assert evidence.server_current_provider_authority_proven is False
+    assert evidence.provider_write_authorized is False
     assert len(assessment.assessment_id) == 64
     assert len(evidence.evidence_id) == 64
     assert [body["method"] for _, body in calls] == [
@@ -275,7 +279,7 @@ def test_canonical_network_live_app_snapshot_is_quantity_aware_and_authoritative
     ]
 
 
-def test_positive_assessment_revalidates_provider_origin_at_use_time(monkeypatch):
+def test_positive_assessment_revalidates_local_provider_context_at_use_time(monkeypatch):
     clients = []
     evidence, _ = _network_capture(monkeypatch, client_sink=clients)
     assessment = _assess(evidence)
@@ -286,7 +290,10 @@ def test_positive_assessment_revalidates_provider_origin_at_use_time(monkeypatch
         "_credentials",
         BetfairSessionCredentials("rotated-app-secret", "rotated-session-secret"),
     )
-    with pytest.raises(BetfairDecisionQuoteError, match="current live App Key authority"):
+    with pytest.raises(
+        BetfairDecisionQuoteError,
+        match="capture-time live App Key evidence or unchanged local provider context",
+    ):
         assessment.assert_authoritative()
 
     negative_clients = []
@@ -303,6 +310,28 @@ def test_positive_assessment_revalidates_provider_origin_at_use_time(monkeypatch
         BetfairSessionCredentials("rotated-app-secret", "rotated-session-secret"),
     )
     negative_assessment.assert_authoritative()
+
+
+def test_assessment_contract_cannot_claim_server_current_or_write_authority(monkeypatch):
+    evidence, _ = _network_capture(monkeypatch)
+    assessment = _assess(evidence)
+
+    assert assessment.decision_eligible is True
+    assessment.assert_authoritative()
+    assert assessment.server_current_provider_authority_proven is False
+    assert assessment.provider_write_authorized is False
+
+    with pytest.raises(
+        BetfairDecisionQuoteError,
+        match="cannot claim server-current provider authority",
+    ):
+        replace(assessment, server_current_provider_authority_proven=True)
+
+    with pytest.raises(
+        BetfairDecisionQuoteError,
+        match="cannot grant provider-write authority",
+    ):
+        replace(assessment, provider_write_authorized=True)
 
 
 def test_direct_or_copied_values_cannot_mint_positive_authority(monkeypatch):
@@ -351,7 +380,7 @@ def test_delayed_market_data_is_retained_but_not_decision_eligible(monkeypatch):
 def test_delayed_application_key_cannot_mint_live_decision_authority(monkeypatch):
     evidence, _ = _network_capture(monkeypatch, app_delay_data=True)
 
-    with pytest.raises(BetfairDecisionQuoteError, match="live App Key authority"):
+    with pytest.raises(BetfairDecisionQuoteError, match="capture-time live App Key evidence"):
         _assess(evidence)
 
 
@@ -544,6 +573,8 @@ def test_secrets_are_absent_from_evidence_and_contract_claims_remain_narrow(monk
     assert evidence.market_version_price_lock_proven is False
     assert evidence.execution_fill_proven is False
     assert evidence.realized_price_proven is False
+    assert evidence.server_current_provider_authority_proven is False
+    assert evidence.provider_write_authorized is False
     assert evidence.real_money_authorized is False
 
 

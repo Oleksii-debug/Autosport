@@ -639,6 +639,14 @@ class CausalLearningEnvironment:
             raise LearningEnvironmentError(
                 "reward truth label conflicts: observed reward cannot derive from simulated outcome"
             )
+        if (
+            outcome.truth is EvidenceTruth.SIMULATED
+            and reward.truth is EvidenceTruth.SIMULATED
+            and reward.simulation_model_id != outcome.simulation_model_id
+        ):
+            raise LearningEnvironmentError(
+                "simulated reward must use the exact outcome simulation_model_id"
+            )
 
         decision_time = _timestamp("action decided_at", action.decided_at)
         reveal_time = _timestamp("outcome revealed_at", outcome.revealed_at)

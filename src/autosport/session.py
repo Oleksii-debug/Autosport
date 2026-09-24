@@ -46,6 +46,24 @@ from .strategies import (
 from .workspace_lock import WorkspaceEconomicLock
 
 
+def _bind_canonical_settlement_engine(method):
+    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+
+    canonical_engine_type = SettlementEngine
+
+    def guarded(self, *args, **kwargs):
+        if "_settlement_engine_type" in kwargs:
+            raise TypeError("settlement engine origin is internal product authority")
+        kwargs["_settlement_engine_type"] = canonical_engine_type
+        return method(self, *args, **kwargs)
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
 @dataclass(frozen=True, slots=True)
 class SessionResult:
     replay: ReplayRun
@@ -230,6 +248,7 @@ class AutosportSession:
                 runtime_strategy_id=runtime_strategy_id,
             )
 
+    @_bind_canonical_settlement_engine
     def _run_dataset_locked(
         self,
         dataset: ReplayDataset,
@@ -242,7 +261,10 @@ class AutosportSession:
         economic_goal: EconomicGoalContract | None = None,
         risk_policy: PaperRiskPolicy | None = None,
         runtime_strategy_id: str | None = None,
+        _settlement_engine_type: type[SettlementEngine],
     ) -> SessionResult:
+        if SettlementEngine is not _settlement_engine_type:
+            raise RuntimeError("settlement engine constructor origin changed")
         if risk_policy is None:
             risk_policy = PaperRiskPolicy(economic_goal=economic_goal)
         runtime_strategy_id = runtime_strategy_id or self._runtime_strategy_identity(
@@ -306,7 +328,11 @@ class AutosportSession:
             # Fail closed on any planned causal decision that did not execute before
             # loading sealed outcome facts into settlement.
             orchestrator.finalize_replay()
-            settlement = SettlementEngine()
+            settlement = _settlement_engine_type()
+            if type(settlement) is not _settlement_engine_type:
+                raise RuntimeError(
+                    "settlement engine constructor returned non-canonical type"
+                )
             settlement.record(dataset.load_results_after_replay())
             settled = tuple(settlement.settle_ready(working_book))
             evaluation = evaluate(working_book)

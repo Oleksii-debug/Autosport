@@ -14,6 +14,7 @@ _PERSISTENCE = "LAPSE"
 _TIME_IN_FORCE = "FILL_OR_KILL"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_TEXT = 512
+_MAX_DECIMAL_INPUT_MAGNITUDE = 10 ** _MAX_FIXED_POINT_TEXT
 _MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
 _BETFAIR_CLASSIC_MIN_ODDS = Decimal("1.01")
 _BETFAIR_CLASSIC_MAX_ODDS = Decimal("1000")
@@ -84,6 +85,22 @@ def _require_fixed_point_bound(value: Decimal, name: str) -> Decimal:
     return value
 
 
+def _preflight_decimal_input(value: object, name: str) -> None:
+    if type(value) is str:
+        if len(value) > _MAX_FIXED_POINT_TEXT:
+            raise BetfairFillOrKillError(
+                f"{name} decimal input exceeds resource bound"
+            )
+        return
+    if type(value) is int and (
+        value >= _MAX_DECIMAL_INPUT_MAGNITUDE
+        or value <= -_MAX_DECIMAL_INPUT_MAGNITUDE
+    ):
+        raise BetfairFillOrKillError(
+            f"{name} integer input exceeds resource bound"
+        )
+
+
 def _positive_decimal(value: object, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise BetfairFillOrKillError(f"{name} must not use bool/float coercion")
@@ -93,6 +110,7 @@ def _positive_decimal(value: object, name: str) -> Decimal:
         )
     if type(value) is str and (not value or value != value.strip()):
         raise BetfairFillOrKillError(f"{name} must be canonical decimal text")
+    _preflight_decimal_input(value, name)
     try:
         parsed = value if type(value) is Decimal else Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
@@ -111,6 +129,7 @@ def _nonnegative_decimal(value: object, name: str) -> Decimal:
         )
     if type(value) is str and (not value or value != value.strip()):
         raise BetfairFillOrKillError(f"{name} must be canonical decimal text")
+    _preflight_decimal_input(value, name)
     try:
         parsed = value if type(value) is Decimal else Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

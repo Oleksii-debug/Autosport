@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import http.client as http_client
 import json
+import urllib.request as urllib_request
 import tempfile
 import threading
 import unittest
@@ -275,6 +276,51 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     self.assertFalse(evidence_path.exists())
 
         self.assertEqual(forged_calls, [])
+
+    def test_product_owned_capture_rejects_urllib_http_global_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            urllib_request,
+            "http",
+            object(),
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+    def test_product_owned_capture_rejects_http_response_class_rebind(self) -> None:
+        class ForgedResponse:
+            pass
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            http_client.HTTPConnection,
+            "response_class",
+            ForgedResponse,
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
 
     def test_product_owned_capture_rejects_live_constructor_rebind_before_io(self) -> None:
         calls: list[str] = []

@@ -40,7 +40,7 @@ from .betfair_account_readonly import (
 VENUE_ID = "betfair"
 IDENTITY_SCOPE = "SESSION_CONTEXT"
 IDENTITY_SCHEMA = "autosport.betfair_authenticated_account_context"
-IDENTITY_SCHEMA_VERSION = 1
+IDENTITY_SCHEMA_VERSION = 2
 _CONTEXT_PREFIX = "betfair-session-context:"
 
 

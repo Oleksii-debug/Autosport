@@ -1053,3 +1053,143 @@ def _reservation_status(value: object) -> ReservationStatus:
         raise BetfairPreTradeReservationError(
             "unsupported reservation status"
         ) from exc
+
+def _build_canonical_reservation_admission_authority():
+    """Seal positive local-capital admission to canonical product dispatch."""
+
+    store_class = BetfairPreTradeReservationStore
+    reserve_impl = store_class.reserve
+    reserve_impl_code = getattr(reserve_impl, "__code__", None)
+    store_method_names = (
+        "_require_workspace",
+        "_connect",
+        "_bind_ledger_path",
+        "_read_all",
+        "_require_ledger_completeness",
+        "_insert",
+    )
+    store_methods = {
+        name: getattr(store_class, name)
+        for name in store_method_names
+    }
+    store_method_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in store_methods.items()
+    }
+    module_helper_names = (
+        "_ledger_view",
+        "worst_case_incremental_exposure",
+        "require_authoritative_funds_precheck",
+        "_text",
+        "_context_id",
+        "_sha",
+        "_immutable_key",
+        "_exact_decimal_sum",
+        "_decode_payload",
+        "_digest",
+        "_reservation_from_payload",
+        "_canonical_json",
+        "_decimal_from_text",
+        "_attempt_state",
+        "_reservation_status",
+        "_currency",
+        "_nonnegative_int",
+    )
+    module_helpers = {
+        name: globals()[name]
+        for name in module_helper_names
+    }
+    module_helper_codes = {
+        name: getattr(helper, "__code__", None)
+        for name, helper in module_helpers.items()
+    }
+    connect = store_methods["_connect"]
+    read_all = store_methods["_read_all"]
+    admission_error = BetfairPreTradeReservationError
+    reservation_type = BetfairExposureReservation
+
+    def require_dispatch(store: object) -> BetfairPreTradeReservationStore:
+        module_globals = globals()
+        if (
+            module_globals.get("BetfairPreTradeReservationStore") is not store_class
+            or type(store) is not store_class
+            or getattr(reserve_impl, "__code__", None) is not reserve_impl_code
+        ):
+            raise admission_error(
+                "canonical Betfair reservation admission authority changed"
+            )
+        instance_state = vars(store)
+        for name in store_method_names:
+            expected_method = store_methods[name]
+            current_method = getattr(store_class, name, None)
+            bound_method = getattr(store, name, None)
+            if (
+                current_method is not expected_method
+                or getattr(current_method, "__code__", None)
+                is not store_method_codes[name]
+                or name in instance_state
+                or getattr(bound_method, "__self__", None) is not store
+                or getattr(bound_method, "__func__", None) is not expected_method
+            ):
+                raise admission_error(
+                    "canonical Betfair reservation store admission dispatch changed"
+                )
+        for name in module_helper_names:
+            expected_helper = module_helpers[name]
+            live_helper = module_globals.get(name)
+            if (
+                live_helper is not expected_helper
+                or getattr(expected_helper, "__code__", None)
+                is not module_helper_codes[name]
+            ):
+                raise admission_error(
+                    "canonical Betfair reservation admission helper dispatch changed"
+                )
+        return store
+
+    def reserve(
+        self: BetfairPreTradeReservationStore,
+        *,
+        plan_id: str,
+        attempt_id: str,
+        funds_precheck: BetfairAccountFundsPrecheck,
+        execution_ledger: RealExecutionLedger,
+        customer_order_ref: str | None = None,
+    ) -> BetfairExposureReservation:
+        require_dispatch(self)
+        result = reserve_impl(
+            self,
+            plan_id=plan_id,
+            attempt_id=attempt_id,
+            funds_precheck=funds_precheck,
+            execution_ledger=execution_ledger,
+            customer_order_ref=customer_order_ref,
+        )
+        require_dispatch(self)
+        if type(result) is not reservation_type:
+            raise admission_error(
+                "canonical Betfair reservation admission returned invalid receipt"
+            )
+
+        # Positive reserve() success is not accepted from an in-memory return alone.
+        # Re-read the just-committed row through captured canonical store dispatch.
+        conn = connect(self)
+        try:
+            durable = read_all(self, conn).get(result.attempt_id)
+        finally:
+            conn.close()
+        require_dispatch(self)
+        if durable != result:
+            raise admission_error(
+                "canonical Betfair reservation success lacks durable exact row"
+            )
+        return result
+
+    return reserve
+
+
+BetfairPreTradeReservationStore.reserve = (
+    _build_canonical_reservation_admission_authority()
+)
+del _build_canonical_reservation_admission_authority
+

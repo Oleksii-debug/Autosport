@@ -938,6 +938,25 @@ class ProductDecisionActivationStore:
     __slots__ = ("workspace", "path", "_authority")
     FILE_NAME: Final = "product_decision_activation.json"
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in ("workspace", "path", "_authority"):
+            try:
+                object.__getattribute__(self, name)
+            except AttributeError:
+                pass
+            else:
+                raise ProductDecisionActivationError(
+                    "product decision activation store construction state is immutable"
+                )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in ("workspace", "path", "_authority"):
+            raise ProductDecisionActivationError(
+                "product decision activation store construction state is immutable"
+            )
+        object.__delattr__(self, name)
+
     def __init__(self, workspace: str | Path) -> None:
         if type(self) is not __class__:
             raise ProductDecisionActivationError(
@@ -1395,10 +1414,48 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     """Seal positive START derivation against transient class descriptor rebinding."""
 
     store_class = ProductDecisionActivationStore
+    authority_type = MonotonicWorkspaceAuthority
+    authority_domain = _ACTIVATION_AUTHORITY_DOMAIN
+    activation_filename = "product_decision_activation.json"
     canonical_derive = store_class.__dict__.get("_derive")
     canonical_derive_code = getattr(canonical_derive, "__code__", None)
-    if canonical_derive is None or canonical_derive_code is None:
-        raise RuntimeError("canonical product decision activation derivation is unavailable")
+    canonical_load = store_class.__dict__.get("load")
+    canonical_load_code = getattr(canonical_load, "__code__", None)
+    if (
+        canonical_derive is None
+        or canonical_derive_code is None
+        or canonical_load is None
+        or canonical_load_code is None
+    ):
+        raise RuntimeError(
+            "canonical product decision activation derivation/load is unavailable"
+        )
+
+    def require_store_state(store: ProductDecisionActivationStore) -> None:
+        if type(store) is not store_class:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
+        try:
+            workspace = store.workspace
+            path = store.path
+            authority = store._authority
+        except AttributeError as exc:
+            raise ProductDecisionActivationError(
+                "product decision activation store construction state changed"
+            ) from exc
+        if (
+            type(workspace) is not Path
+            or type(path) is not Path
+            or path != workspace / activation_filename
+            or type(authority) is not authority_type
+            or authority.workspace != workspace
+            or authority.domain != authority_domain
+            or authority.key != activation_filename
+        ):
+            raise ProductDecisionActivationError(
+                "product decision activation store construction state changed"
+            )
 
     def derive_canonically(
         store: ProductDecisionActivationStore,
@@ -1410,10 +1467,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         execution_config: PaperExecutionModelConfig,
         intent_producer: BuiltInIntentProducer,
     ) -> ProductDecisionActivationBinding:
-        if type(store) is not store_class:
-            raise ProductDecisionActivationError(
-                "product decision activation store must be the exact canonical class"
-            )
+        require_store_state(store)
         live_derive = store_class.__dict__.get("_derive")
         if (
             live_derive is not canonical_derive
@@ -1444,10 +1498,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     ) -> ProductDecisionActivationBinding:
         """Create once with an independent freshness witness; exact retry is idempotent."""
 
-        if type(self) is not store_class:
-            raise ProductDecisionActivationError(
-                "product decision activation store must be the exact canonical class"
-            )
+        require_store_state(self)
         with WorkspaceEconomicLock(self.workspace):
             observed = self._recover_authority()
             expected = derive_canonically(
@@ -1529,10 +1580,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     ) -> ProductDecisionActivationBinding:
         """Re-resolve every child authority and reject START-time drift."""
 
-        if type(self) is not store_class:
-            raise ProductDecisionActivationError(
-                "product decision activation store must be the exact canonical class"
-            )
+        require_store_state(self)
         with WorkspaceEconomicLock(self.workspace):
             if self.path.exists() or self.path.is_symlink():
                 persisted = self._load_local()
@@ -1555,8 +1603,20 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 )
             return persisted
 
+    def load(self: ProductDecisionActivationStore) -> ProductDecisionActivationBinding:
+        """Load only bytes from the constructor-bound canonical store namespace."""
+
+        require_store_state(self)
+        live_load = canonical_load
+        if getattr(live_load, "__code__", None) is not canonical_load_code:
+            raise ProductDecisionActivationError(
+                "canonical product decision activation load authority changed"
+            )
+        return live_load(self)
+
     setattr(store_class, "initialize_owner", initialize_owner)
     setattr(store_class, "verify", verify)
+    setattr(store_class, "load", load)
 
 
 _seal_product_decision_activation_derive_dispatch()

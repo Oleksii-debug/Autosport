@@ -14,6 +14,7 @@ from typing import Any
 _MAX_SERIALIZED_METADATA_NESTING = 64
 _SEMANTIC_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._:/-")
 _RESERVED_SEMANTIC_IDENTITIES = frozenset({"unknown", "mixed", "unspecified"})
+_EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
 class MarketType(str, Enum):
@@ -111,6 +112,13 @@ def _canonical_sport_value(value: object, field_name: str = "sport") -> str:
     return sport
 
 
+def _canonical_exchange_side(value: object, field_name: str = "exchange_side") -> str:
+    side = _canonical_string_value(value, field_name)
+    if side not in _EXCHANGE_SIDES:
+        raise ValueError(f"{field_name} must be canonical 'back' or 'lay'")
+    return side
+
+
 def _encoded_sport_identity(kind: str, *components: object) -> str:
     """Return an explicit-sport identity disjoint from every legacy pipe key.
 
@@ -127,6 +135,18 @@ def _encoded_sport_identity(kind: str, *components: object) -> str:
     return f"sport-v2-{token}"
 
 
+def _encoded_exchange_side_identity(kind: str, *components: object) -> str:
+    """Return an exchange-side identity disjoint from legacy and sport-v2 keys."""
+    payload = json.dumps(
+        [kind, *components],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"exchange-side-v1-{token}"
+
+
 def _optional_sport(raw: dict[str, Any]) -> str | None:
     value = raw.get("sport")
     if value is None:
@@ -134,12 +154,31 @@ def _optional_sport(raw: dict[str, Any]) -> str | None:
     return _canonical_sport_value(value)
 
 
+def _optional_exchange_side(raw: dict[str, Any]) -> str | None:
+    value = raw.get("exchange_side")
+    if value is None:
+        return None
+    return _canonical_exchange_side(value)
+
+
 def _quote_identity(
     event_id: str,
     market_id: str,
     selection_id: str,
     sport: str | None,
+    exchange_side: str | None = None,
 ) -> str:
+    if exchange_side is not None:
+        canonical_side = _canonical_exchange_side(exchange_side)
+        canonical_sport = None if sport is None else _canonical_sport_value(sport)
+        return _encoded_exchange_side_identity(
+            "quote",
+            canonical_sport,
+            event_id,
+            market_id,
+            selection_id,
+            canonical_side,
+        )
     if sport is None:
         return f"{event_id}|{market_id}|{selection_id}"
     canonical_sport = _canonical_sport_value(sport)
@@ -259,6 +298,7 @@ class MarketEvent:
     competition_id: str | None = None
     market_semantics_id: str | None = None
     provider_source_class: str | None = None
+    exchange_side: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
@@ -271,6 +311,8 @@ class MarketEvent:
             value = getattr(self, field_name)
             if value is not None:
                 _canonical_semantic_identity(value, field_name)
+        if self.exchange_side is not None:
+            _canonical_exchange_side(self.exchange_side)
 
     @property
     def quote_key(self) -> str:
@@ -279,10 +321,26 @@ class MarketEvent:
             self.market_id,
             self.selection_id,
             self.sport,
+            self.exchange_side,
         )
 
     @property
     def dedupe_key(self) -> str:
+        if self.exchange_side is not None:
+            canonical_side = _canonical_exchange_side(self.exchange_side)
+            canonical_sport = (
+                None if self.sport is None else _canonical_sport_value(self.sport)
+            )
+            return _encoded_exchange_side_identity(
+                "dedupe",
+                self.source_id,
+                canonical_sport,
+                self.event_id,
+                self.market_id,
+                self.selection_id,
+                canonical_side,
+                self.sequence,
+            )
         if self.sport is None:
             return (
                 f"{self.source_id}|{self.event_id}|{self.market_id}|"
@@ -327,6 +385,7 @@ class MarketEvent:
         competition_id = _optional_semantic_identity(raw, "competition_id")
         market_semantics_id = _optional_semantic_identity(raw, "market_semantics_id")
         provider_source_class = _optional_semantic_identity(raw, "provider_source_class")
+        exchange_side = _optional_exchange_side(raw)
 
         return cls(
             event_id=event_id,
@@ -346,6 +405,7 @@ class MarketEvent:
             competition_id=competition_id,
             market_semantics_id=market_semantics_id,
             provider_source_class=provider_source_class,
+            exchange_side=exchange_side,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -372,6 +432,8 @@ class MarketEvent:
             payload["market_semantics_id"] = self.market_semantics_id
         if self.provider_source_class is not None:
             payload["provider_source_class"] = self.provider_source_class
+        if self.exchange_side is not None:
+            payload["exchange_side"] = self.exchange_side
         return payload
 
 
@@ -382,10 +444,13 @@ class TicketLeg:
     selection_id: str
     locked_odds: Decimal
     sport: str | None = None
+    exchange_side: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
+        if self.exchange_side is not None:
+            _canonical_exchange_side(self.exchange_side)
 
     @property
     def quote_key(self) -> str:
@@ -394,6 +459,7 @@ class TicketLeg:
             self.market_id,
             self.selection_id,
             self.sport,
+            self.exchange_side,
         )
 
 

@@ -247,6 +247,24 @@ class SecretRedactionTests(unittest.TestCase):
                 self.assertIn(escaped_key, redacted)
                 self.assertIn(REDACTED, redacted)
 
+    def test_text_redacts_octal_escaped_sensitive_serialized_keys(self) -> None:
+        cases = (
+            (r'{"api\\011key":"octal-tab-secret-804"}', "octal-tab-secret-804", r"api\\011key"),
+            (r'{"\\141pi_key":"octal-a-secret-804"}', "octal-a-secret-804", r"\\141pi_key"),
+        )
+
+        for source, secret, escaped_key in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertNotIn(secret, redacted)
+                self.assertIn(escaped_key, redacted)
+                self.assertIn(REDACTED, redacted)
+
+    def test_non_sensitive_octal_escaped_serialized_key_is_preserved(self) -> None:
+        source = r'{"market\\040name":"winner"}'
+
+        self.assertEqual(redact_operator_text(source), source)
+
     def test_safe_exception_text_redacts_short_escaped_credential_key(self) -> None:
         secret = "short-escape-exception-secret-804"
         source = r'{"api\\tkey":"' + secret + '"}'

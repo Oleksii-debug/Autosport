@@ -609,59 +609,23 @@ class ProphetXFixContinuityStore:
         return self._publish_reconnect_plan(plan)
 
     def _publish_reconnect_plan(self, plan: FixReconnectPlan) -> FixReconnectPlan:
+        """Publish diagnostic reconnect facts without minting durable reset authority.
+
+        This isolated continuity store has no provider/network origin and therefore
+        cannot prove that caller-supplied Logon sequence or elapsed-time facts came
+        from a genuine reconnect. Any legacy reset authority is revoked here.
+        """
         if type(plan) is not FixReconnectPlan:
             raise ProphetXFixContractError(
                 "reconnect plan authority requires canonical plan"
             )
-        digest = _reconnect_plan_sha256(plan)
-        observed = _canonical_time(plan.observed_at, "plan observed_at")
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                existing = conn.execute(
-                    """SELECT plan_sha256, observed_at
-                       FROM reset_plan_authority WHERE session_key=?""",
+                conn.execute(
+                    "DELETE FROM reset_plan_authority WHERE session_key=?",
                     (plan.identity.session_key,),
-                ).fetchone()
-                if existing is not None:
-                    old_time = _time(
-                        existing["observed_at"], "stored reset plan observed_at"
-                    )
-                    new_time = _time(observed, "plan observed_at")
-                    if old_time > new_time:
-                        raise ProphetXFixEvidenceConflict(
-                            "reconnect observation time rolls back reset authority"
-                        )
-                    if old_time == new_time:
-                        if not plan.reset_seq_num_flag_candidate:
-                            raise ProphetXFixEvidenceConflict(
-                                "same-time reconnect facts conflict with reset authority"
-                            )
-                        if existing["plan_sha256"] != digest:
-                            raise ProphetXFixEvidenceConflict(
-                                "same-time reset authority has conflicting reconnect facts"
-                            )
-                if plan.reset_seq_num_flag_candidate:
-                    conn.execute(
-                        """INSERT INTO reset_plan_authority(
-                            session_key, checkpoint_revision, plan_sha256, observed_at
-                        ) VALUES (?, ?, ?, ?)
-                        ON CONFLICT(session_key) DO UPDATE SET
-                            checkpoint_revision=excluded.checkpoint_revision,
-                            plan_sha256=excluded.plan_sha256,
-                            observed_at=excluded.observed_at""",
-                        (
-                            plan.identity.session_key,
-                            plan.checkpoint_revision,
-                            digest,
-                            observed,
-                        ),
-                    )
-                else:
-                    conn.execute(
-                        "DELETE FROM reset_plan_authority WHERE session_key=?",
-                        (plan.identity.session_key,),
-                    )
+                )
                 conn.execute("COMMIT")
             except Exception:
                 if conn.in_transaction:
@@ -675,6 +639,13 @@ class ProphetXFixContinuityStore:
         *,
         observed_at: str,
     ) -> FixSequenceCheckpoint:
+        """Refuse durable sequence mutation without product-owned causal authority.
+
+        plan_reconnect can classify reconnect facts, but its inputs are caller
+        supplied and this component deliberately owns no network/provider trust
+        root. A reset candidate is diagnostic only until a separate product-owned
+        reconnect/provider-origin authority is composed.
+        """
         if type(plan) is not FixReconnectPlan:
             raise ProphetXFixContractError("reset requires a canonical reconnect plan")
         if not plan.reset_seq_num_flag_candidate:
@@ -682,73 +653,12 @@ class ProphetXFixContinuityStore:
         observed = _canonical_time(observed_at, "observed_at")
         if _time(observed, "observed_at") < _time(plan.observed_at, "plan observed_at"):
             raise ProphetXFixContractError("reset cannot precede reconnect plan")
-        plan_digest = _reconnect_plan_sha256(plan)
-
-        with closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                row = conn.execute(
-                    "SELECT * FROM sessions WHERE session_key=?", (plan.identity.session_key,)
-                ).fetchone()
-                if row is None:
-                    raise ProphetXFixContractError(
-                        "reset target session is missing; local sequence-store loss "
-                        "requires product-owned recovery incident authority"
-                    )
-                current = self._checkpoint_from_row(row)
-                if current.identity != plan.identity:
-                    raise ProphetXFixEvidenceConflict("reset session identity changed")
-                if plan.checkpoint_revision != current.revision:
-                    raise ProphetXFixEvidenceConflict("reset plan is stale")
-
-                authority = conn.execute(
-                    """SELECT checkpoint_revision, plan_sha256, observed_at
-                       FROM reset_plan_authority WHERE session_key=?""",
-                    (plan.identity.session_key,),
-                ).fetchone()
-                if authority is None or authority["plan_sha256"] != plan_digest:
-                    raise ProphetXFixEvidenceConflict(
-                        "reset plan was not issued by the continuity store"
-                    )
-                if authority["checkpoint_revision"] != plan.checkpoint_revision:
-                    raise ProphetXFixEvidenceConflict(
-                        "reset plan authority revision does not match plan"
-                    )
-                if _canonical_time(
-                    authority["observed_at"], "stored reset plan observed_at"
-                ) != _canonical_time(plan.observed_at, "plan observed_at"):
-                    raise ProphetXFixEvidenceConflict(
-                        "reset plan authority observation does not match plan"
-                    )
-
-                conn.execute(
-                    """UPDATE sessions
-                       SET next_expected_inbound=1, next_outbound=1,
-                           last_durable_inbound=0, reset_epoch=reset_epoch+1,
-                           revision=revision+1, reconciliation_required=1,
-                           updated_at=? WHERE session_key=? AND revision=?""",
-                    (observed, plan.identity.session_key, current.revision),
-                )
-                if conn.execute("SELECT changes()").fetchone()[0] != 1:
-                    raise ProphetXFixEvidenceConflict(
-                        "reset checkpoint changed concurrently"
-                    )
-
-                conn.execute(
-                    """DELETE FROM reset_plan_authority
-                       WHERE session_key=? AND plan_sha256=?""",
-                    (plan.identity.session_key, plan_digest),
-                )
-                if conn.execute("SELECT changes()").fetchone()[0] != 1:
-                    raise ProphetXFixEvidenceConflict(
-                        "reset plan authority changed concurrently"
-                    )
-                conn.execute("COMMIT")
-            except Exception:
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-                raise
-        return self.load_checkpoint(plan.identity)
+        current = self.load_checkpoint(plan.identity)
+        if plan.checkpoint_revision != current.revision:
+            raise ProphetXFixEvidenceConflict("reset plan is stale")
+        raise ProphetXFixContractError(
+            "durable sequence reset requires product-owned reconnect causal authority"
+        )
 
     def record_pruned_gap(
         self,
@@ -1046,28 +956,11 @@ class ProphetXFixContinuityStore:
                 )
             del observed
 
-        for row in reset_authority_rows:
-            session_key = _digest(
-                row["session_key"], "stored reset authority session_key"
+        if reset_authority_rows:
+            raise ProphetXFixEvidenceConflict(
+                "durable reset plan authority is invalid without product-owned "
+                "reconnect causal authority"
             )
-            _digest(row["plan_sha256"], "stored reset authority plan_sha256")
-            _time(row["observed_at"], "stored reset authority observed_at")
-            revision = row["checkpoint_revision"]
-            if revision is not None:
-                _positive_int(revision, "stored reset authority checkpoint_revision")
-            checkpoint = checkpoints.get(session_key)
-            if checkpoint is None:
-                raise ProphetXFixEvidenceConflict(
-                    "orphan reset plan authority session"
-                )
-            if revision is None:
-                raise ProphetXFixEvidenceConflict(
-                    "reset plan authority is missing checkpoint revision"
-                )
-            if revision > checkpoint.revision:
-                raise ProphetXFixEvidenceConflict(
-                    "reset authority references future checkpoint revision"
-                )
 
     @staticmethod
     def _checkpoint_from_row(row: sqlite3.Row) -> FixSequenceCheckpoint:

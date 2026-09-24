@@ -6,7 +6,11 @@ from decimal import Decimal
 
 import pytest
 
-from autosport.opponent_intelligence import RatingSnapshot, SnapshotState
+from autosport.opponent_intelligence import (
+    OpponentIntelligenceStore,
+    RatingSnapshot,
+    SnapshotState,
+)
 from autosport.participant_identity import IdentityView
 from autosport.participant_strength import (
     HistogramCalibratedStrengthFactory,
@@ -15,6 +19,7 @@ from autosport.participant_strength import (
     RatingDifferenceBaselineFactory,
     StrengthSnapshotPair,
     emit_registered_strength_forecast,
+    load_strength_model,
 )
 from autosport.scientific_registry import (
     DatasetSnapshot,
@@ -113,6 +118,30 @@ def _pair(
             published=opponent_published,
         ),
         decision_at,
+    )
+
+
+def _snapshot_authority(
+    evidence: StrengthSnapshotPair,
+) -> OpponentIntelligenceStore:
+    """Seed the canonical store boundary for participant-strength unit tests."""
+
+    store = object.__new__(OpponentIntelligenceStore)
+    store._ratings = {
+        evidence.subject.snapshot_id: evidence.subject,
+        evidence.opponent.snapshot_id: evidence.opponent,
+    }
+    store._invalidations = {}
+    return store
+
+
+def _emit_registered_strength_forecast(**kwargs):
+    evidence = kwargs.get("evidence")
+    if not isinstance(evidence, StrengthSnapshotPair):
+        raise AssertionError("test helper requires StrengthSnapshotPair evidence")
+    return emit_registered_strength_forecast(
+        opponent_store=_snapshot_authority(evidence),
+        **kwargs,
     )
 
 
@@ -565,7 +594,7 @@ def test_registered_forecast_reloads_hash_bound_factory_artifact_and_registry(tm
     )
 
     evidence = _pair(decision_at=T4)
-    forecast = emit_registered_strength_forecast(
+    forecast = _emit_registered_strength_forecast(
         registry=registry,
         artifact_store=artifacts,
         evidence=evidence,
@@ -588,7 +617,7 @@ def test_registered_forecast_reloads_hash_bound_factory_artifact_and_registry(tm
 
     reopened_registry = ScientificRegistry(tmp_path / "scientific-registry.json")
     reopened_artifacts = FactoryArtifactStore(tmp_path / "factory-artifacts")
-    replay = emit_registered_strength_forecast(
+    replay = _emit_registered_strength_forecast(
         registry=reopened_registry,
         artifact_store=reopened_artifacts,
         evidence=evidence,
@@ -646,7 +675,7 @@ def test_registered_forecast_rejects_future_model_registry_availability(tmp_path
     with pytest.raises(
         ParticipantStrengthError, match="model version was not available"
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T3),
@@ -708,7 +737,7 @@ def test_registered_forecast_rejects_missing_scientific_foundation(tmp_path):
         ParticipantStrengthError,
         match="lacks DatasetSnapshot/FeatureSet/ResearchProtocol foundation",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T3),
@@ -730,7 +759,7 @@ def test_registered_forecast_rejects_training_cutoff_after_model_creation(tmp_pa
         ParticipantStrengthError,
         match="DatasetSnapshot causal cutoff exceeds model version availability",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T5),
@@ -753,7 +782,7 @@ def test_registered_forecast_rejects_strategy_that_predates_bound_model(tmp_path
         ParticipantStrengthError,
         match="model version was not available when strategy version was created",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T5),
@@ -776,7 +805,7 @@ def test_registered_forecast_rejects_missing_frozen_preregistration(tmp_path):
         ParticipantStrengthError,
         match="lacks frozen ResearchQuestion/Hypothesis",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T3),
@@ -800,7 +829,7 @@ def test_registered_forecast_rejects_protocol_dataset_cutoff_mismatch(tmp_path):
         ParticipantStrengthError,
         match="ResearchProtocol/DatasetSnapshot causal cutoff mismatch",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T3),
@@ -824,7 +853,7 @@ def test_registered_forecast_rejects_protocol_feature_version_mismatch(tmp_path)
         ParticipantStrengthError,
         match="FeatureSet version does not match ResearchProtocol",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T3),
@@ -849,7 +878,7 @@ def test_registered_forecast_rejects_hypothesis_frozen_after_protocol(tmp_path):
         ParticipantStrengthError,
         match="Hypothesis must precede ResearchProtocol freeze",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T4),
@@ -871,7 +900,7 @@ def test_registered_forecast_rejects_dataset_cutoff_after_snapshot_availability(
         ParticipantStrengthError,
         match="DatasetSnapshot causal cutoff exceeds snapshot availability",
     ):
-        emit_registered_strength_forecast(
+        _emit_registered_strength_forecast(
             registry=registry,
             artifact_store=artifacts,
             evidence=_pair(decision_at=T4),
@@ -879,4 +908,65 @@ def test_registered_forecast_rejects_dataset_cutoff_after_snapshot_availability(
             strategy_version_id="strategy-lineage",
             quote_key="event-1:match-winner:participant-a",
         )
+
+def test_rating_difference_artifact_readback_rejects_semantic_contract_drift():
+    model = RatingDifferenceBaselineFactory().fit(
+        "baseline-semantic-contract",
+        (_point(0, 0.2, 1.0), _point(1, -0.2, 0.0)),
+        training_cutoff=T2,
+    )
+    canonical = model.to_payload()
+    extended = dict(canonical)
+    extended["model_version_id"] = "baseline-semantic-contract"
+    assert load_strength_model(extended) == model
+
+    unsupported_schema = dict(canonical)
+    unsupported_schema["schema_version"] = 2
+    with pytest.raises(ParticipantStrengthError, match="unsupported baseline artifact schema"):
+        load_strength_model(unsupported_schema)
+
+    false_formula = dict(canonical)
+    false_formula["formula"] = "p=caller_supplied"
+    with pytest.raises(ParticipantStrengthError, match="baseline artifact formula mismatch"):
+        load_strength_model(false_formula)
+
+
+def test_calibrated_artifact_readback_rejects_semantic_contract_drift():
+    model = HistogramCalibratedStrengthFactory(
+        bin_count=4,
+        prior_weight="2",
+    ).fit(
+        "calibrated-semantic-contract",
+        (
+            _point(0, -0.6, 0.0),
+            _point(1, 0.2, 1.0),
+            _point(2, 0.6, 1.0),
+        ),
+        training_cutoff=T3,
+    )
+    canonical = model.to_payload()
+    extended = dict(canonical)
+    extended["research_protocol_id"] = "protocol-semantic-contract"
+    assert load_strength_model(extended) == model
+
+    unsupported_schema = dict(canonical)
+    unsupported_schema["schema_version"] = 2
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="unsupported calibrated artifact schema",
+    ):
+        load_strength_model(unsupported_schema)
+
+    false_baseline = dict(canonical)
+    false_baseline["baseline_formula"] = "p=caller_supplied"
+    with pytest.raises(
+        ParticipantStrengthError,
+        match="calibrated artifact baseline formula mismatch",
+    ):
+        load_strength_model(false_baseline)
+
+    false_calibration = dict(canonical)
+    false_calibration["calibration"] = "caller-controlled-calibration"
+    with pytest.raises(ParticipantStrengthError, match="calibrated artifact method mismatch"):
+        load_strength_model(false_calibration)
 

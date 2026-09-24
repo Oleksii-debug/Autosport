@@ -369,15 +369,20 @@ def mark_ambiguous_delivery(
     ledger.mark_unknown(identity.attempt_id, reason=reason, observed_at=observed_at)
 
 
-def _bind_provider_assigned_order_id(
+def _bind_provider_assigned_order_id_impl(
     ledger: RealExecutionLedger,
     identity: ProphetXOrderIdentity,
     provider_order_id: str,
+    *,
+    identity_resolver,
+    identity_resolver_code: object,
 ) -> bool:
     try:
         _require_canonical_provider_order_ledger(ledger)
+        if getattr(identity_resolver, "__code__", None) is not identity_resolver_code:
+            return False
         ledger_path = ledger.path
-        if load_identity(ledger, attempt_id=identity.attempt_id) != identity:
+        if identity_resolver(ledger, attempt_id=identity.attempt_id) != identity:
             return False
         _require_canonical_provider_order_ledger(ledger)
         bound = _CANONICAL_LEDGER_BIND_PROVIDER_ASSIGNED_ORDER_ID(
@@ -412,11 +417,12 @@ def _bind_provider_assigned_order_id(
     return True
 
 
-def reconciliation_disposition(
+def _reconciliation_disposition_impl(
     identity: ProphetXOrderIdentity,
     evidence: ProphetXProviderEvidence,
     *,
     ledger: RealExecutionLedger | None = None,
+    bind_provider_order_id,
 ) -> ProphetXReconciliationDisposition:
     """Return correlation candidates only; never mint #1634/#530 provider truth."""
 
@@ -437,7 +443,7 @@ def reconciliation_disposition(
             evidence.kind is ProphetXEvidenceKind.ORDER_STATE
             and evidence.provider_order_id
         ):
-            if ledger is None or not _bind_provider_assigned_order_id(
+            if ledger is None or not bind_provider_order_id(
                 ledger, identity, evidence.provider_order_id
             ):
                 return ProphetXReconciliationDisposition.CONFLICT
@@ -478,11 +484,12 @@ def retry_disposition(
     return ProphetXRetryDisposition.SAME_CLIENT_ID_REDELIVERY_CANDIDATE
 
 
-def normalize_fix_execution_reports(
+def _normalize_fix_execution_reports_impl(
     identity: ProphetXOrderIdentity,
     reports: Iterable[ProphetXFixExecutionReport],
     *,
     ledger: RealExecutionLedger | None = None,
+    bind_provider_order_id,
 ) -> tuple[ProphetXFixExecutionReport, ...]:
     if identity.transport is not ProphetXTransport.FIX_ORDER_ENTRY:
         raise ProphetXOrderIdentityError(
@@ -515,7 +522,7 @@ def normalize_fix_execution_reports(
                 "FIX execution reports require durable provider order id binding"
             )
         provider_order_id = next(iter(provider_order_ids))
-        if not _bind_provider_assigned_order_id(
+        if not bind_provider_order_id(
             ledger, identity, provider_order_id
         ):
             raise ProphetXEvidenceConflict(
@@ -528,3 +535,63 @@ def normalize_fix_execution_reports(
             key=lambda report: (_time(report.transact_time, "transact_time"), report.exec_id),
         )
     )
+
+def _build_provider_order_correlation_authority():
+    """Closure-own durable identity resolution and positive provider-OrderID admission."""
+
+    identity_resolver = load_identity
+    identity_resolver_code = getattr(identity_resolver, "__code__", None)
+    bind_impl = _bind_provider_assigned_order_id_impl
+    reconciliation_impl = _reconciliation_disposition_impl
+    normalize_impl = _normalize_fix_execution_reports_impl
+
+    def bind_provider_order_id(
+        ledger: RealExecutionLedger,
+        identity: ProphetXOrderIdentity,
+        provider_order_id: str,
+    ) -> bool:
+        return bind_impl(
+            ledger,
+            identity,
+            provider_order_id,
+            identity_resolver=identity_resolver,
+            identity_resolver_code=identity_resolver_code,
+        )
+
+    def reconciliation_disposition(
+        identity: ProphetXOrderIdentity,
+        evidence: ProphetXProviderEvidence,
+        *,
+        ledger: RealExecutionLedger | None = None,
+    ) -> ProphetXReconciliationDisposition:
+        return reconciliation_impl(
+            identity,
+            evidence,
+            ledger=ledger,
+            bind_provider_order_id=bind_provider_order_id,
+        )
+
+    def normalize_fix_execution_reports(
+        identity: ProphetXOrderIdentity,
+        reports: Iterable[ProphetXFixExecutionReport],
+        *,
+        ledger: RealExecutionLedger | None = None,
+    ) -> tuple[ProphetXFixExecutionReport, ...]:
+        return normalize_impl(
+            identity,
+            reports,
+            ledger=ledger,
+            bind_provider_order_id=bind_provider_order_id,
+        )
+
+    return reconciliation_disposition, normalize_fix_execution_reports
+
+
+reconciliation_disposition, normalize_fix_execution_reports = (
+    _build_provider_order_correlation_authority()
+)
+del _bind_provider_assigned_order_id_impl
+del _reconciliation_disposition_impl
+del _normalize_fix_execution_reports_impl
+del _build_provider_order_correlation_authority
+

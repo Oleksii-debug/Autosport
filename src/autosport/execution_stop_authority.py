@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1684,6 +1685,60 @@ ExecutionStopAuthority._monotonic_authority = _product_root_bound_monotonic_auth
 del _product_root_bound_monotonic_authority
 del _build_product_root_bound_monotonic_authority
 
+def _build_sealed_authority_coordinate(name: str):
+    """Keep one construction-bound STOP pathname outside mutable instance state."""
+
+    values: weakref.WeakKeyDictionary[ExecutionStopAuthority, Path] = (
+        weakref.WeakKeyDictionary()
+    )
+    path_type = Path
+    integrity_error = ExecutionStopIntegrityError
+
+    class SealedAuthorityCoordinate:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            try:
+                return values[instance]
+            except KeyError as exc:
+                raise integrity_error(
+                    f"execution STOP authority {name} is unavailable"
+                ) from exc
+
+        def __set__(self, instance, value) -> None:
+            if not isinstance(value, path_type):
+                raise integrity_error(
+                    f"execution STOP authority {name} must be a Path"
+                )
+            if instance in values:
+                raise integrity_error(
+                    "execution STOP authority construction coordinates are immutable"
+                )
+            values[instance] = value
+
+        def __delete__(self, _instance) -> None:
+            raise integrity_error(
+                "execution STOP authority construction coordinates are immutable"
+            )
+
+    return SealedAuthorityCoordinate()
+
+
+_CANONICAL_ADMISSION_PATH_DESCRIPTOR = _build_sealed_authority_coordinate("path")
+_CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR = _build_sealed_authority_coordinate(
+    "_anchor_path"
+)
+_CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR = _build_sealed_authority_coordinate(
+    "_lock_path"
+)
+ExecutionStopAuthority.path = _CANONICAL_ADMISSION_PATH_DESCRIPTOR
+ExecutionStopAuthority._anchor_path = _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR
+ExecutionStopAuthority._lock_path = _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR
+del _build_sealed_authority_coordinate
+
+
 _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
 )
@@ -1725,6 +1780,9 @@ _CANONICAL_ADMISSION_STATE_FROM_RECORD = ExecutionStopAuthority._state_from_reco
 _CANONICAL_ADMISSION_CURRENT_UNLOCKED = ExecutionStopAuthority._current_unlocked
 
 _CANONICAL_ADMISSION_GRAPH = (
+    ("path", _CANONICAL_ADMISSION_PATH_DESCRIPTOR),
+    ("_anchor_path", _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR),
+    ("_lock_path", _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR),
     ("_monotonic_key", _CANONICAL_ADMISSION_MONOTONIC_KEY),
     (
         "_product_monotonic_authority_root",

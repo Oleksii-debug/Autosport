@@ -414,11 +414,13 @@ def test_summary_rejects_transitive_json_encoder_publication_split(
 
     with pytest.raises(
         ForwardEconomicEvidenceError,
-        match="recorded step evidence publication identity drift",
+        match="internal recorded step identity executable integrity drift",
     ):
         accumulator.summary()
 
-    assert forged_publications == 1
+    # The stronger executable fence rejects encoder substitution before the
+    # forged publication path can run.
+    assert forged_publications == 0
 
     monkeypatch.setattr(encoder_type, "encode", original_encode)
     assert accumulator.summary().evidence_sha256 == baseline.evidence_sha256
@@ -428,6 +430,7 @@ def test_summary_rejects_transitive_json_encoder_publication_split(
 def test_recorded_step_guard_rejects_json_encoder_bootstrap_rebind_before_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    protocol = _protocol()
     encoder_type = forward_evidence.json.JSONEncoder
     forged_calls = 0
 
@@ -442,7 +445,7 @@ def test_recorded_step_guard_rejects_json_encoder_bootstrap_rebind_before_init(
         ForwardEconomicEvidenceError,
         match="internal recorded step identity executable integrity drift",
     ):
-        ForwardEconomicEvidenceAccumulator(_protocol())
+        ForwardEconomicEvidenceAccumulator(protocol)
 
     # The executable fence runs before raw_init, so a pre-construction encoder
     # replacement cannot define protocol identity or the private empty-prefix
@@ -453,6 +456,7 @@ def test_recorded_step_guard_rejects_json_encoder_bootstrap_rebind_before_init(
 def test_recorded_step_guard_rejects_json_encoder_factory_rebind_before_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    protocol = _protocol()
     encoder_module = forward_evidence.json.encoder
     forged_calls = 0
 
@@ -467,7 +471,7 @@ def test_recorded_step_guard_rejects_json_encoder_factory_rebind_before_init(
         ForwardEconomicEvidenceError,
         match="internal recorded step identity executable integrity drift",
     ):
-        ForwardEconomicEvidenceAccumulator(_protocol())
+        ForwardEconomicEvidenceAccumulator(protocol)
 
     # The lower encoder factory is part of the canonical json.dumps execution
     # graph on CPython and must be sealed before any accumulator authority can

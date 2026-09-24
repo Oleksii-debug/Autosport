@@ -1024,6 +1024,7 @@ def _build_allocation_basis_store_runtime():
     _STORE_GETATTRIBUTE,
 ) = _build_allocation_basis_store_runtime()
 
+
 class LocalComputeAllocationBasisAuthorityStore:
     """Creation-only owner-reviewed basis store with rollback fencing."""
 
@@ -1034,19 +1035,8 @@ class LocalComputeAllocationBasisAuthorityStore:
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None
 
-    def _recover(self, _require_state=_STORE_STATE_GUARD) -> None:
-        _require_state(self)
-        observed = self._observed_sha256()
-        history = self._authority.read_history()
-        if history and history[-1].phase is AuthorityPhase.PREPARE:
-            pending = history[-1]
-            self._authority.recover(
-                observed_state_sha256=observed,
-                tx_id=pending.tx_id,
-                semantic_binding_sha256=pending.semantic_binding_sha256,
-            )
-            return
-        self._authority.recover(observed_state_sha256=observed)
+    def _recover(self, _sealed_recover=_STORE_RECOVER) -> None:
+        _sealed_recover(self)
 
     def _load(self) -> tuple[LocalComputeAllocationBasisRecord, ...]:
         if not self.path.exists():

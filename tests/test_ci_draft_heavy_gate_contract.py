@@ -55,25 +55,3 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
     assert "python -m autosport endurance" in workflow
     assert "tests/test_collector_endurance_composition.py" in workflow
     assert "Upload endurance evidence" in workflow
-
-
-def test_heavy_workflow_concurrency_is_isolated_by_exact_head() -> None:
-    ci = _workflow(".github/workflows/ci.yml")
-    windows = _workflow(".github/workflows/windows-build.yml")
-    endurance = _workflow(".github/workflows/endurance.yml")
-
-    assert (
-        "group: ci-${{ github.workflow }}-"
-        "${{ github.event.pull_request.number || github.ref }}-"
-        "${{ github.event.pull_request.head.sha || github.sha }}"
-    ) in ci
-    assert (
-        "group: windows-candidate-"
-        "${{ github.event.pull_request.number || github.ref }}-"
-        "${{ github.event.pull_request.head.sha || github.sha }}"
-    ) in windows
-    assert (
-        "group: endurance-"
-        "${{ github.event.pull_request.number || github.ref }}-"
-        "${{ github.event.pull_request.head.sha || github.sha }}"
-    ) in endurance

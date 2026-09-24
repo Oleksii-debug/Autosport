@@ -20,6 +20,8 @@ from .workspace_lock import WorkspaceEconomicLock
 _FACTORY_PUBLISH_TRANSACTION_FILENAME = ".factory-publish-transaction-v1.json"
 _FACTORY_MATERIALIZATION_LEDGER_FILENAME = ".factory-materialization-ledger-v1.json"
 _FACTORY_MATERIALIZATION_SCHEMA_VERSION = 1
+_FACTORY_PUBLISH_COMMIT_LEDGER_FILENAME = ".factory-publish-commit-ledger-v1.json"
+_FACTORY_PUBLISH_COMMIT_SCHEMA_VERSION = 1
 _FACTORY_ZERO_PREDECESSOR_SHA256 = "0" * 64
 
 
@@ -188,6 +190,296 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
                     raise ValueError("factory materialization receipt artifact hash mismatch")
                 return record
         raise ValueError(f"factory materialization receipt is missing: {kind}:{identity}")
+
+    def _publish_commit_ledger_path(self) -> Path:
+        return self.root / _FACTORY_PUBLISH_COMMIT_LEDGER_FILENAME
+
+    @staticmethod
+    def _publish_commit_digest(record: dict[str, object]) -> str:
+        payload = {
+            key: record[key]
+            for key in (
+                "committed_at",
+                "original_registry_sha256",
+                "final_registry_sha256",
+                "artifacts",
+                "predecessor_record_sha256",
+            )
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _validated_publish_artifacts(
+        raw_artifacts: object,
+    ) -> list[dict[str, str]]:
+        if type(raw_artifacts) is not list:
+            raise ValueError("factory publish commit artifacts must be a list")
+        validated: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw in raw_artifacts:
+            if type(raw) is not dict or set(raw) != {"kind", "identity", "sha256"}:
+                raise ValueError("factory publish commit artifact entry is invalid")
+            kind = _impl._text(raw.get("kind"), "factory publish commit artifact kind")
+            identity = _impl._text(
+                raw.get("identity"),
+                "factory publish commit artifact identity",
+            )
+            sha256 = _impl._sha256(
+                raw.get("sha256"),
+                "factory publish commit artifact sha256",
+            )
+            key = (kind, identity)
+            if key in seen:
+                raise ValueError(
+                    "factory publish commit artifact identities must be unique"
+                )
+            seen.add(key)
+            validated.append(
+                {"kind": kind, "identity": identity, "sha256": sha256}
+            )
+        canonical = sorted(
+            validated,
+            key=lambda artifact: (artifact["kind"], artifact["identity"]),
+        )
+        if validated != canonical:
+            raise ValueError("factory publish commit artifacts must be canonically sorted")
+        return canonical
+
+    def _read_publish_commit_ledger(self) -> list[dict[str, object]]:
+        path = self._publish_commit_ledger_path()
+        if not path.exists():
+            return []
+        try:
+            snapshot = RunTransaction._read_canonical_file_snapshot(
+                path,
+                "factory publish commit ledger",
+            )
+        except RunTransactionError as exc:
+            raise ValueError(
+                "factory publish commit ledger is not a stable regular object"
+            ) from exc
+        try:
+            payload = json.loads(snapshot.payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("factory publish commit ledger is invalid JSON") from exc
+        if type(payload) is not dict or set(payload) != {"schema_version", "records"}:
+            raise ValueError("factory publish commit ledger fields mismatch")
+        if payload.get("schema_version") != _FACTORY_PUBLISH_COMMIT_SCHEMA_VERSION:
+            raise ValueError("factory publish commit ledger schema version mismatch")
+        records = payload.get("records")
+        if type(records) is not list:
+            raise ValueError("factory publish commit ledger records must be a list")
+
+        previous = _FACTORY_ZERO_PREDECESSOR_SHA256
+        artifact_owners: set[tuple[str, str]] = set()
+        validated: list[dict[str, object]] = []
+        for raw in records:
+            if type(raw) is not dict or set(raw) != {
+                "committed_at",
+                "original_registry_sha256",
+                "final_registry_sha256",
+                "artifacts",
+                "predecessor_record_sha256",
+                "record_sha256",
+            }:
+                raise ValueError("factory publish commit record fields mismatch")
+            committed = _impl._instant(
+                raw.get("committed_at"),
+                "factory publish committed_at",
+            ).astimezone(timezone.utc)
+            canonical_committed = committed.isoformat().replace("+00:00", "Z")
+            if raw.get("committed_at") != canonical_committed:
+                raise ValueError(
+                    "factory publish committed_at must be canonical UTC Z"
+                )
+            original_sha256 = _impl._sha256(
+                raw.get("original_registry_sha256"),
+                "factory publish original_registry_sha256",
+            )
+            final_sha256 = _impl._sha256(
+                raw.get("final_registry_sha256"),
+                "factory publish final_registry_sha256",
+            )
+            if original_sha256 == final_sha256:
+                raise ValueError(
+                    "factory publish commit must change ScientificRegistry state"
+                )
+            artifacts = self._validated_publish_artifacts(raw.get("artifacts"))
+            for artifact in artifacts:
+                key = (artifact["kind"], artifact["identity"])
+                if key in artifact_owners:
+                    raise ValueError(
+                        "factory artifact appears in multiple publish commits"
+                    )
+                artifact_owners.add(key)
+            predecessor = _impl._sha256(
+                raw.get("predecessor_record_sha256"),
+                "factory publish predecessor_record_sha256",
+            )
+            record_sha256 = _impl._sha256(
+                raw.get("record_sha256"),
+                "factory publish record_sha256",
+            )
+            if predecessor != previous:
+                raise ValueError(
+                    "factory publish commit ledger predecessor mismatch"
+                )
+            if record_sha256 != self._publish_commit_digest(raw):
+                raise ValueError(
+                    "factory publish commit ledger record digest mismatch"
+                )
+            checked = dict(raw)
+            checked["artifacts"] = artifacts
+            validated.append(checked)
+            previous = record_sha256
+        return validated
+
+    def _record_publish_commit(
+        self,
+        transaction: dict[str, object],
+    ) -> dict[str, object]:
+        """Record one factory transaction only after its final registry state is durable.
+
+        The canonical ExperimentRunner and crash-recovery paths call this while
+        already holding the workspace economic lock. A receipt therefore cannot
+        precede the registry commit it attests to.
+        """
+
+        if type(transaction) is not dict or set(transaction) != {
+            "schema_version",
+            "phase",
+            "original_registry_sha256",
+            "final_registry_sha256",
+            "artifacts",
+        }:
+            raise ValueError("factory publish commit transaction fields mismatch")
+        if (
+            transaction.get("schema_version") != 1
+            or transaction.get("phase") != "prepared"
+        ):
+            raise ValueError("factory publish commit transaction identity mismatch")
+        original_sha256 = _impl._sha256(
+            transaction.get("original_registry_sha256"),
+            "factory publish original_registry_sha256",
+        )
+        final_sha256 = _impl._sha256(
+            transaction.get("final_registry_sha256"),
+            "factory publish final_registry_sha256",
+        )
+        if original_sha256 == final_sha256:
+            raise ValueError(
+                "factory publish commit must change ScientificRegistry state"
+            )
+        artifacts = self._validated_publish_artifacts(transaction.get("artifacts"))
+        for artifact in artifacts:
+            kind = artifact["kind"]
+            identity = artifact["identity"]
+            if not self.path_for_testing(kind, identity).exists():
+                raise ValueError(
+                    "factory publish commit is missing transaction artifact: "
+                    f"{kind}:{identity}"
+                )
+            if self.sha256(kind, identity) != artifact["sha256"]:
+                raise ValueError(
+                    "factory publish commit artifact hash mismatch: "
+                    f"{kind}:{identity}"
+                )
+
+        records = self._read_publish_commit_ledger()
+        for existing in records:
+            if (
+                existing["original_registry_sha256"] == original_sha256
+                and existing["final_registry_sha256"] == final_sha256
+                and existing["artifacts"] == artifacts
+            ):
+                return existing
+
+        prior_artifacts = {
+            (artifact["kind"], artifact["identity"])
+            for existing in records
+            for artifact in existing["artifacts"]
+        }
+        for artifact in artifacts:
+            if (artifact["kind"], artifact["identity"]) in prior_artifacts:
+                raise ValueError(
+                    "factory artifact is already bound to another publish commit"
+                )
+
+        now = self._clock()
+        if not isinstance(now, datetime) or now.tzinfo is None:
+            raise ValueError(
+                "factory publish commit clock must return an aware datetime"
+            )
+        committed_at = (
+            now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        record: dict[str, object] = {
+            "committed_at": committed_at,
+            "original_registry_sha256": original_sha256,
+            "final_registry_sha256": final_sha256,
+            "artifacts": artifacts,
+            "predecessor_record_sha256": (
+                records[-1]["record_sha256"]
+                if records
+                else _FACTORY_ZERO_PREDECESSOR_SHA256
+            ),
+        }
+        record["record_sha256"] = self._publish_commit_digest(record)
+        atomic_write_json(
+            self._publish_commit_ledger_path(),
+            {
+                "schema_version": _FACTORY_PUBLISH_COMMIT_SCHEMA_VERSION,
+                "records": [*records, record],
+            },
+        )
+        return record
+
+    def publication_receipt(
+        self,
+        kind: str,
+        identity: str,
+        *,
+        expected_sha256: str | None = None,
+    ) -> dict[str, object]:
+        """Resolve transaction-bound executable availability for one artifact."""
+
+        actual_sha256 = self.sha256(kind, identity)
+        if expected_sha256 is not None and actual_sha256 != _impl._sha256(
+            expected_sha256,
+            "expected_sha256",
+        ):
+            raise ValueError("factory publication receipt artifact hash mismatch")
+        canonical_kind = _impl._text(kind, "kind")
+        canonical_identity = _impl._text(identity, "identity")
+        matches: list[dict[str, object]] = []
+        for record in self._read_publish_commit_ledger():
+            for artifact in record["artifacts"]:
+                if (
+                    artifact["kind"] == canonical_kind
+                    and artifact["identity"] == canonical_identity
+                ):
+                    if artifact["sha256"] != actual_sha256:
+                        raise ValueError(
+                            "factory publication receipt artifact hash mismatch"
+                        )
+                    matches.append(record)
+        if len(matches) != 1:
+            raise ValueError(
+                f"factory publication receipt is missing or ambiguous: {kind}:{identity}"
+            )
+        record = dict(matches[0])
+        record["artifacts"] = [
+            dict(artifact) for artifact in matches[0]["artifacts"]
+        ]
+        return record
 
     def _stable_snapshot(self, kind: str, identity: str):
         path = self._path(kind, identity)
@@ -526,6 +818,7 @@ def _recover_interrupted_factory_publish(
                     "committed factory transaction artifact hash mismatch: "
                     f"{kind}:{identity}"
                 )
+        store._record_publish_commit(transaction)
         _unlink_transaction_manifest(path)
         return
 
@@ -1352,6 +1645,7 @@ class ExperimentRunner(_impl.ExperimentRunner):
                     staged_store._rollback(created_artifacts, publish_error)
                     _unlink_transaction_manifest(transaction_path, publish_error)
                     raise
+                real_store._record_publish_commit(transaction)
                 _unlink_transaction_manifest(transaction_path)
                 return result
 
@@ -1693,6 +1987,7 @@ class ExperimentRunner(_impl.ExperimentRunner):
                     staged_store._rollback(created_artifacts, publish_error)
                     _unlink_transaction_manifest(transaction_path, publish_error)
                     raise
+                real_store._record_publish_commit(transaction)
                 _unlink_transaction_manifest(transaction_path)
                 return result
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+import http.client as _http_client
 import json
 import pickle
 
@@ -18,18 +19,32 @@ from autosport.betfair_account_readonly import (
 
 
 class _Response:
+    status = 200
+    code = 200
+    reason = "OK"
+    msg = "OK"
+
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+
+    def info(self):
+        return {}
+
+    def read(self, limit: int | None = None) -> bytes:
+        if limit is None:
+            return self._payload
+        assert limit >= len(self._payload)
+        return self._payload
+
+    def close(self) -> None:
+        return None
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, traceback):
+        self.close()
         return False
-
-    def read(self, limit: int) -> bytes:
-        assert limit >= len(self._payload)
-        return self._payload
 
 
 def _install_provider(
@@ -40,14 +55,33 @@ def _install_provider(
     account_error: str | None = None,
     funds_error: str | None = None,
 ) -> list[str]:
+    """Stub provider I/O below the product-owned private opener boundary."""
     methods: list[str] = []
 
-    def urlopen(request, timeout: float):
-        assert timeout > 0
-        assert request.data is not None
-        rpc = json.loads(request.data.decode("utf-8"))
+    def fake_request(
+        connection,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        assert method == "POST"
+        assert url.endswith("/json-rpc/v1")
+        assert isinstance(body, bytes)
+        assert headers is not None
+        normalized_headers = {key.lower(): value for key, value in headers.items()}
+        assert normalized_headers["x-application"]
+        assert normalized_headers["x-authentication"]
+        rpc = json.loads(body.decode("utf-8"))
+        methods.append(rpc["method"])
+        connection._autosport_funds_request = rpc
+        connection._autosport_funds_encode_chunked = encode_chunked
+
+    def fake_getresponse(connection):
+        rpc = connection._autosport_funds_request
         method = rpc["method"]
-        methods.append(method)
         if method.endswith("getAccountDetails"):
             if account_error is not None:
                 payload = {
@@ -92,7 +126,8 @@ def _install_provider(
             )
         )
 
-    monkeypatch.setattr(_readonly, "urlopen", urlopen)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "request", fake_request)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "getresponse", fake_getresponse)
     return methods
 
 

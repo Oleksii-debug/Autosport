@@ -603,5 +603,40 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertIsNotNone(engine._outcomes_authority)
 
 
+    def test_replayed_post_init_cannot_reauthorize_mutated_outcomes(self) -> None:
+        key = "event-1|winner|alice"
+        engine = SettlementEngine({key: "win"})
+        engine.outcomes[key] = "loss"
+        engine._outcomes_authority = None
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority already initialized",
+        ):
+            engine.__post_init__()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.record({})
+
+    def test_malformed_constructor_cannot_be_upgraded_by_replayed_post_init(self) -> None:
+        engine = SettlementEngine(["not-a-dict"])  # type: ignore[arg-type]
+        engine.outcomes = {"event-1|winner|alice": "win"}
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority already initialized",
+        ):
+            engine.__post_init__()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcome authority changed",
+        ):
+            engine.record({})
+
+
 if __name__ == "__main__":
     unittest.main()

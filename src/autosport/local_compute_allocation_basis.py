@@ -787,9 +787,11 @@ def _build_allocation_basis_store_runtime():
     error_type = LocalComputeAllocationBasisError
     goal_store_type = _CANONICAL_ECONOMIC_GOAL_STORE_CLASS
     goal_store_load = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
+    goal_store_file_name = goal_store_type.FILE_NAME
     goal_to_payload = _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD
     json_dumps = json.dumps
     sha256 = hashlib.sha256
+    object_new = object.__new__
     sealed_state = weakref.WeakKeyDictionary()
     authority_operations = {
         "read_history": authority_type.read_history,
@@ -1026,7 +1028,9 @@ def _build_allocation_basis_store_runtime():
         require_state(self)
         try:
             frozen_workspace, _path, _authority, _root = sealed_state[self]
-            goal_store = goal_store_type(frozen_workspace)
+            goal_store = object_new(goal_store_type)
+            goal_store.workspace = frozen_workspace
+            goal_store.path = frozen_workspace / goal_store_file_name
             goal = goal_store_load(goal_store)
             raw = json_dumps(
                 goal_to_payload(goal),

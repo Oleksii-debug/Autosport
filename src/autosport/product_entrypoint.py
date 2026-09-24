@@ -3,13 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import signal
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
+from .localization_product_cli import product_cli_text
+from .paths import default_workspace
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
 
@@ -268,28 +272,143 @@ def run_product_command(
         return 3
 
 
+_REQUIRED_ARGUMENTS_RE = re.compile(
+    r"^the following arguments are required: (?P<arguments>.+)$"
+)
+_INVALID_NUMBER_RE = re.compile(
+    r"^argument (?P<option>--?[^ :]+): invalid (?:int|float) value: (?P<value>.+)$"
+)
+_UNRECOGNIZED_ARGUMENTS_RE = re.compile(
+    r"^unrecognized arguments: (?P<arguments>.+)$"
+)
+_MISSING_OPTION_VALUE_RE = re.compile(
+    r"^argument (?P<option>--?[^ :]+): expected one argument$"
+)
+
+
+def _localized_argparse_error(message: str) -> str:
+    match = _REQUIRED_ARGUMENTS_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.required",
+            arguments=match.group("arguments"),
+        )
+
+    match = _INVALID_NUMBER_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.invalid_number",
+            option=match.group("option"),
+            value=match.group("value"),
+        )
+
+    match = _UNRECOGNIZED_ARGUMENTS_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.unrecognized",
+            arguments=match.group("arguments"),
+        )
+
+    match = _MISSING_OPTION_VALUE_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.missing_value",
+            option=match.group("option"),
+        )
+
+    return product_cli_text("product.cli.error.generic")
+
+
+class _UkrainianArgumentParser(argparse.ArgumentParser):
+    """Argparse formatter with Ukrainian public presentation text."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        rendered = _localized_argparse_error(message)
+        self.exit(
+            2,
+            (
+                f"{self.prog}: "
+                f"{product_cli_text('product.cli.error.prefix')} "
+                f"{rendered}\n"
+            ),
+        )
+
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if getattr(parsed, "workspace", None) is None:
+            parsed.workspace = default_workspace()
+        return parsed
+
+    def format_usage(self) -> str:
+        return super().format_usage().replace(
+            "usage: ", product_cli_text("product.cli.usage_prefix"), 1
+        )
+
+    def format_help(self) -> str:
+        rendered = super().format_help().replace(
+            "usage: ", product_cli_text("product.cli.usage_prefix"), 1
+        )
+        rendered = rendered.replace(
+            "options:\n", f"{product_cli_text('product.cli.options_heading')}\n", 1
+        )
+        rendered = rendered.replace(
+            "optional arguments:\n",
+            f"{product_cli_text('product.cli.options_heading')}\n",
+            1,
+        )
+        return rendered
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _UkrainianArgumentParser(
         prog="autosport-product",
-        description=(
-            "Run the canonical durable Autosport PAPER product. Provider credentials "
-            "remain external to Autosport and are never accepted as CLI arguments."
-        ),
+        description=product_cli_text("product.cli.description"),
+        add_help=False,
     )
-    parser.add_argument("--workspace", type=Path, default=Path(".autosport-product"))
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help=product_cli_text("product.cli.help"),
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        metavar=product_cli_text("product.cli.workspace.metavar"),
+        help=product_cli_text("product.cli.workspace.help"),
+    )
     parser.add_argument(
         "--source-factory",
         required=True,
-        help="external product source factory in module:function form",
+        metavar=product_cli_text("product.cli.source_factory.metavar"),
+        help=product_cli_text("product.cli.source_factory.help"),
     )
-    parser.add_argument("--bankroll", default="10000")
+    parser.add_argument(
+        "--bankroll",
+        default="10000",
+        metavar=product_cli_text("product.cli.bankroll.metavar"),
+        help=product_cli_text("product.cli.bankroll.help"),
+    )
     parser.add_argument(
         "--max-cycles",
         type=int,
         default=None,
-        help="optional bounded cycle count for qualification/supervised runs",
+        metavar=product_cli_text("product.cli.max_cycles.metavar"),
+        help=product_cli_text("product.cli.max_cycles.help"),
     )
-    parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=30.0,
+        metavar=product_cli_text("product.cli.poll_seconds.metavar"),
+        help=product_cli_text("product.cli.poll_seconds.help"),
+    )
     return parser
 
 

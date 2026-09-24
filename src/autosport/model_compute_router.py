@@ -1373,11 +1373,16 @@ def route_compute(
     domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
-    if not isinstance(request, ComputeRouteRequest):
-        raise TypeError("request must be ComputeRouteRequest")
-    if not isinstance(policy, ComputeRoutingPolicy):
-        raise TypeError("policy must be ComputeRoutingPolicy")
+    if type(request) is not ComputeRouteRequest:
+        raise TypeError("request must be exact ComputeRouteRequest")
+    if type(policy) is not ComputeRoutingPolicy:
+        raise TypeError("policy must be exact ComputeRoutingPolicy")
     now = _instant("as_of", as_of)
+    created_at = _instant("created_at", request.created_at)
+    if now < created_at:
+        raise ModelComputeRouterError(
+            "as_of precedes request creation"
+        )
     if request.data_classification is DataClassification.SECRET:
         return ComputeRouteDecision.build(
             decision_id=f"{request.request_id}:wait",
@@ -1406,10 +1411,6 @@ def route_compute(
         if domain_observation is None
         else domain_observation.observation_id
     )
-    if now < _instant("created_at", request.created_at):
-        raise ModelComputeRouterError(
-            "as_of precedes request creation"
-        )
     if now >= _instant(
         "decision_deadline", request.decision_deadline
     ):

@@ -500,6 +500,55 @@ def test_canonical_account_issuance_ignores_module_network_resolver_rebind(
     assert network_calls == []
 
 
+@pytest.mark.parametrize("operation", ["profile", "snapshot"])
+def test_canonical_account_issuance_ignores_module_registry_rebind(
+    monkeypatch,
+    operation: str,
+):
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    virtual_get_calls: list[str] = []
+
+    def forged_get(url, *, headers, timeout_seconds):
+        del headers, timeout_seconds
+        virtual_get_calls.append(url)
+        return http_response()
+
+    setattr(client._transport, "get", forged_get)
+    monkeypatch.setattr(subject, "_PROVIDER_TRANSPORTS", {})
+    monkeypatch.setattr(subject, "_PROVIDER_FETCHES", {})
+
+    opener = client._transport._opener  # type: ignore[attr-defined]
+    https_handler = next(
+        handler
+        for handler in opener.handlers
+        if type(handler) is HTTPSHandler
+    )
+    network_calls: list[str] = []
+
+    def forged_https_open(request):
+        network_calls.append(request.full_url)
+        return _forged_wallet_network_response()
+
+    https_handler.https_open = forged_https_open
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network authority changed",
+    ):
+        if operation == "profile":
+            client.capability_profile()
+        else:
+            client.read_account_snapshot(
+                frozenset({BookmakerCapability.BALANCE_READ})
+            )
+
+    assert virtual_get_calls == []
+    assert network_calls == []
+
+
 @pytest.mark.parametrize("mutation", ["replace", "weaken-in-place"])
 
 def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(

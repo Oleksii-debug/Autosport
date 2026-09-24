@@ -64,6 +64,11 @@ class _MarketStore:
         return None
 
 
+class _StartTransitionStore:
+    def pending(self):
+        return None
+
+
 def _runtime(tmp_path, *, stop_called: Event) -> AutonomousProductRuntime:
     return AutonomousProductRuntime(
         workspace=tmp_path,
@@ -79,6 +84,7 @@ def _runtime(tmp_path, *, stop_called: Event) -> AutonomousProductRuntime:
         invalidations=SimpleNamespace(),
         dependencies=SimpleNamespace(),
         _runtime_lease=_Lease(),
+        _start_transition_store=_StartTransitionStore(),
     )
 
 

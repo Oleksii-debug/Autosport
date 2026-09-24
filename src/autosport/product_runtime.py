@@ -85,6 +85,195 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         super().release()
 
 
+class _ProductStartTransitionStore:
+    """Durable START transaction journal under the runtime-wide workspace lease."""
+
+    _SCHEMA = "autosport.product_runtime_start_transition"
+    _VERSION = 1
+    _PHASES = frozenset(
+        {"STARTING", "COMPLETED", "ROLLED_BACK", "RECOVERY_REQUIRED"}
+    )
+    _FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "generation",
+            "phase",
+            "collector_was_stopped",
+            "session_pre_state",
+        }
+    )
+    _PENDING_PHASES = frozenset({"STARTING", "RECOVERY_REQUIRED"})
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def _read(self) -> dict[str, object] | None:
+        if not self.path.exists():
+            return None
+        try:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ProductCompositionError(
+                "cannot verify durable product START transition"
+            ) from exc
+        if (
+            type(raw) is not dict
+            or set(raw) != self._FIELDS
+            or raw.get("schema") != self._SCHEMA
+            or raw.get("schema_version") != self._VERSION
+        ):
+            raise ProductCompositionError(
+                "durable product START transition schema mismatch"
+            )
+        generation = raw.get("generation")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation <= 0
+        ):
+            raise ProductCompositionError(
+                "durable product START transition generation is invalid"
+            )
+        phase = raw.get("phase")
+        if phase not in self._PHASES:
+            raise ProductCompositionError(
+                "durable product START transition phase is invalid"
+            )
+        collector_was_stopped = raw.get("collector_was_stopped")
+        if type(collector_was_stopped) is not bool:
+            raise ProductCompositionError(
+                "durable product START transition collector pre-state is invalid"
+            )
+        session_pre_state = raw.get("session_pre_state")
+        if session_pre_state not in {
+            SessionState.RUNNING.value,
+            SessionState.PAUSED.value,
+            SessionState.STOPPED.value,
+        }:
+            raise ProductCompositionError(
+                "durable product START transition session pre-state is invalid"
+            )
+        if collector_was_stopped != (
+            session_pre_state == SessionState.STOPPED.value
+        ):
+            raise ProductCompositionError(
+                "durable product START transition pre-state is incoherent"
+            )
+        return raw
+
+    def pending(self) -> dict[str, object] | None:
+        raw = self._read()
+        if raw is None or raw["phase"] not in self._PENDING_PHASES:
+            return None
+        return dict(raw)
+
+    def begin(
+        self,
+        *,
+        collector_was_stopped: bool,
+        session_pre_state: str,
+    ) -> int:
+        if type(collector_was_stopped) is not bool:
+            raise ProductCompositionError(
+                "product START collector pre-state must be boolean"
+            )
+        if session_pre_state not in {
+            SessionState.RUNNING.value,
+            SessionState.PAUSED.value,
+            SessionState.STOPPED.value,
+        }:
+            raise ProductCompositionError(
+                "product START session pre-state is invalid"
+            )
+        if collector_was_stopped != (
+            session_pre_state == SessionState.STOPPED.value
+        ):
+            raise ProductCompositionError(
+                "product START pre-state authorities disagree"
+            )
+        current = self._read()
+        if current is not None and current["phase"] in self._PENDING_PHASES:
+            raise ProductCompositionError(
+                "unfinished product START transition requires recovery"
+            )
+        generation = 1 if current is None else int(current["generation"]) + 1
+        atomic_write_json(
+            self.path,
+            {
+                "schema": self._SCHEMA,
+                "schema_version": self._VERSION,
+                "generation": generation,
+                "phase": "STARTING",
+                "collector_was_stopped": collector_was_stopped,
+                "session_pre_state": session_pre_state,
+            },
+        )
+        verified = self._read()
+        if (
+            verified is None
+            or verified["generation"] != generation
+            or verified["phase"] != "STARTING"
+        ):
+            raise ProductCompositionError(
+                "durable product START transition publication could not be verified"
+            )
+        return generation
+
+    def _mark(
+        self,
+        generation: int,
+        phase: str,
+        *,
+        allowed_from: frozenset[str],
+    ) -> None:
+        current = self._read()
+        if current is None or current["generation"] != generation:
+            raise ProductCompositionError(
+                "durable product START transition generation changed"
+            )
+        current_phase = current["phase"]
+        if current_phase == phase:
+            return
+        if current_phase not in allowed_from:
+            raise ProductCompositionError(
+                "durable product START transition phase changed unexpectedly"
+            )
+        updated = dict(current)
+        updated["phase"] = phase
+        atomic_write_json(self.path, updated)
+        verified = self._read()
+        if (
+            verified is None
+            or verified["generation"] != generation
+            or verified["phase"] != phase
+        ):
+            raise ProductCompositionError(
+                "durable product START transition update could not be verified"
+            )
+
+    def mark_completed(self, generation: int) -> None:
+        self._mark(
+            generation,
+            "COMPLETED",
+            allowed_from=frozenset({"STARTING"}),
+        )
+
+    def mark_rolled_back(self, generation: int) -> None:
+        self._mark(
+            generation,
+            "ROLLED_BACK",
+            allowed_from=frozenset({"STARTING", "RECOVERY_REQUIRED"}),
+        )
+
+    def mark_recovery_required(self, generation: int) -> None:
+        self._mark(
+            generation,
+            "RECOVERY_REQUIRED",
+            allowed_from=frozenset({"STARTING", "RECOVERY_REQUIRED"}),
+        )
+
+
 class ProductCollectorSource(CollectorServiceSource, Protocol):
     """One acquisition source plus canonical delta-to-event resolution.
 
@@ -324,12 +513,13 @@ class AutonomousProductRuntime:
     invalidations: BoundedMirrorInvalidationBuffer
     dependencies: FocusedMirrorDependencyIndex
     _runtime_lease: _ProductRuntimeLease
-    _closed: bool = False
+    _start_transition_store: _ProductStartTransitionStore
     _decision_commit_lock: RLock = field(
         default_factory=RLock,
         init=False,
         repr=False,
     )
+    _closed: bool = False
 
     def _require_runtime_authority(self) -> None:
         if self._closed or not self._runtime_lease.authority_active:
@@ -351,10 +541,22 @@ class AutonomousProductRuntime:
             )
         return value
 
-    def _coherent_status(self) -> ContinuousSessionStatus:
+    def _require_start_transition_resolved(self) -> None:
+        if self._start_transition_store.pending() is not None:
+            raise ProductCompositionError(
+                "product START transition requires recovery before positive lifecycle use"
+            )
+
+    def _coherent_status(
+        self,
+        *,
+        allow_pending_start: bool = False,
+    ) -> ContinuousSessionStatus:
         """Project lifecycle truth only when collector and session durable state agree."""
 
         self._require_runtime_authority()
+        if not allow_pending_start:
+            self._require_start_transition_resolved()
         coordinator_status = self.coordinator.status()
         state = self._state_value(coordinator_status)
         try:
@@ -400,10 +602,32 @@ class AutonomousProductRuntime:
         except BaseException:
             pass
 
-    def _compensate_failed_start(self, primary_error: BaseException) -> None:
-        # start() spans two durable authorities. Either call can fail after its
-        # durable mutation committed, so both STOP compensations are attempted
-        # independently and the original start failure remains primary truth.
+    def _mark_start_recovery_required(
+        self,
+        generation: int,
+        primary_error: BaseException,
+    ) -> None:
+        try:
+            self._start_transition_store.mark_recovery_required(generation)
+        except BaseException as transition_error:
+            self._note_secondary_failure(
+                primary_error,
+                action="START recovery journal",
+                secondary_error=transition_error,
+            )
+
+    def _compensate_failed_start(
+        self,
+        primary_error: BaseException,
+        *,
+        generation: int,
+    ) -> None:
+        # The START journal is durable before either child mutation. If a child
+        # transition or final journal publication fails, attempt both STOP
+        # authorities independently. Only verified coherent STOPPED can close the
+        # transaction as rolled back; otherwise the durable transition remains
+        # recovery-required and positive lifecycle use stays fenced.
+        compensation_failed = False
         for action, stop in (
             ("collector STOP compensation", self.collector.stop),
             ("session STOP compensation", self.coordinator.stop),
@@ -411,11 +635,53 @@ class AutonomousProductRuntime:
             try:
                 stop("runtime_start_failed")
             except BaseException as secondary_error:
+                compensation_failed = True
                 self._note_secondary_failure(
                     primary_error,
                     action=action,
                     secondary_error=secondary_error,
                 )
+
+        if not compensation_failed:
+            try:
+                status = self._coherent_status(allow_pending_start=True)
+                if self._state_value(status) != SessionState.STOPPED.value:
+                    raise ProductCompositionError(
+                        "START compensation did not reach coherent STOPPED state"
+                    )
+            except BaseException as secondary_error:
+                compensation_failed = True
+                self._note_secondary_failure(
+                    primary_error,
+                    action="START compensation verification",
+                    secondary_error=secondary_error,
+                )
+
+        if compensation_failed:
+            self._mark_start_recovery_required(generation, primary_error)
+            return
+
+        try:
+            self._start_transition_store.mark_rolled_back(generation)
+        except BaseException as transition_error:
+            # A still-STARTING journal is intentionally fail-closed and will be
+            # recovered on restart. Keep the original START failure primary.
+            self._note_secondary_failure(
+                primary_error,
+                action="START rollback journal",
+                secondary_error=transition_error,
+            )
+
+    def _recover_interrupted_start(self) -> None:
+        pending = self._start_transition_store.pending()
+        if pending is None:
+            return
+        try:
+            self.stop("runtime_start_recovery")
+        except BaseException as exc:
+            raise ProductCompositionError(
+                "cannot recover interrupted product START transition"
+            ) from exc
 
     @contextmanager
     def decision_commit_fence(self) -> Iterator[None]:
@@ -433,18 +699,33 @@ class AutonomousProductRuntime:
 
     def start(self) -> ContinuousSessionStatus:
         # Lifecycle transitions and decision publication share this process-local
-        # fence. It is deliberately narrower than provider/strategy work: only the
-        # already-prepared durable decision commit can delay START/PAUSE/STOP/CLOSE.
+        # fence. Only the already-prepared durable decision commit can delay a
+        # lifecycle transition; provider/strategy work happens outside this lock.
         with self._decision_commit_lock:
-            # A prior interrupted lifecycle transition must be repaired with explicit
-            # STOP before any new resume is allowed.
-            self._coherent_status()
+            current = self._coherent_status()
+            current_state = self._state_value(current)
+            if current_state == SessionState.RUNNING.value:
+                return current
+
+            generation = self._start_transition_store.begin(
+                collector_was_stopped=current_state == SessionState.STOPPED.value,
+                session_pre_state=current_state,
+            )
             try:
                 self.collector.resume()
                 self.coordinator.resume()
-                return self._coherent_status()
+                resolved = self._coherent_status(allow_pending_start=True)
+                if self._state_value(resolved) != SessionState.RUNNING.value:
+                    raise ProductCompositionError(
+                        "product START did not reach coherent RUNNING state"
+                    )
+                self._start_transition_store.mark_completed(generation)
+                return resolved
             except BaseException as primary_error:
-                self._compensate_failed_start(primary_error)
+                self._compensate_failed_start(
+                    primary_error,
+                    generation=generation,
+                )
                 raise
 
     def pause(self) -> ContinuousSessionStatus:
@@ -466,9 +747,7 @@ class AutonomousProductRuntime:
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
         with self._decision_commit_lock:
             self._require_runtime_authority()
-            # STOP is also the explicit recovery action for a previously split
-            # lifecycle graph, so do not preflight coherence here. Attempt both
-            # durable STOP authorities even if either side reports an error.
+            pending = self._start_transition_store.pending()
             collector_error: BaseException | None = None
             coordinator_error: BaseException | None = None
             try:
@@ -487,10 +766,36 @@ class AutonomousProductRuntime:
                         action="session STOP",
                         secondary_error=coordinator_error,
                     )
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        collector_error,
+                    )
                 raise collector_error
             if coordinator_error is not None:
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        coordinator_error,
+                    )
                 raise coordinator_error
-            return self._coherent_status()
+
+            resolved = self._coherent_status(allow_pending_start=True)
+            if self._state_value(resolved) != SessionState.STOPPED.value:
+                error = ProductCompositionError(
+                    "canonical product STOP did not reach coherent STOPPED state"
+                )
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        error,
+                    )
+                raise error
+            if pending is not None:
+                self._start_transition_store.mark_rolled_back(
+                    int(pending["generation"])
+                )
+            return resolved
 
     def status(self) -> ContinuousSessionStatus:
         return self._coherent_status()
@@ -501,9 +806,6 @@ class AutonomousProductRuntime:
 
     def close(self) -> None:
         with self._decision_commit_lock:
-            # Revoke lifecycle authority before closing resources or releasing the
-            # workspace lease. Cleanup may fail, but a closing runtime must never
-            # become usable again after exclusive ownership can be transferred.
             self._closed = True
             try:
                 self.market_store.close()
@@ -650,7 +952,14 @@ def build_autonomous_product_runtime(
             invalidations=invalidations,
             dependencies=dependencies,
             _runtime_lease=runtime_lease,
+            _start_transition_store=_ProductStartTransitionStore(
+                root / "product_start_transition.json"
+            ),
         )
+        # An interrupted START is recovered while the same exclusive product lease
+        # still serializes the workspace. Conservatively reconverge to STOPPED
+        # before handing runtime authority back to a caller.
+        runtime._recover_interrupted_start()
         # Runtime lifetime, not builder lifetime, owns the process lease.
         lease_stack.pop_all()
         return runtime

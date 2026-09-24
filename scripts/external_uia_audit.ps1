@@ -206,6 +206,24 @@ try {
         throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
     }
 
+    # A native top-level window can be visible before the embedded WebView2
+    # accessibility provider has projected its semantic DOM into UIA.  Treating
+    # those two states as equivalent makes the external gate race startup.  Keep
+    # one bounded startup deadline and wait for a stable semantic sentinel instead.
+    $semanticReady = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
+        if ($null -ne $uiaRoot) {
+            $semanticReady = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
+            if ($null -ne $semanticReady) { break }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($null -eq $semanticReady) {
+        throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
+    }
+
     $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $report.process_id = [int]$uiaRoot.Current.ProcessId
     $report.root_name = [string]$uiaRoot.Current.Name
@@ -219,7 +237,7 @@ try {
     )
     $report.descendant_count = $descendants.Count
 
-    $manualOpen = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
+    $manualOpen = $semanticReady
     if ($null -eq $manualOpen) {
         $report.failures += 'automation_id=330: cannot open manual calculation workbench for external UIA audit'
     } else {

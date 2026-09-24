@@ -642,6 +642,93 @@ class ProductDecisionActivationTests(unittest.TestCase):
         reopened = ProductDecisionActivationStore(self.workspace)
         self.assertEqual(reopened.path, self.store.path)
 
+    def test_exact_binding_replacement_and_coordinate_retarget_cannot_mint_start(
+        self,
+    ) -> None:
+        authority = self.store._authority
+        original_binding = authority.workspace_binding
+        original_state = (
+            authority.workspace_binding,
+            authority.workspace_instance_id,
+            authority.workspace_binding_path,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.records_dir,
+            authority.namespace_marker_path,
+        )
+        forged_instance_id = "caller-selected-workspace-instance"
+        forged_locator = original_binding.workspace_locator + "::caller-retarget"
+        forged_locator_sha = hashlib.sha256(
+            forged_locator.encode("utf-8")
+        ).hexdigest()
+        forged_path_binding = (
+            authority.authority_root
+            / "workspace-bindings"
+            / forged_locator_sha[:2]
+            / f"{forged_locator_sha}.json"
+        )
+        binding_type = type(original_binding)
+        forged_binding = binding_type(
+            workspace=original_binding.workspace,
+            authority_root=original_binding.authority_root,
+            workspace_instance_id=forged_instance_id,
+            workspace_marker_path=original_binding.workspace_marker_path,
+            path_binding_path=forged_path_binding,
+            workspace_locator=forged_locator,
+            workspace_locator_sha256=forged_locator_sha,
+        )
+        forged_namespace = hashlib.sha256(
+            "\0".join(
+                (
+                    activation_module.MONOTONIC_AUTHORITY_ID,
+                    forged_instance_id,
+                    authority.domain,
+                    authority.key,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        forged_journal = (
+            authority.authority_root
+            / "journals"
+            / forged_namespace[:2]
+            / forged_namespace
+        )
+
+        authority.workspace_binding = forged_binding
+        authority.workspace_instance_id = forged_instance_id
+        authority.workspace_binding_path = original_binding.workspace_marker_path
+        authority.namespace_sha256 = forged_namespace
+        authority.journal_dir = forged_journal
+        authority.records_dir = forged_journal / "records"
+        authority.namespace_marker_path = (
+            authority.authority_root
+            / "namespace-bindings"
+            / forged_namespace[:2]
+            / f"{forged_namespace}.json"
+        )
+        try:
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "workspace identity binding construction state changed",
+            ):
+                self._initialize()
+            self.assertFalse(self.store.path.exists())
+            self.assertFalse(forged_journal.exists())
+        finally:
+            (
+                authority.workspace_binding,
+                authority.workspace_instance_id,
+                authority.workspace_binding_path,
+                authority.namespace_sha256,
+                authority.journal_dir,
+                authority.records_dir,
+                authority.namespace_marker_path,
+            ) = original_state
+
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
     def test_exact_same_root_mwa_cannot_replace_constructor_authority(
         self,
     ) -> None:

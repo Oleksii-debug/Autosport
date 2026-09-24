@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -232,6 +233,31 @@ def test_scientific_registry_authority_cannot_be_retargeted_after_construction(
         match="scientific registry authority class binding changed",
     ):
         ShadowedResearchSupervisor(supervisor.path, registry)
+
+
+def test_scientific_registry_authority_rejects_relative_path_retarget(
+    tmp_path,
+    monkeypatch,
+):
+    alternate_root = tmp_path / "alternate-root"
+    alternate_root.mkdir()
+    _, alternate_supervisor = _workspace(alternate_root / "workspace")
+
+    original_root = tmp_path / "original-root"
+    original_root.mkdir()
+    monkeypatch.chdir(original_root)
+    _, supervisor = _workspace(Path("workspace"))
+
+    monkeypatch.chdir(alternate_root)
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="scientific registry authority binding changed",
+    ):
+        supervisor.accept_trigger(
+            _trigger(trigger_id="relative-path-retarget")
+        )
+
+    assert alternate_supervisor.list_runs() == ()
 
 
 def test_scientific_binding_must_exist_and_be_causally_available(tmp_path):

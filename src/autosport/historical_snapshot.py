@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import hashlib
 import json
 import os
+import ssl
 import tempfile
 import weakref
 from dataclasses import dataclass, replace
@@ -12,7 +13,18 @@ from datetime import datetime
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Iterable
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
+from urllib.request import (
+    AbstractHTTPHandler,
+    HTTPErrorProcessor,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 from .domain import MarketEvent
 from .integrity import atomic_write_json, durable_path_lock
@@ -359,13 +371,389 @@ def _build_historical_snapshot_provider_origin_authority():
     canonical_defaults = canonical_provider_init.__kwdefaults__
     if type(canonical_defaults) is not dict:
         raise RuntimeError("canonical Parlay provider defaults are unavailable")
-    canonical_transport = canonical_defaults.get("transport")
+    canonical_default_transport = canonical_defaults.get("transport")
     canonical_clock = canonical_defaults.get("clock")
     canonical_sleeper = canonical_defaults.get("sleeper")
-    if not callable(canonical_transport) or not callable(canonical_clock) or not callable(
-        canonical_sleeper
+    if (
+        not callable(canonical_default_transport)
+        or not callable(canonical_clock)
+        or not callable(canonical_sleeper)
     ):
         raise RuntimeError("canonical Parlay provider runtime defaults are invalid")
+
+    # Positive provider-origin authority must not flow through the provider module's
+    # live `urlopen` global or urllib.request's process-global opener. Build one
+    # private opener per product-owned acquisition and keep its complete dispatch/
+    # TLS verifier graph lexical to this issuer. This mirrors the bounded network
+    # authority used by other provider-facing product surfaces while leaving the
+    # generic provider transport seam available for non-authoritative parsing/tests.
+    request_type = Request
+    build_opener_fn = build_opener
+    opener_type = OpenerDirector
+    proxy_handler_type = ProxyHandler
+    http_redirect_handler_type = HTTPRedirectHandler
+    https_handler_type = HTTPSHandler
+    abstract_http_handler_type = AbstractHTTPHandler
+    http_error_processor_type = HTTPErrorProcessor
+    http_error_type = HTTPError
+    url_error_type = URLError
+    response_type = HttpJsonResponse
+    transport_error_type = ProviderTransportError
+    decode_provider_json = canonical_default_transport.__globals__.get(
+        "_decode_provider_json"
+    )
+    parse_retry_after = canonical_default_transport.__globals__.get(
+        "_parse_retry_after"
+    )
+    urlsplit_fn = urlsplit
+    sha256_fn = hashlib.sha256
+    ssl_context_type = ssl.SSLContext
+    ssl_cert_required = ssl.CERT_REQUIRED
+    ssl_error_type = ssl.SSLError
+    if not callable(decode_provider_json) or not callable(parse_retry_after):
+        raise RuntimeError("canonical Parlay provider transport parser is unavailable")
+
+    def tls_context_snapshot(context: object):
+        if type(context) is not ssl_context_type:
+            return None
+        try:
+            ciphers = tuple(
+                (
+                    cipher.get("id"),
+                    cipher.get("name"),
+                    cipher.get("protocol"),
+                    cipher.get("strength_bits"),
+                    cipher.get("alg_bits"),
+                    cipher.get("aead"),
+                    cipher.get("symmetric"),
+                    cipher.get("digest"),
+                    cipher.get("kea"),
+                    cipher.get("auth"),
+                )
+                for cipher in context.get_ciphers()
+            )
+            trust_anchors = tuple(
+                sorted(
+                    sha256_fn(certificate).hexdigest()
+                    for certificate in context.get_ca_certs(binary_form=True)
+                )
+            )
+            store_stats = tuple(sorted(context.cert_store_stats().items()))
+            return (
+                int(context.verify_mode),
+                context.check_hostname,
+                int(context.verify_flags),
+                int(context.minimum_version),
+                int(context.maximum_version),
+                int(context.options),
+                getattr(context, "hostname_checks_common_name", None),
+                getattr(context, "security_level", None),
+                store_stats,
+                trust_anchors,
+                ciphers,
+            )
+        except (AttributeError, TypeError, ValueError, ssl_error_type):
+            return None
+
+    def dispatch_snapshot(current_opener: object):
+        records: list[tuple[str, object, tuple[object, ...]]] = []
+        for map_name in ("handle_open", "process_request", "process_response"):
+            mapping = getattr(current_opener, map_name, None)
+            if type(mapping) is not dict:
+                return None
+            for key, handlers in mapping.items():
+                if type(key) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append((map_name, key, tuple(handlers)))
+        error_mapping = getattr(current_opener, "handle_error", None)
+        if type(error_mapping) is not dict:
+            return None
+        for protocol, by_code in error_mapping.items():
+            if type(protocol) not in (str, int) or type(by_code) is not dict:
+                return None
+            for code, handlers in by_code.items():
+                if type(code) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append(
+                    (f"handle_error:{protocol}", code, tuple(handlers))
+                )
+        records.sort(
+            key=lambda item: (
+                item[0],
+                type(item[1]).__name__,
+                str(item[1]),
+            )
+        )
+        return tuple(records)
+
+    def dispatch_matches(current, expected) -> bool:
+        if current is None or len(current) != len(expected):
+            return False
+        for actual, wanted in zip(current, expected):
+            if actual[0] != wanted[0] or actual[1] != wanted[1]:
+                return False
+            if len(actual[2]) != len(wanted[2]):
+                return False
+            if any(
+                actual_handler is not expected_handler
+                for actual_handler, expected_handler in zip(
+                    actual[2], wanted[2]
+                )
+            ):
+                return False
+        return True
+
+    def build_product_owned_transport():
+        class RejectRedirectHandler(http_redirect_handler_type):
+            def redirect_request(
+                self,
+                req,
+                fp,
+                code,
+                msg,
+                headers,
+                newurl,
+            ):  # type: ignore[no-untyped-def]
+                raise transport_error_type(
+                    "Parlay historical HTTP redirect refused",
+                    int(code),
+                )
+
+        opener = build_opener_fn(
+            proxy_handler_type({}),
+            RejectRedirectHandler(),
+        )
+        if type(opener) is not opener_type:
+            raise ProviderPayloadError(
+                "canonical Parlay historical opener authority is invalid"
+            )
+
+        open_response = opener.open
+        canonical_opener_open = opener_type.open
+        canonical_opener_internal_open = opener_type._open
+        canonical_opener_call_chain = opener_type._call_chain
+        canonical_opener_error = opener_type.error
+        canonical_redirect_request = RejectRedirectHandler.redirect_request
+        canonical_https_open = https_handler_type.https_open
+        canonical_https_request = https_handler_type.https_request
+        canonical_do_open = abstract_http_handler_type.do_open
+        canonical_https_response = http_error_processor_type.https_response
+
+        expected_handlers_raw = getattr(opener, "handlers", None)
+        expected_dispatch = dispatch_snapshot(opener)
+        if type(expected_handlers_raw) is not list or expected_dispatch is None:
+            raise ProviderPayloadError(
+                "canonical Parlay historical opener graph is not inspectable"
+            )
+        expected_handlers = tuple(expected_handlers_raw)
+        redirect_handlers = tuple(
+            handler
+            for handler in expected_handlers
+            if isinstance(handler, http_redirect_handler_type)
+        )
+        https_handlers = tuple(
+            handler
+            for handler in expected_handlers
+            if isinstance(handler, https_handler_type)
+        )
+        response_handlers = tuple(
+            handlers
+            for map_name, key, handlers in expected_dispatch
+            if map_name == "process_response" and key == "https"
+        )
+        if (
+            len(redirect_handlers) != 1
+            or type(redirect_handlers[0]) is not RejectRedirectHandler
+            or len(https_handlers) != 1
+            or type(https_handlers[0]) is not https_handler_type
+            or len(response_handlers) != 1
+            or len(response_handlers[0]) != 1
+            or type(response_handlers[0][0]) is not http_error_processor_type
+            or any(
+                isinstance(handler, proxy_handler_type)
+                for handler in expected_handlers
+            )
+        ):
+            raise ProviderPayloadError(
+                "canonical Parlay historical opener graph is invalid"
+            )
+        expected_redirect_handler = redirect_handlers[0]
+        expected_https_handler = https_handlers[0]
+        expected_error_processor = response_handlers[0][0]
+        expected_tls_context = getattr(expected_https_handler, "_context", None)
+        expected_tls_state = tls_context_snapshot(expected_tls_context)
+        if (
+            expected_tls_state is None
+            or expected_tls_context.verify_mode != ssl_cert_required
+            or expected_tls_context.check_hostname is not True
+        ):
+            raise ProviderPayloadError(
+                "canonical Parlay historical TLS verifier is invalid"
+            )
+
+        if (
+            getattr(open_response, "__self__", None) is not opener
+            or getattr(open_response, "__func__", None) is not canonical_opener_open
+        ):
+            raise ProviderPayloadError(
+                "canonical Parlay historical opener dispatch is invalid"
+            )
+
+        def authority_is_current() -> bool:
+            if (
+                type(opener) is not opener_type
+                or opener_type.open is not canonical_opener_open
+                or opener_type._open is not canonical_opener_internal_open
+                or opener_type._call_chain is not canonical_opener_call_chain
+                or opener_type.error is not canonical_opener_error
+                or RejectRedirectHandler.redirect_request
+                is not canonical_redirect_request
+                or https_handler_type.https_open is not canonical_https_open
+                or https_handler_type.https_request is not canonical_https_request
+                or abstract_http_handler_type.do_open is not canonical_do_open
+                or http_error_processor_type.https_response
+                is not canonical_https_response
+            ):
+                return False
+
+            current_tls_context = getattr(expected_https_handler, "_context", None)
+            if (
+                current_tls_context is not expected_tls_context
+                or tls_context_snapshot(current_tls_context) != expected_tls_state
+            ):
+                return False
+
+            opener_dict = getattr(opener, "__dict__", None)
+            if type(opener_dict) is not dict or any(
+                name in opener_dict
+                for name in ("open", "_open", "_call_chain", "error")
+            ):
+                return False
+
+            handlers = getattr(opener, "handlers", None)
+            if type(handlers) is not list or len(handlers) != len(expected_handlers):
+                return False
+            if any(
+                current is not expected
+                for current, expected in zip(handlers, expected_handlers)
+            ):
+                return False
+            if any(
+                isinstance(handler, proxy_handler_type)
+                for handler in handlers
+            ):
+                return False
+
+            redirect_dict = getattr(expected_redirect_handler, "__dict__", None)
+            https_dict = getattr(expected_https_handler, "__dict__", None)
+            error_processor_dict = getattr(expected_error_processor, "__dict__", None)
+            if (
+                type(redirect_dict) is not dict
+                or "redirect_request" in redirect_dict
+                or type(https_dict) is not dict
+                or any(
+                    name in https_dict
+                    for name in ("https_open", "https_request", "do_open")
+                )
+                or type(error_processor_dict) is not dict
+                or "https_response" in error_processor_dict
+            ):
+                return False
+
+            current_dispatch = dispatch_snapshot(opener)
+            if not dispatch_matches(current_dispatch, expected_dispatch):
+                return False
+
+            dispatch_handlers = tuple(
+                handlers
+                for map_name, key, handlers in current_dispatch
+                if map_name == "handle_open" and key == "https"
+            )
+            request_handlers = tuple(
+                handlers
+                for map_name, key, handlers in current_dispatch
+                if map_name == "process_request" and key == "https"
+            )
+            response_handlers_now = tuple(
+                handlers
+                for map_name, key, handlers in current_dispatch
+                if map_name == "process_response" and key == "https"
+            )
+            return (
+                len(dispatch_handlers) == 1
+                and len(dispatch_handlers[0]) == 1
+                and dispatch_handlers[0][0] is expected_https_handler
+                and len(request_handlers) == 1
+                and len(request_handlers[0]) == 1
+                and request_handlers[0][0] is expected_https_handler
+                and len(response_handlers_now) == 1
+                and len(response_handlers_now[0]) == 1
+                and response_handlers_now[0][0] is expected_error_processor
+                and all(
+                    any(handler is registered for registered in expected_handlers)
+                    for _map_name, _key, mapped_handlers in current_dispatch
+                    for handler in mapped_handlers
+                )
+            )
+
+        def require_authority() -> None:
+            if not authority_is_current():
+                raise transport_error_type(
+                    "canonical Parlay historical network authority changed"
+                )
+
+        def product_owned_transport(
+            url: str,
+            headers: Mapping[str, str],
+            timeout: float,
+        ) -> HttpJsonResponse:
+            parsed = urlsplit_fn(url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "parlay-api.com"
+                or parsed.port is not None
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise transport_error_type(
+                    "Parlay historical transport target is outside fixed production origin"
+                )
+            require_authority()
+            request = request_type(url, headers=dict(headers), method="GET")
+            try:
+                with open_response(request, timeout=timeout) as response:
+                    final_url = str(response.geturl())
+                    if final_url != url:
+                        raise transport_error_type(
+                            "Parlay historical response origin changed unexpectedly"
+                        )
+                    raw = response.read()
+                    payload = decode_provider_json(raw)
+                    result = response_type(
+                        payload,
+                        int(response.status),
+                        dict(response.headers.items()),
+                    )
+                require_authority()
+                return result
+            except transport_error_type:
+                raise
+            except http_error_type as exc:
+                retry_after = parse_retry_after(
+                    exc.headers.get("Retry-After") if exc.headers else None
+                )
+                raise transport_error_type(
+                    f"provider HTTP {exc.code}",
+                    int(exc.code),
+                    retry_after,
+                ) from exc
+            except url_error_type as exc:
+                raise transport_error_type(
+                    f"provider transport error: {exc.reason}"
+                ) from exc
+
+        return product_owned_transport, require_authority
 
     issued: dict[
         int,
@@ -405,6 +793,7 @@ def _build_historical_snapshot_provider_origin_authority():
         *,
         regions: tuple[str, ...],
         markets: tuple[str, ...],
+        expected_transport: object,
     ) -> bool:
         if (
             type(provider) is not provider_type
@@ -429,7 +818,7 @@ def _build_historical_snapshot_provider_origin_authority():
         return (
             provider.public_preview is False
             and provider.base_url == "https://parlay-api.com"
-            and provider.transport is canonical_transport
+            and provider.transport is expected_transport
             and provider.clock is canonical_clock
             and provider.sleeper is canonical_sleeper
             and provider.regions == regions
@@ -474,6 +863,9 @@ def _build_historical_snapshot_provider_origin_authority():
         if any(type(value) is not str or not value or value != value.strip() for value in markets):
             raise ValueError("markets must contain canonical non-empty text")
 
+        product_transport, require_network_authority = (
+            build_product_owned_transport()
+        )
         provider = object.__new__(provider_type)
         canonical_provider_init(
             provider,
@@ -482,21 +874,33 @@ def _build_historical_snapshot_provider_origin_authority():
             regions=regions,
             markets=markets,
             base_url="https://parlay-api.com",
-            transport=canonical_transport,
+            transport=product_transport,
             clock=canonical_clock,
             sleeper=canonical_sleeper,
         )
-        if not provider_state_is_current(provider, regions=regions, markets=markets):
+        if not provider_state_is_current(
+            provider,
+            regions=regions,
+            markets=markets,
+            expected_transport=product_transport,
+        ):
             raise ProviderPayloadError(
                 "canonical Parlay historical provider authority changed before acquisition"
             )
+        require_network_authority()
         capture = canonical_capture(
             provider,
             requested_at=requested_at,
             output_path=output_path,
             evidence_path=evidence_path,
         )
-        if not provider_state_is_current(provider, regions=regions, markets=markets):
+        require_network_authority()
+        if not provider_state_is_current(
+            provider,
+            regions=regions,
+            markets=markets,
+            expected_transport=product_transport,
+        ):
             raise ProviderPayloadError(
                 "canonical Parlay historical provider authority changed during acquisition"
             )

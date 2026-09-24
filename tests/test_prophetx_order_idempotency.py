@@ -257,15 +257,23 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 reconciliation_disposition(identity, matched, ledger=ledger),
                 ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE,
             )
-            self.assertEqual(
+            self.assertIsNone(
                 RealExecutionLedger(path).provider_assigned_order_id(
                     attempt_id="try-1", provider_id="prophetx"
-                ),
-                "provider-order-7",
+                )
             )
             self.assertEqual(
                 reconciliation_disposition(identity, unrelated, ledger=ledger),
                 ProphetXReconciliationDisposition.UNRELATED_PROVIDER_EVIDENCE,
+            )
+
+            # Candidate evidence is deliberately non-mutating.  If a separate
+            # provider-origin authority later binds an OrderID, public candidates
+            # must agree with that already-durable fact.
+            ledger.bind_provider_assigned_order_id(
+                attempt_id="try-1",
+                provider_id="prophetx",
+                provider_order_id="provider-order-7",
             )
             conflicting = _evidence(
                 identity,
@@ -827,18 +835,17 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProphetXOrderIdentityError,
-                "require durable provider order id binding",
+                "require durable attempt correlation",
             ):
                 normalize_fix_execution_reports(identity, (later, earlier, earlier))
             normalized = normalize_fix_execution_reports(
                 identity, (later, earlier, earlier), ledger=ledger
             )
             self.assertEqual([item.exec_id for item in normalized], ["exec-1", "exec-2"])
-            self.assertEqual(
+            self.assertIsNone(
                 RealExecutionLedger(path).provider_assigned_order_id(
                     attempt_id="try-1", provider_id="prophetx"
-                ),
-                "order-1",
+                )
             )
 
     def test_conflicting_duplicate_fix_exec_id_fails_closed(self):
@@ -924,6 +931,21 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 "0",
             )
             normalize_fix_execution_reports(identity, (first,), ledger=ledger)
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
+            # Simulate a later issuer-bound #1634 receipt by using the canonical
+            # durable primitive directly; candidate normalization may check this
+            # fact but may not create or replace it.
+            ledger.bind_provider_assigned_order_id(
+                attempt_id="try-1",
+                provider_id="prophetx",
+                provider_order_id="order-A",
+            )
             restarted = RealExecutionLedger(path)
 
             conflict = ProphetXFixExecutionReport(

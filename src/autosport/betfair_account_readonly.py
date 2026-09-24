@@ -26,6 +26,7 @@ _GET_ACCOUNT_FUNDS = "AccountAPING/v1.0/getAccountFunds"
 _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
 _LIST_CLEARED_ORDERS = "SportsAPING/v1.0/listClearedOrders"
+_LIST_MARKET_PROFIT_AND_LOSS = "SportsAPING/v1.0/listMarketProfitAndLoss"
 _LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
 _EXECUTION_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 _READ_METHOD_ENDPOINT = MappingProxyType({
@@ -33,6 +34,7 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
     _GET_ACCOUNT_DETAILS: ACCOUNT_JSON_RPC_ENDPOINT,
     _LIST_CURRENT_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_CLEARED_ORDERS: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_MARKET_PROFIT_AND_LOSS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_MARKET_CATALOGUE: BETTING_JSON_RPC_ENDPOINT,
 })
 
@@ -86,6 +88,112 @@ class BetfairEvidence:
     def __post_init__(self) -> None:
         _iso_timestamp(self.observed_at, "observed_at")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class BetfairMarketPnlCoverageBatch:
+    """Coverage-only evidence for one listMarketProfitAndLoss request."""
+
+    account_id_hash: str
+    requested_market_ids: tuple[str, ...]
+    returned_market_ids: tuple[str, ...]
+    include_settled_bets: bool
+    include_bsp_bets: bool
+    net_of_commission: bool
+    evidence: BetfairEvidence
+
+    def __post_init__(self) -> None:
+        _sha256_hex(self.account_id_hash, "account_id_hash")
+        requested = _canonical_text_tuple(self.requested_market_ids, "requested_market_ids")
+        if len(requested) > 50:
+            raise BetfairReadOnlyError("listMarketProfitAndLoss cannot exceed 50 market IDs")
+        if not isinstance(self.returned_market_ids, tuple):
+            raise BetfairReadOnlyError("returned_market_ids must be a tuple")
+        returned = tuple(_required_text(item, "returned_market_ids") for item in self.returned_market_ids)
+        if len(set(returned)) != len(returned):
+            raise BetfairReadOnlyError("listMarketProfitAndLoss returned duplicate market IDs")
+        if set(returned) != set(requested):
+            raise BetfairReadOnlyError("listMarketProfitAndLoss did not return the exact requested market set")
+        for field in ("include_settled_bets", "include_bsp_bets", "net_of_commission"):
+            if type(getattr(self, field)) is not bool:
+                raise BetfairReadOnlyError(f"{field} must be boolean")
+        if not isinstance(self.evidence, BetfairEvidence):
+            raise BetfairReadOnlyError("market P&L batch requires canonical BetfairEvidence")
+
+    def _authority_fingerprint(self) -> tuple[object, ...]:
+        return (
+            self.account_id_hash,
+            self.requested_market_ids,
+            self.returned_market_ids,
+            self.include_settled_bets,
+            self.include_bsp_bets,
+            self.net_of_commission,
+            self.evidence.observed_at,
+            self.evidence.source_payload_sha256,
+        )
+
+    def assert_authoritative(self) -> None:
+        raise BetfairReadOnlyError(
+            "market P&L coverage was not issued by canonical BetfairReadOnlyClient"
+        )
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class BetfairClearedMarketPnlCoveragePage:
+    """Coverage-only SETTLED/MARKET listClearedOrders page evidence."""
+
+    account_id_hash: str
+    requested_market_ids: tuple[str, ...]
+    returned_market_ids: tuple[str, ...]
+    from_record: int
+    requested_record_count: int
+    more_available: bool
+    evidence: BetfairEvidence
+
+    def __post_init__(self) -> None:
+        _sha256_hex(self.account_id_hash, "account_id_hash")
+        _canonical_text_tuple(self.requested_market_ids, "requested_market_ids")
+        if not isinstance(self.returned_market_ids, tuple):
+            raise BetfairReadOnlyError("returned_market_ids must be a tuple")
+        returned = tuple(_required_text(item, "returned_market_ids") for item in self.returned_market_ids)
+        if len(set(returned)) != len(returned):
+            raise BetfairReadOnlyError("SETTLED/MARKET page returned duplicate market IDs")
+        if not set(returned).issubset(set(self.requested_market_ids)):
+            raise BetfairReadOnlyError("SETTLED/MARKET page returned out-of-scope market IDs")
+        _nonnegative_int(self.from_record, "from_record")
+        if (
+            not isinstance(self.requested_record_count, int)
+            or isinstance(self.requested_record_count, bool)
+            or self.requested_record_count < 0
+            or self.requested_record_count > 1000
+        ):
+            raise BetfairReadOnlyError("requested_record_count must be in range 0..1000")
+        effective_limit = 1000 if self.requested_record_count == 0 else self.requested_record_count
+        if len(returned) > effective_limit:
+            raise BetfairReadOnlyError("SETTLED/MARKET page exceeded requested record count")
+        if not isinstance(self.more_available, bool):
+            raise BetfairReadOnlyError("more_available must be boolean")
+        if self.more_available and not returned:
+            raise BetfairReadOnlyError("SETTLED/MARKET page cannot be empty when moreAvailable is true")
+        if not isinstance(self.evidence, BetfairEvidence):
+            raise BetfairReadOnlyError("cleared market P&L page requires canonical BetfairEvidence")
+
+    def _authority_fingerprint(self) -> tuple[object, ...]:
+        return (
+            self.account_id_hash,
+            self.requested_market_ids,
+            self.returned_market_ids,
+            self.from_record,
+            self.requested_record_count,
+            self.more_available,
+            self.evidence.observed_at,
+            self.evidence.source_payload_sha256,
+        )
+
+    def assert_authoritative(self) -> None:
+        raise BetfairReadOnlyError(
+            "cleared market P&L coverage was not issued by canonical BetfairReadOnlyClient"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +594,102 @@ class BetfairReadOnlyClient:
             _provider_optional_text(result, "localeCode", "locale_code"),
             _provider_optional_text(result, "region", "region"),
             _provider_optional_text(result, "timezone", "timezone"),
+            response.evidence,
+        )
+
+    def read_market_profit_and_loss_coverage(
+        self,
+        *,
+        market_ids: tuple[str, ...],
+        include_settled_bets: bool = False,
+        include_bsp_bets: bool = False,
+        net_of_commission: bool = False,
+    ) -> BetfairMarketPnlCoverageBatch:
+        requested = _canonical_text_tuple(market_ids, "market_ids")
+        if len(requested) > 50:
+            raise BetfairReadOnlyError(
+                "listMarketProfitAndLoss cannot exceed 50 market IDs under the provider weight limit"
+            )
+        for field, value in (
+            ("include_settled_bets", include_settled_bets),
+            ("include_bsp_bets", include_bsp_bets),
+            ("net_of_commission", net_of_commission),
+        ):
+            if type(value) is not bool:
+                raise BetfairReadOnlyError(f"{field} must be boolean")
+        response = self._rpc(
+            _LIST_MARKET_PROFIT_AND_LOSS,
+            {
+                "marketIds": list(requested),
+                "includeSettledBets": include_settled_bets,
+                "includeBspBets": include_bsp_bets,
+                "netOfCommission": net_of_commission,
+            },
+        )
+        rows = _sequence(response.result, "listMarketProfitAndLoss result")
+        returned = tuple(
+            _provider_text(
+                _mapping(row, f"marketProfitAndLoss[{index}]"),
+                "marketId",
+                f"marketProfitAndLoss[{index}].market_id",
+            )
+            for index, row in enumerate(rows)
+        )
+        return BetfairMarketPnlCoverageBatch(
+            sha256(self._account_id.encode("utf-8")).hexdigest(),
+            requested,
+            returned,
+            include_settled_bets,
+            include_bsp_bets,
+            net_of_commission,
+            response.evidence,
+        )
+
+    def read_cleared_market_profit_and_loss_coverage_page(
+        self,
+        *,
+        market_ids: tuple[str, ...],
+        from_record: int = 0,
+        record_count: int = 0,
+        settled_from: str | None = None,
+    ) -> BetfairClearedMarketPnlCoveragePage:
+        requested = _canonical_text_tuple(market_ids, "market_ids")
+        _nonnegative_int(from_record, "from_record")
+        if (
+            not isinstance(record_count, int)
+            or isinstance(record_count, bool)
+            or record_count < 0
+            or record_count > 1000
+        ):
+            raise BetfairReadOnlyError("record_count must be in range 0..1000")
+        params: dict[str, object] = {
+            "betStatus": "SETTLED",
+            "groupBy": "MARKET",
+            "marketIds": list(requested),
+            "fromRecord": from_record,
+            "recordCount": record_count,
+        }
+        if settled_from is not None:
+            _iso_timestamp(settled_from, "settled_from")
+            params["settledDateRange"] = {"from": settled_from}
+        response = self._rpc(_LIST_CLEARED_ORDERS, params)
+        report = _mapping(response.result, "listClearedOrders result")
+        rows = _sequence(report.get("clearedOrders"), "clearedOrders")
+        returned = tuple(
+            _provider_text(
+                _mapping(row, f"clearedOrders[{index}]"),
+                "marketId",
+                f"clearedOrders[{index}].market_id",
+            )
+            for index, row in enumerate(rows)
+        )
+        return BetfairClearedMarketPnlCoveragePage(
+            sha256(self._account_id.encode("utf-8")).hexdigest(),
+            requested,
+            returned,
+            from_record,
+            record_count,
+            _provider_bool(report, "moreAvailable"),
             response.evidence,
         )
 
@@ -1167,4 +1371,96 @@ def _install_execution_readback_authority() -> None:
 
 _install_execution_readback_authority()
 del _install_execution_readback_authority
+
+
+def _install_pnl_coverage_authority() -> None:
+    issued_open: dict[int, tuple[object, tuple[object, ...]]] = {}
+    issued_closed: dict[int, tuple[object, tuple[object, ...]]] = {}
+    raw_open = BetfairReadOnlyClient.read_market_profit_and_loss_coverage
+    raw_closed = BetfairReadOnlyClient.read_cleared_market_profit_and_loss_coverage_page
+
+    def remember(
+        registry: dict[int, tuple[object, tuple[object, ...]]],
+        capture: object,
+        fingerprint: tuple[object, ...],
+    ) -> None:
+        capture_id = id(capture)
+
+        def forget(_weakref: object, *, key: int = capture_id) -> None:
+            registry.pop(key, None)
+
+        registry[capture_id] = (ref(capture, forget), fingerprint)
+
+    def authoritative_open(
+        self: BetfairReadOnlyClient,
+        *,
+        market_ids: tuple[str, ...],
+        include_settled_bets: bool = False,
+        include_bsp_bets: bool = False,
+        net_of_commission: bool = False,
+    ) -> BetfairMarketPnlCoverageBatch:
+        capture = raw_open(
+            self,
+            market_ids=market_ids,
+            include_settled_bets=include_settled_bets,
+            include_bsp_bets=include_bsp_bets,
+            net_of_commission=net_of_commission,
+        )
+        remember(issued_open, capture, capture._authority_fingerprint())
+        return capture
+
+    def authoritative_closed(
+        self: BetfairReadOnlyClient,
+        *,
+        market_ids: tuple[str, ...],
+        from_record: int = 0,
+        record_count: int = 0,
+        settled_from: str | None = None,
+    ) -> BetfairClearedMarketPnlCoveragePage:
+        capture = raw_closed(
+            self,
+            market_ids=market_ids,
+            from_record=from_record,
+            record_count=record_count,
+            settled_from=settled_from,
+        )
+        remember(issued_closed, capture, capture._authority_fingerprint())
+        return capture
+
+    def assert_open_authoritative(self: BetfairMarketPnlCoverageBatch) -> None:
+        record = issued_open.get(id(self))
+        if record is None or record[0]() is not self:
+            raise BetfairReadOnlyError(
+                "market P&L coverage was not issued by canonical BetfairReadOnlyClient"
+            )
+        if record[1] != self._authority_fingerprint():
+            raise BetfairReadOnlyError(
+                "market P&L coverage changed after canonical adapter capture"
+            )
+
+    def assert_closed_authoritative(
+        self: BetfairClearedMarketPnlCoveragePage,
+    ) -> None:
+        record = issued_closed.get(id(self))
+        if record is None or record[0]() is not self:
+            raise BetfairReadOnlyError(
+                "cleared market P&L coverage was not issued by canonical BetfairReadOnlyClient"
+            )
+        if record[1] != self._authority_fingerprint():
+            raise BetfairReadOnlyError(
+                "cleared market P&L coverage changed after canonical adapter capture"
+            )
+
+    BetfairReadOnlyClient.read_market_profit_and_loss_coverage = authoritative_open
+    BetfairReadOnlyClient.read_cleared_market_profit_and_loss_coverage_page = (
+        authoritative_closed
+    )
+    BetfairMarketPnlCoverageBatch.assert_authoritative = assert_open_authoritative
+    BetfairClearedMarketPnlCoveragePage.assert_authoritative = (
+        assert_closed_authoritative
+    )
+
+
+_install_pnl_coverage_authority()
+del _install_pnl_coverage_authority
 

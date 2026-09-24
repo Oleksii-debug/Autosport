@@ -237,6 +237,8 @@ def test_understated_funds_precheck_cannot_underreserve_durable_action(
         "_ledger_view",
         "_LEDGER_SNAPSHOT",
         "worst_case_incremental_exposure",
+        "_positive_decimal",
+        "_bounded_decimal_shape",
         "require_authoritative_funds_precheck",
     ),
 )
@@ -271,6 +273,83 @@ def test_reservation_admission_rejects_module_helper_rebind(
         )
 
     assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+@pytest.mark.parametrize("dependency_name", ("Decimal", "localcontext"))
+def test_reservation_admission_rejects_liability_primitive_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    dependency_name: str,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("liability-primitive", stake="100")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    attacker_calls: list[str] = []
+
+    def attacker(*_args, **_kwargs):
+        attacker_calls.append(dependency_name)
+        raise AssertionError("attacker liability primitive executed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reservation_module, dependency_name, attacker)
+        with pytest.raises(
+            BetfairPreTradeReservationError,
+            match="reservation admission helper dispatch changed",
+        ):
+            store.reserve(
+                plan_id="plan-1",
+                attempt_id="try-1",
+                funds_precheck=precheck,
+                execution_ledger=ledger,
+            )
+
+    assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_reservation_admission_rejects_understating_positive_decimal_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("liability-understate", stake="100")
+    ledger = _ledger(tmp_path, action)
+    understated = evaluate_betfair_account_funds(
+        client,
+        Decimal("1"),
+        required_currency_code="EUR",
+    )
+    store = _store(tmp_path)
+    attacker_calls: list[str] = []
+
+    def forged_positive_decimal(*_args, **_kwargs) -> Decimal:
+        attacker_calls.append("positive-decimal")
+        return Decimal("1")
+
+    monkeypatch.setattr(
+        reservation_module,
+        "_positive_decimal",
+        forged_positive_decimal,
+    )
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation admission helper dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=understated,
+            execution_ledger=ledger,
+        )
+
+    assert attacker_calls == []
+    monkeypatch.undo()
     assert store.active_reserved_amount() == Decimal("0")
 
 

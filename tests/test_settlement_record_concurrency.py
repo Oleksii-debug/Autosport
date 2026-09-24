@@ -333,6 +333,20 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         before_record["event-4|winner|dave"] = "loss"
         self.assertNotIn("event-4|winner|dave", engine.outcomes)
 
+    def test_malformed_constructor_keeps_delayed_ingress_validation(self) -> None:
+        engine = SettlementEngine(["not-a-dict"])  # type: ignore[arg-type]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcomes must be an exact dict",
+        ):
+            engine.record({})
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement outcomes must be an exact dict",
+        ):
+            engine.settle_ready(PaperBook("100"))
+
     def test_direct_outcome_overwrite_cannot_bypass_record_conflict(self) -> None:
         book = PaperBook("100")
         leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))

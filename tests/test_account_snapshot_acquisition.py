@@ -197,7 +197,7 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     assert acquired.snapshot.balance.available_balance == Decimal("100.1")
     assert acquired.receipt.source_authority_proven is False
     assert acquired.source_authority_proven is True
-    assert acquired.receipt.provider_account_identity_proven is False
+    assert acquired.receipt.provider_account_identity_proven is True
     assert acquired.receipt.grants_execution_authority is False
     assert acquired.receipt.grants_settlement_authority is False
     assert acquired.receipt.integration_kind == "official_api"

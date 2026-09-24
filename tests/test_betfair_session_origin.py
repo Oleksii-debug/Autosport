@@ -85,6 +85,8 @@ def test_caller_constructed_origin_is_never_authoritative():
     credentials = BetfairSessionCredentials("app", "token")
     assert is_authoritative_betfair_session_origin(origin) is False
     assert is_authoritative_betfair_session_origin(origin, credentials=credentials) is False
+    assert origin.remote_provider_origin_proven is False
+    assert origin.remote_provider_jurisdiction_proven is False
     assert origin.execution_authorized is False
 
 
@@ -97,7 +99,71 @@ def test_caller_constructed_bound_jurisdiction_is_never_authoritative():
         session_origin_id="c" * 64,
     )
     assert is_authoritative_betfair_authenticated_jurisdiction(value) is False
+    assert value.remote_provider_origin_proven is False
+    assert value.remote_provider_jurisdiction_proven is False
     assert value.execution_authorized is False
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "remote_provider_origin_proven",
+        "remote_provider_jurisdiction_proven",
+        "execution_authorized",
+    ],
+)
+def test_origin_negative_authority_semantics_cannot_be_rebound(
+    monkeypatch, tmp_path, attribute
+):
+    monkeypatch.setattr(
+        BetfairSessionOrigin,
+        attribute,
+        property(lambda _self: True),
+    )
+    secrets = BetfairNonInteractiveLoginSecrets(
+        "app",
+        "user",
+        "password",
+        tmp_path / "client.crt",
+        tmp_path / "client.key",
+    )
+
+    with pytest.raises(
+        BetfairSessionOriginError,
+        match="canonical Betfair login authority binding changed",
+    ):
+        login_betfair_noninteractive(
+            secrets,
+            jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+        )
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "remote_provider_origin_proven",
+        "remote_provider_jurisdiction_proven",
+        "execution_authorized",
+    ],
+)
+def test_bound_negative_authority_semantics_cannot_be_rebound(
+    monkeypatch, attribute
+):
+    monkeypatch.setattr(
+        BetfairAuthenticatedJurisdiction,
+        attribute,
+        property(lambda _self: True),
+    )
+
+    with pytest.raises(
+        BetfairSessionOriginError,
+        match="canonical K07 identity verifier binding changed",
+    ):
+        subject.bind_betfair_authenticated_jurisdiction(
+            None,
+            None,
+            client=None,
+        )
 
 
 def test_origin_endpoint_cannot_be_relabelled_to_another_jurisdiction():

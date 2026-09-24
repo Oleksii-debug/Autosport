@@ -1,13 +1,13 @@
-"""Product-issued Betfair login/jurisdiction origin bound to authenticated K07 context.
+"""Product-issued Betfair login-route/session observation bound to K07 context.
 
-The Betting and Accounts JSON-RPC endpoints are shared by multiple Betfair
-jurisdictions, so they cannot prove whether an authenticated session came from the
-Global/.com, .es, .it, .ro, or .com.au login domain.  This module records that fact at
-the only causal point where Autosport can prove it: a successful product-owned login
-request to one exact jurisdiction endpoint.
+Betfair login route selection is product-owned process-local configuration. A successful
+response through this Python stack does not independently prove that bytes originated
+from the remote Betfair service or that the provider assigned the selected jurisdiction.
+The public authority objects therefore bind the exact selected login route and current
+K07 session context while explicitly denying remote-provider origin/jurisdiction proof.
 
 No username, password, application key, session token, certificate/key bytes, or raw
-login response is serialized into the public authority objects.  This module does not
+login response is serialized into the public authority objects. This module does not
 place, cancel, replace, or otherwise authorize wagers.
 """
 from __future__ import annotations
@@ -39,9 +39,9 @@ from .betfair_account_readonly import BetfairReadOnlyClient, BetfairSessionCrede
 VENUE_ID = "betfair"
 LOGIN_METHOD = "NON_INTERACTIVE_CERT"
 ORIGIN_SCHEMA = "autosport.betfair_session_origin"
-ORIGIN_SCHEMA_VERSION = 1
+ORIGIN_SCHEMA_VERSION = 2
 BOUND_SCHEMA = "autosport.betfair_authenticated_jurisdiction"
-BOUND_SCHEMA_VERSION = 1
+BOUND_SCHEMA_VERSION = 2
 _MAX_RESPONSE_BYTES = 64 * 1024
 
 
@@ -126,7 +126,7 @@ class BetfairNonInteractiveLoginResponse:
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairSessionOrigin:
-    """Public secret-free proof bytes for one product-owned successful login."""
+    """Secret-free process-local observation of one selected login route/session."""
 
     venue_id: str
     login_method: str
@@ -162,8 +162,20 @@ class BetfairSessionOrigin:
             "login_endpoint": self.login_endpoint,
             "issued_at": _instant(self.issued_at),
             "response_sha256": self.response_sha256,
+            "remote_provider_origin_proven": False,
+            "remote_provider_jurisdiction_proven": False,
         }
         return sha256(_canonical_json(payload)).hexdigest()
+
+    @property
+    def remote_provider_origin_proven(self) -> bool:
+        """This process-local observation is not remote transport attestation."""
+        return False
+
+    @property
+    def remote_provider_jurisdiction_proven(self) -> bool:
+        """The selected login route is not provider-attested jurisdiction truth."""
+        return False
 
     @property
     def execution_authorized(self) -> bool:
@@ -197,7 +209,7 @@ class BetfairLoginSession:
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairAuthenticatedJurisdiction:
-    """Jurisdiction proof bound to one exact current K07 session context."""
+    """Product-selected login-route label bound to one exact current K07 context."""
 
     venue_id: str
     jurisdiction: BetfairLoginJurisdiction
@@ -226,8 +238,20 @@ class BetfairAuthenticatedJurisdiction:
             "session_context_id": self.session_context_id,
             "account_identity_id": self.account_identity_id,
             "session_origin_id": self.session_origin_id,
+            "remote_provider_origin_proven": False,
+            "remote_provider_jurisdiction_proven": False,
         }
         return sha256(_canonical_json(payload)).hexdigest()
+
+    @property
+    def remote_provider_origin_proven(self) -> bool:
+        """K07 + login-route binding is not remote transport attestation."""
+        return False
+
+    @property
+    def remote_provider_jurisdiction_proven(self) -> bool:
+        """The bound route label is not provider-attested jurisdiction truth."""
+        return False
 
     @property
     def execution_authorized(self) -> bool:
@@ -447,6 +471,20 @@ def _build_origin_authority_runtime():
     origin_init_code = getattr(origin_init, "__code__", None)
     origin_post_init = origin_type.__post_init__
     origin_post_init_code = getattr(origin_post_init, "__code__", None)
+    origin_semantic_properties = tuple(
+        (
+            name,
+            descriptor,
+            descriptor.fget,
+            getattr(descriptor.fget, "__code__", None),
+        )
+        for name in (
+            "remote_provider_origin_proven",
+            "remote_provider_jurisdiction_proven",
+            "execution_authorized",
+        )
+        for descriptor in (origin_type.__dict__[name],)
+    )
     weakref_ref = ref
     sha256_fn = sha256
     hmac_digest = hmac.digest
@@ -514,6 +552,13 @@ def _build_origin_authority_runtime():
             and origin_type.__post_init__ is origin_post_init
             and getattr(origin_post_init, "__code__", None)
             is origin_post_init_code
+            and all(
+                origin_type.__dict__.get(name) is descriptor
+                and descriptor.fget is getter
+                and getattr(getter, "__code__", None) is getter_code
+                for name, descriptor, getter, getter_code
+                in origin_semantic_properties
+            )
             and json_executable_graph_matches()
         )
 
@@ -628,6 +673,9 @@ def _build_origin_authority_runtime():
             or value.login_method != login_method
             or type(value.jurisdiction) is not jurisdiction_type
             or value.login_endpoint != endpoint_for(value.jurisdiction)
+            or value.remote_provider_origin_proven is not False
+            or value.remote_provider_jurisdiction_proven is not False
+            or value.execution_authorized is not False
             or type(value.response_sha256) is not str
             or len(value.response_sha256) != 64
             or any(
@@ -643,6 +691,9 @@ def _build_origin_authority_runtime():
             value.login_endpoint,
             issued_at.astimezone(utc).isoformat(),
             value.response_sha256,
+            False,
+            False,
+            False,
         )
         return sha256_fn(repr(material).encode("utf-8")).hexdigest()
 
@@ -724,6 +775,9 @@ def _build_origin_authority_runtime():
             or origin.login_method != login_method
             or origin.jurisdiction is not jurisdiction
             or origin.login_endpoint != endpoint
+            or origin.remote_provider_origin_proven is not False
+            or origin.remote_provider_jurisdiction_proven is not False
+            or origin.execution_authorized is not False
         ):
             raise error_type(
                 "canonical Betfair login observation construction changed"
@@ -765,7 +819,7 @@ def _build_origin_authority_runtime():
     ) -> BetfairSessionOrigin:
         if not is_authoritative(value, credentials=credentials):
             raise error_type(
-                "Betfair session origin lacks current canonical login authority"
+                "Betfair session origin lacks current process-local login-route authority"
             )
         assert type(value) is origin_type
         return value
@@ -801,6 +855,20 @@ def _build_bound_authority_runtime(require_origin):
     bound_init_code = getattr(bound_init, "__code__", None)
     bound_post_init = bound_type.__post_init__
     bound_post_init_code = getattr(bound_post_init, "__code__", None)
+    bound_semantic_properties = tuple(
+        (
+            name,
+            descriptor,
+            descriptor.fget,
+            getattr(descriptor.fget, "__code__", None),
+        )
+        for name in (
+            "remote_provider_origin_proven",
+            "remote_provider_jurisdiction_proven",
+            "execution_authorized",
+        )
+        for descriptor in (bound_type.__dict__[name],)
+    )
 
     json_module = json
     json_dumps = json.dumps
@@ -860,6 +928,13 @@ def _build_bound_authority_runtime(require_origin):
             and bound_type.__post_init__ is bound_post_init
             and getattr(bound_post_init, "__code__", None)
             is bound_post_init_code
+            and all(
+                bound_type.__dict__.get(name) is descriptor
+                and descriptor.fget is getter
+                and getattr(getter, "__code__", None) is getter_code
+                for name, descriptor, getter, getter_code
+                in bound_semantic_properties
+            )
             and json_executable_graph_matches()
         )
 
@@ -875,6 +950,9 @@ def _build_bound_authority_runtime(require_origin):
             or origin.login_method != login_method
             or type(origin.jurisdiction) is not jurisdiction_type
             or endpoint_table.get(origin.jurisdiction) != origin.login_endpoint
+            or origin.remote_provider_origin_proven is not False
+            or origin.remote_provider_jurisdiction_proven is not False
+            or origin.execution_authorized is not False
             or type(origin.response_sha256) is not str
             or len(origin.response_sha256) != 64
             or any(
@@ -896,6 +974,8 @@ def _build_bound_authority_runtime(require_origin):
                 "+00:00", "Z"
             ),
             "response_sha256": origin.response_sha256,
+            "remote_provider_origin_proven": False,
+            "remote_provider_jurisdiction_proven": False,
         }
         encoded = json_dumps(
             payload,
@@ -919,6 +999,9 @@ def _build_bound_authority_runtime(require_origin):
             or not value.session_context_id
             or type(value.account_identity_id) is not str
             or type(value.session_origin_id) is not str
+            or value.remote_provider_origin_proven is not False
+            or value.remote_provider_jurisdiction_proven is not False
+            or value.execution_authorized is not False
         ):
             raise error_type("authenticated jurisdiction fields are not canonical")
         material = (
@@ -927,6 +1010,9 @@ def _build_bound_authority_runtime(require_origin):
             value.session_context_id,
             value.account_identity_id,
             value.session_origin_id,
+            False,
+            False,
+            False,
         )
         return sha256_fn(repr(material).encode("utf-8")).hexdigest()
 
@@ -1000,6 +1086,9 @@ def _build_bound_authority_runtime(require_origin):
             or value.session_context_id != identity.session_context_id
             or value.account_identity_id != identity.identity_id
             or value.session_origin_id != origin_id
+            or value.remote_provider_origin_proven is not False
+            or value.remote_provider_jurisdiction_proven is not False
+            or value.execution_authorized is not False
         ):
             raise error_type(
                 "authenticated jurisdiction construction changed"
@@ -1047,6 +1136,9 @@ def _build_bound_authority_runtime(require_origin):
                 and value.account_identity_id == identity.identity_id
                 and value.session_origin_id == origin_id
                 and value.jurisdiction is origin.jurisdiction
+                and value.remote_provider_origin_proven is False
+                and value.remote_provider_jurisdiction_proven is False
+                and value.execution_authorized is False
             )
 
     def require(
@@ -1056,7 +1148,7 @@ def _build_bound_authority_runtime(require_origin):
     ) -> BetfairAuthenticatedJurisdiction:
         if not is_authoritative(value, client=client):
             raise error_type(
-                "Betfair jurisdiction lacks current authenticated-session authority"
+                "Betfair login-route label lacks current K07 session-context authority"
             )
         assert type(value) is bound_type
         return value

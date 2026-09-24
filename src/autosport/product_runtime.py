@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import FunctionType
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from threading import RLock
+from typing import Callable, Iterator, Protocol
 
 from .causal_collector import (
     CanonicalDesktopApplication,
@@ -514,6 +515,11 @@ class AutonomousProductRuntime:
     _runtime_lease: _ProductRuntimeLease
     _start_transition_store: _ProductStartTransitionStore
     _closed: bool = False
+    _decision_commit_lock: RLock = field(
+        default_factory=RLock,
+        init=False,
+        repr=False,
+    )
 
     def _require_runtime_authority(self) -> None:
         if self._closed or not self._runtime_lease.authority_active:
@@ -677,104 +683,124 @@ class AutonomousProductRuntime:
                 "cannot recover interrupted product START transition"
             ) from exc
 
-    def start(self) -> ContinuousSessionStatus:
-        # A completed RUNNING start is idempotent. Every mutating START/resume
-        # publishes a durable transition before the first child mutation.
-        current = self._coherent_status()
-        current_state = self._state_value(current)
-        if current_state == SessionState.RUNNING.value:
-            return current
+    @contextmanager
+    def decision_commit_fence(self) -> Iterator[None]:
+        """Serialize one already-prepared economic commit against lifecycle changes."""
 
-        generation = self._start_transition_store.begin(
-            collector_was_stopped=current_state == SessionState.STOPPED.value,
-            session_pre_state=current_state,
-        )
-        try:
-            self.collector.resume()
-            self.coordinator.resume()
-            resolved = self._coherent_status(allow_pending_start=True)
-            if self._state_value(resolved) != SessionState.RUNNING.value:
+        self._require_runtime_authority()
+        with self._decision_commit_lock:
+            current = self._coherent_status()
+            if self._state_value(current) != SessionState.RUNNING.value:
                 raise ProductCompositionError(
-                    "product START did not reach coherent RUNNING state"
+                    "PAPER decision commit requires the canonical product runtime "
+                    "to remain running"
                 )
-            self._start_transition_store.mark_completed(generation)
-            return resolved
-        except BaseException as primary_error:
-            self._compensate_failed_start(
-                primary_error,
-                generation=generation,
+            yield
+
+    def start(self) -> ContinuousSessionStatus:
+        # Lifecycle transitions and decision publication share this process-local
+        # fence. It is deliberately narrower than provider/strategy work: only the
+        # already-prepared durable decision commit can delay START/PAUSE/STOP/CLOSE.
+        with self._decision_commit_lock:
+            # A completed RUNNING start is idempotent. Every mutating START/resume
+            # publishes a durable transition before the first child mutation.
+            current = self._coherent_status()
+            current_state = self._state_value(current)
+            if current_state == SessionState.RUNNING.value:
+                return current
+
+            generation = self._start_transition_store.begin(
+                collector_was_stopped=current_state == SessionState.STOPPED.value,
+                session_pre_state=current_state,
             )
-            raise
+            try:
+                self.collector.resume()
+                self.coordinator.resume()
+                resolved = self._coherent_status(allow_pending_start=True)
+                if self._state_value(resolved) != SessionState.RUNNING.value:
+                    raise ProductCompositionError(
+                        "product START did not reach coherent RUNNING state"
+                    )
+                self._start_transition_store.mark_completed(generation)
+                return resolved
+            except BaseException as primary_error:
+                self._compensate_failed_start(
+                    primary_error,
+                    generation=generation,
+                )
+                raise
 
     def pause(self) -> ContinuousSessionStatus:
-        current = self._coherent_status()
-        state = self._state_value(current)
-        if state == SessionState.STOPPED.value:
-            raise ProductCompositionError(
-                "cannot pause a stopped product runtime; start it before pausing"
-            )
-        if state == SessionState.PAUSED.value:
-            return current
-        self.coordinator.pause()
-        return self._coherent_status()
+        with self._decision_commit_lock:
+            current = self._coherent_status()
+            state = self._state_value(current)
+            if state == SessionState.STOPPED.value:
+                raise ProductCompositionError(
+                    "cannot pause a stopped product runtime; start it before pausing"
+                )
+            if state == SessionState.PAUSED.value:
+                return current
+            self.coordinator.pause()
+            return self._coherent_status()
 
     def resume(self) -> ContinuousSessionStatus:
         return self.start()
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
-        self._require_runtime_authority()
-        pending = self._start_transition_store.pending()
-        # STOP is also the explicit recovery action for a previously split
-        # lifecycle graph, so do not preflight coherence here. Attempt both
-        # durable STOP authorities even if either side reports an error.
-        collector_error: BaseException | None = None
-        coordinator_error: BaseException | None = None
-        try:
-            self.collector.stop(reason)
-        except BaseException as exc:
-            collector_error = exc
-        try:
-            self.coordinator.stop(reason)
-        except BaseException as exc:
-            coordinator_error = exc
+        with self._decision_commit_lock:
+            self._require_runtime_authority()
+            pending = self._start_transition_store.pending()
+            # STOP is also the explicit recovery action for a previously split
+            # lifecycle graph, so do not preflight coherence here. Attempt both
+            # durable STOP authorities even if either side reports an error.
+            collector_error: BaseException | None = None
+            coordinator_error: BaseException | None = None
+            try:
+                self.collector.stop(reason)
+            except BaseException as exc:
+                collector_error = exc
+            try:
+                self.coordinator.stop(reason)
+            except BaseException as exc:
+                coordinator_error = exc
 
-        if collector_error is not None:
+            if collector_error is not None:
+                if coordinator_error is not None:
+                    self._note_secondary_failure(
+                        collector_error,
+                        action="session STOP",
+                        secondary_error=coordinator_error,
+                    )
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        collector_error,
+                    )
+                raise collector_error
             if coordinator_error is not None:
-                self._note_secondary_failure(
-                    collector_error,
-                    action="session STOP",
-                    secondary_error=coordinator_error,
-                )
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    collector_error,
-                )
-            raise collector_error
-        if coordinator_error is not None:
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    coordinator_error,
-                )
-            raise coordinator_error
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        coordinator_error,
+                    )
+                raise coordinator_error
 
-        resolved = self._coherent_status(allow_pending_start=True)
-        if self._state_value(resolved) != SessionState.STOPPED.value:
-            error = ProductCompositionError(
-                "canonical product STOP did not reach coherent STOPPED state"
-            )
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    error,
+            resolved = self._coherent_status(allow_pending_start=True)
+            if self._state_value(resolved) != SessionState.STOPPED.value:
+                error = ProductCompositionError(
+                    "canonical product STOP did not reach coherent STOPPED state"
                 )
-            raise error
-        if pending is not None:
-            self._start_transition_store.mark_rolled_back(
-                int(pending["generation"])
-            )
-        return resolved
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        error,
+                    )
+                raise error
+            if pending is not None:
+                self._start_transition_store.mark_rolled_back(
+                    int(pending["generation"])
+                )
+            return resolved
 
     def status(self) -> ContinuousSessionStatus:
         return self._coherent_status()
@@ -784,25 +810,26 @@ class AutonomousProductRuntime:
         return self.coordinator.tick()
 
     def close(self) -> None:
-        # Revoke lifecycle authority before closing resources or releasing the
-        # workspace lease. Cleanup may fail, but a closing runtime must never
-        # become usable again after exclusive ownership can be transferred.
-        self._closed = True
-        try:
-            self.market_store.close()
-        except BaseException as primary_error:
+        with self._decision_commit_lock:
+            # Revoke lifecycle authority before closing resources or releasing the
+            # workspace lease. Cleanup may fail, but a closing runtime must never
+            # become usable again after exclusive ownership can be transferred.
+            self._closed = True
             try:
-                self._runtime_lease.release()
-            except BaseException as release_error:
+                self.market_store.close()
+            except BaseException as primary_error:
                 try:
-                    primary_error.add_note(
-                        "product runtime lease release also failed while closing "
-                        f"market storage: {type(release_error).__name__}: {release_error}"
-                    )
-                except BaseException:
-                    pass
-            raise
-        self._runtime_lease.release()
+                    self._runtime_lease.release()
+                except BaseException as release_error:
+                    try:
+                        primary_error.add_note(
+                            "product runtime lease release also failed while closing "
+                            f"market storage: {type(release_error).__name__}: {release_error}"
+                        )
+                    except BaseException:
+                        pass
+                raise
+            self._runtime_lease.release()
 
 
 def build_autonomous_product_runtime(

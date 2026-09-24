@@ -297,7 +297,6 @@ def test_product_root_module_rebind_cannot_reauthorize_valid_old_armed(
 
 def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "workspace" / "execution-stop.jsonl"
     authority = _initialized(path)
@@ -335,12 +334,37 @@ def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
         shadow_calls.append("_current_unlocked")
         return armed
 
-    monkeypatch.setattr(restarted, "current", forged_current)
-    monkeypatch.setattr(
-        restarted,
-        "_current_unlocked",
-        forged_current_unlocked,
+    def forged_decision() -> object:
+        shadow_calls.append("decision")
+        raise AssertionError("forged decision dispatch must not run")
+
+    def forged_assert_execution_allowed() -> object:
+        shadow_calls.append("assert_execution_allowed")
+        return armed
+
+    # Direct instance-dict insertion is stronger than ordinary setattr for this
+    # regression: a data descriptor must still win normal attribute lookup.
+    restarted.__dict__["current"] = forged_current
+    restarted.__dict__["_current_unlocked"] = forged_current_unlocked
+    restarted.__dict__["decision"] = forged_decision
+    restarted.__dict__["assert_execution_allowed"] = (
+        forged_assert_execution_allowed
     )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical public STOP authority method is immutable",
+    ):
+        setattr(restarted, "decision", forged_decision)
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical public STOP authority method is immutable",
+    ):
+        setattr(
+            restarted,
+            "assert_execution_allowed",
+            forged_assert_execution_allowed,
+        )
 
     assert restarted.decision().allowed is False
     with pytest.raises(ExecutionStopAuthorityError):

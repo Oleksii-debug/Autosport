@@ -105,3 +105,11 @@ def test_support_boundary_keeps_exact_point_score_without_clipping() -> None:
     assert report.log_loss.method == _METHOD
     assert report.log_loss.lower <= report.log_loss.point <= report.log_loss.upper
     assert report.log_loss.point > 0.0
+
+
+def test_upper_support_boundary_keeps_exact_point_score_without_clipping() -> None:
+    report = _evaluate("0.999999999999999", outcome=0)
+
+    assert report.log_loss.method == _METHOD
+    assert report.log_loss.lower <= report.log_loss.point <= report.log_loss.upper
+    assert report.log_loss.point > 0.0

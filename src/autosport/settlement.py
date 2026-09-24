@@ -77,6 +77,11 @@ class SettlementEngine(metaclass=_SettlementEngineMeta):
 
     _public_entry_bindings_sealed = False
     outcomes: dict[str, str] = field(default_factory=dict)
+    _outcomes_authority: tuple[tuple[object, object], ...] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
         # Own the constructor handoff. Retaining a caller-owned exact dict would
@@ -87,6 +92,7 @@ class SettlementEngine(metaclass=_SettlementEngineMeta):
         # non-dict state: settle_ready()/record() remain the fail-closed ingress.
         if type(self.outcomes) is dict:
             self.outcomes = self.outcomes.copy()
+            self._outcomes_authority = tuple(self.outcomes.items())
 
     @staticmethod
     def _validated_outcomes_snapshot(raw: object) -> dict[str, str]:
@@ -119,8 +125,30 @@ def _build_serialized_settlement_operations():
     serialization_lock = Lock()
     engine_type = SettlementEngine
     validate_outcomes = engine_type._validated_outcomes_snapshot
+    outcomes_descriptor = engine_type.__dict__["outcomes"]
+    outcomes_authority_descriptor = engine_type.__dict__["_outcomes_authority"]
     paper_book_type = PaperBook
     open_status = TicketStatus.OPEN
+
+    def require_outcomes_authority(
+        engine: SettlementEngine,
+        snapshot: dict[str, str] | None = None,
+    ) -> object:
+        raw = outcomes_descriptor.__get__(engine, engine_type)
+        authorized = outcomes_authority_descriptor.__get__(engine, engine_type)
+        if authorized is None:
+            # Preserve delayed validation for a malformed non-dict constructor
+            # value, but never allow caller replacement of that state with a
+            # valid-looking dict to create settlement authority.
+            if type(raw) is dict:
+                raise ValueError("settlement outcome authority changed")
+            return raw
+        if type(authorized) is not tuple or type(raw) is not dict:
+            raise ValueError("settlement outcome authority changed")
+        expected = dict(authorized)
+        if raw != expected or (snapshot is not None and snapshot != expected):
+            raise ValueError("settlement outcome authority changed")
+        return raw
 
     # Freeze the exact class-level executable graph that this boundary calls
     # directly or through PaperBook.settle()/validation. Capturing only the class
@@ -372,7 +400,9 @@ def _build_serialized_settlement_operations():
         # The lock is closure-owned so a module-global rebind cannot split
         # concurrent official operations into different serialization domains.
         with serialization_lock:
-            current = validate_outcomes(self.outcomes)
+            raw = require_outcomes_authority(self)
+            current = validate_outcomes(raw)
+            require_outcomes_authority(self, current)
             incoming = validate_outcomes(quote_outcomes)
             for quote_key, outcome in incoming.items():
                 previous = current.get(quote_key)
@@ -380,14 +410,22 @@ def _build_serialized_settlement_operations():
                     raise ValueError(
                         f"conflicting settlement for {quote_key}"
                     )
-            self.outcomes.update(incoming)
+            published = current.copy()
+            published.update(incoming)
+            outcomes_descriptor.__set__(self, published)
+            outcomes_authority_descriptor.__set__(
+                self,
+                tuple(published.items()),
+            )
 
     def settle_ready(self, book: PaperBook) -> list[str]:
         # Keep one exact lock from outcome snapshot through the entire canonical
         # PaperBook economic commit. record() consumes this same closure-owned
         # lock, so neither operation can be retargeted at runtime.
         with serialization_lock:
-            outcomes = validate_outcomes(self.outcomes)
+            raw = require_outcomes_authority(self)
+            outcomes = validate_outcomes(raw)
+            require_outcomes_authority(self, outcomes)
 
             require_paper_book_dispatch(book)
             validate_book(book)

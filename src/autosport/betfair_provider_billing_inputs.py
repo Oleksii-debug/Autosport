@@ -75,6 +75,10 @@ def _build_capability():
     namespace_cls = SimpleNamespace
     mapping_cls = Mapping
     sha_pattern = re.compile(r"^[0-9a-f]{64}$")
+    transaction_charge_marker = "BETFAIR_TRANSACTION_CHARGE"
+    transaction_charge_description_prefix = (
+        "Bet Txn Charge for over 5000 per hour on "
+    )
 
     def required_text(value: object, field: str) -> str:
         if (
@@ -270,6 +274,8 @@ def _build_capability():
         balance: Decimal
         item_class: str
         item_class_data_sha256: str
+        provider_charge_class: str | None = None
+        provider_transaction_id: int | None = None
 
         def __post_init__(self) -> None:
             required_text(self.ref_id, "ref_id")
@@ -278,6 +284,18 @@ def _build_capability():
             decimal_value(self.balance, "balance")
             required_text(self.item_class, "item_class")
             sha256_hex(self.item_class_data_sha256, "item_class_data_sha256")
+            if self.provider_charge_class is None:
+                if self.provider_transaction_id is not None:
+                    raise error_cls(
+                        "provider_transaction_id requires provider_charge_class"
+                    )
+            else:
+                if self.provider_charge_class != transaction_charge_marker:
+                    raise error_cls("unsupported provider charge class")
+                positive_int(
+                    self.provider_transaction_id,
+                    "provider_transaction_id",
+                )
 
     @dataclass(frozen=True, slots=True)
     class AccountStatementPageObservation:
@@ -355,7 +373,7 @@ def _build_capability():
         return canonical_sha256(
             {
                 "schema": "autosport.betfair_provider_billing_inputs",
-                "schema_version": 5,
+                "schema_version": 6,
                 "venue_id": entitlement.venue_id,
                 "observed_at": observed_at,
                 "entitlement": {
@@ -403,6 +421,8 @@ def _build_capability():
                         "balance": str(item.balance),
                         "item_class": item.item_class,
                         "item_class_data_sha256": item.item_class_data_sha256,
+                        "provider_charge_class": item.provider_charge_class,
+                        "provider_transaction_id": item.provider_transaction_id,
                     }
                     for item in statement.items
                 ],
@@ -659,6 +679,62 @@ def _build_capability():
             source_projection_sha256=canonical_sha256(projection),
         )
 
+    def transaction_charge_signal(
+        *,
+        item_class: str,
+        amount: Decimal,
+        item_class_data: Mapping[str, object],
+    ) -> tuple[str | None, int | None]:
+        """Derive only the documented Betfair account-level transaction-charge marker.
+
+        The provider's human-readable description is used as a positive discriminator
+        but is never retained on the durable DTO. Unknown locales, malformed nested
+        data, and near-miss UNKNOWN debits remain unclassified; absence of this signal
+        is therefore never evidence that no provider charge exists.
+        """
+
+        if item_class != "UNKNOWN" or amount >= 0:
+            return None, None
+        raw_unknown = item_class_data.get("unknownStatementItem")
+        if type(raw_unknown) is not str:
+            return None, None
+        try:
+            nested = mapping(
+                decode_json(raw_unknown.encode("utf-8")),
+                "statement unknownStatementItem",
+            )
+        except (error_cls, UnicodeEncodeError):
+            return None, None
+
+        for field in ("eventId", "eventTypeId", "selectionId"):
+            value = nested.get(field)
+            if isinstance(value, bool) or type(value) is not int or value != 0:
+                return None, None
+
+        if (
+            nested.get("marketName") != "DEBIT"
+            or nested.get("marketType") != "NOT_APPLICABLE"
+            or nested.get("transactionType") != "ACCOUNT_DEBIT"
+            or nested.get("winLose") != "RESULT_NOT_APPLICABLE"
+        ):
+            return None, None
+
+        description = nested.get("fullMarketName")
+        if (
+            type(description) is not str
+            or not description.startswith(transaction_charge_description_prefix)
+        ):
+            return None, None
+
+        transaction_id = nested.get("transactionId")
+        if (
+            isinstance(transaction_id, bool)
+            or type(transaction_id) is not int
+            or transaction_id <= 0
+        ):
+            return None, None
+        return transaction_charge_marker, transaction_id
+
     def parse_statement_item(
         value: object, index: int
     ) -> AccountStatementItemObservation:
@@ -670,13 +746,23 @@ def _build_capability():
             type(key) is not str for key in item_class_data
         ):
             raise error_cls("statement itemClassData must be a JSON object")
+
+        amount = provider_decimal(row, "amount", "amount")
+        item_class = provider_text(row, "itemClass", "item_class")
+        provider_charge_class, provider_transaction_id = transaction_charge_signal(
+            item_class=item_class,
+            amount=amount,
+            item_class_data=item_class_data,
+        )
         return AccountStatementItemObservation(
             ref_id=provider_text(row, "refId", "ref_id"),
             item_date=provider_text(row, "itemDate", "item_date"),
-            amount=provider_decimal(row, "amount", "amount"),
+            amount=amount,
             balance=provider_decimal(row, "balance", "balance"),
-            item_class=provider_text(row, "itemClass", "item_class"),
+            item_class=item_class,
             item_class_data_sha256=canonical_sha256(item_class_data),
+            provider_charge_class=provider_charge_class,
+            provider_transaction_id=provider_transaction_id,
         )
 
     def read(

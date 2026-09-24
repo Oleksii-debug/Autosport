@@ -604,6 +604,24 @@ def _build_provider_order_correlation_authority():
     json_module = json
     json_loads = json.loads
     json_loads_code = getattr(json_loads, "__code__", None)
+    profile_class = ProphetXProfile
+    profile_field_descriptors = tuple(
+        (
+            field_name,
+            vars(profile_class)[field_name],
+        )
+        for field_name in getattr(profile_class, "__slots__", ())
+        if field_name != "__weakref__" and field_name in vars(profile_class)
+    )
+    identity_class = ProphetXOrderIdentity
+    identity_field_descriptors = tuple(
+        (
+            field_name,
+            vars(identity_class)[field_name],
+        )
+        for field_name in getattr(identity_class, "__slots__", ())
+        if field_name != "__weakref__" and field_name in vars(identity_class)
+    )
 
     def require_identity_resolver_graph() -> None:
         for (
@@ -627,6 +645,21 @@ def _build_provider_order_correlation_authority():
         ):
             raise ProphetXOrderIdentityError(
                 "canonical ProphetX identity transitive dependency changed"
+            )
+        if (
+            module_globals.get("ProphetXProfile") is not profile_class
+            or module_globals.get("ProphetXOrderIdentity") is not identity_class
+            or any(
+                vars(profile_class).get(field_name) is not expected_descriptor
+                for field_name, expected_descriptor in profile_field_descriptors
+            )
+            or any(
+                vars(identity_class).get(field_name) is not expected_descriptor
+                for field_name, expected_descriptor in identity_field_descriptors
+            )
+        ):
+            raise ProphetXOrderIdentityError(
+                "canonical ProphetX identity field descriptor changed"
             )
         if (
             module_globals.get("_PROFILE_BY_VERSION") is not profile_map

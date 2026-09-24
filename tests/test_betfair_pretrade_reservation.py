@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from autosport import betfair_account_readonly as _readonly
 import autosport.betfair_pretrade_reservation as reservation_module
+from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_funds_precheck import (
     evaluate_betfair_account_funds,
 )

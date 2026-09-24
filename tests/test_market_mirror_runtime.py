@@ -291,6 +291,79 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_registration_cannot_lose_interleaved_matching_invalidation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        event = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        original_snapshot = mirror.snapshot
+        routed_batches = []
+
+        def stale_snapshot_with_routed_update():
+            # Reproduce the exact old ordering deterministically: registration has
+            # captured an empty mirror snapshot, then a persisted update is applied
+            # and its invalidation is completely routed before snapshot() returns.
+            stale = original_snapshot()
+            runtime.accept_persisted(event)
+            routed_batches.append(dependencies.affected_inputs(runtime.drain()))
+            return stale
+
+        with patch.object(
+            mirror,
+            "snapshot",
+            side_effect=stale_snapshot_with_routed_update,
+        ):
+            dependencies.register(
+                "decision-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+        current = dependencies.decision_view(
+            "decision-a",
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+        )
+        incremental = dependencies.incremental_decision_view(
+            "decision-a",
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+        )
+
+        self.assertEqual(routed_batches, [("decision-a",)])
+        self.assertEqual(
+            dependencies.matching_keys("decision-a"),
+            (("provider-a", "event-1|market-1|selection-a"),),
+        )
+        self.assertEqual(incremental.events, current.events)
+        self.assertEqual(len(incremental.events), 1)
+        self.assertEqual(incremental.events[0].sequence, 1)
+
+    def test_registration_snapshot_failure_rolls_back_provisional_dependency(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+
+        with patch.object(
+            mirror,
+            "snapshot",
+            side_effect=RuntimeError("snapshot failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "snapshot failed"):
+                dependencies.register("decision-a", source_ids="provider-a")
+
+        self.assertEqual(dependencies.input_ids, ())
+        with self.assertRaises(KeyError):
+            dependencies.matching_keys("decision-a")
+
+        registered = dependencies.register("decision-a", source_ids="provider-a")
+        self.assertEqual(registered.input_id, "decision-a")
+        self.assertEqual(dependencies.input_ids, ("decision-a",))
+        self.assertEqual(dependencies.matching_keys("decision-a"), ())
+
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)

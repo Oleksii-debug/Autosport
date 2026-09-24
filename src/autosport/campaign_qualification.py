@@ -316,6 +316,24 @@ class CampaignQualificationReport:
     nvda_verified: bool = False
     whole_product_complete: bool = False
 
+    def __post_init__(self) -> None:
+        for name in (
+            "canonical_authority_verified",
+            "promotion_authority",
+            "readiness_authority",
+            "real_money_execution",
+            "human_tested",
+            "nvda_verified",
+            "whole_product_complete",
+        ):
+            value = getattr(self, name)
+            if type(value) is not bool:
+                raise CampaignQualificationError(f"{name} must be a bool")
+            if value:
+                raise CampaignQualificationError(
+                    "CampaignQualificationReport cannot carry positive authority/truth"
+                )
+
 
 def structural_terminal_bundle_sha256(
     identity: CampaignQualificationIdentity,

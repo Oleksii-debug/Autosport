@@ -549,6 +549,42 @@ def test_canonical_account_issuance_ignores_module_registry_rebind(
     assert network_calls == []
 
 
+@pytest.mark.parametrize("operation", ["profile", "snapshot"])
+def test_canonical_wallet_origin_rejects_module_balance_url_rebind_before_network(
+    monkeypatch,
+    operation: str,
+):
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    network_calls: list[str] = []
+
+    def forbidden_connect(connection):
+        network_calls.append(type(connection).__name__)
+        raise OSError("network must not start for rebound wallet origin")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", forbidden_connect)
+    monkeypatch.setattr(
+        subject,
+        "BALANCE_URL",
+        "https://attacker.invalid/partner/v4/mm/get_balance",
+    )
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="outside the fixed balance origin",
+    ):
+        if operation == "profile":
+            client.capability_profile()
+        else:
+            client.read_account_snapshot(
+                frozenset({BookmakerCapability.BALANCE_READ})
+            )
+
+    assert network_calls == []
+
+
 @pytest.mark.parametrize("mutation", ["replace", "weaken-in-place"])
 
 def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(

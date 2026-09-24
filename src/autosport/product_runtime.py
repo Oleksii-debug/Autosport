@@ -72,6 +72,15 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         super().__init__(workspace)
         self._authority_active = False
         self._acquired_once = False
+        self._operation_fence: RLock | None = None
+
+    def bind_operation_fence(self, operation_fence: RLock) -> None:
+        """Bind runtime release to the same in-process lifecycle serialization fence."""
+        if self._operation_fence is not None:
+            raise WorkspaceEconomicLockError(
+                "product runtime operation fence is already bound"
+            )
+        self._operation_fence = operation_fence
 
     @property
     def authority_active(self) -> bool:
@@ -88,8 +97,14 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
         self._authority_active = True
 
     def release(self) -> None:
-        self._authority_active = False
-        super().release()
+        operation_fence = self._operation_fence
+        if operation_fence is None:
+            self._authority_active = False
+            super().release()
+            return
+        with operation_fence:
+            self._authority_active = False
+            super().release()
 
 
 class _ProductStartTransitionStore:
@@ -933,6 +948,7 @@ def build_autonomous_product_runtime(
                 root / "product_start_transition.json"
             ),
         )
+        runtime_lease.bind_operation_fence(runtime._operation_fence)
         runtime._recover_interrupted_start()
         lease_stack.pop_all()
         return runtime

@@ -341,12 +341,9 @@ class MarketMirrorTests(unittest.TestCase):
                 observed_ts="2026-09-16T19:00:01+00:00",
             )
         )
-        mirror.apply(
-            self.event(
-                selection="bad-time",
-                observed_ts="not-a-timestamp",
-            )
-        )
+        bad_time = self.event(selection="bad-time")
+        object.__setattr__(bad_time, "observed_ts", "not-a-timestamp")
+        mirror.apply(bad_time)
 
         active = mirror.active_snapshot(
             as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),

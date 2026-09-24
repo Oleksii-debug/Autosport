@@ -1186,17 +1186,30 @@ def _build_allocation_basis_store_runtime():
                 raise error_type(
                     "current EconomicGoal canonical projection is invalid"
                 )
-            goal_id = _text(contract_payload.get("goal_id"), "owner_goal_id")
+            goal_id = contract_payload.get("goal_id")
             goal_revision = contract_payload.get("revision")
-            if type(goal_revision) is not int or goal_revision <= 0:
+            goal_bankroll_id = contract_payload.get("bankroll_id")
+            goal_currency = contract_payload.get("currency")
+            if (
+                type(goal_id) is not str
+                or not goal_id
+                or goal_id != goal_id.strip()
+                or "\x00" in goal_id
+                or type(goal_revision) is not int
+                or goal_revision <= 0
+                or type(goal_bankroll_id) is not str
+                or not goal_bankroll_id
+                or goal_bankroll_id != goal_bankroll_id.strip()
+                or "\x00" in goal_bankroll_id
+                or type(goal_currency) is not str
+                or len(goal_currency) != 3
+                or not goal_currency.isascii()
+                or not goal_currency.isalpha()
+                or goal_currency != goal_currency.upper()
+            ):
                 raise error_type(
-                    "current EconomicGoal revision is invalid"
+                    "current EconomicGoal canonical projection is invalid"
                 )
-            goal_bankroll_id = _text(
-                contract_payload.get("bankroll_id"),
-                "owner_bankroll_id",
-            )
-            goal_currency = _currency(contract_payload.get("currency"))
             goal_sha256 = sha256(raw).hexdigest()
             require_goal_parser_authority()
         except Exception as exc:

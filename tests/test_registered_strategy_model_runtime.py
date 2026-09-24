@@ -342,6 +342,26 @@ def test_resolves_exact_promoted_model_and_predicts_without_caller_callable(
     ) == Decimal("0.61")
 
 
+def test_rejects_prediction_before_model_training_cutoff(tmp_path: Path) -> None:
+    _write_workspace(tmp_path)
+
+    runtime = resolve_registered_strategy_model(
+        tmp_path,
+        strategy_version_id="strategy-v1",
+        as_of="2026-01-01T00:01:00Z",
+    )
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="training cutoff exceeds decision time",
+    ):
+        runtime.predict_probability(
+            feature=0.52,
+            observed_at="2025-12-31T23:59:00Z",
+            decision_at="2025-12-31T23:59:30Z",
+        )
+
+
 def test_rejects_activation_of_nonchampion_strategy(tmp_path: Path) -> None:
     _write_workspace(tmp_path, second_champion=True)
 

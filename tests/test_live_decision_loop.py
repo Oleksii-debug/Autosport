@@ -16,6 +16,7 @@ from autosport.decision_ledger import (
 )
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
+from autosport.ingestion_health import SourceHealthStore
 from autosport.event_lifecycle import (
     CatalogEvent,
     CatalogPage,
@@ -46,7 +47,7 @@ from autosport.portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
 )
-from autosport.providers import ProviderUnavailableError
+from autosport.providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
@@ -88,6 +89,44 @@ class _DurableObserver:
         finally:
             store.close()
         return object()
+
+
+class _SingleSnapshotProvider:
+    source_id = "provider-a"
+
+    def __init__(
+        self,
+        observed_at: datetime,
+        *,
+        quality_flags: tuple[str, ...] = (),
+    ) -> None:
+        self.observed_at = observed_at
+        self.quality_flags = quality_flags
+        self.calls = 0
+
+    def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        del max_items
+        self.calls += 1
+        if self.calls != 1:
+            raise AssertionError("single-snapshot provider was polled more than once")
+        timestamp = self.observed_at.isoformat()
+        return ProviderBatch(
+            source_id=self.source_id,
+            quotes=(
+                ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="market-1",
+                    provider_selection_id="selection-a",
+                    decimal_odds=Decimal("2.00"),
+                    observed_ts=timestamp,
+                    sequence=1,
+                    status="open",
+                    source_ts=timestamp,
+                ),
+            ),
+            cursor="snapshot-1",
+            quality_flags=self.quality_flags,
+        )
 
 
 class _EmptyIntentFactory:
@@ -1389,6 +1428,73 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     max_quote_age=timedelta(seconds=6),
                     clock=_ManualClock(self.START),
                 )
+
+    def test_healthy_default_provider_health_reaches_intent_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            provider = _SingleSnapshotProvider(self.START)
+            factory = _EmptyIntentFactory()
+            strategy = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy)
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-health-healthy",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual([item[0] for item in factory.calls], ["input-a"])
+            health = SourceHealthStore(workspace / "source_health.json").get("provider-a")
+            self.assertEqual(health.status, "healthy")
+
+    def test_degraded_default_provider_health_fails_closed_before_intent_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            provider = _SingleSnapshotProvider(
+                self.START,
+                quality_flags=("PARTIAL_SNAPSHOT",),
+            )
+            factory = _EmptyIntentFactory()
+            strategy = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy)
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-health-degraded",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(result.plan.action.value, "zero")
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(factory.calls, [])
+            health = SourceHealthStore(workspace / "source_health.json").get("provider-a")
+            self.assertEqual(health.status, "degraded")
+            self.assertEqual(health.quality_flags, ("PARTIAL_SNAPSHOT",))
+            records = JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()
+            self.assertEqual(records[-1].payload["gate"], "provider_gap")
 
     def test_provider_gap_persists_zero_and_forces_rebuild_on_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

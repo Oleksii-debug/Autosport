@@ -27,6 +27,7 @@ from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror, MirrorSnapshot
+from .market_mirror_health import HealthGatedMirrorDecisionIndex
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
@@ -806,6 +807,14 @@ class PersistentLiveDecisionLoop:
             max_dirty_keys=self.bounds.max_dirty_keys,
         )
         self.dependencies = FocusedMirrorDependencyIndex(mirror)
+        self._decision_health_store = SourceHealthStore(
+            self.workspace / "source_health.json"
+        )
+        self._health_gate = HealthGatedMirrorDecisionIndex(
+            self.dependencies,
+            self._decision_health_store,
+            max_health_age=self.max_quote_age,
+        )
         self.inputs_path = self.workspace / self.INPUTS_FILE_NAME
         durable_input_specs = self._load_input_registry() or ()
         if len(durable_input_specs) > self.bounds.max_registered_inputs:
@@ -840,9 +849,7 @@ class PersistentLiveDecisionLoop:
                 if store is None:
                     store = SQLiteMarketStore(self.workspace / "market.db")
                     try:
-                        health_store = SourceHealthStore(
-                            self.workspace / "source_health.json"
-                        )
+                        health_store = self._decision_health_store
                         # One bounded-current reconciliation covers durable changes
                         # between construction and the first live poll. Subsequent
                         # cycles reuse this exact canonical store and rely on the bus.
@@ -861,6 +868,7 @@ class PersistentLiveDecisionLoop:
                     mirror_updates=updates,
                     max_items=self.bounds.observation_max_items,
                     policy=self.ingestion_policy,
+                    clock=lambda: _require_utc_clock(self.clock).isoformat(),
                 )
 
             self._observe = _default_observer
@@ -1087,6 +1095,17 @@ class PersistentLiveDecisionLoop:
             )
 
         now = _require_utc_clock(self.clock)
+        provider_health_gap = self._provider_health_gap(now)
+        if provider_health_gap is not None:
+            self._needs_cache_rebuild = True
+            return self._persist_provider_gap(
+                now,
+                RuntimeError(
+                    "provider health is not decision-eligible: "
+                    f"{provider_health_gap.eligibility.value}"
+                ),
+            )
+
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )
@@ -1610,6 +1629,23 @@ class PersistentLiveDecisionLoop:
             self._freshness_deadlines[input_id] = None
             expired.append(input_id)
         return tuple(expired)
+
+    def _provider_health_gap(self, now: datetime):
+        """Return canonical provider-health admission failure for the live source.
+
+        The provider-backed observation path persists source health before this check.
+        Re-read that durable authority instead of trusting an in-memory poll result.
+        Unknown, degraded, failed, future, or stale health must therefore enter the
+        existing provider-gap ZERO gate before intent construction.
+        """
+        provider = self.provider
+        if provider is None:
+            return None
+        decision = self._health_gate.provider_health(
+            provider.source_id,
+            as_of=now,
+        )
+        return None if decision.eligible else decision
 
     def _persist_provider_gap(
         self,

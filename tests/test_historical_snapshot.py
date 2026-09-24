@@ -218,6 +218,44 @@ class HistoricalSnapshotTests(unittest.TestCase):
 
         self.assertEqual(forged_calls, [])
 
+    def test_product_owned_capture_rejects_tls_context_factory_rebind(self) -> None:
+        factory_calls: list[str] = []
+
+        def forged_factory(*_args, **_kwargs):
+            factory_calls.append("factory")
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.check_hostname = True
+            return context
+
+        cases = (
+            (http_client, "_create_https_context"),
+            (ssl, "_create_default_https_context"),
+        )
+        for target, attribute in cases:
+            with (
+                self.subTest(attribute=attribute),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                output_path = Path(temp) / "market.jsonl"
+                evidence_path = Path(temp) / "evidence.json"
+                with mock.patch.object(target, attribute, forged_factory):
+                    with self.assertRaisesRegex(
+                        ProviderPayloadError,
+                        "network dispatch changed before construction",
+                    ):
+                        capture_product_owned_historical_snapshot(
+                            api_key="secret-key-must-not-leak",
+                            requested_at="2026-09-12T10:03:00Z",
+                            output_path=output_path,
+                            evidence_path=evidence_path,
+                        )
+                self.assertFalse(output_path.exists())
+                self.assertFalse(evidence_path.exists())
+
+        self.assertEqual(factory_calls, [])
+
+
     def test_product_owned_capture_rejects_precall_https_connection_rebind(self) -> None:
         forged_calls: list[str] = []
 

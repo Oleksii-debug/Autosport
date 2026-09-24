@@ -42,10 +42,6 @@ def _iso(value: object, name: str) -> str:
     return text
 
 
-_MAX_DECIMAL_COEFFICIENT_DIGITS = 4096
-_MAX_DECIMAL_ABS_EXPONENT = 4096
-
-
 def _decimal(value: object, name: str) -> Decimal:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a finite Decimal")
@@ -55,22 +51,6 @@ def _decimal(value: object, name: str) -> Decimal:
         raise ValueError(f"{name} must be a finite Decimal") from exc
     if not parsed.is_finite():
         raise ValueError(f"{name} must be a finite Decimal")
-
-    # Preserve the existing canonical text/hash representation for ordinary
-    # evidence while rejecting attacker-sized coefficient/exponent shapes
-    # before _decimal_text() or exact arithmetic can allocate in proportion
-    # to an unbounded Decimal representation. Collapse every numerical zero
-    # to exponent 0 so an extreme zero exponent cannot amplify _exact_sum().
-    if parsed.is_zero():
-        return Decimal("0")
-    _, digits, exponent = parsed.as_tuple()
-    if len(digits) > _MAX_DECIMAL_COEFFICIENT_DIGITS:
-        raise ValueError(f"{name} Decimal coefficient exceeds evidence limit")
-    if (
-        not isinstance(exponent, int)
-        or abs(exponent) > _MAX_DECIMAL_ABS_EXPONENT
-    ):
-        raise ValueError(f"{name} Decimal exponent exceeds evidence limit")
     return parsed
 
 

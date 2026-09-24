@@ -42,6 +42,28 @@ def _install_forward_economic_step_identity_guard() -> None:
     json_module = _evidence.json
     json_dumps = json_module.dumps
     json_dumps_code = getattr(json_dumps, "__code__", None)
+    json_encoder_module = json_module.encoder
+    json_encoder_type = json_module.JSONEncoder
+    json_encoder_init = json_encoder_type.__init__
+    json_encoder_init_code = getattr(json_encoder_init, "__code__", None)
+    json_encoder_encode = json_encoder_type.encode
+    json_encoder_encode_code = getattr(json_encoder_encode, "__code__", None)
+    json_encoder_iterencode = json_encoder_type.iterencode
+    json_encoder_iterencode_code = getattr(json_encoder_iterencode, "__code__", None)
+    json_encoder_c_make_encoder = getattr(json_encoder_module, "c_make_encoder", None)
+    json_encoder_make_iterencode = getattr(json_encoder_module, "_make_iterencode", None)
+    json_encoder_make_iterencode_code = getattr(
+        json_encoder_make_iterencode,
+        "__code__",
+        None,
+    )
+    json_encode_basestring = getattr(json_encoder_module, "encode_basestring", None)
+    json_encode_basestring_ascii = getattr(
+        json_encoder_module,
+        "encode_basestring_ascii",
+        None,
+    )
+    json_encoder_infinity = getattr(json_encoder_module, "INFINITY", None)
     hashlib_module = _evidence.hashlib
     hashlib_sha256 = hashlib_module.sha256
     datetime_type = _evidence.datetime
@@ -86,6 +108,26 @@ def _install_forward_economic_step_identity_guard() -> None:
             or getattr(_evidence, "json", None) is not json_module
             or getattr(json_module, "dumps", None) is not json_dumps
             or getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or getattr(json_module, "encoder", None) is not json_encoder_module
+            or getattr(json_module, "JSONEncoder", None) is not json_encoder_type
+            or getattr(json_encoder_type, "__init__", None) is not json_encoder_init
+            or getattr(json_encoder_init, "__code__", None) is not json_encoder_init_code
+            or getattr(json_encoder_type, "encode", None) is not json_encoder_encode
+            or getattr(json_encoder_encode, "__code__", None) is not json_encoder_encode_code
+            or getattr(json_encoder_type, "iterencode", None) is not json_encoder_iterencode
+            or getattr(json_encoder_iterencode, "__code__", None)
+            is not json_encoder_iterencode_code
+            or getattr(json_encoder_module, "c_make_encoder", None)
+            is not json_encoder_c_make_encoder
+            or getattr(json_encoder_module, "_make_iterencode", None)
+            is not json_encoder_make_iterencode
+            or getattr(json_encoder_make_iterencode, "__code__", None)
+            is not json_encoder_make_iterencode_code
+            or getattr(json_encoder_module, "encode_basestring", None)
+            is not json_encode_basestring
+            or getattr(json_encoder_module, "encode_basestring_ascii", None)
+            is not json_encode_basestring_ascii
+            or getattr(json_encoder_module, "INFINITY", None) is not json_encoder_infinity
             or getattr(_evidence, "hashlib", None) is not hashlib_module
             or getattr(hashlib_module, "sha256", None) is not hashlib_sha256
             or getattr(_evidence, "datetime", None) is not datetime_type
@@ -192,7 +234,13 @@ def _install_forward_economic_step_identity_guard() -> None:
         self: _evidence.ForwardEconomicEvidenceAccumulator,
         protocol: _evidence.ForwardEconomicProtocol,
     ) -> None:
+        # The private registry must never bootstrap from a serializer that was
+        # already replaced before accumulator construction.  Validate the whole
+        # canonical JSON dispatch graph before raw_init can compute any protocol
+        # or evidence identity, then validate it again before registry creation.
+        _require_executable_identity()
         raw_init(self, protocol)
+        _require_executable_identity()
         key = id(self)
 
         def forget(_weakref: object, *, registry_key: int = key) -> None:

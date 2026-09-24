@@ -431,7 +431,11 @@ def test_ticket_mapping_permutation_preserves_turnover_identity(tmp_path):
         window_store=store,
         window_evidence=window,
     )
+    # Permute the complete canonical OPEN history, not only its materialized
+    # mapping. PaperBook requires lifecycle open order and ticket insertion order
+    # to agree; reversing only one side correctly represents corruption.
     book.tickets = dict(reversed(tuple(book.tickets.items())))
+    book._lifecycle = list(reversed(book._lifecycle))
     second = PaperDayTurnoverResolver.resolve(
         book=book,
         goal_store=goal_store,

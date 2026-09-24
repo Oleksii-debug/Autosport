@@ -211,7 +211,7 @@ def test_metadata_relabel_cannot_mint_fresh_capacity_for_same_manifest(
     )
 
 
-def test_distinct_content_manifest_remains_fresh() -> None:
+def test_distinct_content_manifest_without_membership_fails_closed() -> None:
     current = _attempt()
     prior = _attempt(
         experiment_id="experiment-prior",
@@ -225,7 +225,7 @@ def test_distinct_content_manifest_remains_fresh() -> None:
         }
     )
 
-    assert not guard._holdout_consumed_by_physical_evidence(
+    assert guard._holdout_consumed_by_physical_evidence(
         (prior,),
         same_attempt_identity=current,
         registry=registry,

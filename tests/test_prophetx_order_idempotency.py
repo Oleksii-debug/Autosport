@@ -103,6 +103,63 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
             self.assertEqual(len(first.client_order_id), 32)
             self.assertEqual(first.transport, ProphetXTransport.REST_DIRECT_LINK)
 
+    def test_client_order_identity_requires_canonical_ledger_reference_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            forged_reference = "f" * 32
+            attacker_calls = []
+
+            def forged_bind(**_kwargs):
+                attacker_calls.append("bind")
+                return forged_reference
+
+            def forged_read(**_kwargs):
+                attacker_calls.append("read")
+                return forged_reference
+
+            ledger.bind_provider_order_reference = forged_bind
+            ledger.provider_order_reference = forged_read
+
+            with self.assertRaisesRegex(
+                ProphetXOrderIdentityError,
+                "canonical execution ledger provider-order dispatch changed",
+            ):
+                bind_before_effect(ledger, attempt_id="try-1")
+
+            self.assertEqual(attacker_calls, [])
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_order_reference(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
+            canonical = RealExecutionLedger(path)
+            identity = bind_before_effect(canonical, attempt_id="try-1")
+            restarted = RealExecutionLedger(path)
+            read_calls = []
+
+            def forged_restart_read(**_kwargs):
+                read_calls.append("read")
+                return identity.client_order_id
+
+            restarted.provider_order_reference = forged_restart_read
+            with self.assertRaisesRegex(
+                ProphetXOrderIdentityError,
+                "canonical execution ledger provider-order dispatch changed",
+            ):
+                load_identity(restarted, attempt_id="try-1")
+
+            self.assertEqual(read_calls, [])
+            self.assertEqual(
+                RealExecutionLedger(path).provider_order_reference(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                ),
+                identity.client_order_id,
+            )
+
     def test_transport_is_durable_plan_fact_and_unqualified_profile_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             fix = _ledger(

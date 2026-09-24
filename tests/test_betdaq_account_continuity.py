@@ -911,3 +911,93 @@ def test_positive_continuity_rejects_json_dumps_rebind_before_provider_io(
     assert attacker_calls == []
     assert opener.calls == []
 
+@pytest.mark.parametrize(
+    "class_name",
+    (
+        "BetdaqAuthenticatedPrincipalContext",
+        "BetdaqContinuousAccountEvidence",
+        "BookmakerCapabilityProfile",
+        "BookmakerBalanceObservation",
+        "BookmakerPositionObservation",
+        "BookmakerAccountSnapshot",
+    ),
+)
+def test_positive_continuity_rejects_constructed_class_init_rebind_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    class_name: str,
+) -> None:
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    target_class = getattr(continuity_module, class_name)
+    canonical_init = target_class.__init__
+    attacker_calls: list[str] = []
+
+    def attacker(self, *args, **kwargs):
+        attacker_calls.append(class_name)
+        canonical_init(self, *args, **kwargs)
+        if class_name == "BetdaqAuthenticatedPrincipalContext":
+            object.__setattr__(
+                self,
+                "principal_context_id",
+                "betdaq-authenticated-principal:" + ("f" * 64),
+            )
+
+    monkeypatch.setattr(target_class, "__init__", attacker)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity class dispatch changed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert attacker_calls == []
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    ("class_name", "descriptor_name"),
+    (
+        ("BookmakerCapabilityProfile", "require"),
+        ("BookmakerAccountSnapshot", "_validate_balance"),
+        ("BookmakerAccountSnapshot", "_validate_positions"),
+        ("BookmakerAccountSnapshot", "_validate_identity"),
+    ),
+)
+def test_positive_continuity_rejects_projection_validation_rebind_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    class_name: str,
+    descriptor_name: str,
+) -> None:
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    target_class = getattr(continuity_module, class_name)
+    attacker_calls: list[str] = []
+
+    def attacker(*args, **kwargs):
+        del args, kwargs
+        attacker_calls.append(f"{class_name}.{descriptor_name}")
+        return None
+
+    monkeypatch.setattr(target_class, descriptor_name, attacker)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity class dispatch changed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert attacker_calls == []
+    assert opener.calls == []
+

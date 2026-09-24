@@ -15,12 +15,26 @@ def _replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
-def _audit_candidate(monkeypatch, tmp_path: Path, html: str):
+def _audit_candidate(
+    monkeypatch,
+    tmp_path: Path,
+    html: str,
+    *,
+    emergency_script: str | None = None,
+):
     source_index = web_shell_index_path()
     candidate_index = tmp_path / "index.html"
     candidate_index.write_text(html, encoding="utf-8")
     (tmp_path / "app.js").write_text(
         source_index.with_name("app.js").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / "emergency_stop.js").write_text(
+        (
+            source_index.with_name("emergency_stop.js").read_text(encoding="utf-8")
+            if emergency_script is None
+            else emergency_script
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(webview_audit, "web_shell_index_path", lambda: candidate_index)
@@ -37,6 +51,53 @@ def test_packaged_machine_audit_treats_emergency_stop_as_critical_focusable_cont
     assert semantic["status"] == "PASS", semantic["failures"]
     assert keyboard["status"] == "PASS", keyboard["failures"]
     assert "emergency-stop-action" in keyboard["critical_focusable_controls"]
+
+
+def test_packaged_keyboard_audit_rejects_unloaded_emergency_stop_script(
+    monkeypatch,
+    tmp_path,
+):
+    html = web_shell_index_path().read_text(encoding="utf-8")
+    html = _replace_once(
+        html,
+        '  <script src="emergency_stop.js"></script>\n',
+        "",
+    )
+
+    _, keyboard = _audit_candidate(monkeypatch, tmp_path, html)
+
+    assert keyboard["status"] == "FAIL"
+    assert (
+        "emergency STOP keyboard asset is not loaded by the semantic shell"
+        in keyboard["failures"]
+    )
+
+
+def test_packaged_keyboard_audit_rejects_broken_emergency_stop_click_wiring(
+    monkeypatch,
+    tmp_path,
+):
+    html = web_shell_index_path().read_text(encoding="utf-8")
+    emergency_script = _asset("emergency_stop.js")
+    emergency_script = _replace_once(
+        emergency_script,
+        'button.addEventListener("click", activateEmergencyStop);',
+        'button.addEventListener("pointerdown", activateEmergencyStop);',
+    )
+
+    _, keyboard = _audit_candidate(
+        monkeypatch,
+        tmp_path,
+        html,
+        emergency_script=emergency_script,
+    )
+
+    assert keyboard["status"] == "FAIL"
+    assert any(
+        "emergency STOP keyboard wiring marker missing" in failure
+        and 'button.addEventListener("click", activateEmergencyStop);' in failure
+        for failure in keyboard["failures"]
+    )
 
 
 def test_packaged_machine_audit_rejects_missing_emergency_stop(monkeypatch, tmp_path):

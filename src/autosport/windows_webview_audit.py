@@ -88,6 +88,13 @@ _REQUIRED_SHORTCUT_MARKERS = (
     "event.shiftKey",
     "if (hasShortcutModifier(event)) return;",
 )
+_REQUIRED_EMERGENCY_STOP_KEYBOARD_MARKERS = (
+    'getElementById("emergency-stop-action")',
+    "button.addEventListener(\"click\", activateEmergencyStop);",
+    "const dispatch = globalThis.autosportDispatch;",
+    '"emergency_stop.activate",',
+    "{ globalAnnouncement: false, resultFocus: false }",
+)
 _FORBIDDEN_SHORTCUT_MARKERS = (
     'event.ctrlKey && event.altKey',
     'key === "r"',
@@ -314,6 +321,7 @@ def inspect_semantic_shell() -> dict[str, Any]:
 
 def inspect_keyboard_contract() -> dict[str, Any]:
     index, script = _asset_paths()
+    emergency_script = index.with_name("emergency_stop.js")
     failures: list[str] = []
     try:
         html = index.read_text(encoding="utf-8")
@@ -324,6 +332,14 @@ def inspect_keyboard_contract() -> dict[str, Any]:
             "failures": [f"semantic keyboard assets unreadable: {type(exc).__name__}: {exc}"],
             **_base_truth(),
         }
+    try:
+        emergency_javascript = emergency_script.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        failures.append(
+            "emergency STOP keyboard asset unreadable: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        emergency_javascript = ""
 
     parser = _SemanticShellParser()
     parser.feed(html)
@@ -334,6 +350,11 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     for marker in _FORBIDDEN_SHORTCUT_MARKERS:
         if marker in javascript:
             failures.append(f"screen-reader/browser shortcut collision remains: {marker}")
+    if '<script src="emergency_stop.js"></script>' not in html:
+        failures.append("emergency STOP keyboard asset is not loaded by the semantic shell")
+    for marker in _REQUIRED_EMERGENCY_STOP_KEYBOARD_MARKERS:
+        if marker not in emergency_javascript:
+            failures.append(f"emergency STOP keyboard wiring marker missing: {marker}")
     modifier_guard = "if (hasShortcutModifier(event)) return;"
     modifier_guard_index = javascript.find(modifier_guard)
     for shortcut_marker in ('event.key === "F2"', 'event.key === "F8"'):
@@ -403,9 +424,9 @@ def inspect_keyboard_contract() -> dict[str, Any]:
         "failures": failures,
         "evidence_scope": (
             "machine inspection of native semantic focusability, DOM-order discipline, "
-            "screen-reader/browser shortcut preservation, stable dynamic DOM projection, and "
-            "declared keyboard shortcuts in the packaged WebView2 shell; not physical "
-            "keyboard/NVDA speech proof."
+            "screen-reader/browser shortcut preservation, emergency STOP keyboard dispatch "
+            "wiring, stable dynamic DOM projection, and declared keyboard shortcuts in the "
+            "packaged WebView2 shell; not physical keyboard/NVDA speech proof."
         ),
         **_base_truth(),
     }

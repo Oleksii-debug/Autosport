@@ -88,6 +88,19 @@ def test_webview_dynamic_projection_preserves_nvda_navigation_contract() -> None
 
     assert 'event.ctrlKey && event.altKey' not in javascript
     for marker in (
+        "event.altKey",
+        "event.ctrlKey",
+        "event.metaKey",
+        "event.shiftKey",
+        "if (hasShortcutModifier(event)) return;",
+    ):
+        assert marker in javascript
+    modifier_guard_index = javascript.index(
+        "if (hasShortcutModifier(event)) return;"
+    )
+    assert modifier_guard_index < javascript.index('event.key === "F2"')
+    assert modifier_guard_index < javascript.index('event.key === "F8"')
+    for marker in (
         'key === "r"',
         'key === "o"',
         'key === "e"',

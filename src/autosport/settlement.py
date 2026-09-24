@@ -73,9 +73,9 @@ class _SettlementEngineMeta(type):
 
 @dataclass(slots=True)
 class SettlementEngine(metaclass=_SettlementEngineMeta):
-    _public_entry_bindings_sealed = False
     """Version-1 deterministic settlement state. Strategy code never receives this state during replay."""
 
+    _public_entry_bindings_sealed = False
     outcomes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

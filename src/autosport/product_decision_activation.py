@@ -1479,6 +1479,39 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         for name, method in canonical_authority_helpers.items()
     }
 
+    # Nested MWA operations also virtual-dispatch into WorkspaceIdentityBinding.
+    # Capture the exact descriptor graph rather than getattr()-bound methods so
+    # classmethod/staticmethod identity remains stable and independently checkable.
+    canonical_workspace_binding_descriptor_names = (
+        "resolve",
+        "validate_existing",
+        "ensure_bound",
+        "_read_workspace_marker_id",
+        "_read_path_binding_id",
+        "_ensure_path_binding",
+        "_ensure_workspace_marker",
+        "_workspace_payload",
+        "_path_payload",
+    )
+    canonical_workspace_binding_descriptors = {
+        name: workspace_binding_type.__dict__.get(name)
+        for name in canonical_workspace_binding_descriptor_names
+    }
+
+    def workspace_binding_descriptor_callable(descriptor: object) -> object:
+        if isinstance(descriptor, (classmethod, staticmethod)):
+            return descriptor.__func__
+        return descriptor
+
+    canonical_workspace_binding_codes = {
+        name: getattr(
+            workspace_binding_descriptor_callable(descriptor),
+            "__code__",
+            None,
+        )
+        for name, descriptor in canonical_workspace_binding_descriptors.items()
+    }
+
     if (
         canonical_authority_root_code is None
         or canonical_init is None
@@ -1493,6 +1526,11 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         or any(code is None for code in canonical_authority_codes.values())
         or any(method is None for method in canonical_authority_helpers.values())
         or any(code is None for code in canonical_authority_helper_codes.values())
+        or any(
+            descriptor is None
+            for descriptor in canonical_workspace_binding_descriptors.values()
+        )
+        or any(code is None for code in canonical_workspace_binding_codes.values())
     ):
         raise RuntimeError(
             "canonical product decision activation authority composition is unavailable"
@@ -1536,6 +1574,19 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             ):
                 raise ProductDecisionActivationError(
                     "nested anti-rollback authority lower dispatch changed"
+                )
+
+    def require_workspace_binding_dispatch() -> None:
+        for name, canonical in canonical_workspace_binding_descriptors.items():
+            live = workspace_binding_type.__dict__.get(name)
+            live_callable = workspace_binding_descriptor_callable(live)
+            if (
+                live is not canonical
+                or getattr(live_callable, "__code__", None)
+                is not canonical_workspace_binding_codes[name]
+            ):
+                raise ProductDecisionActivationError(
+                    "nested workspace identity binding dispatch changed"
                 )
 
     def require_store_state(store: ProductDecisionActivationStore) -> None:
@@ -1587,6 +1638,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 "product decision activation store construction state changed"
             )
 
+        require_workspace_binding_dispatch()
         binding = authority.workspace_binding
         expected_namespace = hashlib.sha256(
             "\0".join(
@@ -1899,7 +1951,9 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             raise ProductDecisionActivationError(
                 "canonical product decision activation constructor authority changed"
             )
+        require_workspace_binding_dispatch()
         canonical_init(self, workspace)
+        require_workspace_binding_dispatch()
         constructor_authorities[self] = self._authority
 
     setattr(store_class, "__init__", init)

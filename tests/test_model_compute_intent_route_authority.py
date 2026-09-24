@@ -21,6 +21,7 @@ from autosport.model_compute_router import (
 )
 from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
 )
 
 
@@ -178,6 +179,52 @@ def test_private_canonical_root_alias_cannot_retarget_after_local_state_loss(
 
         assert authority._authority.authority_root == canonical_root
         assert not alternate_root.exists()
+
+
+def test_live_authority_replacement_cannot_rebootstrap_after_local_state_loss(
+    monkeypatch,
+) -> None:
+    first_intent = _canonical_intent(suffix="runtime-binding-a")
+    second_intent = _canonical_intent(suffix="runtime-binding-b")
+    issued_at = max(_proposal(first_intent), _proposal(second_intent)) + timedelta(
+        seconds=2
+    )
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        first_request = _issue(store, router, first_intent)
+        _route(router, first_request)
+
+        canonical_authority = store._authority
+        alternate_root = workspace.parent / "runtime-retarget-authority"
+        alternate_authority = MonotonicWorkspaceAuthority(
+            workspace=workspace,
+            workspace_instance_id=canonical_authority.workspace_instance_id,
+            domain=subject.AUTHORITY_DOMAIN,
+            key=subject.AUTHORITY_KEY,
+            authority_root=alternate_root,
+        )
+        store._authority = alternate_authority
+        store.path.unlink()
+
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="runtime binding changed",
+        ):
+            _issue(
+                store,
+                router,
+                second_intent,
+                request_id="intent-route-2",
+            )
+
+        assert canonical_authority.read_history()
+        assert router.get_request("intent-route-2") is None
+        assert not store.path.exists()
+        assert not alternate_authority.records_dir.exists()
 
 
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:

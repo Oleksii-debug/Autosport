@@ -762,7 +762,7 @@ def _build_provider_order_correlation_authority():
             identity,
             reports,
             ledger=ledger,
-            bind_provider_order_id=bind_provider_order_id,
+            validate_provider_order_candidate=validate_provider_order_candidate,
         )
 
     return reconciliation_disposition, normalize_fix_execution_reports

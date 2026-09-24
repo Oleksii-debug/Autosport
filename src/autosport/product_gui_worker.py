@@ -400,7 +400,8 @@ class ProductGuiWorker:
             else:
                 if expected_source_id is not None:
                     raise ProductEntrypointError(
-                        "configured source identity forbids caller-injected runtime builders"
+                        "configured source identity forbids "
+                        "caller-injected runtime builders"
                     )
                 runtime = self._runtime_builder(
                     workspace,

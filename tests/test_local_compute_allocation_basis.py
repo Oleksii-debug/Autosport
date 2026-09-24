@@ -452,6 +452,50 @@ def test_exact_alternate_authority_object_cannot_retarget_store(
     assert _resolve(store) == record
 
 
+def test_recover_class_rebind_cannot_bypass_exact_authority_object_seal(
+    tmp_path, monkeypatch
+):
+    workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    canonical_authority = store._authority
+    alternate_root = tmp_path / "alternate-recover-bypass-root"
+    alternate_authority = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        domain=canonical_authority.domain,
+        key=canonical_authority.key,
+        authority_root=alternate_root,
+    )
+    forged_calls: list[str] = []
+
+    def forged_recover(_store):
+        forged_calls.append("recover")
+
+    monkeypatch.setattr(
+        subject.LocalComputeAllocationBasisAuthorityStore,
+        "_recover",
+        forged_recover,
+    )
+    object.__setattr__(store, "_authority", alternate_authority)
+
+    with pytest.raises(
+        subject.LocalComputeAllocationBasisError,
+        match="authority state changed",
+    ):
+        store.publish_owner_basis(review, confirmed=True)
+
+    assert forged_calls == []
+    assert not store.path.exists()
+    assert not alternate_root.exists()
+
+    object.__setattr__(store, "_authority", canonical_authority)
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert canonical_authority.authority_root == canonical_root
+    assert _resolve(store) == record
+
+
 def test_authority_method_shadow_cannot_bypass_machine_history(
     tmp_path, monkeypatch
 ):

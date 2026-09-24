@@ -23,6 +23,7 @@ def _install_forward_economic_step_identity_guard() -> None:
     raw_init = accumulator_type.__init__
     raw_record = accumulator_type.record
     raw_validate_aggregate = accumulator_type._validated_aggregate_state
+    raw_summary = accumulator_type.summary
     raw_steps_property = accumulator_type.steps
     raw_next_sequence_property = accumulator_type.next_sequence
     step_type = _evidence.ForwardEconomicStep
@@ -30,6 +31,23 @@ def _install_forward_economic_step_identity_guard() -> None:
     step_to_payload_code = getattr(step_to_payload, "__code__", None)
     canonical_digest = _evidence._canonical_digest
     canonical_digest_code = getattr(canonical_digest, "__code__", None)
+    instant_text = _evidence._instant_text
+    instant_text_code = getattr(instant_text, "__code__", None)
+    decimal_text = _evidence._decimal_text
+    decimal_text_code = getattr(decimal_text, "__code__", None)
+    instant = _evidence._instant
+    instant_code = getattr(instant, "__code__", None)
+    decimal = _evidence._decimal
+    decimal_code = getattr(decimal, "__code__", None)
+    json_module = _evidence.json
+    json_dumps = json_module.dumps
+    json_dumps_code = getattr(json_dumps, "__code__", None)
+    hashlib_module = _evidence.hashlib
+    hashlib_sha256 = hashlib_module.sha256
+    datetime_type = _evidence.datetime
+    timezone_type = _evidence.timezone
+    decimal_type = _evidence.Decimal
+    max_decimal_text_chars = _evidence._MAX_CANONICAL_DECIMAL_TEXT_CHARS
 
     if (
         type(raw_steps_property) is not property
@@ -43,7 +61,11 @@ def _install_forward_economic_step_identity_guard() -> None:
     raw_next_sequence_getter = raw_next_sequence_property.fget
     registries: dict[
         int,
-        tuple[ReferenceType[_evidence.ForwardEconomicEvidenceAccumulator], tuple[str, ...]],
+        tuple[
+            ReferenceType[_evidence.ForwardEconomicEvidenceAccumulator],
+            tuple[str, ...],
+            str,
+        ],
     ] = {}
 
     def _require_executable_identity() -> None:
@@ -53,6 +75,24 @@ def _install_forward_economic_step_identity_guard() -> None:
             or getattr(step_to_payload, "__code__", None) is not step_to_payload_code
             or getattr(_evidence, "_canonical_digest", None) is not canonical_digest
             or getattr(canonical_digest, "__code__", None) is not canonical_digest_code
+            or getattr(_evidence, "_instant_text", None) is not instant_text
+            or getattr(instant_text, "__code__", None) is not instant_text_code
+            or getattr(_evidence, "_decimal_text", None) is not decimal_text
+            or getattr(decimal_text, "__code__", None) is not decimal_text_code
+            or getattr(_evidence, "_instant", None) is not instant
+            or getattr(instant, "__code__", None) is not instant_code
+            or getattr(_evidence, "_decimal", None) is not decimal
+            or getattr(decimal, "__code__", None) is not decimal_code
+            or getattr(_evidence, "json", None) is not json_module
+            or getattr(json_module, "dumps", None) is not json_dumps
+            or getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or getattr(_evidence, "hashlib", None) is not hashlib_module
+            or getattr(hashlib_module, "sha256", None) is not hashlib_sha256
+            or getattr(_evidence, "datetime", None) is not datetime_type
+            or getattr(_evidence, "timezone", None) is not timezone_type
+            or getattr(_evidence, "Decimal", None) is not decimal_type
+            or getattr(_evidence, "_MAX_CANONICAL_DECIMAL_TEXT_CHARS", None)
+            != max_decimal_text_chars
         ):
             raise _evidence.ForwardEconomicEvidenceError(
                 "internal recorded step identity executable integrity drift"
@@ -67,6 +107,31 @@ def _install_forward_economic_step_identity_guard() -> None:
                 "internal recorded step identity registry origin drift"
             )
         return record[1]
+
+    def _expected_evidence_sha256(
+        self: _evidence.ForwardEconomicEvidenceAccumulator,
+    ) -> str:
+        record = registries.get(id(self))
+        if record is None or record[0]() is not self:
+            raise _evidence.ForwardEconomicEvidenceError(
+                "internal recorded step identity registry origin drift"
+            )
+        return record[2]
+
+    def _evidence_digest(
+        self: _evidence.ForwardEconomicEvidenceAccumulator,
+        steps: tuple[_evidence.ForwardEconomicStep, ...],
+    ) -> str:
+        _require_executable_identity()
+        digest = canonical_digest(
+            {
+                "schema_version": 1,
+                "protocol_sha256": self._protocol_sha256,
+                "steps": [step_to_payload(step) for step in steps],
+            }
+        )
+        _require_executable_identity()
+        return digest
 
     def _validate_step_prefix(
         self: _evidence.ForwardEconomicEvidenceAccumulator,
@@ -133,7 +198,12 @@ def _install_forward_economic_step_identity_guard() -> None:
         def forget(_weakref: object, *, registry_key: int = key) -> None:
             registries.pop(registry_key, None)
 
-        registries[key] = (ref(self, forget), ())
+        _require_executable_identity()
+        registries[key] = (
+            ref(self, forget),
+            (),
+            _evidence_digest(self, ()),
+        )
 
     def guarded_steps(
         self: _evidence.ForwardEconomicEvidenceAccumulator,
@@ -153,12 +223,26 @@ def _install_forward_economic_step_identity_guard() -> None:
         _validated_recorded_steps(self)
         return raw_validate_aggregate(self)
 
+    def guarded_summary(
+        self: _evidence.ForwardEconomicEvidenceAccumulator,
+    ) -> _evidence.ForwardEconomicEvidenceSummary:
+        _validated_recorded_steps(self)
+        expected_evidence_sha256 = _expected_evidence_sha256(self)
+        summary = raw_summary(self)
+        _validated_recorded_steps(self)
+        if summary.evidence_sha256 != expected_evidence_sha256:
+            raise _evidence.ForwardEconomicEvidenceError(
+                "recorded step evidence publication identity drift"
+            )
+        return summary
+
     def guarded_record(
         self: _evidence.ForwardEconomicEvidenceAccumulator,
         observation: _evidence.ForwardDecisionObservation,
         resolver: _evidence.EconomicAuthorityResolver,
     ) -> _evidence.ForwardEconomicStep:
         before_digests = _registry_for(self)
+        before_evidence_sha256 = _expected_evidence_sha256(self)
         _validated_recorded_steps(self)
         before_count = len(self._steps)
         published_step = raw_record(self, observation, resolver)
@@ -190,11 +274,22 @@ def _install_forward_economic_step_identity_guard() -> None:
                 "recorded step publication identity drift"
             )
         record = registries.get(id(self))
-        if record is None or record[0]() is not self or record[1] != before_digests:
+        if (
+            record is None
+            or record[0]() is not self
+            or record[1] != before_digests
+            or record[2] != before_evidence_sha256
+        ):
             raise _evidence.ForwardEconomicEvidenceError(
                 "internal recorded step identity registry changed during append"
             )
-        registries[id(self)] = (record[0], (*before_digests, stored_digest))
+        committed_steps = tuple(self._steps)
+        expected_evidence_sha256 = _evidence_digest(self, committed_steps)
+        registries[id(self)] = (
+            record[0],
+            (*before_digests, stored_digest),
+            expected_evidence_sha256,
+        )
         return published_step
 
     accumulator_type.__init__ = guarded_init
@@ -202,6 +297,7 @@ def _install_forward_economic_step_identity_guard() -> None:
     accumulator_type.next_sequence = property(guarded_next_sequence)
     accumulator_type._validated_aggregate_state = guarded_validate_aggregate
     accumulator_type.record = guarded_record
+    accumulator_type.summary = guarded_summary
     accumulator_type._recorded_step_identity_guard_installed = True
 
 

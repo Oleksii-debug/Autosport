@@ -118,7 +118,7 @@ if set(_PRODUCT_SOURCE_FACTORIES) != {
 for _entry in _PRODUCT_SOURCE_ENTRIES:
     _factory = _PRODUCT_SOURCE_FACTORIES[_entry.source_id]
     if (
-        getattr(_factory, "__module__", None) + ":" + getattr(_factory, "__name__", "")
+        getattr(_factory, "__module__", "") + ":" + getattr(_factory, "__name__", "")
         != _entry.factory_spec
     ):
         raise RuntimeError("product source callable identity does not match factory_spec")

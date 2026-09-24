@@ -87,6 +87,10 @@ from . import _point_in_time_feature_provenance_guard as _point_in_time_feature_
 # stale holdout process views re-resolve the same durable workspace binding/root.
 from . import _point_in_time_authority_runtime_repair as _point_in_time_authority_runtime_repair  # noqa: F401,E402
 
+# Positive point-in-time evidence must consume an ingestion-owned immutable first-
+# publication record instead of trusting evaluator-authored availability metadata.
+from . import source_feature_artifact_authority as _source_feature_artifact_authority  # noqa: F401,E402
+
 # Structural cursor/range witnesses are useful legacy intake evidence but are not
 # production provider-completeness authority. Install the fail-closed public gate;
 # the supported denominator path consumes the exact live CompleteGameBoardSnapshot.
@@ -135,6 +139,11 @@ from . import _scientific_registry_read_authority as _scientific_registry_read_a
 # authority instances must not dispatch through caller-replaced class implementations,
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
+
+# Compose source-feature publication last: same-process writers serialize before the
+# existing crash-releasing OS lock, and legacy provenance-guard reloads cannot
+# silently downgrade the public binding surface back to metadata-only availability.
+from . import _source_feature_artifact_runtime_repair as _source_feature_artifact_runtime_repair  # noqa: F401,E402
 
 # Sequential multiplicity evidence and PromotionEvidence live in separate durable
 # journals. Seal the registry prefix observed at look registration so a later write

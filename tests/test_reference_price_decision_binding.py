@@ -138,6 +138,38 @@ class ReferencePriceDecisionBindingTests(unittest.TestCase):
         self.assertFalse(resolved.fair_probability_verified)
         self.assertFalse(resolved.real_money_execution_authorized)
 
+    def test_restart_resolution_ignores_instance_verified_records_shadow(self) -> None:
+        evidence = self.evidence()
+        durable = bind_reference_price_evidence(
+            self.decision(decision_id="durable-decision"),
+            evidence,
+        )
+        ledger = self.ledger()
+        ledger.append(durable)
+
+        forged = bind_reference_price_evidence(
+            self.decision(decision_id="forged-decision"),
+            evidence,
+        )
+        ledger.verified_records = lambda: (forged,)  # type: ignore[method-assign]
+        self.assertEqual(ledger.verified_records(), (forged,))
+
+        resolved = resolve_ledger_reference_price_evidence(
+            ledger,
+            "durable-decision",
+        )
+        self.assertEqual(resolved.decision_id, "durable-decision")
+        self.assertEqual(resolved.evidence, evidence)
+
+        with self.assertRaisesRegex(
+            ReferencePriceDecisionBindingError,
+            "exactly one requested decision",
+        ):
+            resolve_ledger_reference_price_evidence(
+                ledger,
+                "forged-decision",
+            )
+
     def test_binding_embeds_exact_canonical_event_bytes(self) -> None:
         evidence = self.evidence()
         bound = bind_reference_price_evidence(self.decision(), evidence)

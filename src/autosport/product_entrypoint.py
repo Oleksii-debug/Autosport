@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
+from .forensic_session_journal import ForensicSessionJournal, verify_journal
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
 
@@ -164,6 +165,14 @@ def run_product(
     # creates a workspace or durable manifest. Missing event resolution or a split
     # source/runtime workspace must never be hidden by runtime initialization.
     source = _validated_source(source_factory, workspace=workspace)
+    workspace_path = _normalized_workspace(workspace, label="product runtime")
+    journal_path = workspace_path / "forensic-session.jsonl"
+
+    # Verify any pre-existing forensic history without creating the workspace. This
+    # preserves the existing first-run preflight while ensuring a torn/tampered journal
+    # blocks product-state construction. The journal constructor verifies again before
+    # appending startup, closing the check-to-append race fail-closed.
+    verify_journal(journal_path)
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
         source=source,
@@ -171,16 +180,20 @@ def run_product(
     )
     stop_request = _SignalStopRequest()
     previous_handlers: dict[signal.Signals, object] = {}
-    if install_signal_handlers:
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM)
-        }
-        for signum in previous_handlers:
-            signal.signal(signum, stop_request.handle)
-
+    journal: ForensicSessionJournal | None = None
     started = False
+    journal_exit = "error"
+    close_error: Exception | None = None
     try:
+        if install_signal_handlers:
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in (signal.SIGINT, signal.SIGTERM)
+            }
+            for signum in previous_handlers:
+                signal.signal(signum, stop_request.handle)
+
+        journal = ForensicSessionJournal(journal_path)
         start_status = runtime.start()
         started = True
         _print_record("product_status", runtime=runtime, value=start_status)
@@ -213,6 +226,7 @@ def run_product(
                 )
                 break
             sleep(float(poll_seconds))
+        journal_exit = "clean"
         return stop_request.exit_code
     except Exception as exc:
         if started:
@@ -224,12 +238,27 @@ def run_product(
         try:
             runtime.close()
         except Exception as exc:
+            close_error = exc
+
+        if journal is not None:
+            try:
+                journal.close(
+                    {
+                        "exit": journal_exit,
+                        "runtime_started": started,
+                    }
+                )
+            except Exception as exc:
+                if close_error is None:
+                    close_error = exc
+
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+        if close_error is not None:
             if started:
-                raise ProductRuntimeError(type(exc).__name__) from exc
-            raise
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+                raise ProductRuntimeError(type(close_error).__name__) from close_error
+            raise close_error
 
 
 def run_product_command(

@@ -11,8 +11,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.event_lifecycle import CatalogPage
+from autosport.forensic_session_journal import JournalIntegrityError, verify_journal
 from autosport.product_entrypoint import (
     ProductEntrypointError,
+    ProductRuntimeError,
     run_product,
     run_product_command,
 )
@@ -115,6 +117,102 @@ class SupportedProductEntrypointTests(unittest.TestCase):
                 self.assertEqual(second_code, 0)
                 self.assertEqual(second[0]["value"]["session_id"], first_session_id)
                 self.assertEqual(second[1]["value"]["cycle_index"], 2)
+
+                journal_records = verify_journal(workspace / "forensic-session.jsonl")
+                self.assertEqual(
+                    [record.event_type for record in journal_records],
+                    [
+                        "lifecycle.startup",
+                        "lifecycle.shutdown",
+                        "lifecycle.startup",
+                        "lifecycle.shutdown",
+                    ],
+                )
+                self.assertEqual(
+                    journal_records[-1].payload,
+                    {"exit": "clean", "runtime_started": True},
+                )
+
+    def test_tampered_forensic_journal_blocks_runtime_before_product_state_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            source_module = _module(_Source)
+            with patch.dict(
+                sys.modules,
+                {"autosport_test_product_source": source_module},
+            ):
+                with redirect_stdout(io.StringIO()):
+                    run_product(
+                        workspace=workspace,
+                        source_factory="autosport_test_product_source:make_source",
+                        initial_bankroll="100",
+                        max_cycles=1,
+                        poll_seconds=0,
+                        install_signal_handlers=False,
+                    )
+
+                composition_before = (workspace / "product_composition.json").read_bytes()
+                journal_path = workspace / "forensic-session.jsonl"
+                tampered = journal_path.read_text(encoding="utf-8").replace(
+                    '"exit":"clean"',
+                    '"exit":"tampered"',
+                    1,
+                )
+                self.assertIn('"exit":"tampered"', tampered)
+                journal_path.write_text(tampered, encoding="utf-8")
+
+                with self.assertRaises(JournalIntegrityError):
+                    run_product(
+                        workspace=workspace,
+                        source_factory="autosport_test_product_source:make_source",
+                        initial_bankroll="100",
+                        max_cycles=1,
+                        poll_seconds=0,
+                        install_signal_handlers=False,
+                    )
+
+                self.assertEqual(
+                    (workspace / "product_composition.json").read_bytes(),
+                    composition_before,
+                )
+                self.assertEqual(journal_path.read_text(encoding="utf-8"), tampered)
+
+    def test_runtime_exception_closes_forensic_journal_with_error_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            source_module = _module(_Source)
+            with patch.dict(
+                sys.modules,
+                {"autosport_test_product_source": source_module},
+            ), patch(
+                "autosport.product_entrypoint.AutonomousProductRuntime.tick",
+                side_effect=RuntimeError("provider-secret-must-not-be-journaled"),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(ProductRuntimeError):
+                        run_product(
+                            workspace=workspace,
+                            source_factory="autosport_test_product_source:make_source",
+                            initial_bankroll="100",
+                            max_cycles=1,
+                            poll_seconds=0,
+                            install_signal_handlers=False,
+                        )
+
+            journal_path = workspace / "forensic-session.jsonl"
+            journal_records = verify_journal(journal_path)
+            self.assertEqual(
+                [record.event_type for record in journal_records],
+                ["lifecycle.startup", "lifecycle.shutdown"],
+            )
+            self.assertEqual(
+                journal_records[-1].payload,
+                {"exit": "error", "runtime_started": True},
+            )
+            self.assertNotIn(
+                "provider-secret-must-not-be-journaled",
+                journal_path.read_text(encoding="utf-8"),
+            )
 
     def test_missing_event_resolution_fails_before_workspace_creation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

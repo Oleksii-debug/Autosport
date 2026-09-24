@@ -19,6 +19,7 @@ from secrets import token_hex
 from threading import RLock
 
 from .collector_service import _load_source_factory
+from .continuous_session import SessionState
 from .operator_source_registry import (
     OperatorSourceRegistryError,
     resolve_product_source_runtime_binding,
@@ -29,6 +30,8 @@ from .product_runtime import AutonomousProductRuntime
 PROFILE_SCHEMA = "autosport.trusted_product_runtime_code_profile"
 PROFILE_SCHEMA_VERSION = 1
 TRUST_BOUNDARY = "TRUSTED_PRODUCT_INTERPRETER"
+_CANONICAL_RUNTIME_TYPE = AutonomousProductRuntime
+_CANONICAL_RUNTIME_STATUS = AutonomousProductRuntime.status
 
 
 class TrustedRuntimeCodeProfileError(RuntimeError):
@@ -140,6 +143,25 @@ def _workspace_text(runtime: AutonomousProductRuntime) -> str:
     return text
 
 
+def _canonical_runtime_is_running(runtime: object) -> bool:
+    """Fail closed when the real product runtime has already left RUNNING state.
+
+    Tests may replace the public ``AutonomousProductRuntime`` alias with a narrow
+    fake to exercise object-origin semantics.  The state proof is deliberately
+    bound to the import-captured product type and unbound status method so ordinary
+    module/global rebinding cannot turn a STOPPED canonical runtime back into an
+    active trusted-code prerequisite.
+    """
+
+    if type(runtime) is not _CANONICAL_RUNTIME_TYPE:
+        return True
+    try:
+        status = _CANONICAL_RUNTIME_STATUS(runtime)
+    except BaseException:
+        return False
+    return type(status.state) is SessionState and status.state is SessionState.RUNNING
+
+
 def require_product_owned_source_factory_identity(
     *,
     source_factory: str,
@@ -228,6 +250,10 @@ def issue_trusted_runtime_code_profile(
         raise TrustedRuntimeCodeProfileError(
             "trusted runtime profile requires exact AutonomousProductRuntime"
         )
+    if not _canonical_runtime_is_running(runtime):
+        raise TrustedRuntimeCodeProfileError(
+            "trusted runtime profile requires a currently RUNNING product runtime"
+        )
     runtime_identity = id(runtime)
     with _LOCK:
         origin = _STARTED_ORIGINS.get(runtime_identity)
@@ -245,6 +271,7 @@ def issue_trusted_runtime_code_profile(
         runtime.manifest.source_id != origin.provider_source_id
         or workspace != origin.workspace
         or entry.source_id != origin.operator_source_id
+        or not _canonical_runtime_is_running(runtime)
     ):
         raise TrustedRuntimeCodeProfileError(
             "runtime started origin changed before profile issuance"
@@ -255,6 +282,10 @@ def issue_trusted_runtime_code_profile(
         if current_origin != origin or current_origin is None:
             raise TrustedRuntimeCodeProfileError(
                 "runtime started origin changed during profile issuance"
+            )
+        if not _canonical_runtime_is_running(runtime):
+            raise TrustedRuntimeCodeProfileError(
+                "runtime stopped during profile issuance"
             )
         existing_profile_identity = _ACTIVE_BY_RUNTIME.get(runtime_identity)
         if existing_profile_identity is not None:
@@ -307,6 +338,8 @@ def is_authoritative_trusted_runtime_code_profile(
         runtime = record.runtime
         if type(runtime) is not AutonomousProductRuntime:
             return False
+        if not _canonical_runtime_is_running(runtime):
+            return False
         origin = _STARTED_ORIGINS.get(id(runtime))
         if origin is None or origin.runtime is not runtime:
             return False
@@ -332,6 +365,7 @@ def is_authoritative_trusted_runtime_code_profile(
             or value.factory_spec != origin.factory_spec
             or value.operator_source_id != origin.operator_source_id
             or entry.source_id != value.operator_source_id
+            or not _canonical_runtime_is_running(runtime)
         ):
             return False
         if workspace is not None:

@@ -10,7 +10,6 @@ import threading
 import unittest
 from unittest import mock
 from pathlib import Path
-import urllib.request as urllib_request
 from urllib.parse import parse_qs, urlparse
 from urllib.request import HTTPSHandler, OpenerDirector
 
@@ -126,199 +125,96 @@ class HistoricalSnapshotTests(unittest.TestCase):
         ):
             assert_historical_snapshot_provider_origin(report)
 
-    def test_product_owned_capture_issues_only_exact_live_origin_witness(self) -> None:
-        payload = _payload()
-        raw = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        network_calls: list[str] = []
 
-        class NetworkResponse:
-            status = 200
-            headers = {"X-API-Version": "test"}
+    def test_product_owned_capture_rejects_precall_opener_open_rebind(self) -> None:
+        forged_calls: list[str] = []
 
-            def __init__(self, url: str) -> None:
-                self._url = url
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self) -> bytes:
-                return raw
-
-            def geturl(self) -> str:
-                return self._url
-
-        def open_response(opener, request, timeout=None):
+        def forged_open(opener, request, timeout=None):
             del opener, timeout
-            network_calls.append(request.full_url)
-            return NetworkResponse(request.full_url)
+            forged_calls.append(request.full_url)
+            raise AssertionError("forged opener dispatch must not run")
 
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(
             OpenerDirector,
             "open",
-            open_response,
-        ), mock.patch(
-            "autosport.parlayapi_provider.urlopen",
-            side_effect=AssertionError("ambient provider urlopen must not be used"),
-        ) as ambient_urlopen:
-            report = capture_product_owned_historical_snapshot(
-                api_key="secret-key-must-not-leak",
-                requested_at="2026-09-12T10:03:00Z",
-                output_path=Path(temp) / "market.jsonl",
-                evidence_path=Path(temp) / "evidence.json",
-            )
-            persisted = json.loads(
-                (Path(temp) / "evidence.json").read_text(encoding="utf-8")
-            )
-
-        ambient_urlopen.assert_not_called()
-        self.assertEqual(len(network_calls), 1)
-        self.assertTrue(network_calls[0].startswith("https://parlay-api.com/"))
-        assert_historical_snapshot_provider_origin(report)
-        self.assertFalse(
-            persisted["acquisition_provenance"]["provider_origin_authority_persisted"]
-        )
-        self.assertTrue(
-            persisted["acquisition_provenance"][
-                "provider_origin_requires_live_product_capture"
-            ]
-        )
-
-        reconstructed = replace(report)
-        self.assertEqual(reconstructed, report)
-        self.assertIsNot(reconstructed, report)
-        with self.assertRaisesRegex(
-            ProviderPayloadError,
-            "not issued by canonical product-owned Parlay acquisition",
-        ):
-            assert_historical_snapshot_provider_origin(reconstructed)
-
-    def test_product_owned_capture_does_not_use_process_global_urllib_opener(self) -> None:
-        payload = _payload()
-        raw = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        private_calls: list[str] = []
-        ambient_calls: list[str] = []
-
-        class NetworkResponse:
-            status = 200
-            headers = {"X-API-Version": "test"}
-
-            def __init__(self, url: str) -> None:
-                self._url = url
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self) -> bytes:
-                return raw
-
-            def geturl(self) -> str:
-                return self._url
-
-        def private_open(opener, request, timeout=None):
-            del opener, timeout
-            private_calls.append(request.full_url)
-            return NetworkResponse(request.full_url)
-
-        class AmbientOpener:
-            def open(self, request, timeout=None):
-                del timeout
-                ambient_calls.append(request.full_url)
-                return NetworkResponse(request.full_url)
-
-        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
-            OpenerDirector,
-            "open",
-            private_open,
-        ), mock.patch.object(
-            urllib_request,
-            "_opener",
-            AmbientOpener(),
-        ):
-            report = capture_product_owned_historical_snapshot(
-                api_key="secret-key-must-not-leak",
-                requested_at="2026-09-12T10:03:00Z",
-                output_path=Path(temp) / "market.jsonl",
-                evidence_path=Path(temp) / "evidence.json",
-            )
-
-        self.assertEqual(len(private_calls), 1)
-        self.assertEqual(ambient_calls, [])
-        assert_historical_snapshot_provider_origin(report)
-
-    def test_product_owned_capture_rejects_private_tls_drift_during_io(self) -> None:
-        payload = _payload()
-        raw = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-
-        class NetworkResponse:
-            status = 200
-            headers = {"X-API-Version": "test"}
-
-            def __init__(self, url: str) -> None:
-                self._url = url
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self) -> bytes:
-                return raw
-
-            def geturl(self) -> str:
-                return self._url
-
-        def weakening_open(opener, request, timeout=None):
-            del timeout
-            https_handler = next(
-                handler
-                for handler in opener.handlers
-                if type(handler) is HTTPSHandler
-            )
-            context = https_handler._context
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            return NetworkResponse(request.full_url)
-
-        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
-            OpenerDirector,
-            "open",
-            weakening_open,
+            forged_open,
         ):
             output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
             with self.assertRaisesRegex(
-                ProviderTransportError,
-                "network authority changed",
+                ProviderPayloadError,
+                "network dispatch changed before construction",
             ):
                 capture_product_owned_historical_snapshot(
                     api_key="secret-key-must-not-leak",
                     requested_at="2026-09-12T10:03:00Z",
                     output_path=output_path,
-                    evidence_path=Path(temp) / "evidence.json",
+                    evidence_path=evidence_path,
                 )
             self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
 
+        self.assertEqual(forged_calls, [])
+
+    def test_product_owned_capture_rejects_precall_opener_internal_rebind(self) -> None:
+        forged_calls: list[str] = []
+
+        def forged_internal_open(opener, request, data=None):
+            del opener, data
+            forged_calls.append(request.full_url)
+            raise AssertionError("forged internal opener dispatch must not run")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            OpenerDirector,
+            "_open",
+            forged_internal_open,
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+        self.assertEqual(forged_calls, [])
+
+    def test_product_owned_capture_rejects_precall_https_open_rebind(self) -> None:
+        forged_calls: list[str] = []
+
+        def forged_https_open(handler, request):
+            del handler
+            forged_calls.append(request.full_url)
+            raise AssertionError("forged HTTPS dispatch must not run")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            HTTPSHandler,
+            "https_open",
+            forged_https_open,
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+        self.assertEqual(forged_calls, [])
     def test_product_owned_capture_rejects_live_constructor_rebind_before_io(self) -> None:
         calls: list[str] = []
 

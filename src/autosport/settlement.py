@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import Lock
-from weakref import ReferenceType, WeakKeyDictionary, ref
+from weakref import ReferenceType, ref
 
 from .domain import TicketStatus
 from .paper import PaperBook
@@ -137,31 +137,57 @@ def _build_serialized_settlement_operations():
     class OutcomeAuthorityToken:
         __slots__ = ("__weakref__",)
 
-    authority_tokens: WeakKeyDictionary[
-        OutcomeAuthorityToken,
+    authority_by_engine_id: dict[
+        int,
         tuple[
             ReferenceType[SettlementEngine],
-            tuple[tuple[object, object], ...],
+            OutcomeAuthorityToken | None,
+            tuple[tuple[object, object], ...] | None,
         ],
-    ] = WeakKeyDictionary()
+    ] = {}
+
+    def _new_owner_ref(engine: SettlementEngine) -> ReferenceType[SettlementEngine]:
+        key = id(engine)
+
+        def forget(owner_ref: ReferenceType[SettlementEngine]) -> None:
+            current = authority_by_engine_id.get(key)
+            if current is not None and current[0] is owner_ref:
+                authority_by_engine_id.pop(key, None)
+
+        return ref(engine, forget)
 
     def issue_outcomes_authority(
         engine: SettlementEngine,
         snapshot: dict[str, str],
     ) -> None:
-        previous = outcomes_authority_descriptor.__get__(engine, engine_type)
-        if type(previous) is OutcomeAuthorityToken:
-            authority_tokens.pop(previous, None)
+        key = id(engine)
+        current = authority_by_engine_id.get(key)
+        if current is None or current[0]() is not engine:
+            owner_ref = _new_owner_ref(engine)
+        else:
+            owner_ref = current[0]
         token = OutcomeAuthorityToken()
-        authority_tokens[token] = (ref(engine), tuple(snapshot.items()))
+        authority_by_engine_id[key] = (
+            owner_ref,
+            token,
+            tuple(snapshot.items()),
+        )
         outcomes_authority_descriptor.__set__(engine, token)
 
     def guarded_post_init(self: SettlementEngine) -> None:
-        raw_post_init(self)
-        raw = outcomes_descriptor.__get__(self, engine_type)
-        if type(raw) is dict:
-            with serialization_lock:
+        with serialization_lock:
+            key = id(self)
+            current = authority_by_engine_id.get(key)
+            if current is not None and current[0]() is self:
+                raise ValueError("settlement outcome authority already initialized")
+
+            raw_post_init(self)
+            raw = outcomes_descriptor.__get__(self, engine_type)
+            if type(raw) is dict:
                 issue_outcomes_authority(self, raw)
+            else:
+                owner_ref = _new_owner_ref(self)
+                authority_by_engine_id[key] = (owner_ref, None, None)
 
     def require_outcomes_authority(
         engine: SettlementEngine,
@@ -169,19 +195,24 @@ def _build_serialized_settlement_operations():
     ) -> object:
         raw = outcomes_descriptor.__get__(engine, engine_type)
         authorized = outcomes_authority_descriptor.__get__(engine, engine_type)
+        binding = authority_by_engine_id.get(id(engine))
+        if binding is None or binding[0]() is not engine:
+            raise ValueError("settlement outcome authority changed")
         if authorized is None:
             # Preserve delayed validation for a malformed non-dict constructor
             # value, but never allow caller replacement of that state with a
-            # valid-looking dict to create settlement authority.
-            if type(raw) is dict:
+            # valid-looking dict or a replayed __post_init__ to create authority.
+            if binding[1] is not None or binding[2] is not None or type(raw) is dict:
                 raise ValueError("settlement outcome authority changed")
             return raw
-        if type(authorized) is not OutcomeAuthorityToken or type(raw) is not dict:
+        if (
+            type(authorized) is not OutcomeAuthorityToken
+            or type(raw) is not dict
+            or authorized is not binding[1]
+            or binding[2] is None
+        ):
             raise ValueError("settlement outcome authority changed")
-        binding = authority_tokens.get(authorized)
-        if binding is None or binding[0]() is not engine:
-            raise ValueError("settlement outcome authority changed")
-        expected = dict(binding[1])
+        expected = dict(binding[2])
         if raw != expected or (snapshot is not None and snapshot != expected):
             raise ValueError("settlement outcome authority changed")
         return raw

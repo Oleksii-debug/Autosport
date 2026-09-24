@@ -1215,7 +1215,6 @@ def _install_execution_readback_authority() -> None:
     for _request_member_name, request_member, member_state in (
         sealed_request_class_graph
     ):
-        del _request_member_name
         candidate_functions = (
             request_member,
             member_state[1],

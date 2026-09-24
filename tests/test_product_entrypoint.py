@@ -286,6 +286,103 @@ class SupportedProductEntrypointTests(unittest.TestCase):
             ],
         )
 
+    def test_signal_during_final_tick_wins_terminal_stop_reason(self) -> None:
+        runtime = Mock()
+        runtime.start.return_value = object()
+        runtime.stop.return_value = object()
+        installed_handlers: dict[int, object] = {}
+        previous_handler = object()
+
+        def install_handler(signum: int, handler: object) -> object:
+            if callable(handler):
+                installed_handlers[signum] = handler
+            return previous_handler
+
+        def tick() -> object:
+            handler = installed_handlers[int(signal.SIGTERM)]
+            self.assertTrue(callable(handler))
+            handler(int(signal.SIGTERM), None)
+            return object()
+
+        runtime.tick.side_effect = tick
+        with (
+            patch(
+                "autosport.product_entrypoint._validated_source",
+                return_value=object(),
+            ),
+            patch(
+                "autosport.product_entrypoint.build_autonomous_product_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "autosport.product_entrypoint._product_stop_signals",
+                return_value=(int(signal.SIGTERM),),
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.getsignal",
+                return_value=previous_handler,
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.signal",
+                side_effect=install_handler,
+            ),
+            patch("autosport.product_entrypoint._print_record"),
+        ):
+            code = run_product(
+                workspace="unused-workspace",
+                source_factory="unused:factory",
+                max_cycles=1,
+                poll_seconds=0,
+                sleep=lambda _seconds: self.fail(
+                    "bounded final cycle must not sleep"
+                ),
+            )
+
+        self.assertEqual(code, 128 + int(signal.SIGTERM))
+        runtime.stop.assert_called_once_with("signal:SIGTERM")
+        runtime.close.assert_called_once_with()
+
+    def test_no_signal_final_tick_still_records_max_cycles_reached(self) -> None:
+        runtime = Mock()
+        runtime.start.return_value = object()
+        runtime.tick.return_value = object()
+        runtime.stop.return_value = object()
+        previous_handler = object()
+
+        with (
+            patch(
+                "autosport.product_entrypoint._validated_source",
+                return_value=object(),
+            ),
+            patch(
+                "autosport.product_entrypoint.build_autonomous_product_runtime",
+                return_value=runtime,
+            ),
+            patch(
+                "autosport.product_entrypoint._product_stop_signals",
+                return_value=(int(signal.SIGTERM),),
+            ),
+            patch(
+                "autosport.product_entrypoint.signal.getsignal",
+                return_value=previous_handler,
+            ),
+            patch("autosport.product_entrypoint.signal.signal"),
+            patch("autosport.product_entrypoint._print_record"),
+        ):
+            code = run_product(
+                workspace="unused-workspace",
+                source_factory="unused:factory",
+                max_cycles=1,
+                poll_seconds=0,
+                sleep=lambda _seconds: self.fail(
+                    "bounded final cycle must not sleep"
+                ),
+            )
+
+        self.assertEqual(code, 0)
+        runtime.stop.assert_called_once_with("max_cycles_reached")
+        runtime.close.assert_called_once_with()
+
     def test_missing_event_resolution_fails_before_workspace_creation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "must-not-exist"

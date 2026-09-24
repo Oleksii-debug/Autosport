@@ -955,6 +955,72 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertFalse(self.store.path.exists())
         self.assertEqual(committed.product_source_id, "provider-a")
 
+    def test_hashlib_sha256_member_rebind_cannot_mask_composition_drift(
+        self,
+    ) -> None:
+        committed = self._initialize()
+        canonical_sha256 = hashlib.sha256
+        committed_state_sha256 = canonical_sha256(
+            self.store.path.read_bytes()
+        ).hexdigest()
+
+        self._write_composition(source_id="provider-b", bankroll="1000")
+        composition_bytes = (
+            self.workspace / "product_composition.json"
+        ).read_bytes()
+
+        root = json.loads(self.store.path.read_text(encoding="utf-8"))
+        binding = root["binding"]
+        binding["product_source_id"] = "provider-b"
+        binding["product_composition_sha256"] = canonical_sha256(
+            composition_bytes
+        ).hexdigest()
+        binding_bytes = json.dumps(
+            binding,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        root["binding_sha256"] = canonical_sha256(binding_bytes).hexdigest()
+        tampered_activation_bytes = activation_module._durable_json_bytes(root)
+        self.store.path.write_bytes(tampered_activation_bytes)
+
+        forged_calls: list[str] = []
+
+        class ForgedDigest:
+            def hexdigest(self) -> str:
+                return committed_state_sha256
+
+        def forged_sha256(
+            data: bytes = b"",
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            if data == tampered_activation_bytes:
+                forged_calls.append("activation-state")
+                return ForgedDigest()
+            return canonical_sha256(data, *args, **kwargs)
+
+        with mock.patch.object(
+            monotonic_authority_module.hashlib,
+            "sha256",
+            forged_sha256,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "defining globals changed",
+            ):
+                self._verify()
+
+        self.assertEqual(forged_calls, [])
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "anti-rollback authority rejected",
+        ):
+            self._verify()
+        self.assertEqual(committed.product_source_id, "provider-a")
+
     def test_committed_activation_deletion_cannot_reinitialize(self) -> None:
         committed = self._initialize()
         self.store.path.unlink()

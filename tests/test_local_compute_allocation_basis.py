@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -313,6 +315,65 @@ def test_transitive_goal_parser_dependency_rebind_fails_closed(
     assert review.owner_goal_revision == durable_goal.revision
     assert review.owner_bankroll_id == durable_goal.bankroll_id
     assert review.currency == durable_goal.currency
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+
+def test_path_open_rebind_cannot_replace_durable_goal_bytes(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 47,
+    )
+    forged_bytes = (
+        json.dumps(
+            economic_goal_to_payload(forged_goal),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    canonical_open = Path.open
+    forged_open_calls: list[str] = []
+
+    def forged_open(
+        self,
+        mode="r",
+        buffering=-1,
+        encoding=None,
+        errors=None,
+        newline=None,
+    ):
+        if self.name == EconomicGoalStore.FILE_NAME:
+            forged_open_calls.append(mode)
+            if "b" in mode:
+                return io.BytesIO(forged_bytes)
+            return io.StringIO(forged_bytes.decode("utf-8"))
+        return canonical_open(
+            self,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", forged_open)
+        review = _review(store)
+
+    assert forged_open_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+
     record = store.publish_owner_basis(review, confirmed=True)
     assert _resolve(store) == record
 

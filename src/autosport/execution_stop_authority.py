@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import monotonic_workspace_authority as _monotonic_authority_module
 from .monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
@@ -277,7 +279,49 @@ def _exclusive_file_lock(
         ) from exc
 
 
-class ExecutionStopAuthority:
+def _build_execution_stop_authority_meta():
+    """Fence final positive STOP entry bindings after import composition."""
+
+    protected_names = frozenset(
+        {
+            "current",
+            "decision",
+            "assert_execution_allowed",
+            "admission_lease",
+        }
+    )
+    sealed = False
+    integrity_error = ExecutionStopIntegrityError
+
+    class ExecutionStopAuthorityMeta(type):
+        def __setattr__(cls, name, value) -> None:
+            nonlocal sealed
+            if sealed and name in protected_names:
+                raise integrity_error(
+                    "canonical public STOP authority entry binding is immutable"
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name) -> None:
+            nonlocal sealed
+            if sealed and name in protected_names:
+                raise integrity_error(
+                    "canonical public STOP authority entry binding is immutable"
+                )
+            super().__delattr__(name)
+
+        def _seal_positive_entry_bindings(cls) -> None:
+            nonlocal sealed
+            sealed = True
+
+    return ExecutionStopAuthorityMeta
+
+
+_ExecutionStopAuthorityMeta = _build_execution_stop_authority_meta()
+del _build_execution_stop_authority_meta
+
+
+class ExecutionStopAuthority(metaclass=_ExecutionStopAuthorityMeta):
     """Durable, explicit, fail-closed execution STOP/ARM authority.
 
     The journal is authoritative. Every command is hash chained and revisioned.
@@ -358,11 +402,22 @@ class ExecutionStopAuthority:
 
     def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
         absolute = Path(os.path.abspath(os.fspath(self.path)))
-        return MonotonicWorkspaceAuthority(
-            workspace=absolute.parent,
+        expected_workspace = absolute.parent
+        expected_root = _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT
+        expected_key = _CANONICAL_ADMISSION_MONOTONIC_KEY(absolute)
+        _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
+        authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS(
+            workspace=expected_workspace,
             domain=_MONOTONIC_DOMAIN,
-            key=_CANONICAL_ADMISSION_MONOTONIC_KEY(absolute),
-            authority_root=_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT(),
+            key=expected_key,
+            authority_root=expected_root,
+        )
+        _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
+        return _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_COORDINATES(
+            authority,
+            expected_workspace=expected_workspace,
+            expected_root=expected_root,
+            expected_key=expected_key,
         )
 
     def _stable_serialization_lock_path(self) -> Path:
@@ -584,7 +639,7 @@ class ExecutionStopAuthority:
         binding = _CANONICAL_ADMISSION_MONOTONIC_BINDING(self)
         try:
             authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY(self)
-            history = authority.read_history()
+            history = _CANONICAL_ADMISSION_MONOTONIC_READ_HISTORY(authority)
             receipt_exists = _CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED(
                 self,
                 authority,
@@ -608,7 +663,8 @@ class ExecutionStopAuthority:
                     semantic_binding_sha256=binding,
                     authority_tip_sha256=None,
                 )
-                authority.prepare(
+                _CANONICAL_ADMISSION_MONOTONIC_PREPARE(
+                    authority,
                     tx_id=tx_id,
                     observed_state_sha256=None,
                     intended_state_sha256=observed,
@@ -619,7 +675,8 @@ class ExecutionStopAuthority:
                     authority,
                     semantic_binding_sha256=binding,
                 )
-                authority.commit(
+                _CANONICAL_ADMISSION_MONOTONIC_COMMIT(
+                    authority,
                     tx_id=tx_id,
                     observed_state_sha256=observed,
                     semantic_binding_sha256=binding,
@@ -637,13 +694,17 @@ class ExecutionStopAuthority:
                 latest.phase is AuthorityPhase.PREPARE
                 and observed == latest.intended_state_sha256
             ):
-                authority.recover(
+                _CANONICAL_ADMISSION_MONOTONIC_RECOVER(
+                    authority,
                     observed_state_sha256=observed,
                     tx_id=latest.tx_id,
                     semantic_binding_sha256=binding,
                 )
             else:
-                authority.recover(observed_state_sha256=observed)
+                _CANONICAL_ADMISSION_MONOTONIC_RECOVER(
+                    authority,
+                    observed_state_sha256=observed,
+                )
         except MonotonicWorkspaceAuthorityError as exc:
             _CANONICAL_ADMISSION_RAISE_MONOTONIC_ERROR(exc)
 
@@ -664,7 +725,7 @@ class ExecutionStopAuthority:
         binding = self._monotonic_binding()
         try:
             authority = self._monotonic_authority()
-            history = authority.read_history()
+            history = _CANONICAL_ADMISSION_MONOTONIC_READ_HISTORY(authority)
             tip = None if not history else history[-1].record_sha256
             tx_id = self._monotonic_tx_id(
                 operation="APPEND_STOP_AUTHORITY_RECORD",
@@ -673,7 +734,8 @@ class ExecutionStopAuthority:
                 semantic_binding_sha256=binding,
                 authority_tip_sha256=tip,
             )
-            authority.prepare(
+            _CANONICAL_ADMISSION_MONOTONIC_PREPARE(
+                authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 intended_state_sha256=intended,
@@ -706,7 +768,8 @@ class ExecutionStopAuthority:
                 "STOP transition local state differs from monotonic PREPARE"
             )
         try:
-            authority.commit(
+            _CANONICAL_ADMISSION_MONOTONIC_COMMIT(
+                authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 semantic_binding_sha256=binding,
@@ -1314,12 +1377,433 @@ class ExecutionStopAuthority:
         return state
 
 
+def _monotonic_dependency_callable_state(
+    value: object,
+) -> tuple[object | None, ...]:
+    wrapped = getattr(value, "__wrapped__", None)
+    descriptor_function = getattr(value, "__func__", None)
+    property_getter = value.fget if type(value) is property else None
+    property_setter = value.fset if type(value) is property else None
+    property_deleter = value.fdel if type(value) is property else None
+    return (
+        getattr(value, "__code__", None),
+        wrapped,
+        getattr(wrapped, "__code__", None),
+        descriptor_function,
+        getattr(descriptor_function, "__code__", None),
+        property_getter,
+        getattr(property_getter, "__code__", None),
+        property_setter,
+        getattr(property_setter, "__code__", None),
+        property_deleter,
+        getattr(property_deleter, "__code__", None),
+    )
+
+
+_CANONICAL_ADMISSION_MONOTONIC_MODULE = _monotonic_authority_module
+_CANONICAL_ADMISSION_MONOTONIC_MODULE_GRAPH = tuple(
+    (
+        name,
+        value,
+        _monotonic_dependency_callable_state(value),
+    )
+    for name, value in sorted(
+        vars(_CANONICAL_ADMISSION_MONOTONIC_MODULE).items()
+    )
+)
+_CANONICAL_ADMISSION_MONOTONIC_DEPENDENCY_CLASSES = tuple(
+    (
+        name,
+        value,
+        tuple(
+            (
+                member_name,
+                member,
+                _monotonic_dependency_callable_state(member),
+            )
+            for member_name, member in value.__dict__.items()
+        ),
+    )
+    for name, value in (
+        (
+            "MonotonicWorkspaceAuthority",
+            _monotonic_authority_module.MonotonicWorkspaceAuthority,
+        ),
+        (
+            "WorkspaceIdentityBinding",
+            _monotonic_authority_module.WorkspaceIdentityBinding,
+        ),
+        (
+            "WorkspaceEconomicLock",
+            _monotonic_authority_module.WorkspaceEconomicLock,
+        ),
+    )
+)
+# pathlib dispatch is part of the transitive monotonic read/durability graph.
+# Freezing only the module-level Path object is insufficient: its inherited class
+# members can be rebound while Path identity remains unchanged, allowing a forged
+# directory view to hide a newer STOP authority suffix.
+_CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS = _monotonic_authority_module.Path
+_CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS = type(
+    _CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS(".")
+)
+_CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH = tuple(
+    (
+        path_class,
+        tuple(
+            (
+                member_name,
+                member,
+                _monotonic_dependency_callable_state(member),
+            )
+            for member_name, member in path_class.__dict__.items()
+        ),
+    )
+    for path_class in _CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS.__mro__
+    if path_class is not object
+)
+
+
+_CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_ID = (
+    _monotonic_authority_module.AUTHORITY_ID
+)
+_CANONICAL_ADMISSION_MONOTONIC_BINDING_CLASS = (
+    _monotonic_authority_module.WorkspaceIdentityBinding
+)
+
+
+def _require_canonical_monotonic_module_graph() -> None:
+    live_graph = vars(_CANONICAL_ADMISSION_MONOTONIC_MODULE)
+    if len(live_graph) != len(_CANONICAL_ADMISSION_MONOTONIC_MODULE_GRAPH):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority module dependency graph changed"
+        )
+    for name, expected, expected_state in (
+        _CANONICAL_ADMISSION_MONOTONIC_MODULE_GRAPH
+    ):
+        live_value = live_graph.get(name)
+        if (
+            live_value is not expected
+            or _monotonic_dependency_callable_state(live_value)
+            != expected_state
+        ):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority module dependency graph changed"
+            )
+
+    for class_name, expected_class, expected_members in (
+        _CANONICAL_ADMISSION_MONOTONIC_DEPENDENCY_CLASSES
+    ):
+        live_class = live_graph.get(class_name)
+        if live_class is not expected_class:
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority dependency class changed"
+            )
+        live_members = live_class.__dict__
+        if len(live_members) != len(expected_members):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority dependency class graph changed"
+            )
+        for member_name, expected_member, expected_state in expected_members:
+            live_member = live_members.get(member_name)
+            if (
+                live_member is not expected_member
+                or _monotonic_dependency_callable_state(live_member)
+                != expected_state
+            ):
+                raise ExecutionStopIntegrityError(
+                    "canonical monotonic authority dependency class graph changed"
+                )
+
+    expected_path_mro = tuple(
+        path_class
+        for path_class, _members in _CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH
+    )
+    live_path_mro = tuple(
+        path_class
+        for path_class in _CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS.__mro__
+        if path_class is not object
+    )
+    if (
+        live_graph.get("Path") is not _CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS
+        or live_path_mro != expected_path_mro
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority filesystem dispatch graph changed"
+        )
+    for path_class, expected_members in (
+        _CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH
+    ):
+        live_members = path_class.__dict__
+        if len(live_members) != len(expected_members):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority filesystem dispatch graph changed"
+            )
+        for member_name, expected_member, expected_state in expected_members:
+            live_member = live_members.get(member_name)
+            if (
+                live_member is not expected_member
+                or _monotonic_dependency_callable_state(live_member)
+                != expected_state
+            ):
+                raise ExecutionStopIntegrityError(
+                    "canonical monotonic authority filesystem dispatch graph changed"
+                )
+
+
+def _require_monotonic_authority_coordinates(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    expected_workspace: Path,
+    expected_root: Path,
+    expected_key: str,
+) -> MonotonicWorkspaceAuthority:
+    if type(authority) is not MonotonicWorkspaceAuthority:
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority type changed"
+        )
+    binding = authority.workspace_binding
+    if type(binding) is not _CANONICAL_ADMISSION_MONOTONIC_BINDING_CLASS:
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic workspace binding type changed"
+        )
+
+    expected_locator = os.path.normcase(
+        os.path.normpath(str(expected_workspace))
+    )
+    expected_locator_sha256 = hashlib.sha256(
+        expected_locator.encode("utf-8")
+    ).hexdigest()
+    expected_workspace_marker = (
+        expected_workspace
+        / ".autosport"
+        / "monotonic-workspace-binding.json"
+    )
+    expected_path_binding = (
+        expected_root
+        / "workspace-bindings"
+        / expected_locator_sha256[:2]
+        / f"{expected_locator_sha256}.json"
+    )
+
+    workspace_instance_id = authority.workspace_instance_id
+    if (
+        type(workspace_instance_id) is not str
+        or not workspace_instance_id
+        or workspace_instance_id != binding.workspace_instance_id
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic workspace identity changed"
+        )
+
+    namespace_material = "\0".join(
+        (
+            _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_ID,
+            workspace_instance_id,
+            _MONOTONIC_DOMAIN,
+            expected_key,
+        )
+    ).encode("utf-8")
+    expected_namespace = hashlib.sha256(namespace_material).hexdigest()
+    expected_journal_dir = (
+        expected_root
+        / "journals"
+        / expected_namespace[:2]
+        / expected_namespace
+    )
+    expected_records_dir = expected_journal_dir / "records"
+    expected_namespace_marker = (
+        expected_root
+        / "namespace-bindings"
+        / expected_namespace[:2]
+        / f"{expected_namespace}.json"
+    )
+
+    if (
+        authority.workspace != expected_workspace
+        or authority.authority_root != expected_root
+        or authority.domain != _MONOTONIC_DOMAIN
+        or authority.key != expected_key
+        or authority.namespace_sha256 != expected_namespace
+        or authority.journal_dir != expected_journal_dir
+        or authority.records_dir != expected_records_dir
+        or authority.namespace_marker_path != expected_namespace_marker
+        or authority.workspace_binding_path != expected_workspace_marker
+        or binding.workspace != expected_workspace
+        or binding.authority_root != expected_root
+        or binding.workspace_marker_path != expected_workspace_marker
+        or binding.path_binding_path != expected_path_binding
+        or binding.workspace_locator != expected_locator
+        or binding.workspace_locator_sha256 != expected_locator_sha256
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority coordinates changed"
+        )
+    return authority
+
+
+_CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH = (
+    _require_canonical_monotonic_module_graph
+)
+_CANONICAL_ADMISSION_REQUIRE_MONOTONIC_COORDINATES = (
+    _require_monotonic_authority_coordinates
+)
+
+
+# Freeze the public MonotonicWorkspaceAuthority entry points consumed by STOP
+# state verification/transitions. Calling these exact unbound functions prevents
+# a class-attribute rebind from silently changing authority semantics.
+_CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS = MonotonicWorkspaceAuthority
+_CANONICAL_ADMISSION_MONOTONIC_READ_HISTORY = (
+    MonotonicWorkspaceAuthority.read_history
+)
+_CANONICAL_ADMISSION_MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
+_CANONICAL_ADMISSION_MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
+_CANONICAL_ADMISSION_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH = tuple(
+    (name, value)
+    for name, value in MonotonicWorkspaceAuthority.__dict__.items()
+)
+_CANONICAL_ADMISSION_MONOTONIC_CLASS_CODES = tuple(
+    (name, getattr(value, "__code__", None))
+    for name, value in _CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH
+)
+
+
 # admission_lease is consumed across irreversible provider effects. Capture the
 # complete class-level helper graph reachable from its linearization lock and durable
 # current-state verification. Security-critical edges below the lease invoke these
 # exact unbound callables rather than re-resolving self.<helper> dynamically.
 _CANONICAL_ADMISSION_AUTHORITY_CLASS = ExecutionStopAuthority
 _CANONICAL_ADMISSION_MONOTONIC_KEY = ExecutionStopAuthority._monotonic_key
+
+
+def _build_product_root_bound_monotonic_authority():
+    """Bind every STOP authority read/write to one import-composed product root."""
+
+    product_root = ExecutionStopAuthority._product_monotonic_authority_root()
+    path_class = Path
+    path_abspath = os.path.abspath
+    fspath = os.fspath
+    monotonic_key = ExecutionStopAuthority._monotonic_key
+    require_module_graph = _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH
+    authority_class = MonotonicWorkspaceAuthority
+    require_coordinates = _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_COORDINATES
+    monotonic_domain = _MONOTONIC_DOMAIN
+
+    def monotonic_authority(
+        self: ExecutionStopAuthority,
+    ) -> MonotonicWorkspaceAuthority:
+        absolute = path_class(path_abspath(fspath(self.path)))
+        expected_workspace = absolute.parent
+        expected_key = monotonic_key(absolute)
+        require_module_graph()
+        authority = authority_class(
+            workspace=expected_workspace,
+            domain=monotonic_domain,
+            key=expected_key,
+            authority_root=product_root,
+        )
+        require_module_graph()
+        return require_coordinates(
+            authority,
+            expected_workspace=expected_workspace,
+            expected_root=product_root,
+            expected_key=expected_key,
+        )
+
+    return product_root, monotonic_authority
+
+
+# Resolve the supported product root once at import composition time, then bind it
+# into the canonical authority callable itself. The exported Path below is evidence,
+# not a live authority input: rebinding it cannot retarget current()/decision()/
+# assert_execution_allowed() or the sealed provider admission lease.
+(
+    _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT,
+    _product_root_bound_monotonic_authority,
+) = _build_product_root_bound_monotonic_authority()
+ExecutionStopAuthority._monotonic_authority = _product_root_bound_monotonic_authority
+del _product_root_bound_monotonic_authority
+del _build_product_root_bound_monotonic_authority
+
+def _build_sealed_authority_coordinate(name: str):
+    """Keep one construction-bound STOP pathname outside mutable instance state."""
+
+    values: weakref.WeakKeyDictionary[ExecutionStopAuthority, Path] = (
+        weakref.WeakKeyDictionary()
+    )
+    path_type = Path
+    integrity_error = ExecutionStopIntegrityError
+
+    class SealedAuthorityCoordinate:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            try:
+                return values[instance]
+            except KeyError as exc:
+                raise integrity_error(
+                    f"execution STOP authority {name} is unavailable"
+                ) from exc
+
+        def __set__(self, instance, value) -> None:
+            if not isinstance(value, path_type):
+                raise integrity_error(
+                    f"execution STOP authority {name} must be a Path"
+                )
+            if instance in values:
+                raise integrity_error(
+                    "execution STOP authority construction coordinates are immutable"
+                )
+            values[instance] = value
+
+        def __delete__(self, _instance) -> None:
+            raise integrity_error(
+                "execution STOP authority construction coordinates are immutable"
+            )
+
+    return SealedAuthorityCoordinate()
+
+
+_CANONICAL_ADMISSION_PATH_DESCRIPTOR = _build_sealed_authority_coordinate("path")
+_CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR = _build_sealed_authority_coordinate(
+    "_anchor_path"
+)
+_CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR = _build_sealed_authority_coordinate(
+    "_lock_path"
+)
+ExecutionStopAuthority.path = _CANONICAL_ADMISSION_PATH_DESCRIPTOR
+ExecutionStopAuthority._anchor_path = _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR
+ExecutionStopAuthority._lock_path = _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR
+del _build_sealed_authority_coordinate
+
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_NAMES = frozenset(
+    {"path", "_anchor_path", "_lock_path"}
+)
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPES = tuple(
+    type(descriptor)
+    for descriptor in (
+        _CANONICAL_ADMISSION_PATH_DESCRIPTOR,
+        _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR,
+        _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR,
+    )
+)
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_GRAPHS = tuple(
+    tuple(descriptor_type.__dict__.items())
+    for descriptor_type in _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPES
+)
+_CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_CODES = tuple(
+    tuple(
+        (name, getattr(value, "__code__", None))
+        for name, value in graph
+    )
+    for graph in _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_GRAPHS
+)
+
+
 _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
 )
@@ -1361,6 +1845,9 @@ _CANONICAL_ADMISSION_STATE_FROM_RECORD = ExecutionStopAuthority._state_from_reco
 _CANONICAL_ADMISSION_CURRENT_UNLOCKED = ExecutionStopAuthority._current_unlocked
 
 _CANONICAL_ADMISSION_GRAPH = (
+    ("path", _CANONICAL_ADMISSION_PATH_DESCRIPTOR),
+    ("_anchor_path", _CANONICAL_ADMISSION_ANCHOR_PATH_DESCRIPTOR),
+    ("_lock_path", _CANONICAL_ADMISSION_LOCK_PATH_DESCRIPTOR),
     ("_monotonic_key", _CANONICAL_ADMISSION_MONOTONIC_KEY),
     (
         "_product_monotonic_authority_root",
@@ -1428,13 +1915,39 @@ def _require_canonical_admission_graph() -> None:
         raise ExecutionStopIntegrityError(
             "canonical execution admission authority class changed"
         )
+    for descriptor_type, expected_graph, expected_codes in zip(
+        _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPES,
+        _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_GRAPHS,
+        _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_TYPE_CODES,
+    ):
+        live_graph = descriptor_type.__dict__
+        if len(live_graph) != len(expected_graph):
+            raise ExecutionStopIntegrityError(
+                "canonical STOP coordinate descriptor dispatch graph changed"
+            )
+        code_by_name = dict(expected_codes)
+        for member_name, expected_member in expected_graph:
+            live_member = live_graph.get(member_name)
+            if (
+                live_member is not expected_member
+                or getattr(live_member, "__code__", None)
+                is not code_by_name[member_name]
+            ):
+                raise ExecutionStopIntegrityError(
+                    "canonical STOP coordinate descriptor dispatch graph changed"
+                )
+
     expected_codes = dict(_CANONICAL_ADMISSION_GRAPH_CODES)
+    authority_class_dict = _CANONICAL_ADMISSION_AUTHORITY_CLASS.__dict__
     for method_name, expected_method in _CANONICAL_ADMISSION_GRAPH:
-        live_method = getattr(
-            _CANONICAL_ADMISSION_AUTHORITY_CLASS,
-            method_name,
-            None,
-        )
+        if method_name in _CANONICAL_ADMISSION_COORDINATE_DESCRIPTOR_NAMES:
+            live_method = authority_class_dict.get(method_name)
+        else:
+            live_method = getattr(
+                _CANONICAL_ADMISSION_AUTHORITY_CLASS,
+                method_name,
+                None,
+            )
         if (
             live_method is not expected_method
             or getattr(live_method, "__code__", None)
@@ -1442,6 +1955,38 @@ def _require_canonical_admission_graph() -> None:
         ):
             raise ExecutionStopIntegrityError(
                 "canonical execution admission helper graph changed"
+            )
+
+    _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
+
+    if (
+        MonotonicWorkspaceAuthority
+        is not _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority class changed"
+        )
+    live_monotonic_graph = MonotonicWorkspaceAuthority.__dict__
+    expected_monotonic_codes = dict(
+        _CANONICAL_ADMISSION_MONOTONIC_CLASS_CODES
+    )
+    if len(live_monotonic_graph) != len(
+        _CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority helper graph changed"
+        )
+    for method_name, expected_method in (
+        _CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH
+    ):
+        live_method = live_monotonic_graph.get(method_name)
+        if (
+            live_method is not expected_method
+            or getattr(live_method, "__code__", None)
+            is not expected_monotonic_codes[method_name]
+        ):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority helper graph changed"
             )
 
     live_operation_generator = getattr(
@@ -1460,3 +2005,355 @@ def _require_canonical_admission_graph() -> None:
         raise ExecutionStopIntegrityError(
             "canonical execution admission lock generator changed"
         )
+
+
+def _build_public_stop_read_authority():
+    """Remove instance virtual dispatch from public positive STOP reads."""
+
+    require_admission_graph = _require_canonical_admission_graph
+    operation_lock = _CANONICAL_ADMISSION_OPERATION_LOCK
+    current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+    authority_error = ExecutionStopAuthorityError
+    stopped_error = ExecutionStoppedError
+    armed_mode = ExecutionAuthorityMode.ARMED
+    stopped_mode = ExecutionAuthorityMode.STOPPED
+    decision_type = ExecutionAdmissionDecision
+    integrity_error = ExecutionStopIntegrityError
+
+    def current(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        require_admission_graph()
+        with operation_lock(self):
+            state = current_unlocked(self)
+        require_admission_graph()
+        return state
+
+    def decision(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAdmissionDecision:
+        try:
+            state = current(self)
+        except authority_error as exc:
+            return decision_type(
+                allowed=False,
+                mode=stopped_mode,
+                revision=None,
+                reason=f"fail-closed: {exc}",
+            )
+        if state.mode is not armed_mode:
+            return decision_type(
+                allowed=False,
+                mode=state.mode,
+                revision=state.revision,
+                reason=state.reason,
+            )
+        return decision_type(
+            allowed=True,
+            mode=state.mode,
+            revision=state.revision,
+            reason=state.reason,
+        )
+
+    def assert_execution_allowed(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        state = current(self)
+        if state.mode is not armed_mode:
+            raise stopped_error(
+                f"execution STOP is active at revision {state.revision}: "
+                f"{state.reason}"
+            )
+        return state
+
+    def sealed_public_method(method):
+        class SealedPublicMethod:
+            __slots__ = ()
+
+            def __get__(self, instance, owner=None):
+                if instance is None:
+                    return method
+                return method.__get__(instance, owner)
+
+            def __set__(self, _instance, _value) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+            def __delete__(self, _instance) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+        return SealedPublicMethod()
+
+    return (
+        sealed_public_method(current),
+        sealed_public_method(decision),
+        sealed_public_method(assert_execution_allowed),
+    )
+
+
+(
+    _canonical_public_current,
+    _canonical_public_decision,
+    _canonical_public_assert_execution_allowed,
+) = _build_public_stop_read_authority()
+ExecutionStopAuthority.current = _canonical_public_current
+ExecutionStopAuthority.decision = _canonical_public_decision
+ExecutionStopAuthority.assert_execution_allowed = (
+    _canonical_public_assert_execution_allowed
+)
+del _canonical_public_current
+del _canonical_public_decision
+del _canonical_public_assert_execution_allowed
+del _build_public_stop_read_authority
+
+
+def _build_sealed_admission_lease():
+    """Bind positive STOP admission to the import-time canonical module graph.
+
+    The provider write boundary captures admission_lease by function identity,
+    but a function object still resolves ordinary module globals at call time.
+    Keep the lease's security-critical dispatch and its verifier in closure state,
+    and reject any pre-call rebinding of the canonical admission graph or its
+    low-level durable/locking helpers.
+    """
+
+    module_globals = globals()
+    # Positive admission is rare and security-critical. Freeze every module
+    # binding that existed when the canonical lease was built, rather than
+    # maintaining a hand-written allowlist that can miss a deeper helper
+    # constant or callable. For callable bindings, identity alone is
+    # insufficient: Python permits in-place __code__ / contextmanager
+    # __wrapped__ mutation without rebinding the module name.
+    empty_cell = object()
+
+    def callable_state(value: object) -> tuple[
+        object | None,
+        object | None,
+        object | None,
+        tuple[object, ...] | None,
+    ]:
+        wrapped = getattr(value, "__wrapped__", None)
+        closure = getattr(value, "__closure__", None)
+        closure_state: tuple[object, ...] | None
+        if closure is None:
+            closure_state = None
+        else:
+            captured: list[object] = []
+            for cell in closure:
+                try:
+                    captured.append(cell.cell_contents)
+                except ValueError:
+                    captured.append(empty_cell)
+            closure_state = tuple(captured)
+        return (
+            getattr(value, "__code__", None),
+            wrapped,
+            getattr(wrapped, "__code__", None),
+            closure_state,
+        )
+
+    sealed_bindings = tuple(
+        (
+            name,
+            module_globals[name],
+            callable_state(module_globals[name]),
+        )
+        for name in sorted(module_globals)
+    )
+    authority_mode = ExecutionAuthorityMode
+    stopped_error = ExecutionStoppedError
+    integrity_error = ExecutionStopIntegrityError
+    require_graph = _require_canonical_admission_graph
+    operation_lock = _CANONICAL_ADMISSION_OPERATION_LOCK
+    current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+
+    def require_sealed_module_graph() -> None:
+        for name, expected, expected_state in sealed_bindings:
+            if module_globals.get(name) is not expected:
+                raise integrity_error(
+                    "canonical execution admission module dependency graph changed"
+                )
+            current_state = callable_state(expected)
+            current_code, current_wrapped, current_wrapped_code, current_closure = (
+                current_state
+            )
+            expected_code, expected_wrapped, expected_wrapped_code, expected_closure = (
+                expected_state
+            )
+            if (
+                current_code is not expected_code
+                or current_wrapped is not expected_wrapped
+                or current_wrapped_code is not expected_wrapped_code
+                or (
+                    (current_closure is None) != (expected_closure is None)
+                )
+                or (
+                    current_closure is not None
+                    and expected_closure is not None
+                    and (
+                        len(current_closure) != len(expected_closure)
+                        or any(
+                            current is not frozen
+                            for current, frozen in zip(
+                                current_closure,
+                                expected_closure,
+                            )
+                        )
+                    )
+                )
+            ):
+                raise integrity_error(
+                    "canonical execution admission callable state changed"
+                )
+        require_graph()
+
+    @contextmanager
+    def sealed_admission_lease(
+        self,
+    ) -> Iterator[ExecutionAuthorityState]:
+        require_sealed_module_graph()
+        with operation_lock(self):
+            require_sealed_module_graph()
+            state = current_unlocked(self)
+            require_sealed_module_graph()
+            if state.mode is not authority_mode.ARMED:
+                raise stopped_error(
+                    f"execution STOP is active at revision {state.revision}: "
+                    f"{state.reason}"
+                )
+            try:
+                yield state
+            finally:
+                # If any canonical dependency changed while an irreversible
+                # caller held the lease, never return a successful authority
+                # result. The provider layer will retain UNKNOWN/reconciliation
+                # semantics for an already-attempted external effect.
+                require_sealed_module_graph()
+
+    return sealed_admission_lease, require_sealed_module_graph
+
+
+# Install the sealed lease only after the complete canonical helper graph above
+# has been frozen. Reuse the exact same closure-owned module verifier below for
+# the public positive read APIs so they cannot have a weaker transitive trust graph.
+(
+    _canonical_sealed_admission_lease,
+    _CANONICAL_ADMISSION_REQUIRE_SEALED_MODULE_GRAPH,
+) = _build_sealed_admission_lease()
+ExecutionStopAuthority.admission_lease = _canonical_sealed_admission_lease
+del _canonical_sealed_admission_lease
+
+
+def _build_module_guarded_public_stop_read_authority():
+    """Bind public positive STOP reads to the sealed module dependency graph."""
+
+    require_sealed_module_graph = (
+        _CANONICAL_ADMISSION_REQUIRE_SEALED_MODULE_GRAPH
+    )
+    operation_lock = _CANONICAL_ADMISSION_OPERATION_LOCK
+    current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+    authority_error = ExecutionStopAuthorityError
+    stopped_error = ExecutionStoppedError
+    armed_mode = ExecutionAuthorityMode.ARMED
+    stopped_mode = ExecutionAuthorityMode.STOPPED
+    decision_type = ExecutionAdmissionDecision
+    integrity_error = ExecutionStopIntegrityError
+
+    def current(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        require_sealed_module_graph()
+        with operation_lock(self):
+            require_sealed_module_graph()
+            state = current_unlocked(self)
+            require_sealed_module_graph()
+        require_sealed_module_graph()
+        return state
+
+    def decision(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAdmissionDecision:
+        try:
+            state = current(self)
+        except authority_error as exc:
+            return decision_type(
+                allowed=False,
+                mode=stopped_mode,
+                revision=None,
+                reason=f"fail-closed: {exc}",
+            )
+        if state.mode is not armed_mode:
+            return decision_type(
+                allowed=False,
+                mode=state.mode,
+                revision=state.revision,
+                reason=state.reason,
+            )
+        return decision_type(
+            allowed=True,
+            mode=state.mode,
+            revision=state.revision,
+            reason=state.reason,
+        )
+
+    def assert_execution_allowed(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        state = current(self)
+        if state.mode is not armed_mode:
+            raise stopped_error(
+                f"execution STOP is active at revision {state.revision}: "
+                f"{state.reason}"
+            )
+        return state
+
+    def sealed_public_method(method):
+        class SealedPublicMethod:
+            __slots__ = ()
+
+            def __get__(self, instance, owner=None):
+                if instance is None:
+                    return method
+                return method.__get__(instance, owner)
+
+            def __set__(self, _instance, _value) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+            def __delete__(self, _instance) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+        return SealedPublicMethod()
+
+    return (
+        sealed_public_method(current),
+        sealed_public_method(decision),
+        sealed_public_method(assert_execution_allowed),
+    )
+
+
+(
+    _canonical_guarded_public_current,
+    _canonical_guarded_public_decision,
+    _canonical_guarded_public_assert_execution_allowed,
+) = _build_module_guarded_public_stop_read_authority()
+ExecutionStopAuthority.current = _canonical_guarded_public_current
+ExecutionStopAuthority.decision = _canonical_guarded_public_decision
+ExecutionStopAuthority.assert_execution_allowed = (
+    _canonical_guarded_public_assert_execution_allowed
+)
+
+# Final positive entry names are now composed. Ordinary class assignment or
+# deletion must not replace the entry point before its sealed verifier can run.
+ExecutionStopAuthority._seal_positive_entry_bindings()
+
+del _canonical_guarded_public_current
+del _canonical_guarded_public_decision
+del _canonical_guarded_public_assert_execution_allowed
+del _build_module_guarded_public_stop_read_authority

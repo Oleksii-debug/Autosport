@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import monotonic_workspace_authority as _monotonic_authority_module
 from .monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
@@ -358,11 +359,22 @@ class ExecutionStopAuthority:
 
     def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
         absolute = Path(os.path.abspath(os.fspath(self.path)))
-        return MonotonicWorkspaceAuthority(
-            workspace=absolute.parent,
+        expected_workspace = absolute.parent
+        expected_root = _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT()
+        expected_key = _CANONICAL_ADMISSION_MONOTONIC_KEY(absolute)
+        _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
+        authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS(
+            workspace=expected_workspace,
             domain=_MONOTONIC_DOMAIN,
-            key=_CANONICAL_ADMISSION_MONOTONIC_KEY(absolute),
-            authority_root=_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT(),
+            key=expected_key,
+            authority_root=expected_root,
+        )
+        _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
+        return _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_COORDINATES(
+            authority,
+            expected_workspace=expected_workspace,
+            expected_root=expected_root,
+            expected_key=expected_key,
         )
 
     def _stable_serialization_lock_path(self) -> Path:
@@ -1322,6 +1334,219 @@ class ExecutionStopAuthority:
         return state
 
 
+def _monotonic_dependency_callable_state(
+    value: object,
+) -> tuple[object | None, ...]:
+    wrapped = getattr(value, "__wrapped__", None)
+    descriptor_function = getattr(value, "__func__", None)
+    property_getter = value.fget if type(value) is property else None
+    property_setter = value.fset if type(value) is property else None
+    property_deleter = value.fdel if type(value) is property else None
+    return (
+        getattr(value, "__code__", None),
+        wrapped,
+        getattr(wrapped, "__code__", None),
+        descriptor_function,
+        getattr(descriptor_function, "__code__", None),
+        property_getter,
+        getattr(property_getter, "__code__", None),
+        property_setter,
+        getattr(property_setter, "__code__", None),
+        property_deleter,
+        getattr(property_deleter, "__code__", None),
+    )
+
+
+_CANONICAL_ADMISSION_MONOTONIC_MODULE = _monotonic_authority_module
+_CANONICAL_ADMISSION_MONOTONIC_MODULE_GRAPH = tuple(
+    (
+        name,
+        value,
+        _monotonic_dependency_callable_state(value),
+    )
+    for name, value in sorted(
+        vars(_CANONICAL_ADMISSION_MONOTONIC_MODULE).items()
+    )
+)
+_CANONICAL_ADMISSION_MONOTONIC_DEPENDENCY_CLASSES = tuple(
+    (
+        name,
+        value,
+        tuple(
+            (
+                member_name,
+                member,
+                _monotonic_dependency_callable_state(member),
+            )
+            for member_name, member in value.__dict__.items()
+        ),
+    )
+    for name, value in (
+        (
+            "MonotonicWorkspaceAuthority",
+            _monotonic_authority_module.MonotonicWorkspaceAuthority,
+        ),
+        (
+            "WorkspaceIdentityBinding",
+            _monotonic_authority_module.WorkspaceIdentityBinding,
+        ),
+        (
+            "WorkspaceEconomicLock",
+            _monotonic_authority_module.WorkspaceEconomicLock,
+        ),
+    )
+)
+_CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_ID = (
+    _monotonic_authority_module.AUTHORITY_ID
+)
+_CANONICAL_ADMISSION_MONOTONIC_BINDING_CLASS = (
+    _monotonic_authority_module.WorkspaceIdentityBinding
+)
+
+
+def _require_canonical_monotonic_module_graph() -> None:
+    live_graph = vars(_CANONICAL_ADMISSION_MONOTONIC_MODULE)
+    if len(live_graph) != len(_CANONICAL_ADMISSION_MONOTONIC_MODULE_GRAPH):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority module dependency graph changed"
+        )
+    for name, expected, expected_state in (
+        _CANONICAL_ADMISSION_MONOTONIC_MODULE_GRAPH
+    ):
+        live_value = live_graph.get(name)
+        if (
+            live_value is not expected
+            or _monotonic_dependency_callable_state(live_value)
+            != expected_state
+        ):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority module dependency graph changed"
+            )
+
+    for class_name, expected_class, expected_members in (
+        _CANONICAL_ADMISSION_MONOTONIC_DEPENDENCY_CLASSES
+    ):
+        live_class = live_graph.get(class_name)
+        if live_class is not expected_class:
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority dependency class changed"
+            )
+        live_members = live_class.__dict__
+        if len(live_members) != len(expected_members):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority dependency class graph changed"
+            )
+        for member_name, expected_member, expected_state in expected_members:
+            live_member = live_members.get(member_name)
+            if (
+                live_member is not expected_member
+                or _monotonic_dependency_callable_state(live_member)
+                != expected_state
+            ):
+                raise ExecutionStopIntegrityError(
+                    "canonical monotonic authority dependency class graph changed"
+                )
+
+
+def _require_monotonic_authority_coordinates(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    expected_workspace: Path,
+    expected_root: Path,
+    expected_key: str,
+) -> MonotonicWorkspaceAuthority:
+    if type(authority) is not MonotonicWorkspaceAuthority:
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority type changed"
+        )
+    binding = authority.workspace_binding
+    if type(binding) is not _CANONICAL_ADMISSION_MONOTONIC_BINDING_CLASS:
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic workspace binding type changed"
+        )
+
+    expected_locator = os.path.normcase(
+        os.path.normpath(str(expected_workspace))
+    )
+    expected_locator_sha256 = hashlib.sha256(
+        expected_locator.encode("utf-8")
+    ).hexdigest()
+    expected_workspace_marker = (
+        expected_workspace
+        / ".autosport"
+        / "monotonic-workspace-binding.json"
+    )
+    expected_path_binding = (
+        expected_root
+        / "workspace-bindings"
+        / expected_locator_sha256[:2]
+        / f"{expected_locator_sha256}.json"
+    )
+
+    workspace_instance_id = authority.workspace_instance_id
+    if (
+        type(workspace_instance_id) is not str
+        or not workspace_instance_id
+        or workspace_instance_id != binding.workspace_instance_id
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic workspace identity changed"
+        )
+
+    namespace_material = "\0".join(
+        (
+            _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_ID,
+            workspace_instance_id,
+            _MONOTONIC_DOMAIN,
+            expected_key,
+        )
+    ).encode("utf-8")
+    expected_namespace = hashlib.sha256(namespace_material).hexdigest()
+    expected_journal_dir = (
+        expected_root
+        / "journals"
+        / expected_namespace[:2]
+        / expected_namespace
+    )
+    expected_records_dir = expected_journal_dir / "records"
+    expected_namespace_marker = (
+        expected_root
+        / "namespace-bindings"
+        / expected_namespace[:2]
+        / f"{expected_namespace}.json"
+    )
+
+    if (
+        authority.workspace != expected_workspace
+        or authority.authority_root != expected_root
+        or authority.domain != _MONOTONIC_DOMAIN
+        or authority.key != expected_key
+        or authority.namespace_sha256 != expected_namespace
+        or authority.journal_dir != expected_journal_dir
+        or authority.records_dir != expected_records_dir
+        or authority.namespace_marker_path != expected_namespace_marker
+        or authority.workspace_binding_path != expected_workspace_marker
+        or binding.workspace != expected_workspace
+        or binding.authority_root != expected_root
+        or binding.workspace_marker_path != expected_workspace_marker
+        or binding.path_binding_path != expected_path_binding
+        or binding.workspace_locator != expected_locator
+        or binding.workspace_locator_sha256 != expected_locator_sha256
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority coordinates changed"
+        )
+    return authority
+
+
+_CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH = (
+    _require_canonical_monotonic_module_graph
+)
+_CANONICAL_ADMISSION_REQUIRE_MONOTONIC_COORDINATES = (
+    _require_monotonic_authority_coordinates
+)
+
+
 # Freeze the public MonotonicWorkspaceAuthority entry points consumed by STOP
 # state verification/transitions. Calling these exact unbound functions prevents
 # a class-attribute rebind from silently changing authority semantics.
@@ -1471,6 +1696,8 @@ def _require_canonical_admission_graph() -> None:
             raise ExecutionStopIntegrityError(
                 "canonical execution admission helper graph changed"
             )
+
+    _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
 
     if (
         MonotonicWorkspaceAuthority

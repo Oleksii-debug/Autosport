@@ -159,3 +159,35 @@ def test_direct_construction_metadata_round_trip_matches_persisted_reader() -> N
 
     assert restored.metadata == metadata
     assert restored == event
+
+
+def test_direct_construction_detaches_caller_owned_nested_metadata() -> None:
+    metadata = {"nested": {"edge": 0.125}}
+
+    event = _direct_event(metadata=metadata)
+    metadata["nested"]["edge"] = float("nan")
+
+    assert event.metadata == {"nested": {"edge": 0.125}}
+    assert MarketEvent.from_dict(event.to_dict()) == event
+
+
+def test_to_dict_rejects_post_construction_metadata_poisoning() -> None:
+    event = _direct_event(metadata={"nested": {"edge": 0.125}})
+    event.metadata["nested"]["edge"] = float("nan")
+
+    with pytest.raises(ValueError, match="metadata.*non-finite JSON number"):
+        event.to_dict()
+
+
+def test_to_dict_returns_metadata_copy_isolated_from_event_state() -> None:
+    event = _direct_event(metadata={"nested": {"edge": 0.125}})
+
+    payload = event.to_dict()
+    serialized_metadata = payload["metadata"]
+    assert isinstance(serialized_metadata, dict)
+    nested = serialized_metadata["nested"]
+    assert isinstance(nested, dict)
+    nested["edge"] = 9.5
+
+    assert event.metadata == {"nested": {"edge": 0.125}}
+    assert MarketEvent.from_dict(event.to_dict()) == event

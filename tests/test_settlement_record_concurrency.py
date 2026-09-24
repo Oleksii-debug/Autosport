@@ -101,6 +101,63 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
                 _settlement_engine_type=object,
             )
 
+    def test_product_consumer_entry_bindings_are_immutable(self) -> None:
+        entered: list[str] = []
+
+        def forged_continuous(*_args, **_kwargs):
+            entered.append("continuous")
+            return (("forged-ticket",), ("forged-evidence",))
+
+        def forged_replay(*_args, **_kwargs):
+            entered.append("replay")
+            return object()
+
+        coordinator = object.__new__(ContinuousSessionCoordinator)
+        replay_session = object.__new__(AutosportSession)
+        bindings = (
+            (
+                coordinator,
+                ContinuousSessionCoordinator,
+                "_settle",
+                forged_continuous,
+            ),
+            (
+                replay_session,
+                AutosportSession,
+                "_run_dataset_locked",
+                forged_replay,
+            ),
+        )
+
+        for instance, owner, name, forged in bindings:
+            canonical = getattr(owner, name)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement consumer entry binding is immutable",
+            ):
+                setattr(instance, name, forged)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement consumer entry binding is immutable",
+            ):
+                object.__setattr__(instance, name, forged)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement consumer entry binding is immutable",
+            ):
+                setattr(owner, name, forged)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical settlement consumer entry binding is immutable",
+            ):
+                type.__setattr__(owner, name, forged)
+
+            self.assertIs(getattr(owner, name), canonical)
+
+        self.assertEqual(coordinator._settle(resolutions=()), ((), ()))
+        self.assertEqual(entered, [])
+
     def test_module_lock_rebind_cannot_split_record_from_settlement_commit(
         self,
     ) -> None:

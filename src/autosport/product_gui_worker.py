@@ -339,7 +339,7 @@ class ProductGuiWorker:
                 stopped_status = runtime.stop(stop_reason)
             else:
                 started_status = runtime.start()
-                if expected_source_id is not None:
+                if expected_source_id is not None and not self._stop_event.is_set():
                     runtime_profile = issue_trusted_runtime_code_profile(
                         runtime,
                         source_factory=source_factory,

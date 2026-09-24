@@ -607,7 +607,6 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         key = "event-1|winner|alice"
         engine = SettlementEngine({key: "win"})
         engine.outcomes[key] = "loss"
-        engine._outcomes_authority = None
 
         with self.assertRaisesRegex(
             ValueError,

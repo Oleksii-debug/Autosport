@@ -468,17 +468,6 @@ _CANONICAL_INTENT_ROUTE_RECORD_FROM_DICT: Final = (
 )
 
 
-def _state_payload(
-    records: tuple[ModelComputeIntentRouteRecord, ...],
-) -> dict[str, object]:
-    ordered = tuple(sorted(records, key=lambda item: item.request_id))
-    return {
-        "schema": SCHEMA,
-        "schema_version": SCHEMA_VERSION,
-        "records": [item.to_dict() for item in ordered],
-    }
-
-
 def _build_store_init():
     """Bind machine-root selection to import-time closure-owned authority."""
 
@@ -946,7 +935,19 @@ class ModelComputeIntentRouteAuthorityStore:
             )
 
             staged = (*self._records, record)
-            payload = _state_payload(staged)
+            # Positive origin bytes must be derived directly from the exact
+            # mechanically staged record set. Do not dispatch this authority-
+            # bearing composition through a mutable module helper.
+            ordered_records = tuple(
+                sorted(staged, key=lambda item: item.request_id)
+            )
+            payload = {
+                "schema": SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "records": [
+                    item.to_dict() for item in ordered_records
+                ],
+            }
             intended = hashlib.sha256(_state_bytes(payload)).hexdigest()
             observed = self._observed_sha256()
             binding = _digest(

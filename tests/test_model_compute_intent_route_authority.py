@@ -390,6 +390,134 @@ def test_existing_router_request_cannot_be_backfilled_with_origin_authority(
         assert not authority.path.exists()
 
 
+def test_state_payload_rebind_cannot_backfill_preexisting_router_origin(
+    monkeypatch,
+) -> None:
+    caller_intent = _canonical_intent(suffix="payload-caller")
+    issued_intent = _canonical_intent(suffix="payload-issued")
+    issued_at = max(
+        _proposal(caller_intent),
+        _proposal(issued_intent),
+    ) + timedelta(seconds=2)
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: _time_text(issued_at),
+    )
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        caller_request = ComputeRouteRequest(
+            request_id="caller-preexisting",
+            created_at=_time_text(issued_at),
+            decision_deadline=_time_text(
+                issued_at + timedelta(seconds=5)
+            ),
+            required_capability="intent-economics",
+            data_classification=DataClassification.PUBLIC,
+            allow_cloud=False,
+            max_cost=Decimal("0"),
+            response_ttl_seconds=Decimal("5"),
+            baseline_candidate_id="local-deterministic",
+            decision_input_sha256=caller_intent.intent_sha256,
+            decision_evidence_sha256=(
+                caller_intent.evidence.evidence_sha256
+            ),
+        )
+        _route(router, caller_request)
+
+        authority = subject.ModelComputeIntentRouteAuthorityStore(
+            workspace,
+        )
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="cannot be backfilled",
+        ):
+            _issue(
+                authority,
+                router,
+                caller_intent,
+                request_id=caller_request.request_id,
+            )
+
+        caller_identity = subject._intent_identity(caller_intent)
+        forged_record = subject.ModelComputeIntentRouteRecord(
+            router_store_relpath=authority._router_relpath(router),
+            intent_id=caller_identity["intent_id"],
+            intent_sha256=caller_identity["intent_sha256"],
+            intent_audit_sha256=caller_identity["intent_audit_sha256"],
+            opportunity_id=caller_identity["opportunity_id"],
+            opportunity_evidence_sha256=caller_identity[
+                "opportunity_evidence_sha256"
+            ],
+            candidate_sha256=caller_identity["candidate_sha256"],
+            proposal_ts=caller_identity["proposal_ts"],
+            issued_at=caller_request.created_at,
+            request=caller_request.payload(),
+            request_sha256=subject._digest(
+                caller_request.payload()
+            ),
+        )
+        payload_calls: list[tuple[str, ...]] = []
+
+        def forged_state_payload(records):
+            payload_calls.append(
+                tuple(item.request_id for item in records)
+            )
+            ordered = tuple(
+                sorted(
+                    (*records, forged_record),
+                    key=lambda item: item.request_id,
+                )
+            )
+            return {
+                "schema": subject.SCHEMA,
+                "schema_version": subject.SCHEMA_VERSION,
+                "records": [item.to_dict() for item in ordered],
+            }
+
+        monkeypatch.setattr(
+            subject,
+            "_state_payload",
+            forged_state_payload,
+            raising=False,
+        )
+
+        issued = _issue(
+            authority,
+            router,
+            issued_intent,
+            request_id="intent-route-2",
+        )
+        _route(router, issued)
+
+        reopened_router = ModelComputeRouterStore(
+            workspace / "router.json"
+        )
+        reopened_authority = (
+            subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        )
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="issuance is missing",
+        ):
+            reopened_authority.resolve_current(
+                intent=caller_intent,
+                router_store=reopened_router,
+                request_id=caller_request.request_id,
+            )
+
+        resolved = reopened_authority.resolve_current(
+            intent=issued_intent,
+            router_store=reopened_router,
+            request_id=issued.request_id,
+        )
+        assert resolved.request == issued.payload()
+        assert payload_calls == []
+
+
+
 def test_same_id_retry_is_idempotent_and_cannot_retimestamp(
     monkeypatch,
 ) -> None:

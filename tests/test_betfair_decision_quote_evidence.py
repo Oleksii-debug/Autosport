@@ -380,7 +380,10 @@ def test_delayed_market_data_is_retained_but_not_decision_eligible(monkeypatch):
 def test_delayed_application_key_cannot_mint_live_decision_authority(monkeypatch):
     evidence, _ = _network_capture(monkeypatch, app_delay_data=True)
 
-    with pytest.raises(BetfairDecisionQuoteError, match="capture-time live App Key evidence"):
+    with pytest.raises(
+        BetfairDecisionQuoteError,
+        match="capture-time live App Key evidence",
+    ):
         _assess(evidence)
 
 

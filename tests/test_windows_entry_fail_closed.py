@@ -26,10 +26,17 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         return module
 
     @staticmethod
-    def _deployment_module(*, available: bool = True, exc: Exception | None = None) -> types.ModuleType:
+    def _deployment_module(
+        *,
+        available: bool = True,
+        exc: Exception | None = None,
+        calls: list[str] | None = None,
+    ) -> types.ModuleType:
         module = types.ModuleType("autosport.webview2_runtime_deployment")
 
         def ensure_webview2_runtime():
+            if calls is not None:
+                calls.append("deployment")
             if exc is not None:
                 raise exc
             return types.SimpleNamespace(available=available)
@@ -37,11 +44,23 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         module.ensure_webview2_runtime = ensure_webview2_runtime
         return module
 
-    def _interactive_patches(self):
+    def _interactive_patches(self, *, calls: list[str] | None = None):
         workspace = Path.cwd().resolve() / ".autosport-entry-test-workspace"
+        if calls is None:
+            workspace_patch = patch.object(
+                windows_entry,
+                "_probe_workspace_writable",
+                return_value=None,
+            )
+        else:
+            workspace_patch = patch.object(
+                windows_entry,
+                "_probe_workspace_writable",
+                side_effect=lambda _workspace: calls.append("workspace"),
+            )
         return (
             patch("autosport.paths.default_workspace", return_value=workspace),
-            patch.object(windows_entry, "_probe_workspace_writable", return_value=None),
+            workspace_patch,
         )
 
     def test_unknown_packaged_argument_fails_before_webview_shell(self) -> None:
@@ -91,7 +110,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         fake_shell.AutosportWebBridge = AutosportWebBridge
         fake_shell.WindowsWebViewUnavailable = WindowsWebViewUnavailable
         fake_shell.launch_windows_shell = launch_windows_shell
-        path_patch, workspace_patch = self._interactive_patches()
+        path_patch, workspace_patch = self._interactive_patches(calls=calls)
         with (
             path_patch,
             workspace_patch,
@@ -99,7 +118,8 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
                 sys.modules,
                 {
                     "autosport.webview2_runtime_deployment": self._deployment_module(
-                        available=True
+                        available=True,
+                        calls=calls,
                     ),
                     "autosport.windows_webview_emergency_stop": fake_emergency_stop,
                     "autosport.windows_webview_shell": fake_shell,
@@ -108,7 +128,10 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         ):
             self.assertEqual(main([]), 17)
 
-        self.assertEqual(calls, ["controller", "bridge", "webview"])
+        self.assertEqual(
+            calls,
+            ["deployment", "workspace", "controller", "bridge", "webview"],
+        )
 
     def test_unavailable_runtime_fails_before_webview_shell_start(self) -> None:
         calls: list[str] = []
@@ -126,7 +149,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         path_patch, workspace_patch = self._interactive_patches()
         with (
             path_patch,
-            workspace_patch,
+            workspace_patch as workspace_probe,
             patch.object(windows_entry, "_show_startup_error") as show_error,
             patch.dict(
                 sys.modules,
@@ -141,6 +164,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             self.assertEqual(main([]), 3)
 
         self.assertEqual(calls, [])
+        workspace_probe.assert_not_called()
         show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_preflight_exception_fails_closed_without_detail_leak(self) -> None:
@@ -148,7 +172,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         secret = "secret-bearing-preflight-detail"
         with (
             path_patch,
-            workspace_patch,
+            workspace_patch as workspace_probe,
             patch.object(windows_entry, "_show_startup_error") as show_error,
             patch.dict(
                 sys.modules,
@@ -162,6 +186,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         ):
             self.assertEqual(main([]), 3)
 
+        workspace_probe.assert_not_called()
         shown = show_error.call_args.args[0]
         self.assertEqual(shown, windows_entry._WEBVIEW2_STARTUP_ERROR)
         self.assertNotIn(secret, shown)

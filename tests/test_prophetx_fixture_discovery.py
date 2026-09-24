@@ -3,6 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+import autosport.prophetx_fixture_discovery as prophetx_fixture_discovery_module
 from autosport.prophetx_fixture_discovery import (
     ProphetXDiscoveryJsonResponse,
     ProphetXDiscoveryPayloadError,
@@ -398,6 +399,62 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         acquisition = catalog.acquisitions[0]
         self.assertTrue(acquisition.provider_origin_verified)
         self.assertTrue(acquisition.observation_time_verified)
+        self.assertTrue(acquisition.observed_at.endswith("Z"))
+
+
+    @patch("autosport.prophetx_fixture_discovery.build_opener")
+    def test_canonical_product_clock_ignores_module_datetime_rebind(self, build_opener):
+        raw = json.dumps(
+            _tournaments([]),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = build_opener.return_value.open.return_value.__enter__.return_value
+        response.headers.get.return_value = "application/json"
+        response.headers.items.return_value = []
+        response.read.return_value = raw
+        response.status = 200
+
+        original_datetime = prophetx_fixture_discovery_module.datetime
+        original_timezone = prophetx_fixture_discovery_module.timezone
+        fake_calls = []
+
+        class BackdatedDateTime:
+            @classmethod
+            def now(cls, tz):
+                fake_calls.append(("now", tz))
+                return original_datetime(
+                    2000,
+                    1,
+                    1,
+                    tzinfo=original_timezone.utc,
+                )
+
+            @classmethod
+            def fromisoformat(cls, value):
+                fake_calls.append(("fromisoformat", value))
+                return original_datetime.fromisoformat(
+                    "2000-01-01T00:00:00+00:00"
+                )
+
+        with patch.object(
+            prophetx_fixture_discovery_module,
+            "datetime",
+            BackdatedDateTime,
+        ):
+            catalog = ProphetXFixtureDiscovery(
+                "secret-token",
+                data_context_id="sandbox-aggregator-account-a",
+                transport=_default_transport,
+            ).discover()
+
+        self.assertEqual(fake_calls, [])
+        self.assertEqual(len(catalog.acquisitions), 1)
+        acquisition = catalog.acquisitions[0]
+        self.assertTrue(acquisition.provider_origin_verified)
+        self.assertTrue(acquisition.observation_time_verified)
+        self.assertNotEqual(acquisition.observed_at, "2000-01-01T00:00:00Z")
         self.assertTrue(acquisition.observed_at.endswith("Z"))
 
 

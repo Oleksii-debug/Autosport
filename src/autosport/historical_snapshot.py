@@ -473,6 +473,14 @@ def _build_historical_snapshot_provider_origin_authority():
         name: getattr(method, "__code__", None)
         for name, method in canonical_tls_socket_dispatch.items()
     }
+    tls_context_instance_shadow_names = (
+        "wrap_socket",
+        "_wrap_socket",
+        "sslsocket_class",
+        "get_ciphers",
+        "get_ca_certs",
+        "cert_store_stats",
+    )
     http_client_module = http_client
     http_connection_type = http_client_module.HTTPConnection
     https_connection_type = http_client_module.HTTPSConnection
@@ -709,6 +717,17 @@ def _build_historical_snapshot_provider_origin_authority():
             ):
                 return False
         return True
+
+    def tls_context_instance_dispatch_is_canonical(context: object) -> bool:
+        if type(context) is not ssl_context_type:
+            return False
+        instance_dict = getattr(context, "__dict__", None)
+        if type(instance_dict) is not dict:
+            return False
+        return not any(
+            name in instance_dict
+            for name in tls_context_instance_shadow_names
+        )
 
     def connection_dispatch_is_canonical() -> bool:
         if (
@@ -954,6 +973,9 @@ def _build_historical_snapshot_provider_origin_authority():
             expected_tls_state is None
             or expected_tls_context.verify_mode != ssl_cert_required
             or expected_tls_context.check_hostname is not True
+            or not tls_context_instance_dispatch_is_canonical(
+                expected_tls_context
+            )
         ):
             raise ProviderPayloadError(
                 "canonical Parlay historical TLS verifier is invalid"
@@ -980,6 +1002,9 @@ def _build_historical_snapshot_provider_origin_authority():
             if (
                 current_tls_context is not expected_tls_context
                 or current_tls_context.sslsocket_class is not ssl_socket_type
+                or not tls_context_instance_dispatch_is_canonical(
+                    current_tls_context
+                )
                 or tls_context_snapshot(current_tls_context) != expected_tls_state
             ):
                 return False

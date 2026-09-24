@@ -1180,6 +1180,46 @@ def _install_execution_readback_authority() -> None:
     sealed_timezone_utc = timezone.utc
     sealed_read_method_endpoint = MappingProxyType(dict(_READ_METHOD_ENDPOINT))
     sealed_request_type = Request
+    sealed_request_init = Request.__init__
+    sealed_request_init_code = getattr(sealed_request_init, "__code__", None)
+    sealed_request_structural_fields = (
+        "_full_url",
+        "fragment",
+        "type",
+        "host",
+        "selector",
+        "_tunnel_host",
+        "origin_req_host",
+        "unverifiable",
+        "method",
+    )
+    request_shapes: dict[str, tuple[object, ...]] = {}
+    request_state_keys: frozenset[str] | None = None
+    for request_url in frozenset(sealed_read_method_endpoint.values()):
+        probe = object.__new__(sealed_request_type)
+        sealed_request_init(
+            probe,
+            request_url,
+            data=b"",
+            headers={},
+            method="POST",
+        )
+        probe_state = object.__getattribute__(probe, "__dict__")
+        if type(probe_state) is not dict:
+            raise RuntimeError("canonical Betfair Request state is invalid")
+        current_keys = frozenset(probe_state)
+        if request_state_keys is None:
+            request_state_keys = current_keys
+        elif current_keys != request_state_keys:
+            raise RuntimeError("canonical Betfair Request state shape is unstable")
+        request_shapes[request_url] = tuple(
+            probe_state.get(field)
+            for field in sealed_request_structural_fields
+        )
+    if request_state_keys is None:
+        raise RuntimeError("canonical Betfair Request endpoint set is empty")
+    sealed_request_state_keys = request_state_keys
+    sealed_request_shapes = MappingProxyType(request_shapes)
     sealed_build_opener = build_opener
     sealed_http_error = HTTPError
     sealed_url_error = URLError
@@ -1514,6 +1554,86 @@ def _install_execution_readback_authority() -> None:
         if type(value) is not list:
             raise sealed_error_type(f"{field} must be a JSON array")
         return value
+
+    def request_constructor_graph_matches() -> bool:
+        return bool(
+            getattr(sealed_request_type, "__init__", None)
+            is sealed_request_init
+            and getattr(sealed_request_init, "__code__", None)
+            is sealed_request_init_code
+        )
+
+    def canonical_request(
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> Request:
+        if (
+            type(url) is not str
+            or not url
+            or type(body) is not bytes
+            or not request_constructor_graph_matches()
+        ):
+            raise sealed_error_type(
+                "canonical Betfair request construction authority changed"
+            )
+        canonical_headers = dict(headers)
+        if any(
+            type(key) is not str or type(value) is not str
+            for key, value in canonical_headers.items()
+        ):
+            raise sealed_error_type(
+                "canonical Betfair request headers are invalid"
+            )
+        expected_headers = {
+            key.capitalize(): value
+            for key, value in canonical_headers.items()
+        }
+
+        request = object.__new__(sealed_request_type)
+        sealed_request_init(
+            request,
+            url,
+            data=body,
+            headers=canonical_headers,
+            method="POST",
+        )
+        if not request_constructor_graph_matches():
+            raise sealed_error_type(
+                "canonical Betfair request construction authority changed"
+            )
+        state = object.__getattribute__(request, "__dict__")
+        if (
+            type(state) is not dict
+            or frozenset(state) != sealed_request_state_keys
+            or state.get("_data") != body
+            or state.get("headers") != expected_headers
+            or state.get("unredirected_hdrs") != {}
+            or state.get("method") != "POST"
+        ):
+            raise sealed_error_type(
+                "canonical Betfair outbound request state changed"
+            )
+
+        expected_shape = sealed_request_shapes.get(url)
+        if expected_shape is not None:
+            actual_shape = tuple(
+                state.get(field)
+                for field in sealed_request_structural_fields
+            )
+            if actual_shape != expected_shape:
+                raise sealed_error_type(
+                    "canonical Betfair outbound request state changed"
+                )
+        elif (
+            state.get("_full_url") != url
+            or state.get("fragment") not in (None, "")
+        ):
+            raise sealed_error_type(
+                "canonical Betfair outbound request state changed"
+            )
+        return request
 
     def trusted_text(value: object, field: str) -> str:
         if type(value) is not str or not value or value != value.strip():
@@ -2185,11 +2305,10 @@ def _install_execution_readback_authority() -> None:
             raise sealed_error_type(
                 "canonical Betfair private opener dispatch changed"
             )
-        request = sealed_request_type(
+        request = canonical_request(
             url,
-            data=body,
-            headers=dict(headers),
-            method="POST",
+            headers=headers,
+            body=body,
         )
         try:
             with private_opener_open(
@@ -2288,6 +2407,7 @@ def _install_execution_readback_authority() -> None:
             or getattr(private_opener_type, "open", None) is not private_opener_open
             or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
             or not opener_graph_matches()
+            or not request_constructor_graph_matches()
             or not json_executable_graph_matches()
         ):
             return False
@@ -2326,6 +2446,7 @@ def _install_execution_readback_authority() -> None:
             or getattr(private_opener_type, "open", None) is not private_opener_open
             or getattr(private_opener_open, "__code__", None) is not private_opener_open_code
             or not opener_graph_matches()
+            or not request_constructor_graph_matches()
             or not json_executable_graph_matches()
         ):
             raise sealed_error_type(

@@ -685,3 +685,47 @@ def test_reconciliation_lower_helper_rebind_cannot_report_success(
 
     assert not store_path.exists()
 
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_load_history",
+        "_recover_authority",
+        "_require_same_account",
+        "_require_nested_evidence_after",
+        "_reconcile",
+        "_write_history",
+        "_encode_history",
+        "_next_authority_tx_id",
+        "_publish_history_bytes",
+    ),
+)
+def test_reconciliation_lower_helper_instance_shadow_cannot_report_success(
+    monkeypatch,
+    tmp_path,
+    helper_name,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    monkeypatch.setattr(
+        store,
+        helper_name,
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="reconciliation store helper dispatch was shadowed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert not store_path.exists()

@@ -241,10 +241,18 @@ def _make_provider_fetch(
     expected_error_processor = response_handlers[0][0]
     expected_tls_context = getattr(expected_https_handler, "_context", None)
     expected_tls_context_state = tls_context_snapshot(expected_tls_context)
+    legacy_check_hostname_missing = object()
+    expected_legacy_check_hostname = getattr(
+        expected_https_handler,
+        "_check_hostname",
+        legacy_check_hostname_missing,
+    )
     if (
         expected_tls_context_state is None
         or expected_tls_context.verify_mode != ssl.CERT_REQUIRED
         or expected_tls_context.check_hostname is not True
+        or expected_legacy_check_hostname
+        not in (legacy_check_hostname_missing, None)
     ):
         raise ProphetXReadOnlyError(
             "canonical ProphetX account TLS verifier is invalid"
@@ -297,6 +305,12 @@ def _make_provider_fetch(
             current_tls_context is not expected_tls_context
             or tls_context_snapshot(current_tls_context)
             != expected_tls_context_state
+            or getattr(
+                expected_https_handler,
+                "_check_hostname",
+                legacy_check_hostname_missing,
+            )
+            is not expected_legacy_check_hostname
         ):
             return False
 
@@ -442,7 +456,13 @@ class UrllibProphetXHttpTransport:
         ):
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
-        self._opener = build_opener(ProxyHandler({}), _RejectRedirectHandler())
+        tls_context = ssl.create_default_context()
+        tls_context.set_alpn_protocols(["http/1.1"])
+        self._opener = build_opener(
+            ProxyHandler({}),
+            _RejectRedirectHandler(),
+            HTTPSHandler(context=tls_context),
+        )
         self._provider_fetch = _make_provider_fetch(
             self._opener,
             max_response_bytes,

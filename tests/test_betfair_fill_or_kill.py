@@ -1,5 +1,6 @@
 import unittest
 from decimal import Decimal, localcontext
+from unittest.mock import patch
 
 from autosport.betfair_fill_or_kill import (
     BetfairFillOrKillError,
@@ -278,6 +279,57 @@ class BetfairFillOrKillTests(unittest.TestCase):
                 "must be produced by lifecycle inspection",
             ):
                 BetfairFillOrKillStructuralEvidence(**{flag: True})
+
+    def test_oversized_decimal_text_fails_before_decimal_parser(self):
+        oversized = "1" * 513
+        with patch(
+            "autosport.betfair_fill_or_kill.Decimal",
+            side_effect=AssertionError("Decimal parser must not execute"),
+        ) as decimal_parser:
+            with self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "decimal input exceeds resource bound",
+            ):
+                self._request(requested_size=oversized)
+        decimal_parser.assert_not_called()
+
+        request = self._request()
+        with patch(
+            "autosport.betfair_fill_or_kill.Decimal",
+            side_effect=AssertionError("Decimal parser must not execute"),
+        ) as decimal_parser:
+            with self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "decimal input exceeds resource bound",
+            ):
+                self._report(request, size_matched=oversized)
+        decimal_parser.assert_not_called()
+
+    def test_huge_integer_input_fails_before_string_conversion(self):
+        huge = 10**513
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "integer input exceeds resource bound",
+        ):
+            self._request(requested_size=huge)
+
+        request = self._request()
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "integer input exceeds resource bound",
+        ):
+            self._report(request, size_matched=huge)
+
+    def test_compact_decimal_text_preserves_bounded_scientific_notation(self):
+        request = self._request(requested_size="1E+2", min_fill_size="1E-3")
+        self.assertEqual(request.requested_size, Decimal("100"))
+        self.assertEqual(request.min_fill_size, Decimal("0.001"))
+
+        with self.assertRaisesRegex(
+            BetfairFillOrKillError,
+            "fixed-point representation exceeds resource bound",
+        ):
+            self._request(requested_size="1E+1000000")
 
     def test_extreme_decimal_exponents_fail_before_fixed_point_materialization(self):
         for field, value in (

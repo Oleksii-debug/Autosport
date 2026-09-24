@@ -389,6 +389,138 @@ def test_execution_authority_coordinates_cannot_retarget_valid_old_armed_workspa
             pytest.fail("class-level path descriptor rebind granted an execution lease")
 
 
+def test_coordinate_descriptor_type_dispatch_cannot_retarget_valid_old_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_a = tmp_path / "descriptor-workspace-a" / "execution-stop.jsonl"
+    authority = _initialized(path_a)
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-descriptor-type",
+        expected_revision=1,
+        command_id="arm-r2-descriptor-type",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path_a.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-descriptor-type",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path_b = tmp_path / "descriptor-workspace-b" / "execution-stop.jsonl"
+    path_b.parent.mkdir(parents=True, exist_ok=True)
+    anchor_b = path_b.with_name(path_b.name + ".anchor.json")
+    lock_b = path_b.with_name(path_b.name + ".lock")
+    path_b.write_bytes(valid_old_armed_journal)
+    anchor_b.write_bytes(valid_old_armed_anchor)
+
+    restarted = ExecutionStopAuthority(path_a)
+    forged_calls: list[str] = []
+
+    for name, target in (
+        ("path", path_b),
+        ("_anchor_path", anchor_b),
+        ("_lock_path", lock_b),
+    ):
+        descriptor = ExecutionStopAuthority.__dict__[name]
+        descriptor_type = type(descriptor)
+        canonical_get = descriptor_type.__dict__["__get__"]
+
+        def forged_get(
+            self,
+            instance,
+            owner=None,
+            *,
+            _name=name,
+            _target=target,
+            _descriptor=descriptor,
+            _canonical_get=canonical_get,
+        ):
+            if instance is not None and self is _descriptor:
+                forged_calls.append(_name)
+                return _target
+            return _canonical_get(self, instance, owner)
+
+        monkeypatch.setattr(descriptor_type, "__get__", forged_get)
+
+    # Descriptor OBJECT identity is unchanged. The canonical graph must also
+    # freeze the descriptor TYPE dispatch before any forged __get__ can retarget
+    # local STOP identity to pristine workspace B.
+    assert restarted.decision().allowed is False
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="coordinate descriptor dispatch graph changed",
+    ):
+        restarted.assert_execution_allowed()
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="coordinate descriptor dispatch graph changed",
+    ):
+        with restarted.admission_lease():
+            pytest.fail("descriptor-type retarget yielded an execution lease")
+
+    assert forged_calls == []
+
+
+def test_positive_entry_class_bindings_are_monotonically_sealed(
+    tmp_path: Path,
+) -> None:
+    authority = _initialized(tmp_path / "entry-bindings" / "execution-stop.jsonl")
+    authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-entry-binding",
+        expected_revision=1,
+        command_id="arm-r2-entry-binding",
+    )
+    authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-entry-binding",
+    )
+
+    protected = {
+        name: ExecutionStopAuthority.__dict__[name]
+        for name in (
+            "current",
+            "decision",
+            "assert_execution_allowed",
+            "admission_lease",
+        )
+    }
+
+    def forged_positive(*_args, **_kwargs):
+        raise AssertionError("forged positive STOP entry must never be installed")
+
+    for name, canonical in protected.items():
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="public STOP authority entry binding is immutable",
+        ):
+            setattr(ExecutionStopAuthority, name, forged_positive)
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="public STOP authority entry binding is immutable",
+        ):
+            delattr(ExecutionStopAuthority, name)
+        assert ExecutionStopAuthority.__dict__[name] is canonical
+
+    assert authority.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        authority.assert_execution_allowed()
+    with pytest.raises(ExecutionStopAuthorityError):
+        with authority.admission_lease():
+            pytest.fail("sealed class entry replacement yielded an execution lease")
+
+
 def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
     tmp_path: Path,
 ) -> None:

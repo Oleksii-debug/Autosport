@@ -12,6 +12,7 @@ from .monotonic_workspace_authority import (
     MonotonicAuthorityRecoveryRequiredError,
     MonotonicWorkspaceAuthority,
 )
+from .workspace_lock import WorkspaceEconomicLock
 
 
 _IMPL = _receipt._impl
@@ -52,6 +53,19 @@ def _bind_canonical_publish_commit_clock(
             _utc,
             _instant,
         )
+
+    return bound
+
+
+def _bind_publish_commit_workspace_lock(
+    implementation,
+    _lock_type=WorkspaceEconomicLock,
+):
+    """Serialize publish-ledger readers and writers on the canonical store root."""
+
+    def bound(self, *args, **kwargs):
+        with _lock_type(self.root.resolve(strict=False)):
+            return implementation(self, *args, **kwargs)
 
     return bound
 
@@ -116,6 +130,7 @@ def _recover_publish_commit_authority(
         )
 
 
+@_bind_publish_commit_workspace_lock
 def _read_publish_commit_ledger(
     self,
     *,
@@ -136,6 +151,7 @@ def _read_publish_commit_ledger(
     return records
 
 
+@_bind_publish_commit_workspace_lock
 @_bind_canonical_publish_commit_clock
 def _append_publish_commit_record(
     self,

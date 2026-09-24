@@ -140,13 +140,21 @@ def test_dataclass_replace_cannot_copy_structural_seal():
         ("account_id", "acct-2", "account_id scope mismatch"),
         ("market_id", "market-2", "market_id scope mismatch"),
         ("selection_id", "selection-2", "selection_id scope mismatch"),
-        ("side", "LAY", "side scope mismatch"),
         ("currency", "GBP", "currency scope mismatch"),
     ],
 )
 def test_scope_substitution_fails_closed(field, replacement, message):
     item = evidence(**{field: replacement})
     with pytest.raises(ProviderMaximumOrderLimitError, match=message):
+        seal(item)
+
+
+def test_coherent_lay_evidence_cannot_cross_back_scope():
+    item = evidence(
+        side="LAY",
+        limit_kind=ProviderMaximumOrderLimitKind.LAY_STAKE_PER_ORDER,
+    )
+    with pytest.raises(ProviderMaximumOrderLimitError, match="side scope mismatch"):
         seal(item)
 
 

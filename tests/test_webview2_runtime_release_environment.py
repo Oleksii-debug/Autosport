@@ -87,6 +87,29 @@ def test_canonical_live_probe_rejects_override_before_platform_or_registry(
     assert secret_value not in str(caught.value)
 
 
+def test_user_data_folder_override_fails_before_probe_or_installer(
+    monkeypatch,
+) -> None:
+    secret_value = r"C:\\Users\\operator\\secret-webview-profile"
+    monkeypatch.setenv("WEBVIEW2_USER_DATA_FOLDER", secret_value)
+
+    with (
+        patch(
+            "autosport.webview2_runtime_deployment.probe_webview2_runtime"
+        ) as probe,
+        patch(
+            "autosport.webview2_runtime_deployment._download_bootstrapper"
+        ) as download,
+        pytest.raises(WebView2ReleaseEnvironmentError) as caught,
+    ):
+        ensure_webview2_runtime()
+
+    probe.assert_not_called()
+    download.assert_not_called()
+    assert "WEBVIEW2_USER_DATA_FOLDER" in str(caught.value)
+    assert secret_value not in str(caught.value)
+
+
 def test_deployment_rejects_override_before_runtime_probe_or_installer(
     monkeypatch,
 ) -> None:

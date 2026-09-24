@@ -313,12 +313,33 @@ def resolve_registered_live_feature_authority(
         raise RegisteredStrategyLiveFeatureError(
             "registered FeatureSet is missing"
         )
+    feature_payload = feature_entry.payload
+    if type(feature_payload) is not dict or set(feature_payload) != {
+        "feature_set_id",
+        "version",
+        "definition_sha256",
+        "source_sha256",
+        "available_at",
+    }:
+        raise RegisteredStrategyLiveFeatureError(
+            "registered FeatureSet payload schema is invalid"
+        )
     try:
-        feature = FeatureSet(**feature_entry.payload)
+        feature = FeatureSet(
+            feature_set_id=feature_payload["feature_set_id"],
+            version=feature_payload["version"],
+            definition_sha256=feature_payload["definition_sha256"],
+            source_sha256=feature_payload["source_sha256"],
+            available_at_utc=feature_payload["available_at"],
+        )
     except (TypeError, ValueError) as exc:
         raise RegisteredStrategyLiveFeatureError(
             "registered FeatureSet is invalid"
         ) from exc
+    if feature.to_payload() != feature_payload:
+        raise RegisteredStrategyLiveFeatureError(
+            "registered FeatureSet payload is not canonical"
+        )
     if (
         feature_entry.record_id != feature.feature_set_id
         or feature.feature_set_id != model.feature_set_id

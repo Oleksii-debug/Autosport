@@ -53,6 +53,7 @@ def _validate_context_binding(
     *,
     context: ProposedTicketRiskContext | None,
     legs: tuple[TicketLeg, ...],
+    placed_at: str,
     provider_source_ids: tuple[str, ...],
     provider_accounts: tuple[tuple[str, str], ...],
     bankroll_id: str | None,
@@ -64,6 +65,10 @@ def _validate_context_binding(
         return
     if context.legs != legs:
         raise ValueError("risk context legs must match admitted ticket legs")
+    if context.proposal_ts is not None and context.proposal_ts != placed_at:
+        raise ValueError(
+            "risk context proposal_ts must match admitted ticket placed_at"
+        )
     if context.provider_accounts != provider_accounts:
         raise ValueError(
             "risk context provider accounts must match admitted ticket provenance"
@@ -120,6 +125,7 @@ def admit_paper_ticket(
     _validate_context_binding(
         context=context,
         legs=legs,
+        placed_at=placed_at,
         provider_source_ids=provider_source_ids,
         provider_accounts=provider_accounts,
         bankroll_id=bankroll_id,

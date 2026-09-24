@@ -131,6 +131,17 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
 
         for instance, owner, name, forged in bindings:
             canonical = getattr(owner, name)
+            descriptor = owner.__dict__[name]
+
+            # The descriptor itself is part of the trusted dispatch path.  Its
+            # target must not live in caller-writable instance state: otherwise
+            # mutating descriptor._method bypasses both instance and class seals.
+            self.assertFalse(hasattr(descriptor, "__dict__"))
+            self.assertFalse(hasattr(descriptor, "_method"))
+            with self.assertRaises(AttributeError):
+                setattr(descriptor, "_method", forged)
+            with self.assertRaises(AttributeError):
+                object.__setattr__(descriptor, "_method", forged)
 
             with self.assertRaisesRegex(
                 TypeError,

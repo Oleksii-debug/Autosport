@@ -452,6 +452,87 @@ def test_exact_alternate_authority_object_cannot_retarget_store(
     assert _resolve(store) == record
 
 
+def test_forged_workspace_binding_object_cannot_retarget_authority(
+    tmp_path, monkeypatch
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    authority = store._authority
+    canonical_binding = authority.workspace_binding
+
+    class ForgedBinding:
+        workspace = canonical_binding.workspace
+        authority_root = canonical_binding.authority_root
+        workspace_instance_id = canonical_binding.workspace_instance_id
+        workspace_marker_path = canonical_binding.workspace_marker_path
+        path_binding_path = canonical_binding.path_binding_path
+        workspace_locator = canonical_binding.workspace_locator
+        workspace_locator_sha256 = canonical_binding.workspace_locator_sha256
+
+        def validate_existing(self, **_kwargs):
+            return True, True
+
+        def ensure_bound(self):
+            return None
+
+    object.__setattr__(authority, "workspace_binding", ForgedBinding())
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="workspace binding identity changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        object.__setattr__(authority, "workspace_binding", canonical_binding)
+
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+@pytest.mark.parametrize(
+    "binding_method",
+    ("validate_existing", "ensure_bound", "_read_workspace_marker_id"),
+)
+def test_workspace_binding_class_dispatch_rebind_fails_closed(
+    tmp_path, monkeypatch, binding_method
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    binding_type = type(store._authority.workspace_binding)
+    calls: list[str] = []
+
+    def forged(*_args, **_kwargs):
+        calls.append(binding_method)
+        if binding_method == "validate_existing":
+            return True, True
+        return None
+
+    replacement = (
+        staticmethod(forged)
+        if binding_method == "_read_workspace_marker_id"
+        else forged
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(binding_type, binding_method, replacement)
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="workspace binding dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
 def test_recover_class_rebind_cannot_bypass_exact_authority_object_seal(
     tmp_path, monkeypatch
 ):

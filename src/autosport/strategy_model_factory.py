@@ -342,15 +342,15 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
             previous = record_sha256
         return validated
 
-    def _record_publish_commit(
+    def _append_publish_commit_record(
         self,
         transaction: dict[str, object],
     ) -> dict[str, object]:
-        """Record one factory transaction only after its final registry state is durable.
+        """Append a verified canonical factory publish record.
 
-        The canonical ExperimentRunner and crash-recovery paths call this while
-        already holding the workspace economic lock. A receipt therefore cannot
-        precede the registry commit it attests to.
+        This is an internal sink only. The module-level canonical issuer first
+        re-reads the prepared transaction manifest and proves that the live
+        ScientificRegistry already equals its final digest.
         """
 
         if type(transaction) is not dict or set(transaction) != {
@@ -413,13 +413,8 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
                     "factory artifact is already bound to another publish commit"
                 )
 
-        now = self._clock()
-        if not isinstance(now, datetime) or now.tzinfo is None:
-            raise ValueError(
-                "factory publish commit clock must return an aware datetime"
-            )
         committed_at = (
-            now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
         record: dict[str, object] = {
             "committed_at": committed_at,
@@ -772,6 +767,22 @@ def _read_publish_transaction(path: Path) -> dict[str, object]:
     return payload
 
 
+def _record_committed_factory_publish(
+    registry: ScientificRegistry,
+    store: FactoryArtifactStore,
+) -> dict[str, object]:
+    """Issue publication truth only from the live canonical prepared transaction."""
+
+    path = _publish_transaction_path(registry)
+    transaction = _read_publish_transaction(path)
+    current_sha256 = _registry_state_sha256(registry._read())
+    if current_sha256 != transaction["final_registry_sha256"]:
+        raise ValueError(
+            "factory publish commit requires the durable final registry state"
+        )
+    return store._append_publish_commit_record(transaction)
+
+
 def _recover_interrupted_factory_publish(
     registry: ScientificRegistry,
     store: FactoryArtifactStore,
@@ -818,7 +829,7 @@ def _recover_interrupted_factory_publish(
                     "committed factory transaction artifact hash mismatch: "
                     f"{kind}:{identity}"
                 )
-        store._record_publish_commit(transaction)
+        _record_committed_factory_publish(registry, store)
         _unlink_transaction_manifest(path)
         return
 
@@ -1645,7 +1656,7 @@ class ExperimentRunner(_impl.ExperimentRunner):
                     staged_store._rollback(created_artifacts, publish_error)
                     _unlink_transaction_manifest(transaction_path, publish_error)
                     raise
-                real_store._record_publish_commit(transaction)
+                _record_committed_factory_publish(real_registry, real_store)
                 _unlink_transaction_manifest(transaction_path)
                 return result
 
@@ -1987,7 +1998,7 @@ class ExperimentRunner(_impl.ExperimentRunner):
                     staged_store._rollback(created_artifacts, publish_error)
                     _unlink_transaction_manifest(transaction_path, publish_error)
                     raise
-                real_store._record_publish_commit(transaction)
+                _record_committed_factory_publish(real_registry, real_store)
                 _unlink_transaction_manifest(transaction_path)
                 return result
 

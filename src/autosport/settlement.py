@@ -82,6 +82,8 @@ def _build_serialized_settlement_operations():
     def descriptor_function(descriptor):
         if isinstance(descriptor, (classmethod, staticmethod)):
             return descriptor.__func__
+        if isinstance(descriptor, property):
+            return descriptor.fget
         return descriptor
 
     paper_dispatch_seal = tuple(

@@ -152,6 +152,9 @@ def attempt_utility_bound_update(
         reasons.add("utility_policy_mismatch")
     if utility.config_sha256 != policy.config_sha256:
         reasons.add("utility_config_mismatch")
+    expected_protocol_sha256 = hashlib.sha256(policy.protocol_id.encode("utf-8")).hexdigest()
+    if utility.protocol_sha256 != expected_protocol_sha256:
+        reasons.add("utility_protocol_mismatch")
 
     try:
         utility.require_policy_update_eligible()

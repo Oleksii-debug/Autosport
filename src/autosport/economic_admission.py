@@ -133,12 +133,12 @@ def admit_paper_ticket(
         # The lock alone is insufficient if this caller was constructed before a
         # different process committed a newer PaperBook. Re-read the one durable
         # workspace book only after owning the economic writer lock.
-        if book_path.exists():
-            canonical_book = PaperBook.load(book_path)
-        else:
-            PaperBook._validate_loaded_state(book)
-            book.save(book_path)
-            canonical_book = PaperBook.load(book_path)
+        if not book_path.exists():
+            raise FileNotFoundError(
+                "canonical paper_book.json must already exist; "
+                "bootstrap/recovery belongs to the product lifecycle"
+            )
+        canonical_book = PaperBook.load(book_path)
 
         decision = risk_policy.evaluate(canonical_book, amount, context=context)
         if not decision.allowed:

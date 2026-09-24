@@ -196,7 +196,7 @@ def _build_provider_fetch_factory():
         opener: object,
         max_response_bytes: int,
     ):
-        """Capture one construction-time network primitive for positive wallet authority."""
+        """Capture one construction-time primitive for positive wallet authority."""
 
         opener_type = type(opener)
         if opener_type is not opener_class:
@@ -205,7 +205,8 @@ def _build_provider_fetch_factory():
             )
         if not stdlib_dispatch_is_canonical():
             raise error_type(
-                "canonical ProphetX account network dispatch changed before construction"
+                "canonical ProphetX account network dispatch changed "
+                "before construction"
             )
 
         open_response = canonical_stdlib_opener_open.__get__(opener, opener_class)
@@ -545,7 +546,12 @@ def _build_provider_fetch_factory():
                 raise error_type(
                     f"ProphetX HTTP request failed with status {status}"
                 ) from None
-            except (url_error_type, timeout_error_type, os_error_type, http_exception_type):
+            except (
+                url_error_type,
+                timeout_error_type,
+                os_error_type,
+                http_exception_type,
+            ):
                 raise error_type("ProphetX network request failed") from None
 
         return fetch
@@ -559,6 +565,12 @@ del _build_provider_fetch_factory
 
 def _build_transport_init():
     provider_fetch_factory = _make_provider_fetch
+    create_default_context = ssl.create_default_context
+    build_canonical_opener = build_opener
+    proxy_handler_type = ProxyHandler
+    redirect_handler_type = _RejectRedirectHandler
+    https_handler_type = HTTPSHandler
+    value_error_type = ValueError
 
     def sealed_init(
         self,
@@ -570,14 +582,16 @@ def _build_transport_init():
             or isinstance(max_response_bytes, bool)
             or max_response_bytes <= 0
         ):
-            raise ValueError("max_response_bytes must be a positive integer")
+            raise value_error_type(
+                "max_response_bytes must be a positive integer"
+            )
         self._max_response_bytes = max_response_bytes
-        tls_context = ssl.create_default_context()
+        tls_context = create_default_context()
         tls_context.set_alpn_protocols(["http/1.1"])
-        self._opener = build_opener(
-            ProxyHandler({}),
-            _RejectRedirectHandler(),
-            HTTPSHandler(context=tls_context),
+        self._opener = build_canonical_opener(
+            proxy_handler_type({}),
+            redirect_handler_type(),
+            https_handler_type(context=tls_context),
         )
         self._provider_fetch = provider_fetch_factory(
             self._opener,

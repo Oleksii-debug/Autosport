@@ -3,7 +3,8 @@
 The canonical Betfair readback already obtains groupBy=BET rows for every terminal
 status bucket. This module preserves those provider rows as one origin-sealed,
 read-only evidence object without converting provider profit into net P&L, inferring
-account currency, allocating commission, or mutating execution/settlement state.
+account currency, allocating commission, binding caller-local action identity, or
+mutating execution/settlement state.
 """
 
 from __future__ import annotations
@@ -129,14 +130,16 @@ class BetfairClearedBetSettlementEvidence:
     terminal_rows preserves status-specific provider rows instead of pretending
     there is always exactly one cleared row. profit remains the signed BET-level
     provider field. Betfair commission is a separate MARKET-level authority and this
-    object intentionally carries no account-currency assertion.
+    object intentionally carries no account-currency or local-action assertion.
     """
 
     venue_id: str
     account_id: str
     adapter_id: str
     adapter_version: str
-    action_id: str
+    # Compatibility slot only. Provider-origin evidence must never bind a local
+    # action id; ledger/action association belongs to canonical reconciliation.
+    action_id: None
     provider_order_ref: str
     event_id: str
     market_id: str
@@ -157,7 +160,6 @@ class BetfairClearedBetSettlementEvidence:
             "account_id": self.account_id,
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
-            "action_id": self.action_id,
             "provider_order_ref": self.provider_order_ref,
             "event_id": self.event_id,
             "market_id": self.market_id,
@@ -179,12 +181,15 @@ class BetfairClearedBetSettlementEvidence:
             raise BetfairClearedSettlementEvidenceError(
                 "unsupported cleared settlement evidence schema"
             )
+        if self.action_id is not None:
+            raise BetfairClearedSettlementEvidenceError(
+                "provider settlement evidence must not bind local action_id"
+            )
         for field in (
             "venue_id",
             "account_id",
             "adapter_id",
             "adapter_version",
-            "action_id",
             "provider_order_ref",
             "event_id",
             "market_id",
@@ -374,7 +379,7 @@ def _resolve_betfair_cleared_bet_settlement(
         account_id=readback.account_id,
         adapter_id=readback.adapter_id,
         adapter_version=readback.adapter_version,
-        action_id=readback.action_id,
+        action_id=None,
         provider_order_ref=provider_order_ref,
         event_id=event_id,
         market_id=readback.market_id,

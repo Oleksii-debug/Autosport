@@ -408,14 +408,32 @@ _UK_UA = MappingProxyType(
         ),
         "ui.evaluation.truth": "Істина | лише паперова симуляція; це оцінювання не є доказом майбутньої прибутковості.",
         "ui.ticket.row": "{status} | ставка {stake} | коефіцієнт {odds} | виплата {payout} | {legs}",
+        "ui.ticket.leg": "спорт {sport}; {event_id}/{market_id}/{selection_id}@{odds}",
         "ui.ticket.empty": "Паперові квитки ще відсутні.",
+        "ui.ticket.status.open": "відкрито",
+        "ui.ticket.status.won": "виграно",
+        "ui.ticket.status.lost": "програно",
+        "ui.ticket.status.void": "повернено",
+        "ui.source_health.status.unknown": "невідомий",
+        "ui.source_health.status.healthy": "нормальний",
+        "ui.source_health.status.degraded": "погіршений",
+        "ui.source_health.status.failed": "помилка",
+        "ui.observation.quality_flag.invalid_source_timestamp": "некоректний час джерела",
+        "ui.observation.quality_flag.stale_source": "застарілі дані джерела",
+        "ui.observation.quality_flag.future_clock_skew": "час джерела випереджає локальний годинник",
+        "ui.observation.quality_flag.invalid_quote": "некоректне котирування",
+        "ui.observation.quality_flag.source_time_regression": "час джерела рухається назад",
+        "ui.observation.market_type.winner": "переможець",
+        "ui.observation.market_type.total": "тотал",
+        "ui.observation.market_type.handicap": "фора",
+        "ui.observation.market_type.other": "інший тип ринку",
         "ui.observation.no_flags": "немає",
         "ui.observation.summary": (
             "Поточний знімок: джерело={source_id}; стан={health}; отримано={received}; прийнято={accepted}; "
             "відхилено={rejected}; поточних={current}; прапорці якості={quality_flags}."
         ),
         "ui.observation.quote": (
-            "{event_id} | {market_type} | {market_id} | {selection_id} | коефіцієнт {odds} | час джерела {source_time}"
+            "спорт {sport} | {event_id} | {market_type} | {market_id} | {selection_id} | коефіцієнт {odds} | час джерела {source_time}"
         ),
         "ui.observation.unknown_time": "невідомий",
         "ui.observation.empty": "Поточні котирування ще відсутні.",

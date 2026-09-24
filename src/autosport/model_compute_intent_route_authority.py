@@ -25,8 +25,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
 from typing import Any, Final, Mapping
+from weakref import WeakKeyDictionary
 
 from .integrity import atomic_write_json, sha256_file
 from .json_integrity import strict_json_loads
@@ -499,6 +501,56 @@ def _build_store_init():
     authority_domain = _CANONICAL_AUTHORITY_DOMAIN
     authority_key = _CANONICAL_AUTHORITY_KEY
     error_type = ModelComputeIntentRouteAuthorityError
+    runtime_bindings = WeakKeyDictionary()
+
+    def require_runtime_binding(self) -> None:
+        binding = runtime_bindings.get(self)
+        if binding is None:
+            raise error_type("intent-route authority runtime binding is missing")
+        (
+            workspace,
+            path,
+            authority,
+            authority_root,
+            authority_workspace,
+            domain,
+            key,
+            workspace_binding,
+            workspace_instance_id,
+            workspace_binding_path,
+            namespace_sha256,
+            journal_dir,
+            records_dir,
+            namespace_marker_path,
+        ) = binding
+        try:
+            instance_state = vars(self)
+            if (
+                self.workspace is not workspace
+                or self.path is not path
+                or self._authority is not authority
+                or any(
+                    name in instance_state
+                    for name in ("_recover", "issue_request", "resolve_current")
+                )
+                or type(authority) is not authority_type
+                or authority.authority_root != authority_root
+                or authority.workspace != authority_workspace
+                or authority.domain != domain
+                or authority.key != key
+                or authority.workspace_binding is not workspace_binding
+                or authority.workspace_instance_id != workspace_instance_id
+                or authority.workspace_binding_path != workspace_binding_path
+                or authority.namespace_sha256 != namespace_sha256
+                or authority.journal_dir != journal_dir
+                or authority.records_dir != records_dir
+                or authority.namespace_marker_path != namespace_marker_path
+            ):
+                raise error_type("intent-route authority runtime binding changed")
+        except AttributeError as exc:
+            raise error_type(
+                "intent-route authority runtime binding changed"
+            ) from exc
 
     def sealed_init(self, workspace: str | Path) -> None:
         if getattr(root_resolver, "__code__", None) is not root_code:
@@ -537,17 +589,37 @@ def _build_store_init():
             key=authority_key,
             authority_root=root_resolver(),
         )
+        authority = self._authority
+        runtime_bindings[self] = (
+            self.workspace,
+            self.path,
+            authority,
+            authority.authority_root,
+            authority.workspace,
+            authority.domain,
+            authority.key,
+            authority.workspace_binding,
+            authority.workspace_instance_id,
+            authority.workspace_binding_path,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.records_dir,
+            authority.namespace_marker_path,
+        )
         with lock_type(self.workspace):
             self._recover()
             self._records = self._load()
 
-    return sealed_init
+    return sealed_init, require_runtime_binding
+
+
+_STORE_INIT, _STORE_RUNTIME_GUARD = _build_store_init()
 
 
 class ModelComputeIntentRouteAuthorityStore:
     """Creation-only issuance authority with restart-safe exact re-resolution."""
 
-    __init__ = _build_store_init()
+    __init__ = _STORE_INIT
 
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None
@@ -971,6 +1043,41 @@ class ModelComputeIntentRouteAuthorityStore:
             "timestamp-only historical intent-route resolution requires "
             "durable causal decision authority"
         )
+
+
+def _install_store_runtime_guards() -> None:
+    guard = _STORE_RUNTIME_GUARD
+    recover = ModelComputeIntentRouteAuthorityStore._recover
+    issue_request = ModelComputeIntentRouteAuthorityStore.issue_request
+    resolve_current = ModelComputeIntentRouteAuthorityStore.resolve_current
+
+    @wraps(recover)
+    def guarded_recover(self) -> None:
+        guard(self)
+        recover(self)
+        guard(self)
+
+    @wraps(issue_request)
+    def guarded_issue_request(self, *args, **kwargs):
+        guard(self)
+        result = issue_request(self, *args, **kwargs)
+        guard(self)
+        return result
+
+    @wraps(resolve_current)
+    def guarded_resolve_current(self, *args, **kwargs):
+        guard(self)
+        result = resolve_current(self, *args, **kwargs)
+        guard(self)
+        return result
+
+    ModelComputeIntentRouteAuthorityStore._recover = guarded_recover
+    ModelComputeIntentRouteAuthorityStore.issue_request = guarded_issue_request
+    ModelComputeIntentRouteAuthorityStore.resolve_current = guarded_resolve_current
+
+
+_install_store_runtime_guards()
+del _STORE_INIT, _STORE_RUNTIME_GUARD, _install_store_runtime_guards
 
 
 __all__ = [

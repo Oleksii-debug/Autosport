@@ -267,6 +267,56 @@ def test_dependency_goal_parser_rebind_cannot_mint_basis_authority(
     assert _resolve(store) == record
 
 
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    ("economic_goal_from_payload", "strict_json_loads"),
+)
+def test_transitive_goal_parser_dependency_rebind_fails_closed(
+    tmp_path, monkeypatch, dependency_name
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 43,
+    )
+    dependency_calls: list[str] = []
+    canonical_dependency = getattr(
+        economic_goal_store_module,
+        dependency_name,
+    )
+
+    def forged_dependency(value):
+        dependency_calls.append(dependency_name)
+        if dependency_name == "economic_goal_from_payload":
+            return forged_goal
+        return canonical_dependency(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            economic_goal_store_module,
+            dependency_name,
+            forged_dependency,
+        )
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="transitive parser authority changed",
+        ):
+            _review(store)
+
+    assert dependency_calls == []
+    assert not store.path.exists()
+
+    review = _review(store)
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
 def test_current_goal_dispatch_and_alias_rebind_cannot_mint_basis_authority(
     tmp_path, monkeypatch
 ):

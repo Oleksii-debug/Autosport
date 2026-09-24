@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import Lock
+from weakref import WeakKeyDictionary
 
 from .domain import TicketStatus
 from .paper import PaperBook
@@ -45,6 +46,7 @@ class _SettlementEngineMeta(type):
             cls.__dict__.get("_public_entry_bindings_sealed", False)
             and name
             in {
+                "__post_init__",
                 "record",
                 "settle_ready",
                 "_public_entry_bindings_sealed",
@@ -60,6 +62,7 @@ class _SettlementEngineMeta(type):
             cls.__dict__.get("_public_entry_bindings_sealed", False)
             and name
             in {
+                "__post_init__",
                 "record",
                 "settle_ready",
                 "_public_entry_bindings_sealed",
@@ -77,7 +80,7 @@ class SettlementEngine(metaclass=_SettlementEngineMeta):
 
     _public_entry_bindings_sealed = False
     outcomes: dict[str, str] = field(default_factory=dict)
-    _outcomes_authority: tuple[tuple[object, object], ...] | None = field(
+    _outcomes_authority: object | None = field(
         init=False,
         repr=False,
         compare=False,
@@ -93,7 +96,6 @@ class SettlementEngine(metaclass=_SettlementEngineMeta):
         # non-dict state: settle_ready()/record() remain the fail-closed ingress.
         if type(self.outcomes) is dict:
             self.outcomes = self.outcomes.copy()
-            self._outcomes_authority = tuple(self.outcomes.items())
 
     @staticmethod
     def _validated_outcomes_snapshot(raw: object) -> dict[str, str]:
@@ -125,11 +127,38 @@ def _build_serialized_settlement_operations():
 
     serialization_lock = Lock()
     engine_type = SettlementEngine
+    raw_post_init = engine_type.__post_init__
     validate_outcomes = engine_type._validated_outcomes_snapshot
     outcomes_descriptor = engine_type.__dict__["outcomes"]
     outcomes_authority_descriptor = engine_type.__dict__["_outcomes_authority"]
     paper_book_type = PaperBook
     open_status = TicketStatus.OPEN
+
+    class OutcomeAuthorityToken:
+        __slots__ = ("__weakref__",)
+
+    authority_tokens: WeakKeyDictionary[
+        OutcomeAuthorityToken,
+        tuple[int, tuple[tuple[object, object], ...]],
+    ] = WeakKeyDictionary()
+
+    def issue_outcomes_authority(
+        engine: SettlementEngine,
+        snapshot: dict[str, str],
+    ) -> None:
+        previous = outcomes_authority_descriptor.__get__(engine, engine_type)
+        if type(previous) is OutcomeAuthorityToken:
+            authority_tokens.pop(previous, None)
+        token = OutcomeAuthorityToken()
+        authority_tokens[token] = (id(engine), tuple(snapshot.items()))
+        outcomes_authority_descriptor.__set__(engine, token)
+
+    def guarded_post_init(self: SettlementEngine) -> None:
+        raw_post_init(self)
+        raw = outcomes_descriptor.__get__(self, engine_type)
+        if type(raw) is dict:
+            with serialization_lock:
+                issue_outcomes_authority(self, raw)
 
     def require_outcomes_authority(
         engine: SettlementEngine,
@@ -144,9 +173,12 @@ def _build_serialized_settlement_operations():
             if type(raw) is dict:
                 raise ValueError("settlement outcome authority changed")
             return raw
-        if type(authorized) is not tuple or type(raw) is not dict:
+        if type(authorized) is not OutcomeAuthorityToken or type(raw) is not dict:
             raise ValueError("settlement outcome authority changed")
-        expected = dict(authorized)
+        binding = authority_tokens.get(authorized)
+        if binding is None or binding[0] != id(engine):
+            raise ValueError("settlement outcome authority changed")
+        expected = dict(binding[1])
         if raw != expected or (snapshot is not None and snapshot != expected):
             raise ValueError("settlement outcome authority changed")
         return raw
@@ -414,10 +446,7 @@ def _build_serialized_settlement_operations():
             published = current.copy()
             published.update(incoming)
             outcomes_descriptor.__set__(self, published)
-            outcomes_authority_descriptor.__set__(
-                self,
-                tuple(published.items()),
-            )
+            issue_outcomes_authority(self, published)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
         # Keep one exact lock from outcome snapshot through the entire canonical
@@ -480,20 +509,25 @@ def _build_serialized_settlement_operations():
                 settled.append(ticket_id)
             return settled
 
+    guarded_post_init.__name__ = "__post_init__"
+    guarded_post_init.__qualname__ = "SettlementEngine.__post_init__"
     record.__name__ = "record"
     record.__qualname__ = "SettlementEngine.record"
     settle_ready.__name__ = "settle_ready"
     settle_ready.__qualname__ = "SettlementEngine.settle_ready"
-    return record, settle_ready
+    return guarded_post_init, record, settle_ready
 
 
-SettlementEngine.record, SettlementEngine.settle_ready = (
-    _build_serialized_settlement_operations()
-)
+(
+    SettlementEngine.__post_init__,
+    SettlementEngine.record,
+    SettlementEngine.settle_ready,
+) = _build_serialized_settlement_operations()
 # A metaclass data descriptor is intentionally installed only after the canonical
 # functions exist in SettlementEngine.__dict__.  Unlike an __setattr__ override
 # alone, type.__setattr__/type.__delattr__ still honor data descriptors on the
 # metaclass, so direct base-metaclass mutation cannot replace these public gates.
+_SettlementEngineMeta.__post_init__ = _build_public_entry_class_guard("__post_init__")
 _SettlementEngineMeta.record = _build_public_entry_class_guard("record")
 _SettlementEngineMeta.settle_ready = _build_public_entry_class_guard("settle_ready")
 SettlementEngine._public_entry_bindings_sealed = True

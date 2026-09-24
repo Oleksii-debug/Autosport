@@ -26,15 +26,15 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         return module
 
     @staticmethod
-    def _preflight_module(*, available: bool = True, exc: Exception | None = None) -> types.ModuleType:
-        module = types.ModuleType("autosport.webview2_runtime_preflight")
+    def _deployment_module(*, available: bool = True, exc: Exception | None = None) -> types.ModuleType:
+        module = types.ModuleType("autosport.webview2_runtime_deployment")
 
-        def probe_webview2_runtime():
+        def ensure_webview2_runtime():
             if exc is not None:
                 raise exc
             return types.SimpleNamespace(available=available)
 
-        module.probe_webview2_runtime = probe_webview2_runtime
+        module.ensure_webview2_runtime = ensure_webview2_runtime
         return module
 
     def _interactive_patches(self):
@@ -82,7 +82,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             patch.dict(
                 sys.modules,
                 {
-                    "autosport.webview2_runtime_preflight": self._preflight_module(
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
                         available=True
                     ),
                     "autosport.windows_webview_shell": fake_shell,
@@ -114,7 +114,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             patch.dict(
                 sys.modules,
                 {
-                    "autosport.webview2_runtime_preflight": self._preflight_module(
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
                         available=False
                     ),
                     "autosport.windows_webview_shell": fake_shell,
@@ -136,7 +136,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             patch.dict(
                 sys.modules,
                 {
-                    "autosport.webview2_runtime_preflight": self._preflight_module(
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
                         exc=RuntimeError(secret)
                     ),
                     "autosport.windows_webview_shell": self._failing_webview_module(),
@@ -158,17 +158,17 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             return 23
 
         fake_diagnostic.run_machine_diagnostic = run_machine_diagnostic
-        poison_preflight = types.ModuleType("autosport.webview2_runtime_preflight")
+        poison_deployment = types.ModuleType("autosport.webview2_runtime_deployment")
 
-        def unexpected_preflight():
+        def unexpected_deployment():
             raise AssertionError("machine mode must not invoke interactive runtime preflight")
 
-        poison_preflight.probe_webview2_runtime = unexpected_preflight
+        poison_deployment.ensure_webview2_runtime = unexpected_deployment
         with patch.dict(
             sys.modules,
             {
                 "autosport.diagnostic": fake_diagnostic,
-                "autosport.webview2_runtime_preflight": poison_preflight,
+                "autosport.webview2_runtime_deployment": poison_deployment,
             },
         ):
             self.assertEqual(main(["--diagnostic-output", "report.json"]), 23)

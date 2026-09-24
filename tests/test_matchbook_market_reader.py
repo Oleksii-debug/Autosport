@@ -87,6 +87,6 @@ def test_persisted_budget_rollback_is_rejected_by_monotonic_authority(tmp_path,m
     state_path=workspace/".matchbook-poll-budget-v1.json"
     raw=json.loads(state_path.read_text(encoding="utf-8"))
     raw["used_in_window"]=0
-    state_path.write_text(json.dumps(raw,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+    state_path.write_bytes((json.dumps(raw,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n").encode("utf-8"))
     with pytest.raises(MatchbookMarketReadError,match="monotonic authority"):
         plan_matchbook_poll(items(),now="2026-09-23T00:00:10Z",cursor=None,max_requests_per_minute=2,batch_limit=1)

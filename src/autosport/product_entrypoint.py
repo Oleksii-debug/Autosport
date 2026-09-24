@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import signal
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -28,9 +29,15 @@ class ProductRuntimeError(ProductEntrypointError):
 class _SignalStopRequest:
     def __init__(self) -> None:
         self.signal_number: int | None = None
+        self._event = threading.Event()
 
     def handle(self, signum: int, _frame: object) -> None:
         self.signal_number = signum
+        self._event.set()
+
+    def wait(self, timeout: float) -> bool:
+        """Wait for a stop request, returning early when a signal handler fires."""
+        return self._event.wait(timeout)
 
     @property
     def requested(self) -> bool:
@@ -51,6 +58,21 @@ class _SignalStopRequest:
         if self.signal_number is None:
             return 0
         return 128 + self.signal_number
+
+
+def _product_stop_signals() -> tuple[int, ...]:
+    """Return console stop signals supported by the running platform.
+
+    Windows delivers Ctrl+Break as SIGBREAK rather than SIGINT.  Register it when
+    available so that the supported product boundary records a durable stop instead
+    of letting the process terminate outside the runtime shutdown path.
+    """
+
+    signals = [int(signal.SIGINT), int(signal.SIGTERM)]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None and int(sigbreak) not in signals:
+        signals.append(int(sigbreak))
+    return tuple(signals)
 
 
 def _normalized_workspace(value: object, *, label: str) -> Path:
@@ -170,17 +192,19 @@ def run_product(
         initial_bankroll=initial_bankroll,
     )
     stop_request = _SignalStopRequest()
-    previous_handlers: dict[signal.Signals, object] = {}
-    if install_signal_handlers:
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM)
-        }
-        for signum in previous_handlers:
-            signal.signal(signum, stop_request.handle)
-
+    previous_handlers: dict[int, object] = {}
+    installed_handlers: list[int] = []
     started = False
     try:
+        if install_signal_handlers:
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in _product_stop_signals()
+            }
+            for signum in previous_handlers:
+                signal.signal(signum, stop_request.handle)
+                installed_handlers.append(signum)
+
         start_status = runtime.start()
         started = True
         _print_record("product_status", runtime=runtime, value=start_status)
@@ -198,13 +222,6 @@ def run_product(
             cycles += 1
             _print_record("product_tick", runtime=runtime, value=result)
 
-            if max_cycles is not None and cycles >= max_cycles:
-                _print_record(
-                    "product_status",
-                    runtime=runtime,
-                    value=runtime.stop("max_cycles_reached"),
-                )
-                break
             if stop_request.requested:
                 _print_record(
                     "product_status",
@@ -212,7 +229,17 @@ def run_product(
                     value=runtime.stop(stop_request.reason),
                 )
                 break
-            sleep(float(poll_seconds))
+            if max_cycles is not None and cycles >= max_cycles:
+                _print_record(
+                    "product_status",
+                    runtime=runtime,
+                    value=runtime.stop("max_cycles_reached"),
+                )
+                break
+            if install_signal_handlers and sleep is time.sleep:
+                stop_request.wait(float(poll_seconds))
+            else:
+                sleep(float(poll_seconds))
         return stop_request.exit_code
     except Exception as exc:
         if started:
@@ -228,8 +255,8 @@ def run_product(
                 raise ProductRuntimeError(type(exc).__name__) from exc
             raise
         finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+            for signum in installed_handlers:
+                signal.signal(signum, previous_handlers[signum])
 
 
 def run_product_command(

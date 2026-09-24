@@ -52,6 +52,11 @@ _AUTHORITY_KEY = "issued-results-v1"
 _JOURNAL_NAME = "risk-of-ruin-evaluator-v1.json"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+# Operational implementation support budget, not a statistical max-N or
+# sample-adequacy rule. The current exact CP implementation performs 240
+# high-precision bisection evaluations with O(k) recurrence work per step.
+_MAX_SUPPORTED_FIXED_N_OBSERVATIONS = 10_000
+_UNSUPPORTED_RESOURCE_DOMAIN = "UNSUPPORTED_RESOURCE_DOMAIN"
 _CP_BASE_WORKING_PRECISION = 70
 _CP_INPUT_SCALE_GUARD_DIGITS = 16
 _CP_FINAL_PRECISION = 50
@@ -119,6 +124,15 @@ def _probability(value: object, name: str) -> Decimal:
     if result <= 0 or result >= 1:
         raise RiskOfRuinEvaluationError(f"{name} must be strictly between 0 and 1")
     return result
+
+
+def _require_supported_fixed_n_work_domain(independent_units: int) -> None:
+    if independent_units > _MAX_SUPPORTED_FIXED_N_OBSERVATIONS:
+        raise RiskOfRuinEvaluationError(
+            f"{_UNSUPPORTED_RESOURCE_DOMAIN}: fixed-N computation exceeds "
+            "the current implementation work budget; this is not a "
+            "statistical validity or sample-adequacy judgment"
+        )
 
 
 def _fixed_point_materialization_length(value: Decimal) -> int:
@@ -351,6 +365,9 @@ class RiskOfRuinEvaluationRequest:
             raise RiskOfRuinEvaluationError(
                 "planned_independent_units must be a positive integer"
             )
+        _require_supported_fixed_n_work_domain(
+            self.planned_independent_units
+        )
         if type(self.evaluated_stakes) is not tuple or not self.evaluated_stakes:
             raise RiskOfRuinEvaluationError(
                 "evaluated_stakes must be a non-empty tuple"
@@ -367,6 +384,12 @@ class RiskOfRuinEvaluationRequest:
             )
         if type(self.observations) is not tuple or not self.observations:
             raise RiskOfRuinEvaluationError("observations must be a non-empty tuple")
+        if len(self.observations) > _MAX_SUPPORTED_FIXED_N_OBSERVATIONS:
+            raise RiskOfRuinEvaluationError(
+                f"{_UNSUPPORTED_RESOURCE_DOMAIN}: observation cohort exceeds "
+                "the current implementation work budget; this is not a "
+                "statistical validity or sample-adequacy judgment"
+            )
         if any(type(item) is not RiskPathObservation for item in self.observations):
             raise RiskOfRuinEvaluationError(
                 "observations must contain exact RiskPathObservation values"
@@ -507,6 +530,7 @@ def clopper_pearson_upper_bound(
     working_precision = _clopper_pearson_working_precision(confidence)
     if ruin_count == independent_units:
         return Decimal(1)
+    _require_supported_fixed_n_work_domain(independent_units)
 
     with localcontext() as context:
         # This is a scientific arithmetic boundary, not an ambient process-context

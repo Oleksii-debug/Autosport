@@ -458,6 +458,47 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         self.assertTrue(acquisition.observed_at.endswith("Z"))
 
 
+    @patch("autosport.prophetx_fixture_discovery.build_opener")
+    def test_clock_authority_helpers_are_import_composed(self, build_opener):
+        raw = json.dumps(
+            _tournaments([]),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = build_opener.return_value.open.return_value.__enter__.return_value
+        response.headers.get.return_value = "application/json"
+        response.headers.items.return_value = []
+        response.read.return_value = raw
+        response.status = 200
+
+        discovery = ProphetXFixtureDiscovery(
+            "secret-token",
+            data_context_id="sandbox-aggregator-account-a",
+            transport=_default_transport,
+            clock=lambda: "2000-01-01T00:00:00Z",
+        )
+        with (
+            patch.object(
+                prophetx_fixture_discovery_module,
+                "_canonical_observed_at",
+                lambda value: "1999-01-01T00:00:00Z",
+            ),
+            patch.object(
+                prophetx_fixture_discovery_module,
+                "_clock_origin_verified",
+                lambda clock: True,
+            ),
+        ):
+            catalog = discovery.discover()
+
+        self.assertEqual(len(catalog.acquisitions), 1)
+        acquisition = catalog.acquisitions[0]
+        self.assertTrue(acquisition.provider_origin_verified)
+        self.assertFalse(acquisition.observation_time_verified)
+        self.assertEqual(acquisition.observed_at, "2000-01-01T00:00:00Z")
+
+
     def test_injected_unavailability_detail_is_sanitized_before_durable_failure(self):
         discovery, _ = self._discovery(
             events_by_tournament={

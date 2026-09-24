@@ -1869,6 +1869,7 @@ def _build_public_stop_read_authority():
     armed_mode = ExecutionAuthorityMode.ARMED
     stopped_mode = ExecutionAuthorityMode.STOPPED
     decision_type = ExecutionAdmissionDecision
+    integrity_error = ExecutionStopIntegrityError
 
     def current(
         self: ExecutionStopAuthority,
@@ -1916,7 +1917,32 @@ def _build_public_stop_read_authority():
             )
         return state
 
-    return current, decision, assert_execution_allowed
+    def sealed_public_method(method):
+        class SealedPublicMethod:
+            __slots__ = ()
+
+            def __get__(self, instance, owner=None):
+                if instance is None:
+                    return method
+                return method.__get__(instance, owner)
+
+            def __set__(self, _instance, _value) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+            def __delete__(self, _instance) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+        return SealedPublicMethod()
+
+    return (
+        sealed_public_method(current),
+        sealed_public_method(decision),
+        sealed_public_method(assert_execution_allowed),
+    )
 
 
 (

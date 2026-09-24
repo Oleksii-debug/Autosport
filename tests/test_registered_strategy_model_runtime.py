@@ -390,7 +390,7 @@ def test_resolves_exact_promoted_model_and_predicts_without_caller_callable(
     assert runtime.predict_value(
         feature=0.52,
         observed_at="2026-01-01T00:00:30Z",
-        decision_at="2026-01-01T00:01:00Z",
+        decision_at=RUNTIME_AFTER_PUBLICATION,
     ) == 0.61
 
 
@@ -502,7 +502,7 @@ def test_generic_model_value_is_not_promoted_to_probability_semantics(
     assert runtime.predict_value(
         feature=0.52,
         observed_at="2026-01-01T00:00:30Z",
-        decision_at="2026-01-01T00:01:00Z",
+        decision_at=RUNTIME_AFTER_PUBLICATION,
     ) == 1.2
     assert not hasattr(runtime, "predict_probability")
 

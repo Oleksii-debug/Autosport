@@ -580,7 +580,17 @@
     byId(332).focus();
   });
 
+  function hasShortcutModifier(event) {
+    return (
+      event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+    );
+  }
+
   document.addEventListener("keydown", (event) => {
+    if (hasShortcutModifier(event)) return;
     if (event.key === "F2") {
       event.preventDefault();
       byId(301).focus();

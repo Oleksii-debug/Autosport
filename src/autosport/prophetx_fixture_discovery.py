@@ -60,6 +60,7 @@ class ProphetXDiscoveryAcquisition:
     response_sha256: str
     data_context_id: str
     provider_origin_verified: bool
+    observation_time_verified: bool = False
     environment: str = "sandbox"
     provider: str = "prophetx"
     source_timestamp: None = None
@@ -308,6 +309,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _clock_origin_verified(
+    clock: Clock,
+    _canonical_clock: Clock = _utc_now_iso,
+) -> bool:
+    """Return whether this exact acquisition used the product-owned clock."""
+
+    return clock is _canonical_clock
+
+
 def _collection(payload: Any, *, key: str) -> list[Mapping[str, Any]]:
     if not isinstance(payload, dict) or "data" not in payload:
         raise ProphetXDiscoveryPayloadError("provider discovery response requires data")
@@ -362,7 +372,7 @@ class ProphetXFixtureDiscovery:
     def discover(self) -> ProphetXFixtureCatalog:
         acquisitions: list[ProphetXDiscoveryAcquisition] = []
         tournament_response, tournament_origin_verified = self._get(_TOURNAMENTS_PATH)
-        tournament_observed = _canonical_observed_at(self.clock())
+        tournament_observed, tournament_observation_verified = self._observe()
         acquisitions.append(
             self._acquisition(
                 request_kind="tournaments",
@@ -370,6 +380,7 @@ class ProphetXFixtureDiscovery:
                 observed_at=tournament_observed,
                 response=tournament_response,
                 provider_origin_verified=tournament_origin_verified,
+                observation_time_verified=tournament_observation_verified,
             )
         )
         tournaments = self._parse_tournaments(tournament_response.payload)
@@ -385,7 +396,7 @@ class ProphetXFixtureDiscovery:
             except ProphetXDiscoveryUnavailable as exc:
                 failures.append(self._safe_failure(tournament.tournament_id, exc))
                 continue
-            observed_at = _canonical_observed_at(self.clock())
+            observed_at, observation_time_verified = self._observe()
             acquisitions.append(
                 self._acquisition(
                     request_kind="sport_events",
@@ -393,6 +404,7 @@ class ProphetXFixtureDiscovery:
                     observed_at=observed_at,
                     response=response,
                     provider_origin_verified=event_origin_verified,
+                    observation_time_verified=observation_time_verified,
                 )
             )
             events.extend(self._parse_events(response.payload, tournament=tournament))
@@ -434,6 +446,13 @@ class ProphetXFixtureDiscovery:
             raise ProphetXDiscoveryUnavailable(f"HTTP_{response.status_code}", response.status_code)
         return response, provider_origin_verified
 
+    def _observe(self) -> tuple[str, bool]:
+        # Capture the exact callable before both verification and invocation so a
+        # concurrent/ordinary attribute replacement cannot make one clock appear
+        # to have supplied another clock's timestamp.
+        clock = self.clock
+        return _canonical_observed_at(clock()), _clock_origin_verified(clock)
+
     def _acquisition(
         self,
         *,
@@ -442,6 +461,7 @@ class ProphetXFixtureDiscovery:
         observed_at: str,
         response: ProphetXDiscoveryJsonResponse,
         provider_origin_verified: bool,
+        observation_time_verified: bool,
     ) -> ProphetXDiscoveryAcquisition:
         return ProphetXDiscoveryAcquisition(
             request_kind=request_kind,
@@ -450,6 +470,7 @@ class ProphetXFixtureDiscovery:
             response_sha256=response.body_sha256,
             data_context_id=self.data_context_id,
             provider_origin_verified=provider_origin_verified,
+            observation_time_verified=observation_time_verified,
         )
 
     @staticmethod

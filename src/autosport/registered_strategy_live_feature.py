@@ -367,7 +367,7 @@ def _make_registered_live_feature_authority_resolver():
         decision_at: str,
     ) -> RegisteredLiveFeatureAuthority:
         """Resolve exact ModelVersion -> FeatureSet lineage from durable registry truth."""
-    
+
         require_canonical_scientific_dispatch()
         if type(registry) is not registry_type:
             raise RegisteredStrategyLiveFeatureError(
@@ -375,14 +375,14 @@ def _make_registered_live_feature_authority_resolver():
             )
         wanted_model = _canonical_text("model_version_id", model_version_id)
         decision = _instant("decision_at", decision_at)
-    
+
         try:
             durable_registry = registry_type(registry.path)
         except (OSError, ValueError) as exc:
             raise RegisteredStrategyLiveFeatureError(
                 "durable ScientificRegistry cannot be reopened canonically"
             ) from exc
-    
+
         model_entry = registry_get(
             durable_registry,
             "ModelVersion",
@@ -415,7 +415,7 @@ def _make_registered_live_feature_authority_resolver():
             raise RegisteredStrategyLiveFeatureError(
                 "ModelVersion was not available at decision time"
             )
-    
+
         if model.feature_set_id != LIVE_FEATURE_SET_ID:
             raise RegisteredStrategyLiveFeatureError(
                 "ModelVersion is not bound to the supported live feature set"
@@ -493,7 +493,7 @@ def _make_registered_live_feature_authority_resolver():
             raise RegisteredStrategyLiveFeatureError(
                 "FeatureSet does not durably precede ModelVersion in ScientificRegistry"
             )
-    
+
         return RegisteredLiveFeatureAuthority(
             model_version_id=model.model_version_id,
             model_record_sha256=model_entry.record_sha256,
@@ -505,8 +505,6 @@ def _make_registered_live_feature_authority_resolver():
             feature_record_sha256=feature_entry.record_sha256,
             feature_available_at=feature_entry.available_at,
         )
-    
-    
 
     return resolve_registered_live_feature_authority
 
@@ -514,6 +512,7 @@ def _make_registered_live_feature_authority_resolver():
 resolve_registered_live_feature_authority = (
     _make_registered_live_feature_authority_resolver()
 )
+
 
 def _canonical_snapshot_events(snapshot: MirrorSnapshot) -> tuple[MarketEvent, ...]:
     if type(snapshot) is not MirrorSnapshot:
@@ -620,6 +619,10 @@ def observe_registered_strategy_live_features(
             )
         if event.source_ts is not None:
             source_timestamp = _instant("MarketEvent.source_ts", event.source_ts)
+            if source_timestamp > observed:
+                raise RegisteredStrategyLiveFeatureError(
+                    "provider source timestamp is after local observation"
+                )
             if source_timestamp > decision:
                 raise RegisteredStrategyLiveFeatureError(
                     "provider source timestamp is after decision time"

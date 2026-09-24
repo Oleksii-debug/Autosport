@@ -584,7 +584,8 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
             (
                 "assumes:trusted-cpython-runtime",
                 "assumes:trusted-installed-python-executables",
-                "guards:application-state-binding-descriptor-dependency-drift",
+                "guards:ordinary-application-state-binding-descriptor-dependency-drift",
+                "out-of-scope:direct-builtin-type-class-metaclass-mutation",
                 "out-of-scope:direct-function-code-mutation",
                 "out-of-scope:closure-cell-mutation",
                 "out-of-scope:interpreter-or-native-runtime-mutation",

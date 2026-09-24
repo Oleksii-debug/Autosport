@@ -276,9 +276,15 @@ class CalculationServiceTests(unittest.TestCase):
             )
 
     def test_quote_timestamp_fields_must_be_timezone_aware(self) -> None:
+        invalid_source = self._event()
+        object.__setattr__(
+            invalid_source,
+            "source_ts",
+            "2026-09-14T11:59:59",
+        )
         with self.assertRaisesRegex(ValueError, "source_ts must be a timezone-aware"):
             self.service.implied_probability_for_event(
-                self._event(source_ts="2026-09-14T11:59:59"),
+                invalid_source,
                 causal_cutoff_ts="2026-09-14T12:00:00+00:00",
             )
         with self.assertRaisesRegex(ValueError, "causal_cutoff_ts must be a timezone-aware"):

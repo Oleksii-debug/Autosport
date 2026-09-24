@@ -159,7 +159,7 @@ class _ProductStartTransitionStore:
             SessionState.STOPPED.value,
         }:
             raise ProductCompositionError(
-                "durable product START transition phase is invalid"
+                "durable product START transition session pre-state is invalid"
             )
         if collector_was_stopped != (
             session_pre_state == SessionState.STOPPED.value
@@ -476,7 +476,10 @@ def _settlement_authority_identity(
     if (
         len(configuration_sha256) != 64
         or configuration_sha256 != configuration_sha256.lower()
-        or any(character not in "0123456789abcdef" for character in configuration_sha256)
+        or any(
+            character not in "0123456789abcdef"
+            for character in configuration_sha256
+        )
     ):
         raise ProductCompositionError(
             "settlement_configuration_sha256 must be lowercase SHA-256 hex"

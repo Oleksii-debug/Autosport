@@ -37,6 +37,15 @@ METHOD_ID = "autosport.market-implied.proportional-reciprocal-devig.v1"
 _OBSERVATION_TOKEN = object()
 _COHORT_TOKEN = object()
 
+# The public builder accepts product objects, but the resulting evidence claims
+# canonical durable-history replay. Subclasses or instance-shadowed readers can
+# otherwise replace events() while still satisfying isinstance(), fabricating
+# a self-consistent comparator from process-local bytes.
+_STORE_TYPE = SQLiteMarketStore
+_STORE_EVENTS = _STORE_TYPE.events
+_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+_OUTCOME_ASSERT_AVAILABLE = _OUTCOME_AUTHORITY_TYPE.assert_available_as_of
+
 
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
@@ -279,6 +288,31 @@ def _probabilities(
     return overround, values
 
 
+def _require_canonical_inputs(
+    store: SQLiteMarketStore,
+    outcome_authority: MarketSettlementOutcomeAuthority,
+) -> None:
+    if type(store) is not _STORE_TYPE:
+        raise TypeError("store must be exact SQLiteMarketStore")
+    namespace = getattr(store, "__dict__", None)
+    if isinstance(namespace, dict) and "events" in namespace:
+        raise MarketImpliedBaselineError(
+            "canonical market store must not shadow events reader"
+        )
+    if _STORE_TYPE.events is not _STORE_EVENTS:
+        raise MarketImpliedBaselineError(
+            "canonical market store events authority was rebound"
+        )
+    if type(outcome_authority) is not _OUTCOME_AUTHORITY_TYPE:
+        raise TypeError(
+            "outcome_authority must be exact MarketSettlementOutcomeAuthority"
+        )
+    if _OUTCOME_AUTHORITY_TYPE.assert_available_as_of is not _OUTCOME_ASSERT_AVAILABLE:
+        raise MarketImpliedBaselineError(
+            "market outcome availability authority was rebound"
+        )
+
+
 def build_market_implied_baseline_evidence(
     *,
     cohort_key: str,
@@ -290,14 +324,11 @@ def build_market_implied_baseline_evidence(
     """Issue one decision-time probability vector; roster-origin truth remains false."""
 
     key = _text(cohort_key, "cohort_key")
-    if not isinstance(store, SQLiteMarketStore):
-        raise TypeError("store must be a SQLiteMarketStore")
-    if not isinstance(outcome_authority, MarketSettlementOutcomeAuthority):
-        raise TypeError("outcome_authority must be MarketSettlementOutcomeAuthority")
+    _require_canonical_inputs(store, outcome_authority)
     cutoff = _utc(decision_cutoff, "decision_cutoff")
     age_us = _age_us(max_age)
     try:
-        outcome_authority.assert_available_as_of(decision_cutoff)
+        _OUTCOME_ASSERT_AVAILABLE(outcome_authority, decision_cutoff)
     except (TypeError, ValueError) as exc:
         raise MarketImpliedBaselineError(
             "verified outcome roster is not causally available at decision cutoff"

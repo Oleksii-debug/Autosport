@@ -52,7 +52,9 @@ def _capture_product_source_bindings() -> tuple[_ProfiledSourceBinding, ...]:
             entry.expected_provider_source_id,
         )
         if bound_entry is not entry:
-            raise RuntimeError("product source registry returned inconsistent entry identity")
+            raise RuntimeError(
+                "product source registry returned inconsistent entry identity"
+            )
         bindings.append(
             _ProfiledSourceBinding(
                 factory_spec=entry.factory_spec,

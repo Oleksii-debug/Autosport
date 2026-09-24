@@ -180,6 +180,55 @@ def test_goal_store_module_rebind_cannot_redefine_durable_owner_goal(
     assert goal_store.load() == durable_goal
 
 
+@pytest.mark.parametrize("mutation", ("file-name", "init"))
+def test_goal_store_construction_cannot_retarget_current_goal_authority(
+    tmp_path, monkeypatch, mutation
+):
+    workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 37,
+    )
+    forged_store = EconomicGoalStore(workspace)
+    forged_store.path = workspace / "forged-economic-goal.json"
+    forged_store.initialize_owner(forged_goal)
+    forged_init_calls: list[str] = []
+
+    def forged_init(self, _workspace) -> None:
+        forged_init_calls.append("init")
+        self.workspace = workspace
+        self.path = forged_store.path
+
+    if mutation == "file-name":
+        monkeypatch.setattr(
+            EconomicGoalStore,
+            "FILE_NAME",
+            forged_store.path.name,
+        )
+    else:
+        monkeypatch.setattr(EconomicGoalStore, "__init__", forged_init)
+
+    review = _review(store)
+
+    assert forged_init_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+
+    assert forged_init_calls == []
+    assert record.owner_goal_revision == durable_goal.revision
+    assert record.owner_goal_sha256 == expected_goal_sha256
+    assert _resolve(store) == record
+
+
 def test_current_goal_dispatch_and_alias_rebind_cannot_mint_basis_authority(
     tmp_path, monkeypatch
 ):

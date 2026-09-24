@@ -220,10 +220,24 @@ def _issue_general_risk_admission(
         expected_run_id=expected_run_id,
     )
 
+    # The initial strategy risk result predates the durable decision append. A
+    # concurrent/simultaneous paper allocation can therefore change exposure in
+    # that window. Re-run the canonical policy on the exact current book and bind
+    # that PASS to one digest before publishing any risk-admission evidence.
     pre_action_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(context.paper_book)
     if pre_action_sha256 is None:
         raise PaperExecutionAdoptionError(
             "paper-value risk admission cannot validate pre-action PaperBook"
+        )
+    _require_pre_action_risk_pass(
+        agent=agent,
+        pre_action_book=context.paper_book,
+        descriptor=descriptor,
+    )
+    validated_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(context.paper_book)
+    if validated_sha256 != pre_action_sha256:
+        raise PaperExecutionAdoptionError(
+            "paper-value risk admission PaperBook changed during canonical risk evaluation"
         )
     witness = _expected_witness(
         agent=agent,

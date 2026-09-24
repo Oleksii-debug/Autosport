@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -26,7 +27,12 @@ from typing import Final, Mapping
 from .economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from .integrity import atomic_write_json, sha256_file
 from .json_integrity import strict_json_loads
-from .monotonic_workspace_authority import AuthorityPhase, MonotonicWorkspaceAuthority
+from .monotonic_workspace_authority import (
+    AUTHORITY_ID,
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+)
+from .monotonic_workspace_binding import WorkspaceIdentityBinding
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -755,8 +761,8 @@ def _validate_publication_available_at(
     return available_instant
 
 
-def _build_allocation_basis_store_init():
-    """Bind one LOCAL-compute namespace to the product machine root."""
+def _build_allocation_basis_store_runtime():
+    """Bind one LOCAL-compute namespace and exact authority object."""
 
     root_resolver = local_compute_monotonic_authority_root
     root_code = getattr(root_resolver, "__code__", None)
@@ -772,13 +778,167 @@ def _build_allocation_basis_store_init():
 
     path_type = Path
     authority_type = MonotonicWorkspaceAuthority
+    binding_type = WorkspaceIdentityBinding
     lock_type = WorkspaceEconomicLock
     file_name = FILE_NAME
     authority_domain = AUTHORITY_DOMAIN
     authority_key = AUTHORITY_KEY
+    authority_id = AUTHORITY_ID
     error_type = LocalComputeAllocationBasisError
+    goal_store_type = _CANONICAL_ECONOMIC_GOAL_STORE_CLASS
+    goal_store_load = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
+    goal_store_file_name = goal_store_type.FILE_NAME
+    goal_to_payload = _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD
+    goal_store_load_globals = getattr(goal_store_load, "__globals__", {})
+    goal_parser = goal_store_load_globals.get("economic_goal_from_json")
+    goal_parser_code = getattr(goal_parser, "__code__", None)
+    goal_to_payload_code = getattr(goal_to_payload, "__code__", None)
+    goal_contract_type = goal_store_load_globals.get("EconomicGoalContract")
+    if (
+        goal_parser_code is None
+        or goal_to_payload_code is None
+        or not isinstance(goal_contract_type, type)
+    ):
+        raise LocalComputeAllocationBasisError(
+            "canonical EconomicGoal parser authority is unavailable"
+        )
 
-    def sealed_init(self, workspace: str | Path) -> None:
+    # Seal the project-owned transitive parser/serializer dependency graph.
+    # Capturing only economic_goal_from_json is insufficient because its exact
+    # code still resolves strict_json_loads/economic_goal_from_payload and their
+    # helper/type bindings from mutable defining-module globals.
+    goal_dependency_seal: dict[
+        tuple[int, str],
+        tuple[dict[str, object], str, object, object | None],
+    ] = {}
+    pending_goal_functions = [goal_parser, goal_to_payload]
+    seen_goal_functions: set[int] = set()
+    while pending_goal_functions:
+        function = pending_goal_functions.pop()
+        function_id = id(function)
+        if function_id in seen_goal_functions:
+            continue
+        seen_goal_functions.add(function_id)
+        function_code = getattr(function, "__code__", None)
+        function_globals = getattr(function, "__globals__", None)
+        if function_code is None or type(function_globals) is not dict:
+            continue
+        for global_name in function_code.co_names:
+            if global_name not in function_globals:
+                continue
+            value = function_globals[global_name]
+            value_code = getattr(value, "__code__", None)
+            key = (id(function_globals), global_name)
+            existing = goal_dependency_seal.get(key)
+            if existing is not None and (
+                existing[2] is not value or existing[3] is not value_code
+            ):
+                raise LocalComputeAllocationBasisError(
+                    "canonical EconomicGoal dependency graph is inconsistent"
+                )
+            goal_dependency_seal[key] = (
+                function_globals,
+                global_name,
+                value,
+                value_code,
+            )
+            if (
+                value_code is not None
+                and str(getattr(value, "__module__", "")).startswith("autosport.")
+            ):
+                pending_goal_functions.append(value)
+    frozen_goal_dependencies = tuple(goal_dependency_seal.values())
+
+    goal_contract_slots = tuple(getattr(goal_contract_type, "__slots__", ()))
+    if not goal_contract_slots:
+        raise LocalComputeAllocationBasisError(
+            "canonical EconomicGoal value authority is unavailable"
+        )
+    goal_contract_descriptors = tuple(
+        (name, goal_contract_type.__dict__.get(name))
+        for name in goal_contract_slots
+    )
+    if any(descriptor is None for _name, descriptor in goal_contract_descriptors):
+        raise LocalComputeAllocationBasisError(
+            "canonical EconomicGoal descriptor authority is unavailable"
+        )
+
+    json_module = json
+    json_loads = json_module.loads
+    json_dumps = json_module.dumps
+    json_encoder_type = json_module.JSONEncoder
+    json_decoder_type = json_module.JSONDecoder
+    sha256 = hashlib.sha256
+    open_file = open
+    os_fspath = os.fspath
+    path_separator = os.sep
+    sealed_state = weakref.WeakKeyDictionary()
+    sealed_goal_file = weakref.WeakKeyDictionary()
+    authority_operations = {
+        "read_history": authority_type.read_history,
+        "recover": authority_type.recover,
+        "prepare": authority_type.prepare,
+        "abort": authority_type.abort,
+        "commit": authority_type.commit,
+    }
+    authority_dispatch = {
+        name: getattr(authority_type, name)
+        for name in authority_type.__dict__
+        if getattr(
+            getattr(authority_type, name, None),
+            "__code__",
+            None,
+        )
+        is not None
+    }
+    if any(
+        name not in authority_dispatch
+        for name in authority_operations
+    ):
+        raise error_type(
+            "canonical allocation basis authority operations are not sealed"
+        )
+    authority_method_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in authority_dispatch.items()
+    }
+    binding_descriptor_names = (
+        "resolve",
+        "validate_existing",
+        "ensure_bound",
+        "_read_workspace_marker_id",
+        "_read_path_binding_id",
+        "_ensure_path_binding",
+        "_ensure_workspace_marker",
+        "_workspace_payload",
+        "_path_payload",
+    )
+    binding_descriptors = {
+        name: binding_type.__dict__.get(name)
+        for name in binding_descriptor_names
+    }
+
+    def binding_descriptor_callable(descriptor: object) -> object:
+        if isinstance(descriptor, (classmethod, staticmethod)):
+            return descriptor.__func__
+        return descriptor
+
+    binding_descriptor_codes = {
+        name: getattr(binding_descriptor_callable(descriptor), "__code__", None)
+        for name, descriptor in binding_descriptors.items()
+    }
+    if (
+        any(descriptor is None for descriptor in binding_descriptors.values())
+        or any(code is None for code in binding_descriptor_codes.values())
+    ):
+        raise error_type(
+            "canonical allocation basis workspace binding dispatch is unavailable"
+        )
+    sealed_binding = weakref.WeakKeyDictionary()
+    sha256_file_fn = sha256_file
+    object_getattribute = object.__getattribute__
+
+    def canonical_root() -> Path:
         if getattr(root_resolver, "__code__", None) is not root_code:
             raise error_type(
                 "canonical product authority root resolver code changed"
@@ -805,43 +965,431 @@ def _build_allocation_basis_store_init():
             raise error_type(
                 "canonical product authority root closure changed"
             )
+        root = root_resolver()
+        if not isinstance(root, path_type) or not root.is_absolute():
+            raise error_type(
+                "canonical product authority root is invalid"
+            )
+        return root
 
-        self.workspace = path_type(workspace).absolute().resolve(strict=False)
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / file_name
-        self._authority = authority_type(
-            workspace=self.workspace,
-            domain=authority_domain,
-            key=authority_key,
-            authority_root=root_resolver(),
+    def require_binding_dispatch() -> None:
+        for name, canonical in binding_descriptors.items():
+            live = binding_type.__dict__.get(name)
+            live_callable = binding_descriptor_callable(live)
+            if (
+                live is not canonical
+                or getattr(live_callable, "__code__", None)
+                is not binding_descriptor_codes[name]
+            ):
+                raise error_type(
+                    "allocation basis workspace binding dispatch changed"
+                )
+
+    def require_state(self) -> None:
+        try:
+            (
+                frozen_workspace,
+                frozen_path,
+                frozen_authority,
+                frozen_root,
+            ) = sealed_state[self]
+            (
+                frozen_binding,
+                frozen_binding_workspace,
+                frozen_binding_root,
+                frozen_binding_instance_id,
+                frozen_workspace_marker,
+                frozen_path_binding,
+                frozen_workspace_locator,
+                frozen_workspace_locator_sha256,
+            ) = sealed_binding[self]
+        except (KeyError, TypeError) as exc:
+            raise error_type(
+                "allocation basis authority state is not sealed"
+            ) from exc
+
+        if (
+            self.workspace is not frozen_workspace
+            or self.path is not frozen_path
+            or self._authority is not frozen_authority
+            or canonical_root() != frozen_root
+        ):
+            raise error_type(
+                "allocation basis authority state changed"
+            )
+
+        authority = frozen_authority
+        if type(authority) is not authority_type:
+            raise error_type(
+                "allocation basis authority state changed"
+            )
+        instance_state = getattr(authority, "__dict__", {})
+        for name, method in authority_dispatch.items():
+            live = getattr(authority_type, name, None)
+            if (
+                name in instance_state
+                or live is not method
+                or getattr(live, "__code__", None)
+                is not authority_method_codes[name]
+            ):
+                raise error_type(
+                    "allocation basis authority dispatch changed"
+                )
+
+        binding = authority.workspace_binding
+        if binding is not frozen_binding or type(binding) is not binding_type:
+            raise error_type(
+                "allocation basis workspace binding identity changed"
+            )
+        if (
+            binding.workspace != frozen_binding_workspace
+            or binding.authority_root != frozen_binding_root
+            or binding.workspace_instance_id != frozen_binding_instance_id
+            or binding.workspace_marker_path != frozen_workspace_marker
+            or binding.path_binding_path != frozen_path_binding
+            or binding.workspace_locator != frozen_workspace_locator
+            or binding.workspace_locator_sha256
+            != frozen_workspace_locator_sha256
+        ):
+            raise error_type(
+                "allocation basis workspace binding state changed"
+            )
+        require_binding_dispatch()
+        workspace_instance_id = authority.workspace_instance_id
+        namespace_material = "\0".join(
+            (
+                authority_id,
+                workspace_instance_id,
+                authority_domain,
+                authority_key,
+            )
+        ).encode("utf-8")
+        namespace_sha256 = sha256(namespace_material).hexdigest()
+        expected_journal_dir = (
+            frozen_root
+            / "journals"
+            / namespace_sha256[:2]
+            / namespace_sha256
         )
-        with lock_type(self.workspace):
-            self._recover()
-            self._records = self._load()
+        expected_records_dir = expected_journal_dir / "records"
+        expected_namespace_marker = (
+            frozen_root
+            / "namespace-bindings"
+            / namespace_sha256[:2]
+            / f"{namespace_sha256}.json"
+        )
+        expected_path_binding = (
+            frozen_root
+            / "workspace-bindings"
+            / binding.workspace_locator_sha256[:2]
+            / f"{binding.workspace_locator_sha256}.json"
+        )
+        if (
+            authority.workspace != frozen_workspace
+            or authority.authority_root != frozen_root
+            or authority.domain != authority_domain
+            or authority.key != authority_key
+            or authority.namespace_sha256 != namespace_sha256
+            or authority.journal_dir != expected_journal_dir
+            or authority.records_dir != expected_records_dir
+            or authority.namespace_marker_path
+            != expected_namespace_marker
+            or binding.workspace != frozen_workspace
+            or binding.authority_root != frozen_root
+            or binding.workspace_instance_id != workspace_instance_id
+            or binding.workspace_marker_path
+            != authority.workspace_binding_path
+            or binding.path_binding_path != expected_path_binding
+        ):
+            raise error_type(
+                "allocation basis authority coordinates changed"
+            )
 
-    return sealed_init
+    def require_json_member_authority() -> None:
+        if (
+            json_module.loads is not json_loads
+            or json_module.dumps is not json_dumps
+            or json_module.JSONEncoder is not json_encoder_type
+            or json_module.JSONDecoder is not json_decoder_type
+        ):
+            raise error_type(
+                "current EconomicGoal stdlib JSON authority changed"
+            )
 
+    def require_goal_parser_authority() -> None:
+        require_json_member_authority()
+        live_globals = getattr(goal_store_load, "__globals__", {})
+        live_parser = live_globals.get("economic_goal_from_json")
+        if (
+            live_parser is not goal_parser
+            or getattr(live_parser, "__code__", None) is not goal_parser_code
+            or getattr(goal_to_payload, "__code__", None)
+            is not goal_to_payload_code
+        ):
+            raise error_type(
+                "current EconomicGoal parser authority changed"
+            )
+        for (
+            defining_globals,
+            global_name,
+            canonical_value,
+            canonical_code,
+        ) in frozen_goal_dependencies:
+            live_value = defining_globals.get(global_name)
+            if (
+                live_value is not canonical_value
+                or (
+                    canonical_code is not None
+                    and getattr(live_value, "__code__", None)
+                    is not canonical_code
+                )
+            ):
+                raise error_type(
+                    "current EconomicGoal transitive parser authority changed"
+                )
+        for name, canonical_descriptor in goal_contract_descriptors:
+            if goal_contract_type.__dict__.get(name) is not canonical_descriptor:
+                raise error_type(
+                    "current EconomicGoal value descriptor authority changed"
+                )
+        require_json_member_authority()
 
-class LocalComputeAllocationBasisAuthorityStore:
-    """Creation-only owner-reviewed basis store with rollback fencing."""
+    def sealed_current_goal(self):
+        require_state(self)
+        require_goal_parser_authority()
+        try:
+            _frozen_workspace, _path, _authority, _root = sealed_state[self]
+            goal_path_text = sealed_goal_file[self]
+            with open_file(goal_path_text, "rb") as handle:
+                durable_bytes = handle.read()
+            if type(durable_bytes) is not bytes:
+                raise error_type(
+                    "current EconomicGoal durable read is not exact bytes"
+                )
+            goal_text = durable_bytes.decode("utf-8", errors="strict")
+            goal = goal_parser(goal_text)
+            require_goal_parser_authority()
+            if type(goal) is not goal_contract_type:
+                raise error_type(
+                    "current EconomicGoal value must have exact canonical type"
+                )
+            payload = goal_to_payload(goal)
+            expected_bytes = (
+                json_dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            if durable_bytes != expected_bytes:
+                raise error_type(
+                    "current EconomicGoal does not match durable canonical bytes"
+                )
+            raw = json_dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            contract_payload = payload.get("contract") if type(payload) is dict else None
+            if type(contract_payload) is not dict:
+                raise error_type(
+                    "current EconomicGoal canonical projection is invalid"
+                )
+            goal_id = contract_payload.get("goal_id")
+            goal_revision = contract_payload.get("revision")
+            goal_bankroll_id = contract_payload.get("bankroll_id")
+            goal_currency = contract_payload.get("currency")
+            if (
+                type(goal_id) is not str
+                or not goal_id
+                or goal_id != goal_id.strip()
+                or "\x00" in goal_id
+                or type(goal_revision) is not int
+                or goal_revision <= 0
+                or type(goal_bankroll_id) is not str
+                or not goal_bankroll_id
+                or goal_bankroll_id != goal_bankroll_id.strip()
+                or "\x00" in goal_bankroll_id
+                or type(goal_currency) is not str
+                or len(goal_currency) != 3
+                or not goal_currency.isascii()
+                or not goal_currency.isalpha()
+                or goal_currency != goal_currency.upper()
+            ):
+                raise error_type(
+                    "current EconomicGoal canonical projection is invalid"
+                )
+            goal_sha256 = sha256(raw).hexdigest()
+            require_goal_parser_authority()
+        except Exception as exc:
+            if isinstance(exc, error_type):
+                raise
+            raise error_type(
+                "current durable EconomicGoal is required"
+            ) from exc
+        return (
+            goal_id,
+            goal_revision,
+            goal_bankroll_id,
+            goal_currency,
+            goal_sha256,
+        )
 
-    __init__ = _build_allocation_basis_store_init()
+    def authority_call(self, name: str, **kwargs):
+        require_state(self)
+        try:
+            _workspace, _path, authority, _root = sealed_state[self]
+            method = authority_operations[name]
+        except (KeyError, TypeError) as exc:
+            raise error_type(
+                "allocation basis authority operation is not sealed"
+            ) from exc
+        return method(authority, **kwargs)
 
-    def _observed_sha256(self) -> str | None:
-        return sha256_file(self.path) if self.path.exists() else None
-
-    def _recover(self) -> None:
-        observed = self._observed_sha256()
-        history = self._authority.read_history()
+    def sealed_recover(self) -> None:
+        require_state(self)
+        try:
+            _workspace, frozen_path, authority, _root = sealed_state[self]
+        except (KeyError, TypeError) as exc:
+            raise error_type(
+                "allocation basis authority state is not sealed"
+            ) from exc
+        observed = (
+            sha256_file_fn(frozen_path)
+            if frozen_path.exists()
+            else None
+        )
+        history = authority_operations["read_history"](authority)
         if history and history[-1].phase is AuthorityPhase.PREPARE:
             pending = history[-1]
-            self._authority.recover(
+            authority_operations["recover"](
+                authority,
                 observed_state_sha256=observed,
                 tx_id=pending.tx_id,
                 semantic_binding_sha256=pending.semantic_binding_sha256,
             )
             return
-        self._authority.recover(observed_state_sha256=observed)
+        authority_operations["recover"](
+            authority,
+            observed_state_sha256=observed,
+        )
+
+    def sealed_getattribute(self, name: str):
+        if name == "_recover":
+            return lambda: sealed_recover(self)
+        if name == "_current_goal":
+            return lambda: sealed_current_goal(self)
+        if name == "_authority_prepare":
+            return lambda **kwargs: authority_call(
+                self,
+                "prepare",
+                **kwargs,
+            )
+        if name == "_authority_abort":
+            return lambda **kwargs: authority_call(
+                self,
+                "abort",
+                **kwargs,
+            )
+        if name == "_authority_commit":
+            return lambda **kwargs: authority_call(
+                self,
+                "commit",
+                **kwargs,
+            )
+        return object_getattribute(self, name)
+
+    def sealed_init(self, workspace: str | Path) -> None:
+        authority_root = canonical_root()
+        require_binding_dispatch()
+        workspace_path = (
+            path_type(workspace).absolute().resolve(strict=False)
+        )
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        state_path = workspace_path / file_name
+        workspace_text = os_fspath(workspace_path)
+        if (
+            type(workspace_text) is not str
+            or not workspace_text
+            or "\x00" in workspace_text
+        ):
+            raise error_type(
+                "canonical EconomicGoal workspace path is invalid"
+            )
+        goal_path_text = (
+            workspace_text + goal_store_file_name
+            if workspace_text.endswith(path_separator)
+            else workspace_text + path_separator + goal_store_file_name
+        )
+        if not goal_path_text or "\x00" in goal_path_text:
+            raise error_type(
+                "canonical EconomicGoal path is invalid"
+            )
+        authority = authority_type(
+            workspace=workspace_path,
+            domain=authority_domain,
+            key=authority_key,
+            authority_root=authority_root,
+        )
+        binding = authority.workspace_binding
+        require_binding_dispatch()
+        if type(binding) is not binding_type:
+            raise error_type(
+                "allocation basis workspace binding identity changed"
+            )
+        self.workspace = workspace_path
+        self.path = state_path
+        self._authority = authority
+        sealed_state[self] = (
+            workspace_path,
+            state_path,
+            authority,
+            authority_root,
+        )
+        sealed_goal_file[self] = goal_path_text
+        sealed_binding[self] = (
+            binding,
+            binding.workspace,
+            binding.authority_root,
+            binding.workspace_instance_id,
+            binding.workspace_marker_path,
+            binding.path_binding_path,
+            binding.workspace_locator,
+            binding.workspace_locator_sha256,
+        )
+        require_state(self)
+        with lock_type(workspace_path):
+            sealed_recover(self)
+            self._records = self._load()
+
+    return sealed_init, require_state, sealed_recover, sealed_getattribute
+
+
+(
+    _STORE_INIT,
+    _STORE_STATE_GUARD,
+    _STORE_RECOVER,
+    _STORE_GETATTRIBUTE,
+) = _build_allocation_basis_store_runtime()
+
+
+class LocalComputeAllocationBasisAuthorityStore:
+    """Creation-only owner-reviewed basis store with rollback fencing."""
+
+    __slots__ = ("workspace", "path", "_authority", "_records", "__weakref__")
+    __init__ = _STORE_INIT
+    __getattribute__ = _STORE_GETATTRIBUTE
+
+    def _observed_sha256(self) -> str | None:
+        return sha256_file(self.path) if self.path.exists() else None
+
+    def _recover(self, _sealed_recover=_STORE_RECOVER) -> None:
+        _sealed_recover(self)
 
     def _load(self) -> tuple[LocalComputeAllocationBasisRecord, ...]:
         if not self.path.exists():
@@ -925,7 +1473,13 @@ class LocalComputeAllocationBasisAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             self._records = self._load()
-            goal, goal_sha256 = self._current_goal()
+            (
+                goal_id,
+                goal_revision,
+                goal_bankroll_id,
+                goal_currency,
+                goal_sha256,
+            ) = self._current_goal()
             return _prepare_owner_review(
                 basis_id=basis_id,
                 backend_id=backend_id,
@@ -938,10 +1492,10 @@ class LocalComputeAllocationBasisAuthorityStore:
                 total_allocable_cost=total_allocable_cost,
                 request_denominator=request_denominator,
                 measurement_document=measurement_document,
-                currency=goal.currency,
-                owner_goal_id=goal.goal_id,
-                owner_goal_revision=goal.revision,
-                owner_bankroll_id=goal.bankroll_id,
+                currency=goal_currency,
+                owner_goal_id=goal_id,
+                owner_goal_revision=goal_revision,
+                owner_bankroll_id=goal_bankroll_id,
                 owner_goal_sha256=goal_sha256,
             )
 
@@ -965,12 +1519,18 @@ class LocalComputeAllocationBasisAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             self._records = self._load()
-            goal, goal_sha256 = self._current_goal()
+            (
+                goal_id,
+                goal_revision,
+                goal_bankroll_id,
+                goal_currency,
+                goal_sha256,
+            ) = self._current_goal()
             if (
-                review.currency != goal.currency
-                or review.owner_goal_id != goal.goal_id
-                or review.owner_goal_revision != goal.revision
-                or review.owner_bankroll_id != goal.bankroll_id
+                review.currency != goal_currency
+                or review.owner_goal_id != goal_id
+                or review.owner_goal_revision != goal_revision
+                or review.owner_bankroll_id != goal_bankroll_id
                 or review.owner_goal_sha256 != goal_sha256
             ):
                 raise LocalComputeAllocationBasisError(
@@ -982,11 +1542,11 @@ class LocalComputeAllocationBasisAuthorityStore:
                     continue
                 if (
                     existing.owner_review_sha256 == review.review_sha256
-                    and existing.owner_goal_id == goal.goal_id
-                    and existing.owner_goal_revision == goal.revision
-                    and existing.owner_bankroll_id == goal.bankroll_id
+                    and existing.owner_goal_id == goal_id
+                    and existing.owner_goal_revision == goal_revision
+                    and existing.owner_bankroll_id == goal_bankroll_id
                     and existing.owner_goal_sha256 == goal_sha256
-                    and existing.currency == goal.currency
+                    and existing.currency == goal_currency
                 ):
                     return existing
                 raise LocalComputeAllocationBasisError(
@@ -1069,7 +1629,7 @@ class LocalComputeAllocationBasisAuthorityStore:
                 }
             )
             tx_id = f"local-compute-allocation-{record.basis_sha256}"
-            self._authority.prepare(
+            self._authority_prepare(
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 intended_state_sha256=intended,
@@ -1078,7 +1638,7 @@ class LocalComputeAllocationBasisAuthorityStore:
             try:
                 atomic_write_json(self.path, payload)
             except Exception:
-                self._authority.abort(
+                self._authority_abort(
                     tx_id=tx_id,
                     observed_state_sha256=observed,
                     semantic_binding_sha256=binding,
@@ -1089,7 +1649,7 @@ class LocalComputeAllocationBasisAuthorityStore:
                 raise LocalComputeAllocationBasisError(
                     "published basis bytes do not match prepared monotonic state"
                 )
-            self._authority.commit(
+            self._authority_commit(
                 tx_id=tx_id,
                 observed_state_sha256=published,
                 semantic_binding_sha256=binding,
@@ -1130,10 +1690,16 @@ class LocalComputeAllocationBasisAuthorityStore:
         with WorkspaceEconomicLock(self.workspace):
             self._recover()
             records = self._load()
-            goal, goal_sha256 = self._current_goal()
+            (
+                goal_id,
+                goal_revision,
+                goal_bankroll_id,
+                goal_currency,
+                goal_sha256,
+            ) = self._current_goal()
             if (
-                goal.bankroll_id != canonical_bankroll
-                or goal.currency != canonical_currency
+                goal_bankroll_id != canonical_bankroll
+                or goal_currency != canonical_currency
             ):
                 raise LocalComputeAllocationBasisError(
                     "decision bankroll/currency does not match current owner EconomicGoal"
@@ -1147,11 +1713,11 @@ class LocalComputeAllocationBasisAuthorityStore:
                 and record.model_id == canonical_model
                 and record.config_sha256 == canonical_config
                 and record.allocation_policy_id == canonical_policy
-                and record.owner_goal_id == goal.goal_id
-                and record.owner_goal_revision == goal.revision
-                and record.owner_bankroll_id == goal.bankroll_id
+                and record.owner_goal_id == goal_id
+                and record.owner_goal_revision == goal_revision
+                and record.owner_bankroll_id == goal_bankroll_id
                 and record.owner_goal_sha256 == goal_sha256
-                and record.currency == goal.currency
+                and record.currency == goal_currency
             ]
             if len(matches) > 1:
                 raise LocalComputeAllocationBasisError(
@@ -1185,6 +1751,8 @@ class LocalComputeAllocationBasisAuthorityStore:
             "durable causal observation authority"
         )
 
+
+del _STORE_INIT, _STORE_STATE_GUARD, _STORE_RECOVER, _STORE_GETATTRIBUTE
 __all__ = [
     "LocalComputeAllocationBasisAuthorityStore",
     "LocalComputeAllocationBasisError",

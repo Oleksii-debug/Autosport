@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -8,9 +10,13 @@ from pathlib import Path
 
 import pytest
 
+import autosport.economic_goal_store as economic_goal_store_module
 import autosport.local_compute_allocation_basis as subject
 from autosport.economic_goal_store import EconomicGoalStore, economic_goal_to_payload
-from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthorityError
+from autosport.monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from autosport.owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     build_initial_owner_contract,
@@ -175,6 +181,357 @@ def test_goal_store_module_rebind_cannot_redefine_durable_owner_goal(
     assert record.owner_goal_revision == durable_goal.revision
     assert record.owner_goal_sha256 == expected_goal_sha256
     assert goal_store.load() == durable_goal
+
+
+@pytest.mark.parametrize("mutation", ("file-name", "init"))
+def test_goal_store_construction_cannot_retarget_current_goal_authority(
+    tmp_path, monkeypatch, mutation
+):
+    workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 37,
+    )
+    forged_store = EconomicGoalStore(workspace)
+    forged_store.path = workspace / "forged-economic-goal.json"
+    forged_store.initialize_owner(forged_goal)
+    forged_init_calls: list[str] = []
+
+    def forged_init(self, _workspace) -> None:
+        forged_init_calls.append("init")
+        self.workspace = workspace
+        self.path = forged_store.path
+
+    if mutation == "file-name":
+        monkeypatch.setattr(
+            EconomicGoalStore,
+            "FILE_NAME",
+            forged_store.path.name,
+        )
+    else:
+        monkeypatch.setattr(EconomicGoalStore, "__init__", forged_init)
+
+    review = _review(store)
+
+    assert forged_init_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+
+    assert forged_init_calls == []
+    assert record.owner_goal_revision == durable_goal.revision
+    assert record.owner_goal_sha256 == expected_goal_sha256
+    assert _resolve(store) == record
+
+
+def test_dependency_goal_parser_rebind_cannot_mint_basis_authority(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 41,
+    )
+    parser_calls: list[str] = []
+
+    def forged_parser(_text):
+        parser_calls.append("economic_goal_from_json")
+        return forged_goal
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            economic_goal_store_module,
+            "economic_goal_from_json",
+            forged_parser,
+        )
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="parser authority changed",
+        ):
+            _review(store)
+
+    assert parser_calls == []
+    assert not store.path.exists()
+
+    review = _review(store)
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    ("economic_goal_from_payload", "strict_json_loads"),
+)
+def test_transitive_goal_parser_dependency_rebind_fails_closed(
+    tmp_path, monkeypatch, dependency_name
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 43,
+    )
+    dependency_calls: list[str] = []
+    canonical_dependency = getattr(
+        economic_goal_store_module,
+        dependency_name,
+    )
+
+    def forged_dependency(value):
+        dependency_calls.append(dependency_name)
+        if dependency_name == "economic_goal_from_payload":
+            return forged_goal
+        return canonical_dependency(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            economic_goal_store_module,
+            dependency_name,
+            forged_dependency,
+        )
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="transitive parser authority changed",
+        ):
+            _review(store)
+
+    assert dependency_calls == []
+    assert not store.path.exists()
+
+    review = _review(store)
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    ("loads", "dumps", "JSONEncoder", "JSONDecoder"),
+)
+def test_stdlib_json_member_rebind_fails_before_goal_authority_dispatch(
+    tmp_path, monkeypatch, member_name
+):
+    _workspace, _authority, _goal_store, store = _store(tmp_path, monkeypatch)
+    canonical = getattr(json, member_name)
+    forged_calls: list[str] = []
+
+    if member_name in {"loads", "dumps"}:
+        def forged_member(*args, **kwargs):
+            forged_calls.append(member_name)
+            return canonical(*args, **kwargs)
+
+        replacement = forged_member
+    else:
+        class ForgedJsonMember(canonical):
+            def __init__(self, *args, **kwargs):
+                forged_calls.append(member_name)
+                super().__init__(*args, **kwargs)
+
+        replacement = ForgedJsonMember
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json, member_name, replacement)
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="stdlib JSON authority changed",
+        ):
+            _review(store)
+
+    assert forged_calls == []
+    assert not store.path.exists()
+
+    review = _review(store)
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+def test_path_open_rebind_cannot_replace_durable_goal_bytes(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 47,
+    )
+    forged_bytes = (
+        json.dumps(
+            economic_goal_to_payload(forged_goal),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    canonical_open = Path.open
+    forged_open_calls: list[str] = []
+
+    def forged_open(
+        self,
+        mode="r",
+        buffering=-1,
+        encoding=None,
+        errors=None,
+        newline=None,
+    ):
+        if self.name == EconomicGoalStore.FILE_NAME:
+            forged_open_calls.append(mode)
+            if "b" in mode:
+                return io.BytesIO(forged_bytes)
+            return io.StringIO(forged_bytes.decode("utf-8"))
+        return canonical_open(
+            self,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", forged_open)
+        review = _review(store)
+
+    assert forged_open_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+def test_goal_path_construction_cannot_retarget_durable_goal(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    goal_store = _goal(workspace)
+    durable_goal = goal_store.load()
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 53,
+    )
+    forged_store = EconomicGoalStore(workspace)
+    forged_store.path = workspace / "forged-economic-goal.json"
+    forged_store.initialize_owner(forged_goal)
+
+    path_type = type(workspace)
+    canonical_divide = path_type.__truediv__
+    retarget_calls: list[str] = []
+
+    def forged_divide(self, other):
+        if other == EconomicGoalStore.FILE_NAME:
+            retarget_calls.append(str(self))
+            return forged_store.path
+        return canonical_divide(self, other)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(path_type, "__truediv__", forged_divide)
+        store = subject.LocalComputeAllocationBasisAuthorityStore(workspace)
+        review = _review(store)
+
+    assert retarget_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+def test_current_goal_dispatch_and_alias_rebind_cannot_mint_basis_authority(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 29,
+    )
+    forged_method_calls: list[str] = []
+    forged_alias_calls: list[str] = []
+
+    def forged_current_goal(_store):
+        forged_method_calls.append("current_goal")
+        return forged_goal, "f" * 64
+
+    class ReboundEconomicGoalStore:
+        def __init__(self, _workspace) -> None:
+            forged_alias_calls.append("store_init")
+
+    def forged_load(_store):
+        forged_alias_calls.append("store_load")
+        return forged_goal
+
+    def forged_payload(_goal):
+        forged_alias_calls.append("goal_payload")
+        return {"forged": True}
+
+    monkeypatch.setattr(
+        subject.LocalComputeAllocationBasisAuthorityStore,
+        "_current_goal",
+        forged_current_goal,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_CANONICAL_ECONOMIC_GOAL_STORE_CLASS",
+        ReboundEconomicGoalStore,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_CANONICAL_ECONOMIC_GOAL_STORE_LOAD",
+        forged_load,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD",
+        forged_payload,
+    )
+
+    review = _review(store)
+
+    assert forged_method_calls == []
+    assert forged_alias_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+
+    assert forged_method_calls == []
+    assert forged_alias_calls == []
+    assert record.owner_goal_revision == durable_goal.revision
+    assert record.owner_goal_sha256 == expected_goal_sha256
+    assert _resolve(store) == record
 
 
 def test_bare_digest_or_historical_timestamp_is_not_publish_authority(
@@ -416,6 +773,235 @@ def test_deleted_basis_state_cannot_reset_monotonic_authority(
         subject.LocalComputeAllocationBasisAuthorityStore(store.workspace)
 
 
+def test_exact_alternate_authority_object_cannot_retarget_store(
+    tmp_path, monkeypatch
+):
+    workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    canonical_authority = store._authority
+    alternate_root = tmp_path / "alternate-machine-authority"
+    alternate_authority = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        domain=canonical_authority.domain,
+        key=canonical_authority.key,
+        authority_root=alternate_root,
+    )
+
+    object.__setattr__(store, "_authority", alternate_authority)
+    with pytest.raises(
+        subject.LocalComputeAllocationBasisError,
+        match="authority state changed",
+    ):
+        store.publish_owner_basis(review, confirmed=True)
+
+    assert not store.path.exists()
+    assert not alternate_root.exists()
+
+    object.__setattr__(store, "_authority", canonical_authority)
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert canonical_authority.authority_root == canonical_root
+    assert _resolve(store) == record
+
+
+def test_forged_workspace_binding_object_cannot_retarget_authority(
+    tmp_path, monkeypatch
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    authority = store._authority
+    canonical_binding = authority.workspace_binding
+
+    class ForgedBinding:
+        workspace = canonical_binding.workspace
+        authority_root = canonical_binding.authority_root
+        workspace_instance_id = canonical_binding.workspace_instance_id
+        workspace_marker_path = canonical_binding.workspace_marker_path
+        path_binding_path = canonical_binding.path_binding_path
+        workspace_locator = canonical_binding.workspace_locator
+        workspace_locator_sha256 = canonical_binding.workspace_locator_sha256
+
+        def validate_existing(self, **_kwargs):
+            return True, True
+
+        def ensure_bound(self):
+            return None
+
+    object.__setattr__(authority, "workspace_binding", ForgedBinding())
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="workspace binding identity changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        object.__setattr__(authority, "workspace_binding", canonical_binding)
+
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+def test_constructor_workspace_binding_coordinates_cannot_be_retargeted(
+    tmp_path, monkeypatch
+):
+    _workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    binding = store._authority.workspace_binding
+    original_digest = binding.workspace_locator_sha256
+    original_path = binding.path_binding_path
+    forged_digest = "f" * 64
+    forged_path = (
+        canonical_root
+        / "workspace-bindings"
+        / forged_digest[:2]
+        / f"{forged_digest}.json"
+    )
+
+    object.__setattr__(binding, "workspace_locator_sha256", forged_digest)
+    object.__setattr__(binding, "path_binding_path", forged_path)
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="workspace binding state changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        object.__setattr__(
+            binding,
+            "workspace_locator_sha256",
+            original_digest,
+        )
+        object.__setattr__(binding, "path_binding_path", original_path)
+
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+@pytest.mark.parametrize(
+    "binding_method",
+    ("validate_existing", "ensure_bound", "_read_workspace_marker_id"),
+)
+def test_workspace_binding_class_dispatch_rebind_fails_closed(
+    tmp_path, monkeypatch, binding_method
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    binding_type = type(store._authority.workspace_binding)
+    calls: list[str] = []
+
+    def forged(*_args, **_kwargs):
+        calls.append(binding_method)
+        if binding_method == "validate_existing":
+            return True, True
+        return None
+
+    replacement = (
+        staticmethod(forged)
+        if binding_method == "_read_workspace_marker_id"
+        else forged
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(binding_type, binding_method, replacement)
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="workspace binding dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+def test_recover_class_rebind_cannot_bypass_exact_authority_object_seal(
+    tmp_path, monkeypatch
+):
+    workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    canonical_authority = store._authority
+    alternate_root = tmp_path / "alternate-recover-bypass-root"
+    alternate_authority = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        domain=canonical_authority.domain,
+        key=canonical_authority.key,
+        authority_root=alternate_root,
+    )
+    forged_calls: list[str] = []
+
+    def forged_recover(_store):
+        forged_calls.append("recover")
+
+    monkeypatch.setattr(
+        subject.LocalComputeAllocationBasisAuthorityStore,
+        "_recover",
+        forged_recover,
+    )
+    object.__setattr__(store, "_authority", alternate_authority)
+
+    with pytest.raises(
+        subject.LocalComputeAllocationBasisError,
+        match="authority state changed",
+    ):
+        store.publish_owner_basis(review, confirmed=True)
+
+    assert forged_calls == []
+    assert not store.path.exists()
+    assert not alternate_root.exists()
+
+    object.__setattr__(store, "_authority", canonical_authority)
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert canonical_authority.authority_root == canonical_root
+    assert _resolve(store) == record
+
+
+def test_authority_method_shadow_cannot_bypass_machine_history(
+    tmp_path, monkeypatch
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    authority = store._authority
+    calls: list[str] = []
+
+    def forged_prepare(**_kwargs):
+        calls.append("prepare")
+        return None
+
+    authority.prepare = forged_prepare
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="authority dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        del authority.prepare
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
 def test_machine_authority_root_cannot_be_retargeted_after_local_state_loss(
     tmp_path, monkeypatch
 ):
@@ -486,3 +1072,83 @@ def test_tampered_document_bytes_fail_before_resolution(tmp_path, monkeypatch):
 
     with pytest.raises(MonotonicWorkspaceAuthorityError):
         subject.LocalComputeAllocationBasisAuthorityStore(store.workspace)
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_load_bound_history",
+        "_load_history",
+        "_validate_workspace_binding",
+        "_new_terminal_record",
+        "_append_record",
+    ),
+)
+def test_lower_authority_class_dispatch_rebind_fails_closed(
+    tmp_path, monkeypatch, helper_name
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    calls: list[str] = []
+
+    def forged_helper(*_args, **_kwargs):
+        calls.append(helper_name)
+        return None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            MonotonicWorkspaceAuthority,
+            helper_name,
+            forged_helper,
+        )
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="authority dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_load_bound_history",
+        "_append_record",
+    ),
+)
+def test_lower_authority_instance_shadow_fails_closed(
+    tmp_path, monkeypatch, helper_name
+):
+    _workspace, _canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    authority = store._authority
+    calls: list[str] = []
+
+    def forged_helper(*_args, **_kwargs):
+        calls.append(helper_name)
+        return None
+
+    setattr(authority, helper_name, forged_helper)
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="authority dispatch changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        delattr(authority, helper_name)
+
+    assert calls == []
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record

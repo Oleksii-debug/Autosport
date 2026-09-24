@@ -778,12 +778,10 @@ class ProphetXReadOnlyClient:
             "Accept-Encoding": "identity",
             "Authorization": f"Bearer {self._session.access_token}",
         }
-        canonical_transport = _PROVIDER_TRANSPORTS.get(self)
-        authority_resolver = (
-            _authority_resolver or _require_canonical_network_authority
-        )
         authoritative_fetch = None
-        if canonical_transport is not None:
+        authority_resolver = None
+        if _authority_resolver is not None:
+            authority_resolver = _authority_resolver
             authoritative_fetch = authority_resolver(self)
             response = authoritative_fetch(
                 BALANCE_URL,
@@ -791,11 +789,21 @@ class ProphetXReadOnlyClient:
                 timeout_seconds=self._timeout_seconds,
             )
         else:
-            response = self._transport.get(
-                BALANCE_URL,
-                headers=headers,
-                timeout_seconds=self._timeout_seconds,
-            )
+            canonical_transport = _PROVIDER_TRANSPORTS.get(self)
+            if canonical_transport is not None:
+                authority_resolver = _require_canonical_network_authority
+                authoritative_fetch = authority_resolver(self)
+                response = authoritative_fetch(
+                    BALANCE_URL,
+                    headers=headers,
+                    timeout_seconds=self._timeout_seconds,
+                )
+            else:
+                response = self._transport.get(
+                    BALANCE_URL,
+                    headers=headers,
+                    timeout_seconds=self._timeout_seconds,
+                )
         self._validate_http_response(response)
         if (
             authoritative_fetch is not None

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import io
 import http.client as http_client
 import json
+import socket
+import ssl
 import urllib.request as urllib_request
 import tempfile
 import threading
@@ -343,6 +346,76 @@ class HistoricalSnapshotTests(unittest.TestCase):
         self.assertEqual(request_init_calls, [])
         self.assertEqual(forged_connection_calls, [])
         self.assertIs(http_client.HTTPSConnection, original_https_connection)
+
+    def test_product_owned_capture_rejects_socket_tls_forged_http_path(self) -> None:
+        body = json.dumps(_payload()).encode("utf-8")
+        wire_response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode("ascii")
+            + b"Connection: close\r\n\r\n"
+            + body
+        )
+        forged_calls: list[str] = []
+
+        class DummyRawSocket:
+            def setsockopt(self, *_args) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class ForgedTLSSocket:
+            def sendall(self, _data) -> None:
+                return None
+
+            def makefile(self, _mode, *_args, **_kwargs):
+                return io.BytesIO(wire_response)
+
+            def close(self) -> None:
+                return None
+
+        def forged_create_connection(*_args, **_kwargs):
+            forged_calls.append("create_connection")
+            return DummyRawSocket()
+
+        def forged_wrap_socket(_context, _sock, *_args, **_kwargs):
+            forged_calls.append("wrap_socket")
+            return ForgedTLSSocket()
+
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            mock.patch.object(
+                socket,
+                "create_connection",
+                forged_create_connection,
+            ),
+            mock.patch.object(
+                ssl.SSLContext,
+                "wrap_socket",
+                forged_wrap_socket,
+            ),
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+        # On the vulnerable predecessor these two fakes are sufficient to return
+        # a real HTTPResponse carrying caller bytes through genuine
+        # urllib/http.client code. The repaired trust-root check rejects them
+        # before either fake primitive executes.
+        self.assertEqual(forged_calls, [])
 
     def test_product_owned_capture_rejects_https_connection_method_drift(self) -> None:
         forged_calls: list[str] = []

@@ -544,7 +544,6 @@ def test_issued_evidence_equality_rebind_cannot_preserve_mutated_authority(
     assert not store_path.exists()
 
 
-
 def test_generic_deepcopy_protocol_cannot_alias_product_issuance_baseline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

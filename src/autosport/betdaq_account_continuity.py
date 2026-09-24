@@ -848,27 +848,27 @@ def _build_canonical_continuity_authority():
         (
             "BetdaqAuthenticatedPrincipalContext",
             BetdaqAuthenticatedPrincipalContext,
-            ("__init__", "__post_init__"),
+            ("__init__", "__post_init__", "__eq__"),
         ),
         (
             "BetdaqContinuousAccountEvidence",
             BetdaqContinuousAccountEvidence,
-            ("__init__", "__post_init__"),
+            ("__init__", "__post_init__", "__eq__"),
         ),
         (
             "BookmakerCapabilityProfile",
             BookmakerCapabilityProfile,
-            ("__init__", "__post_init__", "state_of", "require"),
+            ("__init__", "__post_init__", "__eq__", "state_of", "require"),
         ),
         (
             "BookmakerBalanceObservation",
             BookmakerBalanceObservation,
-            ("__init__", "__post_init__"),
+            ("__init__", "__post_init__", "__eq__"),
         ),
         (
             "BookmakerPositionObservation",
             BookmakerPositionObservation,
-            ("__init__", "__post_init__"),
+            ("__init__", "__post_init__", "__eq__"),
         ),
         (
             "BookmakerAccountSnapshot",
@@ -876,6 +876,7 @@ def _build_canonical_continuity_authority():
             (
                 "__init__",
                 "__post_init__",
+                "__eq__",
                 "_validate_cross_state_position_identity",
                 "_validate_balance",
                 "_validate_positions",

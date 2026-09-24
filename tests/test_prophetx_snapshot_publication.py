@@ -245,6 +245,44 @@ class ProphetXSnapshotPublicationTests(unittest.TestCase):
         ):
             self.journal.acquire_and_publish(wrong_scope)
 
+    def test_durable_quote_count_projection_tamper_fails_closed(self):
+        result = self.journal.acquire_and_publish(self._provider())
+        connection = sqlite3.connect(self.journal_path)
+        try:
+            connection.execute(
+                """UPDATE prophetx_snapshot_publications_v1
+                   SET quote_count=0
+                   WHERE acquisition_sequence=?""",
+                (result.publication.acquisition_sequence,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(
+            ProphetXSnapshotPublicationError,
+            "projection mismatch",
+        ):
+            self.journal.resolve(result.publication.acquisition_sequence)
+
+    def test_durable_quality_flags_projection_tamper_fails_closed(self):
+        result = self.journal.acquire_and_publish(self._provider())
+        connection = sqlite3.connect(self.journal_path)
+        try:
+            connection.execute(
+                """UPDATE prophetx_snapshot_publications_v1
+                   SET quality_flags_json='["FORGED_COMPLETE"]'
+                   WHERE acquisition_sequence=?""",
+                (result.publication.acquisition_sequence,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(
+            ProphetXSnapshotPublicationError,
+            "projection mismatch",
+        ):
+            self.journal.resolve(result.publication.acquisition_sequence)
+
     def test_durable_payload_tamper_fails_closed(self):
         result = self.journal.acquire_and_publish(self._provider())
         connection = sqlite3.connect(self.journal_path)

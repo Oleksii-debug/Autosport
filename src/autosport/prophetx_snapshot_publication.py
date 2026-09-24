@@ -366,10 +366,68 @@ class SQLiteProphetXSnapshotPublicationJournal:
             raise ProphetXSnapshotPublicationError("durable publication payload is malformed")
         try:
             flags = json.loads(flags_json)
-        except json.JSONDecodeError as exc:
-            raise ProphetXSnapshotPublicationError("durable quality flags are malformed") from exc
+            batch_payload = json.loads(batch_json)
+        except (json.JSONDecodeError, UnicodeEncodeError) as exc:
+            raise ProphetXSnapshotPublicationError(
+                "durable publication payload is malformed"
+            ) from exc
         if type(flags) is not list or any(type(flag) is not str for flag in flags):
             raise ProphetXSnapshotPublicationError("durable quality flags are malformed")
+        if (
+            type(batch_payload) is not dict
+            or set(batch_payload)
+            != {"schema", "source_id", "cursor", "quality_flags", "quotes"}
+            or batch_payload["schema"]
+            != "autosport.prophetx-snapshot-publication-batch.v1"
+            or batch_payload["source_id"] != _SOURCE_ID
+            or type(batch_payload["quality_flags"]) is not list
+            or type(batch_payload["quotes"]) is not list
+        ):
+            raise ProphetXSnapshotPublicationError(
+                "durable batch projection is malformed"
+            )
+        if _json_text(batch_payload) != batch_json:
+            raise ProphetXSnapshotPublicationError(
+                "durable batch payload is not canonical"
+            )
+        payload_sequence, payload_snapshot_sha = _cursor(batch_payload["cursor"])
+        if (
+            payload_sequence != sequence
+            or payload_snapshot_sha != snapshot_sha
+            or batch_payload["quality_flags"] != flags
+            or len(batch_payload["quotes"]) != quote_count
+        ):
+            raise ProphetXSnapshotPublicationError(
+                "durable publication projection mismatch"
+            )
+        observed_ts: object = None
+        expected_metadata = {
+            "product_acquisition_sequence": sequence,
+            "sequence_authority_id": self.sequence_authority_id,
+            "sequence_source_id": _SEQUENCE_SOURCE_ID,
+            "request_fingerprint_sha256": self.request_fingerprint_sha256,
+            "snapshot_fingerprint_sha256": snapshot_sha,
+        }
+        for quote_payload in batch_payload["quotes"]:
+            if (
+                type(quote_payload) is not dict
+                or quote_payload.get("sequence") != sequence
+                or type(quote_payload.get("metadata")) is not dict
+                or any(
+                    quote_payload["metadata"].get(key) != value
+                    for key, value in expected_metadata.items()
+                )
+            ):
+                raise ProphetXSnapshotPublicationError(
+                    "durable quote publication lineage mismatch"
+                )
+            quote_observed_ts = quote_payload.get("observed_ts")
+            if observed_ts is None:
+                observed_ts = quote_observed_ts
+            elif quote_observed_ts != observed_ts:
+                raise ProphetXSnapshotPublicationError(
+                    "durable acquisition has multiple receipt timestamps"
+                )
         raw = batch_json.encode("ascii")
         if hashlib.sha256(raw).hexdigest() != batch_sha:
             raise ProphetXSnapshotPublicationError("durable batch payload hash mismatch")

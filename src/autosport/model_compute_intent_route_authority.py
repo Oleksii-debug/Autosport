@@ -198,7 +198,9 @@ def _build_product_monotonic_authority_root():
             import ctypes
 
             create_unicode_buffer = ctypes.create_unicode_buffer
-            get_folder_path = ctypes.windll.shell32.SHGetFolderPathW  # type: ignore[attr-defined]
+            get_folder_path = (
+                ctypes.windll.shell32.SHGetFolderPathW  # type: ignore[attr-defined]
+            )
         except (AttributeError, ImportError) as exc:
             raise error_type(
                 "cannot resolve product-owned Windows authority root"
@@ -268,6 +270,8 @@ _product_monotonic_authority_root = _build_product_monotonic_authority_root()
 _CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT: Final = (
     _product_monotonic_authority_root
 )
+
+
 def _intent_identity(intent: OpportunityIntent) -> dict[str, str]:
     if type(intent) is not _CANONICAL_OPPORTUNITY_INTENT_CLASS:
         raise ModelComputeIntentRouteAuthorityError(

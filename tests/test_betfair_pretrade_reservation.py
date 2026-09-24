@@ -335,6 +335,45 @@ def test_reservation_admission_rejects_store_path_retarget(
     assert store.active_reserved_amount() == Decimal("0")
 
 
+def test_reservation_admission_rejects_execution_action_constructor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("action-constructor", stake="100")
+    ledger = _ledger(tmp_path, action)
+    understated = evaluate_betfair_account_funds(
+        client,
+        Decimal("1"),
+        required_currency_code="EUR",
+    )
+    store = _store(tmp_path)
+    canonical_init = ExecutionAction.__init__
+    attacker_calls: list[str] = []
+
+    def forged_init(self, *args, **kwargs) -> None:
+        attacker_calls.append("init")
+        canonical_init(self, *args, **kwargs)
+        object.__setattr__(self, "requested_stake", Decimal("1"))
+
+    monkeypatch.setattr(ExecutionAction, "__init__", forged_init)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="execution action dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=understated,
+            execution_ledger=ledger,
+        )
+
+    assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
 def test_local_reservations_close_same_balance_double_spend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

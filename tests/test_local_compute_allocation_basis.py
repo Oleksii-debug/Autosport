@@ -29,12 +29,9 @@ def _goal(workspace: Path, *, currency: str = "USD") -> EconomicGoalStore:
 
 def _store(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
-    authority_root = tmp_path / "authority"
     goal_store = _goal(workspace)
-    store = subject.LocalComputeAllocationBasisAuthorityStore(
-        workspace,
-        authority_root=authority_root,
-    )
+    store = subject.LocalComputeAllocationBasisAuthorityStore(workspace)
+    authority_root = store._authority.authority_root
     return workspace, authority_root, goal_store, store
 
 
@@ -408,15 +405,70 @@ def test_exact_policy_compute_identity_and_owner_currency_are_required(
 def test_deleted_basis_state_cannot_reset_monotonic_authority(
     tmp_path, monkeypatch
 ):
-    _workspace, authority_root, _goal_store, store = _store(tmp_path, monkeypatch)
+    _workspace, _authority_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
     store.publish_owner_basis(_review(store), confirmed=True)
     store.path.unlink()
 
     with pytest.raises(MonotonicWorkspaceAuthorityError):
+        subject.LocalComputeAllocationBasisAuthorityStore(store.workspace)
+
+
+def test_machine_authority_root_cannot_be_retargeted_after_local_state_loss(
+    tmp_path, monkeypatch
+):
+    workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    store.publish_owner_basis(_review(store), confirmed=True)
+
+    canonical_path = store.path
+    canonical_domain = store._authority.domain
+    canonical_key = store._authority.key
+    alternate_root = tmp_path / "alternate-machine-authority"
+    alternate_file = "alternate-allocation-bases.json"
+
+    monkeypatch.setattr(
+        subject,
+        "local_compute_monotonic_authority_root",
+        lambda: alternate_root,
+    )
+    monkeypatch.setattr(subject, "FILE_NAME", alternate_file)
+    monkeypatch.setattr(
+        subject,
+        "AUTHORITY_DOMAIN",
+        canonical_domain + ".alternate",
+    )
+    monkeypatch.setattr(
+        subject,
+        "AUTHORITY_KEY",
+        canonical_key + "-alternate",
+    )
+
+    rebound = subject.LocalComputeAllocationBasisAuthorityStore(workspace)
+    assert rebound.path == canonical_path
+    assert rebound._authority.authority_root == canonical_root
+    assert rebound._authority.domain == canonical_domain
+    assert rebound._authority.key == canonical_key
+    assert not alternate_root.exists()
+    assert not (workspace / alternate_file).exists()
+
+    canonical_path.unlink()
+
+    with pytest.raises(TypeError, match="authority_root"):
         subject.LocalComputeAllocationBasisAuthorityStore(
-            store.workspace,
-            authority_root=authority_root,
+            workspace,
+            authority_root=alternate_root,  # type: ignore[call-arg]
         )
+
+    with pytest.raises(MonotonicWorkspaceAuthorityError):
+        subject.LocalComputeAllocationBasisAuthorityStore(workspace)
+
+    assert not alternate_root.exists()
+    assert not (workspace / alternate_file).exists()
 
 
 def test_tampered_document_bytes_fail_before_resolution(tmp_path, monkeypatch):
@@ -433,7 +485,4 @@ def test_tampered_document_bytes_fail_before_resolution(tmp_path, monkeypatch):
     )
 
     with pytest.raises(MonotonicWorkspaceAuthorityError):
-        subject.LocalComputeAllocationBasisAuthorityStore(
-            store.workspace,
-            authority_root=_authority,
-        )
+        subject.LocalComputeAllocationBasisAuthorityStore(store.workspace)

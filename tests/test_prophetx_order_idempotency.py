@@ -474,6 +474,74 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 )
             )
 
+    def test_provider_order_correlation_rejects_profile_slot_descriptor_rebind(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            genuine = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            forged = type(genuine)(
+                attempt_id=genuine.attempt_id,
+                environment=genuine.environment,
+                transport=ProphetXTransport.FIX_ORDER_ENTRY,
+                client_order_id=genuine.client_order_id,
+                effect_fingerprint=genuine.effect_fingerprint,
+                production_write_qualified=genuine.production_write_qualified,
+            )
+            matched = _evidence(
+                forged,
+                ProphetXEvidenceKind.FIX_EXECUTION_REPORT,
+                provider_order_id="provider-order-slot-descriptor",
+                effect_fingerprint=forged.effect_fingerprint,
+            )
+
+            profile_class = type(PROPHETX_SANDBOX_REST_PROFILE)
+            canonical_transport_descriptor = vars(profile_class)["transport"]
+            descriptor_reads = []
+
+            class StatefulTransportDescriptor:
+                def __get__(self, instance, owner=None):
+                    if instance is None:
+                        return self
+                    descriptor_reads.append(instance)
+                    canonical = canonical_transport_descriptor.__get__(
+                        instance,
+                        owner,
+                    )
+                    if instance is PROPHETX_SANDBOX_REST_PROFILE:
+                        target_reads = sum(
+                            item is PROPHETX_SANDBOX_REST_PROFILE
+                            for item in descriptor_reads
+                        )
+                        if target_reads == 2:
+                            return ProphetXTransport.FIX_ORDER_ENTRY
+                    return canonical
+
+                def __set__(self, instance, value):
+                    raise AssertionError(
+                        f"hostile descriptor write executed: {instance!r}={value!r}"
+                    )
+
+            with patch.object(
+                profile_class,
+                "transport",
+                StatefulTransportDescriptor(),
+            ):
+                self.assertEqual(
+                    reconciliation_disposition(forged, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.CONFLICT,
+                )
+
+            self.assertEqual(descriptor_reads, [])
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
     def test_positive_provider_order_consumer_ignores_reexposed_binder_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "execution.jsonl"

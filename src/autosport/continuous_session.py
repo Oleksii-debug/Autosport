@@ -42,6 +42,24 @@ class SessionStoppedError(ContinuousSessionError):
     """Raised when work is attempted while the session is durably STOPPED."""
 
 
+def _bind_canonical_settlement_engine(method):
+    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+
+    canonical_engine_type = SettlementEngine
+
+    def guarded(self, *args, **kwargs):
+        if "_settlement_engine_type" in kwargs:
+            raise TypeError("settlement engine origin is internal product authority")
+        kwargs["_settlement_engine_type"] = canonical_engine_type
+        return method(self, *args, **kwargs)
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
 class SessionState(StrEnum):
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
@@ -792,20 +810,30 @@ class ContinuousSessionCoordinator:
             return PaperBook.load(self.paper_book_path)
         return PaperBook(self.initial_bankroll)
 
+    @_bind_canonical_settlement_engine
     def _settle(
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
+        if SettlementEngine is not _settlement_engine_type:
+            raise ContinuousSessionError(
+                "settlement engine constructor origin changed"
+            )
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):
             book = self._load_book()
-            engine = SettlementEngine()
+            engine = _settlement_engine_type()
+            if type(engine) is not _settlement_engine_type:
+                raise ContinuousSessionError(
+                    "settlement engine constructor returned non-canonical type"
+                )
             for resolution in unique.values():
                 allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
                 scoped = {

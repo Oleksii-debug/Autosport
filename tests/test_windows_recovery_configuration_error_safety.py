@@ -41,7 +41,7 @@ def test_recovery_configuration_error_with_broken_str_stays_fail_closed() -> Non
         "ui.error.recovery.configuration",
         detail=text(
             "ui.error.exception.message_unavailable",
-            exception_type="_BrokenTextError",
+            exception_type="RuntimeError",
         ),
     )
     assert app.status.value == text("ui.status.recovery.configuration_rejected")

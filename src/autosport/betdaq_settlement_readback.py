@@ -166,8 +166,10 @@ class BetdaqOrderSettlementObservation:
         expected_final = (
             self.order_status_code in {4, 5}
             and self.gross_settlement_amount is not None
-            and self.order_commission is not None
-            and self.market_commission is not None
+            and (
+                self.order_commission is not None
+                or self.market_commission is not None
+            )
             and self.market_settled_at is not None
         )
         if self.final_settlement_proven is not expected_final:
@@ -387,8 +389,7 @@ class BetdaqEconomicReadbackClient:
         final = (
             status in {4, 5}
             and gross is not None
-            and order_commission is not None
-            and market_commission is not None
+            and (order_commission is not None or market_commission is not None)
             and market_settled_at is not None
         )
         return BetdaqOrderSettlementObservation(

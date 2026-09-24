@@ -378,6 +378,50 @@ def test_path_open_rebind_cannot_replace_durable_goal_bytes(
     assert _resolve(store) == record
 
 
+def test_goal_path_construction_cannot_retarget_durable_goal(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    goal_store = _goal(workspace)
+    durable_goal = goal_store.load()
+    expected_goal_sha256 = subject._digest(
+        economic_goal_to_payload(durable_goal)
+    )
+
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 53,
+    )
+    forged_store = EconomicGoalStore(workspace)
+    forged_store.path = workspace / "forged-economic-goal.json"
+    forged_store.initialize_owner(forged_goal)
+
+    path_type = type(workspace)
+    canonical_divide = path_type.__truediv__
+    retarget_calls: list[str] = []
+
+    def forged_divide(self, other):
+        if other == EconomicGoalStore.FILE_NAME:
+            retarget_calls.append(str(self))
+            return forged_store.path
+        return canonical_divide(self, other)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(path_type, "__truediv__", forged_divide)
+        store = subject.LocalComputeAllocationBasisAuthorityStore(workspace)
+        review = _review(store)
+
+    assert retarget_calls == []
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    assert review.owner_bankroll_id == durable_goal.bankroll_id
+    assert review.currency == durable_goal.currency
+    assert review.owner_goal_sha256 == expected_goal_sha256
+
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
 def test_current_goal_dispatch_and_alias_rebind_cannot_mint_basis_authority(
     tmp_path, monkeypatch
 ):

@@ -732,10 +732,11 @@ def _sha256_hex(value: str, field: str) -> str:
         )
     return text
 
-# Positive continuity evidence is an authority-bearing projection. Compose that path
-# once, after every helper exists, so later module rebinding cannot choose the
-# principal id, projected account snapshot, credential checks, or issuer.
-def _build_canonical_continuity_read_authority():
+# Positive continuity evidence and its durable #790 admission are one authority-
+# bearing composition. Compose both once, after every helper exists, so later
+# module rebinding cannot choose a principal, projected snapshot, issuer, or
+# issuance predicate.
+def _build_canonical_continuity_authority():
     credential_material = _credential_material
     require_source_authority = _require_canonical_source_authority
     require_source_instance = _require_canonical_source_instance
@@ -743,6 +744,11 @@ def _build_canonical_continuity_read_authority():
     principal_context = _principal_context
     project_snapshot = _project_snapshot
     issue_evidence = _issue_continuous_evidence
+    is_issued_evidence = _is_product_issued_continuity_evidence
+    require_store = _require_canonical_reconciliation_store
+    latest_snapshot = _CANONICAL_RECONCILIATION_LATEST_SNAPSHOT
+    append_snapshot = _CANONICAL_RECONCILIATION_APPEND_SNAPSHOT
+    require_history_compatible = require_reconciliation_history_compatible
     continuity_error = BetdaqAccountContinuityError
     source_error = BetdaqAccountReadOnlyError
 
@@ -752,6 +758,8 @@ def _build_canonical_continuity_read_authority():
         ("_require_canonical_source_instance", require_source_instance),
         ("_principal_context", principal_context),
         ("_project_snapshot", project_snapshot),
+        ("_require_canonical_reconciliation_store", require_store),
+        ("require_reconciliation_history_compatible", require_history_compatible),
     )
     helper_codes = tuple(
         (name, getattr(helper, "__code__", None))
@@ -771,11 +779,15 @@ def _build_canonical_continuity_read_authority():
                 raise continuity_error(
                     "canonical BETDAQ continuity composition helper dispatch changed"
                 )
-        # The issuer is intentionally closure-only. Re-exposing any module callable
-        # under its former name is authority drift, not a supported test seam.
-        if "_issue_continuous_evidence" in module_globals:
+        # Issuance and the matching positive predicate are closure-only. Re-exposing
+        # either module name creates an alternate caller-visible minting/admission
+        # surface and is therefore authority drift.
+        if (
+            "_issue_continuous_evidence" in module_globals
+            or "_is_product_issued_continuity_evidence" in module_globals
+        ):
             raise continuity_error(
-                "canonical BETDAQ continuity issuer authority was exposed"
+                "canonical BETDAQ continuity issuance authority was exposed"
             )
 
     def read_account_evidence(
@@ -822,21 +834,46 @@ def _build_canonical_continuity_read_authority():
     ) -> BookmakerAccountSnapshot:
         return read_account_evidence(self, requested_capabilities).snapshot
 
-    return read_account_evidence, read_account_snapshot
+    def append_reconciliation(
+        store: BookmakerAccountReconciliationStore,
+        evidence: BetdaqContinuousAccountEvidence,
+    ) -> bool:
+        require_composition_graph()
+        require_store(store)
+        if not is_issued_evidence(evidence):
+            raise continuity_error(
+                "reconciliation requires product-issued BETDAQ continuity evidence"
+            )
+        latest = latest_snapshot(store)
+        require_composition_graph()
+        require_store(store)
+        require_history_compatible(latest, evidence)
+        require_composition_graph()
+        require_store(store)
+        appended = append_snapshot(store, evidence.snapshot)
+        require_composition_graph()
+        require_store(store)
+        return appended
+
+    return read_account_evidence, read_account_snapshot, append_reconciliation
 
 
 (
     _canonical_continuity_read_account_evidence,
     _canonical_continuity_read_account_snapshot,
-) = _build_canonical_continuity_read_authority()
+    _canonical_continuity_append_to_reconciliation,
+) = _build_canonical_continuity_authority()
 BetdaqAccountContinuityClient.read_account_evidence = (
     _canonical_continuity_read_account_evidence
 )
 BetdaqAccountContinuityClient.read_account_snapshot = (
     _canonical_continuity_read_account_snapshot
 )
+append_to_reconciliation = _canonical_continuity_append_to_reconciliation
 del _canonical_continuity_read_account_evidence
 del _canonical_continuity_read_account_snapshot
+del _canonical_continuity_append_to_reconciliation
 del _issue_continuous_evidence
-del _build_canonical_continuity_read_authority
+del _is_product_issued_continuity_evidence
+del _build_canonical_continuity_authority
 

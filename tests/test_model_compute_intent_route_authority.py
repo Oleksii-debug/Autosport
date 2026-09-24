@@ -147,6 +147,39 @@ def test_machine_authority_root_cannot_be_retargeted_after_local_state_loss(
         assert not alternate_root.exists()
 
 
+def test_private_canonical_root_alias_cannot_retarget_after_local_state_loss(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="private-root-alias")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        authority = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        request = _issue(authority, router, intent)
+        _route(router, request)
+
+        canonical_root = authority._authority.authority_root
+        alternate_root = workspace.parent / "private-alias-machine-authority"
+        monkeypatch.setattr(
+            subject,
+            "_CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT",
+            lambda: alternate_root,
+        )
+        authority.path.unlink()
+
+        with pytest.raises(
+            MonotonicAuthorityRollbackError,
+            match="missing, rolled back, or unproven",
+        ):
+            subject.ModelComputeIntentRouteAuthorityStore(workspace)
+
+        assert authority._authority.authority_root == canonical_root
+        assert not alternate_root.exists()
+
+
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
     intent = _canonical_intent(suffix="origin")
     issued_at = _proposal(intent) + timedelta(seconds=2)

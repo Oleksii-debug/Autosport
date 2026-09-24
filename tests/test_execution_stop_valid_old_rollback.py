@@ -9,6 +9,7 @@ from autosport.execution_stop_authority import (
     ExecutionAuthorityMode,
     ExecutionStopAuthority,
     ExecutionStopAuthorityError,
+    ExecutionStopIntegrityError,
 )
 
 
@@ -212,3 +213,65 @@ def test_admission_lease_rejects_product_root_selector_class_rebind(
 
     assert forged_calls == []
 
+
+
+def test_admission_lease_rejects_monotonic_recover_class_substitution_on_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = _initialized(path)
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-recover-substitution",
+        expected_revision=1,
+        command_id="arm-r2-recover-substitution",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-recover-substitution",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    # Restore a mutually consistent local revision-2 ARMED pair while the
+    # independent authority still carries the newer committed STOP high-water
+    # mark. The genuine recover() must reject this rollback.
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+    forged_calls: list[str] = []
+
+    def no_op_recover(
+        _self,
+        *,
+        observed_state_sha256,
+        tx_id=None,
+        semantic_binding_sha256=None,
+    ):
+        forged_calls.append("called")
+        return None
+
+    monkeypatch.setattr(
+        stop_module.MonotonicWorkspaceAuthority,
+        "recover",
+        no_op_recover,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical monotonic authority helper graph changed",
+    ):
+        with restarted.admission_lease():
+            pytest.fail(
+                "valid-old ARMED state survived monotonic recover substitution"
+            )
+
+    assert forged_calls == []

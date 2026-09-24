@@ -69,8 +69,8 @@ def _digest(payload: Mapping[str, Any] | Sequence[Any]) -> str:
 
 
 def _utc(value: datetime, name: str) -> str:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{name} must be a datetime")
+    if type(value) is not datetime:
+        raise TypeError(f"{name} must be an exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise MarketImpliedBaselineError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -89,8 +89,8 @@ def _event_utc(value: object) -> datetime | None:
 
 
 def _age_us(value: timedelta) -> int:
-    if not isinstance(value, timedelta):
-        raise TypeError("max_age must be a timedelta")
+    if type(value) is not timedelta:
+        raise TypeError("max_age must be an exact timedelta")
     if value < timedelta(0):
         raise MarketImpliedBaselineError("max_age must be non-negative")
     return value.days * 86_400_000_000 + value.seconds * 1_000_000 + value.microseconds

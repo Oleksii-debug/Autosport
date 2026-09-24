@@ -25,6 +25,15 @@ _FACTORY_PUBLISH_COMMIT_SCHEMA_VERSION = 1
 _FACTORY_ZERO_PREDECESSOR_SHA256 = "0" * 64
 
 
+def _canonical_publish_commit_utc_now(
+    _now=datetime.now,
+    _utc=timezone.utc,
+) -> datetime:
+    """Return product-owned UTC time without consulting mutable module aliases."""
+
+    return _now(_utc)
+
+
 class FactoryArtifactStore(_impl.FactoryArtifactStore):
     """Immutable factory evidence read from one stable regular filesystem object."""
 
@@ -253,7 +262,12 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
             raise ValueError("factory publish commit artifacts must be canonically sorted")
         return canonical
 
-    def _read_publish_commit_ledger(self) -> list[dict[str, object]]:
+    def _read_publish_commit_ledger(
+        self,
+        *,
+        _utc=timezone.utc,
+        _instant=_impl._instant,
+    ) -> list[dict[str, object]]:
         path = self._publish_commit_ledger_path()
         if not path.exists():
             return []
@@ -279,6 +293,7 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
             raise ValueError("factory publish commit ledger records must be a list")
 
         previous = _FACTORY_ZERO_PREDECESSOR_SHA256
+        previous_committed_at: datetime | None = None
         artifact_owners: set[tuple[str, str]] = set()
         validated: list[dict[str, object]] = []
         for raw in records:
@@ -291,15 +306,23 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
                 "record_sha256",
             }:
                 raise ValueError("factory publish commit record fields mismatch")
-            committed = _impl._instant(
+            committed = _instant(
                 raw.get("committed_at"),
                 "factory publish committed_at",
-            ).astimezone(timezone.utc)
+            ).astimezone(_utc)
             canonical_committed = committed.isoformat().replace("+00:00", "Z")
             if raw.get("committed_at") != canonical_committed:
                 raise ValueError(
                     "factory publish committed_at must be canonical UTC Z"
                 )
+            if (
+                previous_committed_at is not None
+                and committed < previous_committed_at
+            ):
+                raise ValueError(
+                    "factory publish committed_at moved backwards"
+                )
+            previous_committed_at = committed
             original_sha256 = _impl._sha256(
                 raw.get("original_registry_sha256"),
                 "factory publish original_registry_sha256",
@@ -345,6 +368,11 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
     def _append_publish_commit_record(
         self,
         transaction: dict[str, object],
+        *,
+        _utc_now=_canonical_publish_commit_utc_now,
+        _datetime_type=datetime,
+        _utc=timezone.utc,
+        _instant=_impl._instant,
     ) -> dict[str, object]:
         """Append a verified canonical factory publish record.
 
@@ -413,9 +441,26 @@ class FactoryArtifactStore(_impl.FactoryArtifactStore):
                     "factory artifact is already bound to another publish commit"
                 )
 
-        committed_at = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        )
+        now = _utc_now()
+        if (
+            type(now) is not _datetime_type
+            or now.tzinfo is None
+            or now.utcoffset() is None
+        ):
+            raise ValueError(
+                "factory publish commit clock must return an aware datetime"
+            )
+        committed = now.astimezone(_utc)
+        if records:
+            previous_committed = _instant(
+                records[-1]["committed_at"],
+                "factory publish committed_at",
+            ).astimezone(_utc)
+            if committed < previous_committed:
+                raise ValueError(
+                    "factory publish committed_at moved backwards"
+                )
+        committed_at = committed.isoformat().replace("+00:00", "Z")
         record: dict[str, object] = {
             "committed_at": committed_at,
             "original_registry_sha256": original_sha256,

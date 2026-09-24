@@ -493,6 +493,46 @@ def test_forged_workspace_binding_object_cannot_retarget_authority(
     assert _resolve(store) == record
 
 
+def test_constructor_workspace_binding_coordinates_cannot_be_retargeted(
+    tmp_path, monkeypatch
+):
+    _workspace, canonical_root, _goal_store, store = _store(
+        tmp_path,
+        monkeypatch,
+    )
+    review = _review(store)
+    binding = store._authority.workspace_binding
+    original_digest = binding.workspace_locator_sha256
+    original_path = binding.path_binding_path
+    forged_digest = "f" * 64
+    forged_path = (
+        canonical_root
+        / "workspace-bindings"
+        / forged_digest[:2]
+        / f"{forged_digest}.json"
+    )
+
+    object.__setattr__(binding, "workspace_locator_sha256", forged_digest)
+    object.__setattr__(binding, "path_binding_path", forged_path)
+    try:
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="workspace binding state changed",
+        ):
+            store.publish_owner_basis(review, confirmed=True)
+    finally:
+        object.__setattr__(
+            binding,
+            "workspace_locator_sha256",
+            original_digest,
+        )
+        object.__setattr__(binding, "path_binding_path", original_path)
+
+    assert not store.path.exists()
+    record = store.publish_owner_basis(review, confirmed=True)
+    assert _resolve(store) == record
+
+
 @pytest.mark.parametrize(
     "binding_method",
     ("validate_existing", "ensure_bound", "_read_workspace_marker_id"),

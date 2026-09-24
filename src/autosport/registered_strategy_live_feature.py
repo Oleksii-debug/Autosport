@@ -51,6 +51,19 @@ LIVE_FEATURE_SOURCE_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 _SHA256_HEX = frozenset("0123456789abcdef")
+
+_CANONICAL_REGISTRY_TYPE = ScientificRegistry
+_CANONICAL_REGISTRY_SCHEMA_VERSION = ScientificRegistry.SCHEMA_VERSION
+_CANONICAL_REGISTRY_INIT = ScientificRegistry.__init__
+_CANONICAL_REGISTRY_INIT_CODE = getattr(_CANONICAL_REGISTRY_INIT, "__code__", None)
+_CANONICAL_REGISTRY_READ = ScientificRegistry._read
+_CANONICAL_REGISTRY_READ_CODE = getattr(_CANONICAL_REGISTRY_READ, "__code__", None)
+_CANONICAL_REGISTRY_VALIDATE_ENTRY = ScientificRegistry._validate_entry
+_CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE = getattr(
+    _CANONICAL_REGISTRY_VALIDATE_ENTRY,
+    "__code__",
+    None,
+)
 _CANONICAL_REGISTRY_GET = ScientificRegistry.get
 _CANONICAL_REGISTRY_GET_CODE = getattr(_CANONICAL_REGISTRY_GET, "__code__", None)
 _CANONICAL_REGISTRY_CAUSAL_PRECEDES = ScientificRegistry.causal_precedes
@@ -60,9 +73,140 @@ _CANONICAL_REGISTRY_CAUSAL_PRECEDES_CODE = getattr(
     None,
 )
 
+_CANONICAL_MODEL_VERSION_TYPE = ModelVersion
+_CANONICAL_MODEL_VERSION_INIT = ModelVersion.__init__
+_CANONICAL_MODEL_VERSION_INIT_CODE = getattr(
+    _CANONICAL_MODEL_VERSION_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_MODEL_VERSION_POST_INIT = ModelVersion.__post_init__
+_CANONICAL_MODEL_VERSION_POST_INIT_CODE = getattr(
+    _CANONICAL_MODEL_VERSION_POST_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_MODEL_VERSION_TO_PAYLOAD = ModelVersion.to_payload
+_CANONICAL_MODEL_VERSION_TO_PAYLOAD_CODE = getattr(
+    _CANONICAL_MODEL_VERSION_TO_PAYLOAD,
+    "__code__",
+    None,
+)
+
+_CANONICAL_FEATURE_SET_TYPE = FeatureSet
+_CANONICAL_FEATURE_SET_INIT = FeatureSet.__init__
+_CANONICAL_FEATURE_SET_INIT_CODE = getattr(
+    _CANONICAL_FEATURE_SET_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_FEATURE_SET_POST_INIT = FeatureSet.__post_init__
+_CANONICAL_FEATURE_SET_POST_INIT_CODE = getattr(
+    _CANONICAL_FEATURE_SET_POST_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_FEATURE_SET_TO_PAYLOAD = FeatureSet.to_payload
+_CANONICAL_FEATURE_SET_TO_PAYLOAD_CODE = getattr(
+    _CANONICAL_FEATURE_SET_TO_PAYLOAD,
+    "__code__",
+    None,
+)
+
 
 class RegisteredStrategyLiveFeatureError(ValueError):
     """Raised when live feature provenance cannot be proven exactly."""
+
+
+def _same_canonical_callable(
+    current: object,
+    expected: object,
+    expected_code: object,
+) -> bool:
+    return (
+        current is expected
+        and getattr(current, "__code__", None) is expected_code
+    )
+
+
+def _require_canonical_scientific_dispatch() -> None:
+    if ScientificRegistry is not _CANONICAL_REGISTRY_TYPE:
+        raise RegisteredStrategyLiveFeatureError(
+            "canonical ScientificRegistry type changed"
+        )
+    if (
+        ScientificRegistry.SCHEMA_VERSION != _CANONICAL_REGISTRY_SCHEMA_VERSION
+        or not _same_canonical_callable(
+            ScientificRegistry.__init__,
+            _CANONICAL_REGISTRY_INIT,
+            _CANONICAL_REGISTRY_INIT_CODE,
+        )
+        or not _same_canonical_callable(
+            ScientificRegistry._read,
+            _CANONICAL_REGISTRY_READ,
+            _CANONICAL_REGISTRY_READ_CODE,
+        )
+        or not _same_canonical_callable(
+            ScientificRegistry._validate_entry,
+            _CANONICAL_REGISTRY_VALIDATE_ENTRY,
+            _CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE,
+        )
+        or not _same_canonical_callable(
+            ScientificRegistry.get,
+            _CANONICAL_REGISTRY_GET,
+            _CANONICAL_REGISTRY_GET_CODE,
+        )
+        or not _same_canonical_callable(
+            ScientificRegistry.causal_precedes,
+            _CANONICAL_REGISTRY_CAUSAL_PRECEDES,
+            _CANONICAL_REGISTRY_CAUSAL_PRECEDES_CODE,
+        )
+    ):
+        raise RegisteredStrategyLiveFeatureError(
+            "canonical ScientificRegistry read/causal authority changed"
+        )
+    if (
+        ModelVersion is not _CANONICAL_MODEL_VERSION_TYPE
+        or FeatureSet is not _CANONICAL_FEATURE_SET_TYPE
+    ):
+        raise RegisteredStrategyLiveFeatureError(
+            "canonical scientific record type changed"
+        )
+    if (
+        not _same_canonical_callable(
+            ModelVersion.__init__,
+            _CANONICAL_MODEL_VERSION_INIT,
+            _CANONICAL_MODEL_VERSION_INIT_CODE,
+        )
+        or not _same_canonical_callable(
+            ModelVersion.__post_init__,
+            _CANONICAL_MODEL_VERSION_POST_INIT,
+            _CANONICAL_MODEL_VERSION_POST_INIT_CODE,
+        )
+        or not _same_canonical_callable(
+            ModelVersion.to_payload,
+            _CANONICAL_MODEL_VERSION_TO_PAYLOAD,
+            _CANONICAL_MODEL_VERSION_TO_PAYLOAD_CODE,
+        )
+        or not _same_canonical_callable(
+            FeatureSet.__init__,
+            _CANONICAL_FEATURE_SET_INIT,
+            _CANONICAL_FEATURE_SET_INIT_CODE,
+        )
+        or not _same_canonical_callable(
+            FeatureSet.__post_init__,
+            _CANONICAL_FEATURE_SET_POST_INIT,
+            _CANONICAL_FEATURE_SET_POST_INIT_CODE,
+        )
+        or not _same_canonical_callable(
+            FeatureSet.to_payload,
+            _CANONICAL_FEATURE_SET_TO_PAYLOAD,
+            _CANONICAL_FEATURE_SET_TO_PAYLOAD_CODE,
+        )
+    ):
+        raise RegisteredStrategyLiveFeatureError(
+            "canonical scientific record validation changed"
+        )
 
 
 def _canonical_text(name: str, value: object) -> str:
@@ -245,27 +389,16 @@ def resolve_registered_live_feature_authority(
 ) -> RegisteredLiveFeatureAuthority:
     """Resolve exact ModelVersion -> FeatureSet lineage from durable registry truth."""
 
-    if type(registry) is not ScientificRegistry:
+    _require_canonical_scientific_dispatch()
+    if type(registry) is not _CANONICAL_REGISTRY_TYPE:
         raise RegisteredStrategyLiveFeatureError(
             "registry must be the canonical ScientificRegistry"
         )
     wanted_model = _canonical_text("model_version_id", model_version_id)
     decision = _instant("decision_at", decision_at)
 
-    if (
-        ScientificRegistry.get is not _CANONICAL_REGISTRY_GET
-        or getattr(ScientificRegistry.get, "__code__", None)
-        is not _CANONICAL_REGISTRY_GET_CODE
-        or ScientificRegistry.causal_precedes
-        is not _CANONICAL_REGISTRY_CAUSAL_PRECEDES
-        or getattr(ScientificRegistry.causal_precedes, "__code__", None)
-        is not _CANONICAL_REGISTRY_CAUSAL_PRECEDES_CODE
-    ):
-        raise RegisteredStrategyLiveFeatureError(
-            "canonical ScientificRegistry read/causal authority changed"
-        )
     try:
-        durable_registry = ScientificRegistry(registry.path)
+        durable_registry = _CANONICAL_REGISTRY_TYPE(registry.path)
     except (OSError, ValueError) as exc:
         raise RegisteredStrategyLiveFeatureError(
             "durable ScientificRegistry cannot be reopened canonically"
@@ -281,11 +414,15 @@ def resolve_registered_live_feature_authority(
             "registered ModelVersion is missing"
         )
     try:
-        model = ModelVersion(**model_entry.payload)
+        model = _CANONICAL_MODEL_VERSION_TYPE(**model_entry.payload)
     except (TypeError, ValueError) as exc:
         raise RegisteredStrategyLiveFeatureError(
             "registered ModelVersion is invalid"
         ) from exc
+    if _CANONICAL_MODEL_VERSION_TO_PAYLOAD(model) != model_entry.payload:
+        raise RegisteredStrategyLiveFeatureError(
+            "registered ModelVersion payload is not canonical"
+        )
     if (
         model_entry.record_id != model.model_version_id
         or model.model_version_id != wanted_model
@@ -325,7 +462,7 @@ def resolve_registered_live_feature_authority(
             "registered FeatureSet payload schema is invalid"
         )
     try:
-        feature = FeatureSet(
+        feature = _CANONICAL_FEATURE_SET_TYPE(
             feature_set_id=feature_payload["feature_set_id"],
             version=feature_payload["version"],
             definition_sha256=feature_payload["definition_sha256"],
@@ -336,7 +473,7 @@ def resolve_registered_live_feature_authority(
         raise RegisteredStrategyLiveFeatureError(
             "registered FeatureSet is invalid"
         ) from exc
-    if feature.to_payload() != feature_payload:
+    if _CANONICAL_FEATURE_SET_TO_PAYLOAD(feature) != feature_payload:
         raise RegisteredStrategyLiveFeatureError(
             "registered FeatureSet payload is not canonical"
         )

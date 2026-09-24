@@ -1,0 +1,817 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import autosport.execution_stop_authority as stop_module
+from autosport.execution_stop_authority import (
+    ExecutionAuthorityMode,
+    ExecutionStopAuthority,
+    ExecutionStopAuthorityError,
+    ExecutionStopIntegrityError,
+)
+
+
+def _initialized(path: Path) -> ExecutionStopAuthority:
+    authority = ExecutionStopAuthority(path)
+    authority.initialize_stopped(
+        operator_id="owner",
+        reason="initial safe state",
+        command_id="stop-r1",
+    )
+    return authority
+
+
+def test_valid_old_armed_pair_cannot_resurrect_execution_after_newer_stop(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = _initialized(path)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2",
+        expected_revision=1,
+        command_id="arm-r2",
+    )
+    assert armed.revision == 2
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    assert authority.decision().allowed is True
+
+    old_armed_journal = path.read_bytes()
+    old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3",
+    )
+    assert stopped.revision == 3
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+    assert authority.decision().allowed is False
+
+    # Simulate rollback of the entire workspace-local STOP authority pair.
+    # Both files remain individually valid and mutually consistent at revision 2.
+    path.write_bytes(old_armed_journal)
+    authority.anchor_path.write_bytes(old_armed_anchor)
+
+    restarted = ExecutionStopAuthority(path)
+
+    # Product law: an independently committed revision 3 STOP is a monotonic
+    # high-water mark. Restoring valid-but-older local bytes must fail closed;
+    # it must never resurrect the superseded ARMED permission.
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+
+def test_deleting_local_pair_cannot_rebootstrap_after_committed_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = _initialized(path)
+    authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2",
+        expected_revision=1,
+        command_id="arm-r2",
+    )
+    authority.stop(
+        operator_id="owner",
+        reason="committed stop",
+        expected_revision=2,
+        command_id="stop-r3",
+    )
+    assert authority.decision().allowed is False
+
+    path.unlink()
+    authority.anchor_path.unlink()
+
+    restarted = ExecutionStopAuthority(path)
+
+    # Once independent monotonic history exists, deleting rollbackable local
+    # bytes must not create a fresh authority namespace with revision 1.
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.initialize_stopped(
+            operator_id="owner",
+            reason="must not rebootstrap lost history",
+            command_id="replacement-stop-r1",
+        )
+
+
+def test_process_environment_root_retarget_cannot_reauthorize_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    caller_root_a = tmp_path / "caller-root-a"
+    caller_root_b = tmp_path / "caller-root-b"
+
+    product_root = ExecutionStopAuthority._product_monotonic_authority_root()
+    if stop_module.os.name == "nt":
+        assert product_root.parts[-3:] == (
+            "Autosport",
+            "application-state",
+            "monotonic-authority-v1",
+        )
+    else:
+        assert product_root.parts[-3:] == (
+            "state",
+            "autosport",
+            "monotonic-authority-v1",
+        )
+
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(caller_root_a),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "caller-local-app-data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "caller-xdg-state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home"))
+
+    authority = _initialized(path)
+    assert authority._monotonic_authority().authority_root == product_root
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-root-retarget",
+        expected_revision=1,
+        command_id="arm-r2-root-retarget",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-root-retarget",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    # Restore a mutually-consistent but superseded ARMED local pair, then
+    # simulate a fresh process whose caller-controlled generic authority root
+    # points somewhere empty.
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(caller_root_b),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "caller-local-app-data-b"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "caller-xdg-state-b"))
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home-b"))
+
+    restarted = ExecutionStopAuthority(path)
+    assert restarted._monotonic_authority().authority_root == product_root
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+    # The supported STOP path must not create either caller-selected authority
+    # root while resolving the already-committed monotonic high-water mark.
+    assert not caller_root_a.exists()
+    assert not caller_root_b.exists()
+
+
+@pytest.mark.skipif(
+    stop_module.os.name == "nt",
+    reason="POSIX regression exercises passwd-backed product-root resolution",
+)
+def test_posix_passwd_resolver_retarget_cannot_reauthorize_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pwd
+
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    product_root = stop_module._CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT
+    authority = _initialized(path)
+    assert authority._monotonic_authority().authority_root == product_root
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-passwd-retarget",
+        expected_revision=1,
+        command_id="arm-r2-passwd-retarget",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-passwd-retarget",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+
+    forged_home = tmp_path / "forged-passwd-home"
+    forged_calls: list[int] = []
+
+    class ForgedPasswd:
+        pw_dir = str(forged_home)
+
+    def forged_getpwuid(uid: int) -> ForgedPasswd:
+        forged_calls.append(uid)
+        return ForgedPasswd()
+
+    monkeypatch.setattr(pwd, "getpwuid", forged_getpwuid)
+
+    restarted = ExecutionStopAuthority(path)
+
+    # The dynamic resolver is no longer an admission-time authority input.
+    # The process keeps the import-composed product root that already carries
+    # the newer STOP high-water mark.
+    assert restarted._monotonic_authority().authority_root == product_root
+    assert forged_calls == []
+
+    with pytest.raises(ExecutionStopAuthorityError):
+        with restarted.admission_lease():
+            pytest.fail("passwd retarget resurrected valid-old ARMED authority")
+
+    assert forged_calls == []
+    assert not forged_home.exists()
+
+
+def test_product_root_module_rebind_cannot_reauthorize_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    product_root = stop_module._CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT
+    authority = _initialized(path)
+    assert authority._monotonic_authority().authority_root == product_root
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-root-global",
+        expected_revision=1,
+        command_id="arm-r2-root-global",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-root-global",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+
+    forged_root = tmp_path / "forged-product-root"
+    monkeypatch.setattr(
+        stop_module,
+        "_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT",
+        forged_root,
+    )
+    restarted = ExecutionStopAuthority(path)
+
+    # The exported root snapshot is not a live authority input. All public STOP
+    # reads stay on the import-bound root that contains the newer STOP high-water
+    # mark, even outside the separately sealed provider admission lease.
+    assert restarted._monotonic_authority().authority_root == product_root
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+    assert not forged_root.exists()
+
+
+def test_execution_authority_coordinates_cannot_retarget_valid_old_armed_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_a = tmp_path / "workspace-a" / "execution-stop.jsonl"
+    authority = _initialized(path_a)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-location-seal",
+        expected_revision=1,
+        command_id="arm-r2-location-seal",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path_a.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-location-seal",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+    assert authority.decision().allowed is False
+
+    path_b = tmp_path / "workspace-b" / "execution-stop.jsonl"
+    path_b.parent.mkdir(parents=True, exist_ok=True)
+    anchor_b = path_b.with_name(path_b.name + ".anchor.json")
+    lock_b = path_b.with_name(path_b.name + ".lock")
+    path_b.write_bytes(valid_old_armed_journal)
+    anchor_b.write_bytes(valid_old_armed_anchor)
+
+    restarted = ExecutionStopAuthority(path_a)
+    canonical_anchor = restarted.anchor_path
+    canonical_lock = restarted._lock_path
+
+    # Direct dictionary insertion used to retarget these ordinary instance
+    # attributes without touching any class/module seal. Data-descriptor
+    # precedence must keep the construction-owned A coordinates authoritative.
+    restarted.__dict__["path"] = path_b
+    restarted.__dict__["_anchor_path"] = anchor_b
+    restarted.__dict__["_lock_path"] = lock_b
+
+    assert restarted.path == path_a
+    assert restarted.anchor_path == canonical_anchor
+    assert restarted._lock_path == canonical_lock
+
+    for name, forged in (
+        ("path", path_b),
+        ("_anchor_path", anchor_b),
+        ("_lock_path", lock_b),
+    ):
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="construction coordinates are immutable",
+        ):
+            setattr(restarted, name, forged)
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="construction coordinates are immutable",
+        ):
+            object.__setattr__(restarted, name, forged)
+
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+    with pytest.raises(ExecutionStopAuthorityError):
+        with restarted.admission_lease():
+            pytest.fail("retargeted valid-old ARMED workspace granted an execution lease")
+
+    # The copied workspace remains only inert local bytes. Normal positive reads
+    # never switched the live authority away from the newer STOP in workspace A.
+    assert restarted.path == path_a
+    assert restarted.anchor_path == canonical_anchor
+    assert restarted._lock_path == canonical_lock
+
+    # Replacing the data descriptor at the class itself is also fail-closed:
+    # the canonical admission graph freezes the descriptor identities before
+    # any public positive read or lease may use those coordinates.
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "path",
+        property(lambda _instance: path_b),
+    )
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopIntegrityError):
+        restarted.assert_execution_allowed()
+    with pytest.raises(ExecutionStopIntegrityError):
+        with restarted.admission_lease():
+            pytest.fail("class-level path descriptor rebind granted an execution lease")
+
+
+def test_coordinate_descriptor_type_dispatch_cannot_retarget_valid_old_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_a = tmp_path / "descriptor-workspace-a" / "execution-stop.jsonl"
+    authority = _initialized(path_a)
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-descriptor-type",
+        expected_revision=1,
+        command_id="arm-r2-descriptor-type",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path_a.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-descriptor-type",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path_b = tmp_path / "descriptor-workspace-b" / "execution-stop.jsonl"
+    path_b.parent.mkdir(parents=True, exist_ok=True)
+    anchor_b = path_b.with_name(path_b.name + ".anchor.json")
+    lock_b = path_b.with_name(path_b.name + ".lock")
+    path_b.write_bytes(valid_old_armed_journal)
+    anchor_b.write_bytes(valid_old_armed_anchor)
+
+    restarted = ExecutionStopAuthority(path_a)
+    forged_calls: list[str] = []
+
+    for name, target in (
+        ("path", path_b),
+        ("_anchor_path", anchor_b),
+        ("_lock_path", lock_b),
+    ):
+        descriptor = ExecutionStopAuthority.__dict__[name]
+        descriptor_type = type(descriptor)
+        canonical_get = descriptor_type.__dict__["__get__"]
+
+        def forged_get(
+            self,
+            instance,
+            owner=None,
+            *,
+            _name=name,
+            _target=target,
+            _descriptor=descriptor,
+            _canonical_get=canonical_get,
+        ):
+            if instance is not None and self is _descriptor:
+                forged_calls.append(_name)
+                return _target
+            return _canonical_get(self, instance, owner)
+
+        monkeypatch.setattr(descriptor_type, "__get__", forged_get)
+
+    # Descriptor OBJECT identity is unchanged. The canonical graph must also
+    # freeze the descriptor TYPE dispatch before any forged __get__ can retarget
+    # local STOP identity to pristine workspace B.
+    assert restarted.decision().allowed is False
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="coordinate descriptor dispatch graph changed",
+    ):
+        restarted.assert_execution_allowed()
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="coordinate descriptor dispatch graph changed",
+    ):
+        with restarted.admission_lease():
+            pytest.fail("descriptor-type retarget yielded an execution lease")
+
+    assert forged_calls == []
+
+
+def test_positive_entry_class_bindings_are_monotonically_sealed(
+    tmp_path: Path,
+) -> None:
+    authority = _initialized(tmp_path / "entry-bindings" / "execution-stop.jsonl")
+    authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-entry-binding",
+        expected_revision=1,
+        command_id="arm-r2-entry-binding",
+    )
+    authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-entry-binding",
+    )
+
+    protected = {
+        name: ExecutionStopAuthority.__dict__[name]
+        for name in (
+            "current",
+            "decision",
+            "assert_execution_allowed",
+            "admission_lease",
+        )
+    }
+
+    def forged_positive(*_args, **_kwargs):
+        raise AssertionError("forged positive STOP entry must never be installed")
+
+    for name, canonical in protected.items():
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="public STOP authority entry binding is immutable",
+        ):
+            setattr(ExecutionStopAuthority, name, forged_positive)
+        with pytest.raises(
+            ExecutionStopIntegrityError,
+            match="public STOP authority entry binding is immutable",
+        ):
+            delattr(ExecutionStopAuthority, name)
+        assert ExecutionStopAuthority.__dict__[name] is canonical
+
+    assert authority.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        authority.assert_execution_allowed()
+    with pytest.raises(ExecutionStopAuthorityError):
+        with authority.admission_lease():
+            pytest.fail("sealed class entry replacement yielded an execution lease")
+
+
+def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    authority = _initialized(path)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-instance-shadow",
+        expected_revision=1,
+        command_id="arm-r2-instance-shadow",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-instance-shadow",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+
+    shadow_calls: list[str] = []
+
+    def forged_current() -> object:
+        shadow_calls.append("current")
+        return armed
+
+    def forged_current_unlocked() -> object:
+        shadow_calls.append("_current_unlocked")
+        return armed
+
+    def forged_decision() -> object:
+        shadow_calls.append("decision")
+        raise AssertionError("forged decision dispatch must not run")
+
+    def forged_assert_execution_allowed() -> object:
+        shadow_calls.append("assert_execution_allowed")
+        return armed
+
+    # Direct instance-dict insertion is stronger than ordinary setattr for this
+    # regression: a data descriptor must still win normal attribute lookup.
+    restarted.__dict__["current"] = forged_current
+    restarted.__dict__["_current_unlocked"] = forged_current_unlocked
+    restarted.__dict__["decision"] = forged_decision
+    restarted.__dict__["assert_execution_allowed"] = (
+        forged_assert_execution_allowed
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical public STOP authority method is immutable",
+    ):
+        setattr(restarted, "decision", forged_decision)
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical public STOP authority method is immutable",
+    ):
+        setattr(
+            restarted,
+            "assert_execution_allowed",
+            forged_assert_execution_allowed,
+        )
+
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopAuthorityError):
+        restarted.assert_execution_allowed()
+
+    assert shadow_calls == []
+
+
+def test_public_positive_reads_reject_canonical_module_alias_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    authority = _initialized(path)
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-module-alias",
+        expected_revision=1,
+        command_id="arm-r2-module-alias",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-module-alias",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    # Keep the independent product-root monotonic STOP at rev3 while restoring
+    # only the mutually-consistent local ARMED rev2 pair.
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+
+    forged_calls: list[str] = []
+
+    def bypass_monotonic_current(
+        _authority: ExecutionStopAuthority,
+        _records: object,
+        *,
+        adopt_if_missing: bool,
+    ) -> None:
+        forged_calls.append(f"adopt={adopt_if_missing}")
+
+    monkeypatch.setattr(
+        stop_module,
+        "_CANONICAL_ADMISSION_ENSURE_MONOTONIC_CURRENT_UNLOCKED",
+        bypass_monotonic_current,
+    )
+
+    # The public APIs must use the same full module graph guard as the sealed
+    # provider lease. The rebound alias must be rejected before it can suppress
+    # the newer durable STOP high-water check.
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopIntegrityError):
+        restarted.assert_execution_allowed()
+    with pytest.raises(ExecutionStopIntegrityError):
+        with restarted.admission_lease():
+            pytest.fail("module-alias rebind granted an execution lease")
+
+    assert forged_calls == []
+
+
+def test_admission_lease_rejects_product_root_selector_class_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _initialized(tmp_path / "execution-stop.jsonl")
+    authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-root-selector-guard",
+        expected_revision=1,
+        command_id="arm-root-selector-guard",
+    )
+    forged_calls: list[str] = []
+
+    def forged_root() -> Path:
+        forged_calls.append("called")
+        return tmp_path / "forged-authority-root"
+
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "_product_monotonic_authority_root",
+        staticmethod(forged_root),
+    )
+
+    with pytest.raises(
+        ExecutionStopAuthorityError,
+        match="canonical execution admission helper graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("rebound product root selector yielded an execution lease")
+
+    assert forged_calls == []
+
+
+
+def test_admission_lease_rejects_selective_monotonic_history_prefix_hiding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = _initialized(path)
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-prefix-hide",
+        expected_revision=1,
+        command_id="arm-r2-prefix-hide",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+    monotonic = authority._monotonic_authority()
+    records_dir = monotonic.records_dir
+    armed_record_names = {entry.name for entry in records_dir.iterdir()}
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-prefix-hide",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+    complete_record_names = {entry.name for entry in records_dir.iterdir()}
+    assert armed_record_names < complete_record_names
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+
+    path_class = stop_module._monotonic_authority_module.Path
+    canonical_iterdir = path_class.iterdir
+    forged_calls: list[Path] = []
+
+    def selective_iterdir(candidate: Path):
+        entries = list(canonical_iterdir(candidate))
+        if candidate == records_dir:
+            forged_calls.append(candidate)
+            return iter(
+                entry for entry in entries if entry.name in armed_record_names
+            )
+        return iter(entries)
+
+    monkeypatch.setattr(path_class, "iterdir", selective_iterdir)
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical monotonic authority filesystem dispatch graph changed",
+    ):
+        with restarted.admission_lease():
+            pytest.fail("hidden newer STOP suffix yielded an execution lease")
+
+    assert forged_calls == []
+
+
+def test_admission_lease_rejects_monotonic_recover_class_substitution_on_old_arm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = _initialized(path)
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-recover-substitution",
+        expected_revision=1,
+        command_id="arm-r2-recover-substitution",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-recover-substitution",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    # Restore a mutually consistent local revision-2 ARMED pair while the
+    # independent authority still carries the newer committed STOP high-water
+    # mark. The genuine recover() must reject this rollback.
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+    restarted = ExecutionStopAuthority(path)
+    forged_calls: list[str] = []
+
+    def no_op_recover(
+        _self,
+        *,
+        observed_state_sha256,
+        tx_id=None,
+        semantic_binding_sha256=None,
+    ):
+        forged_calls.append("called")
+        return None
+
+    monkeypatch.setattr(
+        stop_module.MonotonicWorkspaceAuthority,
+        "recover",
+        no_op_recover,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="canonical monotonic authority dependency class graph changed",
+    ):
+        with restarted.admission_lease():
+            pytest.fail(
+                "valid-old ARMED state survived monotonic recover substitution"
+            )
+
+    assert forged_calls == []

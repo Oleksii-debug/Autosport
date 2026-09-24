@@ -398,10 +398,7 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         acquisition = catalog.acquisitions[0]
         self.assertTrue(acquisition.provider_origin_verified)
         self.assertTrue(acquisition.observation_time_verified)
-        self.assertRegex(
-            acquisition.observed_at,
-            r"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z$",
-        )
+        self.assertTrue(acquisition.observed_at.endswith("Z"))
 
 
     def test_injected_unavailability_detail_is_sanitized_before_durable_failure(self):

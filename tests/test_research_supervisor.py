@@ -198,6 +198,41 @@ def test_scientific_registry_authority_cannot_be_retargeted_after_construction(
 
     assert supervisor.scientific_registry is registry
 
+    descriptor = ResearchSupervisor.__dict__["scientific_registry"]
+    try:
+        ResearchSupervisor.scientific_registry = alternate
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority class binding changed",
+        ):
+            supervisor.accept_trigger(
+                _trigger(trigger_id="registry-class-binding-replaced")
+            )
+    finally:
+        ResearchSupervisor.scientific_registry = descriptor
+
+    try:
+        del ResearchSupervisor.scientific_registry
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority class binding changed",
+        ):
+            supervisor.accept_trigger(
+                _trigger(trigger_id="registry-class-binding-deleted")
+            )
+    finally:
+        ResearchSupervisor.scientific_registry = descriptor
+
+    class ShadowedResearchSupervisor(ResearchSupervisor):
+        pass
+
+    ShadowedResearchSupervisor.scientific_registry = alternate
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="scientific registry authority class binding changed",
+    ):
+        ShadowedResearchSupervisor(supervisor.path, registry)
+
 
 def test_scientific_binding_must_exist_and_be_causally_available(tmp_path):
     registry, supervisor = _workspace(tmp_path)

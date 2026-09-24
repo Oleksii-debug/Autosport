@@ -1021,6 +1021,101 @@ class ProductDecisionActivationTests(unittest.TestCase):
             self._verify()
         self.assertEqual(committed.product_source_id, "provider-a")
 
+    def test_product_composition_global_rebind_cannot_hide_durable_drift(
+        self,
+    ) -> None:
+        committed = self._initialize()
+        self._write_composition(source_id="provider-b", bankroll="1000")
+        forged_calls: list[str] = []
+
+        def forged_product_composition(_workspace: Path) -> tuple[str, str, str]:
+            forged_calls.append("_product_composition")
+            return (
+                committed.product_composition_sha256,
+                committed.product_source_id,
+                committed.initial_bankroll,
+            )
+
+        with mock.patch.object(
+            activation_module,
+            "_product_composition",
+            forged_product_composition,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "defining globals changed",
+            ):
+                self._verify()
+
+        self.assertEqual(forged_calls, [])
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "no longer matches durable authority",
+        ):
+            self._verify()
+
+    def test_path_read_bytes_rebind_cannot_cross_sign_tampered_activation(
+        self,
+    ) -> None:
+        committed = self._initialize()
+        committed_activation_bytes = self.store.path.read_bytes()
+        canonical_sha256 = hashlib.sha256
+
+        self._write_composition(source_id="provider-b", bankroll="1000")
+        composition_bytes = (
+            self.workspace / "product_composition.json"
+        ).read_bytes()
+
+        root = json.loads(self.store.path.read_text(encoding="utf-8"))
+        binding = root["binding"]
+        binding["product_source_id"] = "provider-b"
+        binding["product_composition_sha256"] = canonical_sha256(
+            composition_bytes
+        ).hexdigest()
+        binding_bytes = json.dumps(
+            binding,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        root["binding_sha256"] = canonical_sha256(binding_bytes).hexdigest()
+        tampered_activation_bytes = activation_module._durable_json_bytes(root)
+        self.store.path.write_bytes(tampered_activation_bytes)
+
+        canonical_read_bytes = Path.read_bytes
+        forged_calls: list[str] = []
+
+        def forged_read_bytes(
+            path: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> bytes:
+            if path == self.store.path:
+                forged_calls.append("activation-read")
+                if len(forged_calls) == 2:
+                    return committed_activation_bytes
+            return canonical_read_bytes(path, *args, **kwargs)
+
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            forged_read_bytes,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "path dispatch changed",
+            ):
+                self._verify()
+
+        self.assertEqual(forged_calls, [])
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "anti-rollback authority rejected",
+        ):
+            self._verify()
+        self.assertEqual(committed.product_source_id, "provider-a")
+
     def test_committed_activation_deletion_cannot_reinitialize(self) -> None:
         committed = self._initialize()
         self.store.path.unlink()

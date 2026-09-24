@@ -1189,6 +1189,7 @@ def test_source_evidence_equality_side_effect_cannot_swap_snapshot_during_admiss
     assert store.latest_snapshot() is None
     assert not store_path.exists()
 
+
 def test_issued_evidence_capability_fact_equality_rebind_cannot_mask_mutation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -11,7 +11,7 @@ from autosport.registered_strategy_model_runtime import (
     RegisteredStrategyModelRuntimeError,
     resolve_registered_strategy_model,
 )
-from autosport.strategy_model_factory import FactoryArtifactStore
+from autosport.strategy_model_factory import FactoryArtifactStore, WalkForwardEvaluationConfig
 
 
 A = "a" * 64
@@ -20,6 +20,10 @@ C = "c" * 64
 D = "d" * 64
 E = "e" * 64
 F = "f" * 64
+
+EVALUATION_CONFIG = WalkForwardEvaluationConfig()
+EVALUATION_DESIGN = EVALUATION_CONFIG.frozen_text
+EVALUATOR_CONFIG_SHA256 = EVALUATION_CONFIG.config_sha256
 
 
 def _digest(value: object) -> str:
@@ -55,6 +59,8 @@ def _model_artifact(
     model_id: str = "model-v1",
     family: str = "mean-baseline-v1",
     mean_target: float = 0.61,
+    evaluator_config_sha256: str = EVALUATOR_CONFIG_SHA256,
+    training_points_manifest_sha256: str = F,
 ) -> dict[str, object]:
     model = MeanBaselineModel(
         model_id=model_id,
@@ -75,8 +81,8 @@ def _model_artifact(
         "dataset_snapshot_id": "dataset-v1",
         "feature_set_id": "feature-v1",
         "config_sha256": A,
-        "evaluator_config_sha256": B,
-        "training_points_manifest_sha256": C,
+        "evaluator_config_sha256": evaluator_config_sha256,
+        "training_points_manifest_sha256": training_points_manifest_sha256,
         "seed": 7,
     }
 
@@ -90,11 +96,18 @@ def _write_workspace(
     feature_after_model: bool = False,
     second_champion: bool = False,
     promotion_protocol_sha256: str = D,
+    artifact_training_points_manifest_sha256: str = F,
+    artifact_evaluator_config_sha256: str = EVALUATOR_CONFIG_SHA256,
+    protocol_dataset_manifest_sha256: str = F,
+    dataset_manifest_sha256: str = F,
+    evaluation_design: str = EVALUATION_DESIGN,
 ) -> tuple[str, Path]:
     store = FactoryArtifactStore(workspace / "factory-artifacts")
     artifact = _model_artifact(
         family=artifact_family,
         mean_target=mean_target,
+        evaluator_config_sha256=artifact_evaluator_config_sha256,
+        training_points_manifest_sha256=artifact_training_points_manifest_sha256,
     )
     model_artifact_sha256 = store.write("model", "model-v1", artifact)
 
@@ -105,10 +118,10 @@ def _write_workspace(
         {
             "research_protocol_id": "protocol-v1",
             "protocol_sha256": D,
-            "binding": {},
+            "binding": {"evaluation_design": evaluation_design},
             "source_sha256": A,
             "environment_sha256": E,
-            "dataset_manifest_sha256": F,
+            "dataset_manifest_sha256": protocol_dataset_manifest_sha256,
             "available_at": "2026-01-01T00:00:01Z",
         },
     )
@@ -118,7 +131,7 @@ def _write_workspace(
         "2026-01-01T00:00:02Z",
         {
             "dataset_snapshot_id": "dataset-v1",
-            "manifest_sha256": F,
+            "manifest_sha256": dataset_manifest_sha256,
             "source_identity": "source",
             "license_identity": "license",
             "causal_cutoff": "2026-01-01T00:00:00Z",
@@ -466,4 +479,61 @@ def test_rejects_promotion_protocol_digest_mismatch(tmp_path: Path) -> None:
             tmp_path,
             strategy_version_id="strategy-v1",
             as_of="2026-01-01T00:01:00Z",
+        )
+
+
+def test_model_artifact_training_manifest_must_match_durable_dataset(
+    tmp_path: Path,
+) -> None:
+    _write_workspace(
+        tmp_path,
+        artifact_training_points_manifest_sha256=C,
+    )
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="training manifest does not match durable dataset",
+    ):
+        resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-01T00:00:12Z",
+        )
+
+
+def test_dataset_manifest_must_match_frozen_research_protocol(
+    tmp_path: Path,
+) -> None:
+    _write_workspace(
+        tmp_path,
+        dataset_manifest_sha256=E,
+    )
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="DatasetSnapshot manifest does not match ResearchProtocol",
+    ):
+        resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-01T00:00:12Z",
+        )
+
+
+def test_model_artifact_evaluator_config_must_match_frozen_research_protocol(
+    tmp_path: Path,
+) -> None:
+    _write_workspace(
+        tmp_path,
+        artifact_evaluator_config_sha256=A,
+    )
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="evaluator config does not match ResearchProtocol",
+    ):
+        resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-01T00:00:12Z",
         )

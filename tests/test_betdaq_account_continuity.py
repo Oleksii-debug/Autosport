@@ -1094,3 +1094,94 @@ def test_issued_evidence_nested_equality_rebind_cannot_mask_payload_mutation(
 
     assert store.latest_snapshot() is None
     assert not store_path.exists()
+
+
+@pytest.mark.parametrize(
+    "source_class_name",
+    (
+        "BetdaqAuthenticatedAccountContext",
+        "BetdaqSoapEvidence",
+        "BetdaqBalanceObservation",
+        "BetdaqOrderObservation",
+        "BetdaqCurrentOrderBook",
+        "BetdaqAccountEvidence",
+    ),
+)
+def test_positive_continuity_rejects_source_evidence_equality_graph_rebind_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+    source_class_name: str,
+) -> None:
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    target_class = getattr(betdaq_account_module, source_class_name)
+    attacker_calls: list[str] = []
+
+    def attacker(_left, _right):
+        attacker_calls.append(source_class_name)
+        return True
+
+    monkeypatch.setattr(target_class, "__eq__", attacker)
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity class dispatch changed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert attacker_calls == []
+    assert opener.calls == []
+
+
+def test_source_evidence_equality_side_effect_cannot_swap_snapshot_during_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    original_snapshot = current.snapshot
+    assert original_snapshot.balance is not None
+    forged_balance = replace(
+        original_snapshot.balance,
+        available_balance=Decimal("999.99"),
+    )
+    forged_snapshot = replace(
+        original_snapshot,
+        balance=forged_balance,
+    )
+    equality_calls: list[str] = []
+
+    def malicious_source_equality(_left, _right):
+        equality_calls.append("called")
+        object.__setattr__(current, "snapshot", forged_snapshot)
+        return True
+
+    monkeypatch.setattr(
+        betdaq_account_module.BetdaqAccountEvidence,
+        "__eq__",
+        malicious_source_equality,
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity class dispatch changed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert equality_calls == []
+    assert current.snapshot is original_snapshot
+    assert store.latest_snapshot() is None
+    assert not store_path.exists()

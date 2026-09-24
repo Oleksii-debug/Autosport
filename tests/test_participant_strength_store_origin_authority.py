@@ -16,6 +16,7 @@ from test_participant_strength import T3, T4, _registered_strength_lineage
 from test_participant_strength_snapshot_origin_authority import (
     _self_consistent_unissued_snapshot,
 )
+import test_opponent_intelligence as opponent_helpers
 
 
 def _forged_strength_inputs(tmp_path):
@@ -116,3 +117,74 @@ def test_existing_copied_store_bytes_do_not_bootstrap_origin_authority(tmp_path)
         match="product-owned durable store origin authority is missing",
     ):
         OpponentIntelligenceStore(forged_path, identity)
+
+
+def test_durable_rating_invalidation_is_causal_not_retroactive(tmp_path) -> None:
+    """The stronger origin fence preserves decision-time invalidation semantics."""
+
+    identities = ParticipantIdentityRegistry.initialize_pristine(
+        tmp_path / "identity-causal.json"
+    )
+    for item in (
+        opponent_helpers.entity("p-alex"),
+        opponent_helpers.entity("p-blair"),
+        opponent_helpers.entity(
+            "league-tour-a",
+            kind=opponent_helpers.EntityKind.LEAGUE,
+        ),
+    ):
+        identities.add_entity(item)
+    identities.add_alias(
+        opponent_helpers.alias("provider-a", "Alex", "p-alex")
+    )
+    identities.add_alias(
+        opponent_helpers.alias("provider-a", "Blair", "p-blair")
+    )
+    identities.add_alias(
+        opponent_helpers.alias("provider-a", "Tour A", "league-tour-a")
+    )
+
+    store = OpponentIntelligenceStore.initialize_pristine(
+        tmp_path / "opponents-causal.json",
+        identities,
+    )
+    performance = store.record_performance(opponent_helpers.observation())
+    rating, _ = store.build_snapshots(
+        participant_entity_id="p-alex",
+        sport_id="tennis",
+        league_entity_id="league-tour-a",
+        market_context_id="match-outcome",
+        causal_cutoff=opponent_helpers.T2,
+        published_at=opponent_helpers.T2,
+        code_sha256=opponent_helpers.SHA_A,
+        dependency_sha256=opponent_helpers.SHA_B,
+        min_support=1,
+    )
+    assert (
+        store.resolve_rating_snapshot(
+            rating.snapshot_id,
+            as_of=opponent_helpers.T2,
+        )
+        == rating
+    )
+
+    store.retire_performance_outcome(
+        performance.performance_id,
+        evidence_sha256=opponent_helpers.SHA_C,
+        detected_at=opponent_helpers.T3,
+    )
+    assert (
+        store.resolve_rating_snapshot(
+            rating.snapshot_id,
+            as_of=opponent_helpers.T2,
+        )
+        == rating
+    )
+    with pytest.raises(
+        OpponentIntelligenceError,
+        match="rating snapshot was invalidated by the decision time",
+    ):
+        store.resolve_rating_snapshot(
+            rating.snapshot_id,
+            as_of=opponent_helpers.T3,
+        )

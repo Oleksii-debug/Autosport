@@ -245,6 +245,52 @@ class HistoricalSnapshotTests(unittest.TestCase):
 
         self.assertEqual(forged_calls, [])
 
+    def test_product_owned_capture_rejects_request_init_transient_connection_rebind(self) -> None:
+        original_request_init = urllib_request.Request.__init__
+        original_https_connection = http_client.HTTPSConnection
+        request_init_calls: list[str] = []
+        forged_connection_calls: list[str] = []
+
+        class ForgedHTTPSConnection:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+                forged_connection_calls.append("init")
+                # This models the transient bypass: restore the checked module
+                # global as soon as the forged class has already been selected.
+                http_client.HTTPSConnection = original_https_connection
+
+        def forged_request_init(request, *args, **kwargs):
+            original_request_init(request, *args, **kwargs)
+            request_init_calls.append("request-init")
+            http_client.HTTPSConnection = ForgedHTTPSConnection
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            urllib_request.Request,
+            "__init__",
+            forged_request_init,
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+        # The Request executable graph is now part of the import-time trust root,
+        # so the mutating wrapper must be rejected before it can install the
+        # transient forged HTTPS connection.
+        self.assertEqual(request_init_calls, [])
+        self.assertEqual(forged_connection_calls, [])
+        self.assertIs(http_client.HTTPSConnection, original_https_connection)
+
     def test_product_owned_capture_rejects_https_connection_method_drift(self) -> None:
         forged_calls: list[str] = []
 

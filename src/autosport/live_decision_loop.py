@@ -1714,6 +1714,88 @@ class PersistentLiveDecisionLoop:
                     "intent_evidence_json": prepared_execution.intent_evidence_json,
                 }
 
+        learning_observation_payload = None
+        if prepared_execution is not None:
+            assert self.paper_execution is not None
+            issuer = getattr(
+                self.paper_execution,
+                "_autosport_issue_predecision_learning_observation",
+                None,
+            )
+            if issuer is not None:
+                if not intents:
+                    raise LiveDecisionProgressError(
+                        "positive PAPER campaign decision lacks decision-time intent evidence"
+                    )
+                source_observed: list[tuple[datetime, str]] = []
+                source_available: list[tuple[datetime, str]] = []
+                intent_evidence_payloads: list[dict[str, object]] = []
+                intent_sha256s: list[str] = []
+                for intent in intents:
+                    evidence = getattr(intent, "evidence", None)
+                    evidence_to_dict = getattr(evidence, "to_dict", None)
+                    intent_sha256 = getattr(intent, "intent_sha256", None)
+                    if not callable(evidence_to_dict) or type(intent_sha256) is not str:
+                        raise LiveDecisionProgressError(
+                            "campaign decision lacks canonical OpportunityEvidence"
+                        )
+                    cutoff_text, cutoff_time = _canonical_timestamp(
+                        "intent evidence causal_cutoff",
+                        getattr(evidence, "causal_cutoff", None),
+                    )
+                    available_text, available_time = _canonical_timestamp(
+                        "intent evidence observed_at",
+                        getattr(evidence, "observed_at", None),
+                    )
+                    source_observed.append((cutoff_time, cutoff_text))
+                    source_available.append((available_time, available_text))
+                    intent_evidence_payloads.append(evidence_to_dict())
+                    intent_sha256s.append(intent_sha256)
+                decision_time = _canonical_timestamp(
+                    "portfolio decision_ts",
+                    plan.decision_ts,
+                )[1]
+                available_time, available_at = max(
+                    source_available,
+                    key=lambda item: item[0],
+                )
+                if available_time > decision_time:
+                    raise LiveDecisionProgressError(
+                        "decision-time learning evidence was not available before decision"
+                    )
+                _, observed_at = max(source_observed, key=lambda item: item[0])
+                learning_observation_payload = issuer(
+                    observed_at=observed_at,
+                    available_at=available_at,
+                    evidence=tuple(
+                        sorted(
+                            (
+                                ("decision_context_sha256", decision_context_sha256),
+                                (
+                                    "intent_evidence_sha256",
+                                    _canonical_json_sha256(intent_evidence_payloads),
+                                ),
+                                (
+                                    "intent_provenance_sha256",
+                                    provenance.provenance_sha256,
+                                ),
+                                (
+                                    "intent_vector_sha256",
+                                    _canonical_json_sha256(intent_sha256s),
+                                ),
+                                ("market_state_sha256", market_state_sha256),
+                            )
+                        )
+                    ),
+                )
+                if (
+                    learning_observation_payload is not None
+                    and type(learning_observation_payload) is not dict
+                ):
+                    raise LiveDecisionProgressError(
+                        "decision-time learning Observation issuer returned invalid payload"
+                    )
+
         record_payload = {
             "schema": "autosport.persistent_live_decision",
             "schema_version": 2,
@@ -1735,6 +1817,10 @@ class PersistentLiveDecisionLoop:
             # decision identity remains stable; execution adoption is additive,
             # separately versioned evidence.
             record_payload["paper_execution"] = expected_execution_payload
+        if learning_observation_payload is not None:
+            # The DecisionLedger envelope now commits the exact source/learning
+            # Observation atomically with the economic decision publication.
+            record_payload["learning_observation"] = learning_observation_payload
 
         record = DecisionRecord(
             replay_run_id=f"live:{self.loop_id}",
@@ -1852,6 +1938,14 @@ class PersistentLiveDecisionLoop:
                 if existing.payload.get("paper_execution") != expected_execution_payload:
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
+                    )
+                detached_existing_payload = existing.to_dict()["payload"]
+                if (
+                    detached_existing_payload.get("learning_observation")
+                    != learning_observation_payload
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision learning Observation changed"
                     )
                 duplicate = True
             else:

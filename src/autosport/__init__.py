@@ -56,7 +56,7 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
 # Install the fail-closed predictive runtime authority bridge before callers import
-# decision modules.  The import is intentionally private; public APIs remain in the
+# decision modules. The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
@@ -144,3 +144,13 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # Replay must recognize the cross-ledger witness kind, but callers must not mint that
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
+
+# #708 consumes the already-durable #727 RUN_RESERVED decision origin. Reconcile
+# the provisional admission facade first, derive one explicit versioned decision-time
+# learning Observation contract, then closure-seal every authority-bearing read.
+from . import _paper_campaign_admission_origin_convergence as _paper_campaign_admission_origin_convergence  # noqa: F401,E402
+from . import _paper_campaign_admission_preexecution_observation as _paper_campaign_admission_preexecution_observation  # noqa: F401,E402
+from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admission_consumer_guard  # noqa: F401,E402
+# Extend that same executable seal through canonical PaperBook ticket resolution;
+# no new ticket/source authority is introduced here.
+from . import _paper_campaign_admission_ticket_resolution_guard as _paper_campaign_admission_ticket_resolution_guard  # noqa: F401,E402

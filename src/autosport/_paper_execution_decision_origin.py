@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
 from typing import Any, Mapping
@@ -32,6 +32,19 @@ class DecisionRecordOrigin:
 
     decision_id: str
     record_sha256: str
+    # Exact pre-published learning evidence resolved from the same verified
+    # DecisionLedger record. These fields are transport metadata for the canonical
+    # #727 reservation carrier; they do not enlarge origin equality/identity.
+    learning_observation_json: str | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    decision_observed_ts: str | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -58,6 +71,39 @@ class DecisionRecordOrigin:
             raise PaperExecutionDecisionOriginError(
                 "decision origin record_sha256 must be lowercase SHA-256"
             )
+        if (self.learning_observation_json is None) != (
+            self.decision_observed_ts is None
+        ):
+            raise PaperExecutionDecisionOriginError(
+                "decision origin learning evidence must be complete"
+            )
+        if self.learning_observation_json is not None:
+            if (
+                type(self.learning_observation_json) is not str
+                or not self.learning_observation_json
+                or type(self.decision_observed_ts) is not str
+                or not self.decision_observed_ts
+            ):
+                raise PaperExecutionDecisionOriginError(
+                    "decision origin learning evidence is invalid"
+                )
+            try:
+                parsed = json.loads(self.learning_observation_json)
+                canonical = json.dumps(
+                    parsed,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise PaperExecutionDecisionOriginError(
+                    "decision origin learning evidence is not canonical JSON"
+                ) from exc
+            if canonical != self.learning_observation_json:
+                raise PaperExecutionDecisionOriginError(
+                    "decision origin learning evidence is not canonical JSON"
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -104,10 +150,43 @@ def verified_decision_origin(
         record = envelope["record"]
         if record.get("decision_id") != decision_id:
             continue
+        payload = record.get("payload")
+        if type(payload) is not dict:
+            raise PaperExecutionDecisionOriginError(
+                "decision origin durable DecisionRecord payload is invalid"
+            )
+        raw_learning = payload.get("learning_observation")
+        learning_json: str | None = None
+        decision_observed_ts: str | None = None
+        if raw_learning is not None:
+            if type(raw_learning) is not dict:
+                raise PaperExecutionDecisionOriginError(
+                    "decision origin learning observation commitment is invalid"
+                )
+            try:
+                learning_json = json.dumps(
+                    raw_learning,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionDecisionOriginError(
+                    "decision origin learning observation commitment is invalid"
+                ) from exc
+            observed_ts = record.get("observed_ts")
+            if type(observed_ts) is not str or not observed_ts:
+                raise PaperExecutionDecisionOriginError(
+                    "decision origin durable DecisionRecord time is invalid"
+                )
+            decision_observed_ts = observed_ts
         matches.append(
             DecisionRecordOrigin(
                 decision_id=decision_id,
                 record_sha256=envelope["sha256"],
+                learning_observation_json=learning_json,
+                decision_observed_ts=decision_observed_ts,
             )
         )
     if len(matches) != 1:

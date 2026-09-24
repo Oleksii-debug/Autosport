@@ -341,7 +341,15 @@ def _write_exact_git_blob(
         dir=destination.parent,
     )
     try:
-        with os.fdopen(fd, "wb") as handle:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        with handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

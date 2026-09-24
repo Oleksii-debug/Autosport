@@ -8,6 +8,7 @@ from decimal import Decimal
 from unittest.mock import patch
 from pathlib import Path
 
+import autosport.registered_strategy_live_feature as live_feature_module
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MirrorSnapshot
 from autosport.registered_strategy_live_feature import (
@@ -521,6 +522,34 @@ class RegisteredStrategyLiveFeatureTests(unittest.TestCase):
             )
             self.assertEqual(authority.model_version_id, "model-v1")
             self.assertEqual(authority.feature_set_id, LIVE_FEATURE_SET_ID)
+
+    def test_registry_module_binding_rebind_cannot_replace_captured_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = _registry(Path(directory))
+            attacker_called = False
+
+            class AttackerRegistry:
+                def __init__(self, path: object) -> None:
+                    nonlocal attacker_called
+                    attacker_called = True
+                    raise AssertionError("attacker registry type executed")
+
+            with patch.object(
+                live_feature_module,
+                "ScientificRegistry",
+                AttackerRegistry,
+            ):
+                with self.assertRaisesRegex(
+                    RegisteredStrategyLiveFeatureError,
+                    "ScientificRegistry type changed",
+                ):
+                    resolve_registered_live_feature_authority(
+                        registry,
+                        "model-v1",
+                        decision_at=DECISION_AT,
+                    )
+
+            self.assertFalse(attacker_called)
 
     def test_registry_constructor_rebind_cannot_redirect_durable_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

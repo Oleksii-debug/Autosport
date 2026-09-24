@@ -6,7 +6,17 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib, json
+import os, stat, tempfile
+from pathlib import Path
 from typing import Sequence
+
+from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+from .paths import default_workspace
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 EVENT_RPM = 700
 I64_MAX = (1 << 63) - 1
@@ -141,12 +151,136 @@ class MatchbookPollCursor:
     universe_sha256:str; next_index:int; window_started_at:str; used_in_window:int
     def __post_init__(self):
         if type(self.universe_sha256) is not str or len(self.universe_sha256)!=64 or any(c not in "0123456789abcdef" for c in self.universe_sha256): raise MatchbookMarketReadError("invalid cursor universe")
-        if type(self.next_index) is not int or isinstance(self.next_index,bool) or self.next_index<0: raise MatchbookMarketReadError("invalid cursor index")
+        if type(self.next_index) is not int or isinstance(self.next_index,bool) or not 0<=self.next_index<=I64_MAX: raise MatchbookMarketReadError("invalid cursor index")
         object.__setattr__(self,"window_started_at",_utctext(_utc(self.window_started_at,"window_started_at")))
         if type(self.used_in_window) is not int or isinstance(self.used_in_window,bool) or not 0<=self.used_in_window<=EVENT_RPM: raise MatchbookMarketReadError("invalid cursor budget")
+
 @dataclass(frozen=True,slots=True)
 class MatchbookPollPlan:
     request_sha256s:tuple[str,...]; next_cursor:MatchbookPollCursor
+
+_POLL_STATE_SCHEMA="autosport.matchbook.poll-budget-state"
+_POLL_STATE_VERSION=1
+_POLL_AUTHORITY_DOMAIN="provider.matchbook.poll-budget-v1"
+_POLL_AUTHORITY_KEY="event-read-global-budget"
+_POLL_STATE_FILE=".matchbook-poll-budget-v1.json"
+_POLL_STATE_KEYS=frozenset({"schema","schema_version","universe_sha256","next_index","window_started_at","used_in_window","max_requests_per_minute"})
+
+@dataclass(frozen=True,slots=True)
+class _DurablePollState:
+    universe_sha256:str; next_index:int; window_started_at:str
+    used_in_window:int; max_requests_per_minute:int
+    def __post_init__(self):
+        if type(self.universe_sha256) is not str or len(self.universe_sha256)!=64 or any(c not in "0123456789abcdef" for c in self.universe_sha256): raise MatchbookMarketReadError("invalid persisted poll universe")
+        if type(self.next_index) is not int or isinstance(self.next_index,bool) or not 0<=self.next_index<=I64_MAX: raise MatchbookMarketReadError("invalid persisted cursor index")
+        object.__setattr__(self,"window_started_at",_utctext(_utc(self.window_started_at,"persisted window_started_at")))
+        if type(self.max_requests_per_minute) is not int or isinstance(self.max_requests_per_minute,bool) or not 1<=self.max_requests_per_minute<=EVENT_RPM: raise MatchbookMarketReadError("invalid persisted poll budget limit")
+        if type(self.used_in_window) is not int or isinstance(self.used_in_window,bool) or not 0<=self.used_in_window<=self.max_requests_per_minute: raise MatchbookMarketReadError("invalid persisted poll budget use")
+    @property
+    def cursor(self):
+        return MatchbookPollCursor(self.universe_sha256,self.next_index,self.window_started_at,self.used_in_window)
+    def payload(self):
+        return {"schema":_POLL_STATE_SCHEMA,"schema_version":_POLL_STATE_VERSION,"universe_sha256":self.universe_sha256,"next_index":self.next_index,"window_started_at":self.window_started_at,"used_in_window":self.used_in_window,"max_requests_per_minute":self.max_requests_per_minute}
+
+class _MatchbookPollCursorStore:
+    """Durable product-owned authority for Matchbook's per-minute Event-read budget.
+
+    Allowance is persisted before request ids are returned. A crash can waste allowance,
+    but cannot make the same minute's allowance available again. Public cursors are
+    observations only; they never override the canonical workspace state.
+    """
+    def __init__(self,workspace):
+        try: path=Path(workspace).expanduser()
+        except RuntimeError as e: raise MatchbookMarketReadError("poll workspace cannot be resolved") from e
+        if not path.is_absolute(): raise MatchbookMarketReadError("poll workspace must be an absolute path")
+        self.workspace=path; self.state_path=path/_POLL_STATE_FILE
+        try: self._authority=MonotonicWorkspaceAuthority(workspace=path,domain=_POLL_AUTHORITY_DOMAIN,key=_POLL_AUTHORITY_KEY)
+        except MonotonicWorkspaceAuthorityError as e: raise MatchbookMarketReadError("invalid poll monotonic authority") from e
+    @staticmethod
+    def _state_bytes(state):
+        return (json.dumps(state.payload(),ensure_ascii=False,sort_keys=True,separators=(",",":"),allow_nan=False)+"\n").encode("utf-8")
+    @staticmethod
+    def _binding(state):
+        return _hash({"v":1,"provider":"matchbook","authority":_POLL_AUTHORITY_DOMAIN,"universe":state.universe_sha256,"budget":state.max_requests_per_minute})
+    @staticmethod
+    def _tx_id(state_sha256): return "matchbook-poll:"+state_sha256
+    def _decode_state(self,payload):
+        if len(payload)>16*1024: raise MatchbookMarketReadError("persisted poll state is too large")
+        try: raw=strict_json_loads(payload.decode("utf-8"))
+        except (UnicodeError,TypeError,ValueError) as e: raise MatchbookMarketReadError("invalid persisted poll state JSON") from e
+        if type(raw) is not dict or frozenset(raw)!=_POLL_STATE_KEYS: raise MatchbookMarketReadError("persisted poll state schema mismatch")
+        if raw["schema"]!=_POLL_STATE_SCHEMA or raw["schema_version"]!=_POLL_STATE_VERSION: raise MatchbookMarketReadError("persisted poll state version mismatch")
+        state=_DurablePollState(raw["universe_sha256"],raw["next_index"],raw["window_started_at"],raw["used_in_window"],raw["max_requests_per_minute"])
+        if payload!=self._state_bytes(state): raise MatchbookMarketReadError("persisted poll state is not canonical JSON")
+        return state
+    def _read_state(self):
+        try: metadata=self.state_path.lstat()
+        except FileNotFoundError: state=None; digest=None
+        except OSError as e: raise MatchbookMarketReadError("cannot inspect persisted poll state") from e
+        else:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink!=1: raise MatchbookMarketReadError("persisted poll state must be a single-link regular file")
+            try: payload=self.state_path.read_bytes()
+            except OSError as e: raise MatchbookMarketReadError("cannot read persisted poll state") from e
+            state=self._decode_state(payload); digest=hashlib.sha256(payload).hexdigest()
+        try:
+            if state is None: self._authority.recover(observed_state_sha256=None)
+            else: self._authority.recover(observed_state_sha256=digest,tx_id=self._tx_id(digest),semantic_binding_sha256=self._binding(state))
+        except MonotonicWorkspaceAuthorityError as e: raise MatchbookMarketReadError("persisted poll state is not current monotonic authority") from e
+        return state,digest
+    def _publish(self,state,previous_digest):
+        payload=self._state_bytes(state); intended=hashlib.sha256(payload).hexdigest()
+        if intended==previous_digest: return
+        binding=self._binding(state); tx_id=self._tx_id(intended)
+        try: self._authority.prepare(tx_id=tx_id,observed_state_sha256=previous_digest,intended_state_sha256=intended,semantic_binding_sha256=binding)
+        except MonotonicWorkspaceAuthorityError as e: raise MatchbookMarketReadError("cannot reserve poll state transition") from e
+        descriptor=None; temporary=None
+        try:
+            self.workspace.mkdir(parents=True,exist_ok=True)
+            descriptor,name=tempfile.mkstemp(prefix="."+_POLL_STATE_FILE+".",suffix=".tmp",dir=self.workspace); temporary=Path(name)
+            with os.fdopen(descriptor,"wb") as handle:
+                descriptor=None; handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+            os.replace(temporary,self.state_path); temporary=None
+            if os.name!="nt":
+                directory_fd=os.open(self.workspace,os.O_RDONLY|getattr(os,"O_DIRECTORY",0))
+                try: os.fsync(directory_fd)
+                finally: os.close(directory_fd)
+        except BaseException as publish_error:
+            if descriptor is not None: os.close(descriptor)
+            if temporary is not None:
+                try: temporary.unlink()
+                except OSError: pass
+            try: self._authority.abort(tx_id=tx_id,observed_state_sha256=previous_digest,semantic_binding_sha256=binding)
+            except BaseException as abort_error:
+                try: publish_error.add_note("poll authority abort also failed: "+type(abort_error).__name__)
+                except BaseException: pass
+            raise MatchbookMarketReadError("cannot durably publish poll state") from publish_error
+        try: self._authority.commit(tx_id=tx_id,observed_state_sha256=intended,semantic_binding_sha256=binding)
+        except MonotonicWorkspaceAuthorityError as e: raise MatchbookMarketReadError("poll state published but monotonic commit requires recovery") from e
+    def allocate(self,*,universe_sha256,item_count,now,cursor,max_requests_per_minute,batch_limit):
+        with WorkspaceEconomicLock(self.workspace):
+            state,digest=self._read_state()
+            if cursor is not None:
+                if type(cursor) is not MatchbookPollCursor: raise MatchbookMarketReadError("invalid poll cursor")
+                if state is None or cursor!=state.cursor: raise MatchbookMarketReadError("poll cursor is not the current durable authority")
+            if state is None:
+                start=now; index=0; used=0; budget=max_requests_per_minute
+            else:
+                start=_utc(state.window_started_at,"persisted window_started_at")
+                if now<start: raise MatchbookMarketReadError("poll clock regressed")
+                if now-start>=timedelta(minutes=1):
+                    index=state.next_index%item_count if state.universe_sha256==universe_sha256 else 0
+                    start=now; used=0; budget=max_requests_per_minute
+                else:
+                    if state.universe_sha256!=universe_sha256: raise MatchbookMarketReadError("poll universe cannot change inside an active budget window")
+                    if state.max_requests_per_minute!=max_requests_per_minute: raise MatchbookMarketReadError("poll budget cannot change inside an active budget window")
+                    index=state.next_index%item_count; used=state.used_in_window; budget=state.max_requests_per_minute
+            remaining=budget-used
+            if remaining<0: raise MatchbookMarketReadError("durable cursor exceeds budget")
+            count=min(batch_limit,remaining,item_count)
+            selected=tuple((index+i)%item_count for i in range(count))
+            next_state=_DurablePollState(universe_sha256,(index+count)%item_count,_utctext(start),used+count,budget)
+            self._publish(next_state,digest)
+            return selected,next_state.cursor
 
 def plan_matchbook_poll(requests,*,now,cursor,max_requests_per_minute,batch_limit):
     if isinstance(requests,(str,bytes)) or not isinstance(requests,Sequence) or not requests: raise MatchbookMarketReadError("empty poll universe")
@@ -157,16 +291,8 @@ def plan_matchbook_poll(requests,*,now,cursor,max_requests_per_minute,batch_limi
     if type(max_requests_per_minute) is not int or isinstance(max_requests_per_minute,bool) or not 1<=max_requests_per_minute<=EVENT_RPM: raise MatchbookMarketReadError("budget must be 1..700")
     if type(batch_limit) is not int or isinstance(batch_limit,bool) or batch_limit<=0: raise MatchbookMarketReadError("invalid batch_limit")
     t=_utc(now,"now"); universe=_hash({"v":1,"provider":"matchbook","requests":ids})
-    if cursor is None: start,index,used=t,0,0
-    else:
-        if type(cursor) is not MatchbookPollCursor or cursor.universe_sha256!=universe: raise MatchbookMarketReadError("cursor belongs to different universe")
-        start,index,used=_utc(cursor.window_started_at,"window_started_at"),cursor.next_index%len(items),cursor.used_in_window
-        if t<start: raise MatchbookMarketReadError("poll clock regressed")
-        if t-start>=timedelta(minutes=1): start,used=t,0
-    remaining=max_requests_per_minute-used
-    if remaining<0: raise MatchbookMarketReadError("cursor exceeds budget")
-    chosen=[]
-    for _ in range(min(batch_limit,remaining,len(items))): chosen.append(items[index].semantic_sha256); index=(index+1)%len(items)
-    return MatchbookPollPlan(tuple(chosen),MatchbookPollCursor(universe,index,_utctext(start),used+len(chosen)))
+    try: selected,next_cursor=_MatchbookPollCursorStore(default_workspace()).allocate(universe_sha256=universe,item_count=len(items),now=t,cursor=cursor,max_requests_per_minute=max_requests_per_minute,batch_limit=batch_limit)
+    except WorkspaceEconomicLockError as e: raise MatchbookMarketReadError("poll workspace is busy or unsafe") from e
+    return MatchbookPollPlan(tuple(ids[i] for i in selected),next_cursor)
 
 __all__=[n for n in globals() if n.startswith("Matchbook")]+["build_matchbook_market_snapshot","normalize_matchbook_price_levels","plan_matchbook_poll","require_direct_liquidity_comparability"]

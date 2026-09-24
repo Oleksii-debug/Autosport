@@ -297,6 +297,7 @@ def test_product_root_module_rebind_cannot_reauthorize_valid_old_armed(
 
 def test_execution_authority_coordinates_cannot_retarget_valid_old_armed_workspace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path_a = tmp_path / "workspace-a" / "execution-stop.jsonl"
     authority = _initialized(path_a)
@@ -371,6 +372,21 @@ def test_execution_authority_coordinates_cannot_retarget_valid_old_armed_workspa
     assert restarted.path == path_a
     assert restarted.anchor_path == canonical_anchor
     assert restarted._lock_path == canonical_lock
+
+    # Replacing the data descriptor at the class itself is also fail-closed:
+    # the canonical admission graph freezes the descriptor identities before
+    # any public positive read or lease may use those coordinates.
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "path",
+        property(lambda _instance: path_b),
+    )
+    assert restarted.decision().allowed is False
+    with pytest.raises(ExecutionStopIntegrityError):
+        restarted.assert_execution_allowed()
+    with pytest.raises(ExecutionStopIntegrityError):
+        with restarted.admission_lease():
+            pytest.fail("class-level path descriptor rebind granted an execution lease")
 
 
 def test_public_positive_reads_ignore_instance_dispatch_shadow_after_newer_stop(

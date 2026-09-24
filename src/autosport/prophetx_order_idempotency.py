@@ -613,7 +613,10 @@ def _build_provider_order_correlation_authority():
         identity: ProphetXOrderIdentity,
         provider_order_id: str,
     ) -> bool:
-        require_identity_resolver_graph()
+        try:
+            require_identity_resolver_graph()
+        except ProphetXOrderIdentityError:
+            return False
         result = bind_impl(
             ledger,
             identity,
@@ -621,7 +624,10 @@ def _build_provider_order_correlation_authority():
             identity_resolver=identity_resolver,
             identity_resolver_code=identity_resolver_code,
         )
-        require_identity_resolver_graph()
+        try:
+            require_identity_resolver_graph()
+        except ProphetXOrderIdentityError:
+            return False
         return result
 
     def reconciliation_disposition(

@@ -8,6 +8,7 @@ from autosport.prophetx_fix_session_continuity import (
     ExecutionReportObservation,
     FixSessionIdentity,
     ProphetXFixContinuityStore,
+    ProphetXFixContractError,
     ProphetXFixEnvironment,
     ProphetXFixEvidenceConflict,
     ProphetXFixStream,
@@ -68,7 +69,7 @@ def test_restart_rejects_provenance_rebound_into_future_reset_epoch(tmp_path) ->
         ProphetXFixContinuityStore(path)
 
 
-def test_restart_keeps_legitimate_prior_epoch_provenance_after_reset(tmp_path) -> None:
+def test_unproven_reset_candidate_cannot_advance_provenance_epoch(tmp_path) -> None:
     path = tmp_path / "fix-continuity.sqlite3"
     store = ProphetXFixContinuityStore(path)
     identity = _identity()
@@ -89,8 +90,12 @@ def test_restart_keeps_legitimate_prior_epoch_provenance_after_reset(tmp_path) -
         disconnected_since=T2,
     )
     assert plan.disposition is ReconnectDisposition.RESET_PROVIDER_SEQUENCE_LOWER
-    reset = store.record_reset(plan, observed_at=T4)
-    assert reset.reset_epoch == 1
+    with pytest.raises(
+        ProphetXFixContractError,
+        match="product-owned reconnect causal authority",
+    ):
+        store.record_reset(plan, observed_at=T4)
 
     restarted = ProphetXFixContinuityStore(path)
-    assert restarted.load_checkpoint(identity).reset_epoch == 1
+    assert restarted.load_checkpoint(identity) == checkpoint
+    assert restarted.load_checkpoint(identity).reset_epoch == 0

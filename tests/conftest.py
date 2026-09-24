@@ -1,11 +1,77 @@
 from __future__ import annotations
 
+import atexit
 from collections.abc import Mapping
 from datetime import timedelta
+import importlib
 from itertools import count
+import os
 from pathlib import Path
+import shutil
+import sys
+import tempfile
 
 import pytest
+
+
+_TEST_MACHINE_HOME = Path(
+    tempfile.mkdtemp(prefix="autosport-pytest-machine-home-")
+).resolve()
+atexit.register(shutil.rmtree, _TEST_MACHINE_HOME, ignore_errors=True)
+
+
+def _bootstrap_product_machine_root() -> None:
+    """Compose product-owned machine roots into a temporary pytest process home."""
+
+    module_name = "autosport.product_decision_activation"
+    if module_name in sys.modules:
+        raise RuntimeError(
+            "product decision activation imported before machine-root bootstrap"
+        )
+
+    if os.name == "nt":
+        import ctypes
+
+        shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+        original = shell32.SHGetFolderPathW
+
+        def test_local_app_data(
+            _hwnd,
+            _csidl,
+            _token,
+            _flags,
+            buffer,
+        ) -> int:
+            buffer.value = str(_TEST_MACHINE_HOME)
+            return 0
+
+        shell32.SHGetFolderPathW = test_local_app_data
+        try:
+            importlib.import_module(module_name)
+        finally:
+            shell32.SHGetFolderPathW = original
+        return
+
+    import pwd
+
+    original = pwd.getpwuid
+
+    class TestPasswd:
+        pw_dir = str(_TEST_MACHINE_HOME)
+
+    def test_getpwuid(_uid):
+        return TestPasswd()
+
+    pwd.getpwuid = test_getpwuid
+    try:
+        importlib.import_module(module_name)
+    finally:
+        pwd.getpwuid = original
+
+
+_bootstrap_product_machine_root()
+del _bootstrap_product_machine_root
+
 
 from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,

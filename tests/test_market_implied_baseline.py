@@ -170,24 +170,23 @@ class MarketImpliedBaselineTests(unittest.TestCase):
             self.evidence()
         del self.store.events
 
-    def test_time_normalization_cannot_replace_canonical_market_history(self) -> None:
-        store = self.store
-        forged_rows = tuple(
-            self.event(selection, "3.00", sequence)
-            for sequence, selection in enumerate(("away", "draw", "home"), start=1)
-        )
-        forged_reads = 0
-
-        def forged_events(event_id=None):
-            nonlocal forged_reads
-            forged_reads += 1
-            return list(forged_rows)
+    def test_time_subclasses_cannot_execute_before_canonical_history_read(self) -> None:
+        hooks = {"cutoff": 0, "max_age": 0}
 
         class RebindingCutoff(datetime):
             def astimezone(self, tz=None):
-                store.events = forged_events  # type: ignore[method-assign]
+                hooks["cutoff"] += 1
+                self_store = self_test.store
+                self_store.events = lambda event_id=None: []  # type: ignore[method-assign]
                 return super().astimezone(tz)
 
+        class RebindingMaxAge(timedelta):
+            def __lt__(self, other):
+                hooks["max_age"] += 1
+                self_test.store.events = lambda event_id=None: []  # type: ignore[method-assign]
+                return super().__lt__(other)
+
+        self_test = self
         cutoff = RebindingCutoff(
             2026,
             9,
@@ -196,17 +195,16 @@ class MarketImpliedBaselineTests(unittest.TestCase):
             5,
             tzinfo=timezone.utc,
         )
-        try:
-            with self.assertRaisesRegex(
-                MarketImpliedBaselineError,
-                "must not shadow events reader",
-            ):
-                self.evidence(cutoff=cutoff)
-            self.assertEqual(forged_reads, 0)
-        finally:
-            namespace = getattr(store, "__dict__", {})
-            if "events" in namespace:
-                del store.events
+        with self.assertRaisesRegex(TypeError, "decision_cutoff must be an exact datetime"):
+            self.evidence(cutoff=cutoff)
+        self.assertEqual(hooks["cutoff"], 0)
+        self.assertNotIn("events", getattr(self.store, "__dict__", {}))
+
+        max_age = RebindingMaxAge(minutes=10)
+        with self.assertRaisesRegex(TypeError, "max_age must be an exact timedelta"):
+            self.evidence(max_age=max_age)
+        self.assertEqual(hooks["max_age"], 0)
+        self.assertNotIn("events", getattr(self.store, "__dict__", {}))
 
     def test_caller_polymorphism_cannot_replace_outcome_authority(self) -> None:
         class ForgedAuthority(MarketSettlementOutcomeAuthority):

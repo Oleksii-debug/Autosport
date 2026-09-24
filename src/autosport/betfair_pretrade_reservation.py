@@ -1054,6 +1054,7 @@ def _reservation_status(value: object) -> ReservationStatus:
             "unsupported reservation status"
         ) from exc
 
+
 def _build_canonical_reservation_admission_authority():
     """Seal positive local-capital admission to canonical product dispatch."""
 

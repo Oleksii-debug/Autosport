@@ -109,7 +109,6 @@ _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD_CODE: Final = getattr(
     None,
 )
 
-
 # Supported START must derive scientific identity from exact durable registry bytes.
 # A live ScientificRegistry.get() method is application code and can be rebound at
 # runtime without changing the registry file, so it is never positive START authority.
@@ -361,7 +360,29 @@ def _product_composition(workspace: Path) -> tuple[str, str, str]:
     if payload.get("schema") != "autosport.autonomous_product_composition":
         raise ProductDecisionActivationError("product composition schema mismatch")
     version = payload.get("schema_version")
-    if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
+    v1_fields = frozenset({"schema", "schema_version", "source_id", "initial_bankroll"})
+    v2_fields = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "source_id",
+            "initial_bankroll",
+            "settlement_authority_identity",
+        }
+    )
+    if version == 1:
+        if frozenset(payload) != v1_fields:
+            raise ProductDecisionActivationError("product composition schema mismatch")
+    elif version == 2:
+        if frozenset(payload) != v2_fields:
+            raise ProductDecisionActivationError("product composition schema mismatch")
+        settlement_authority_identity = payload.get("settlement_authority_identity")
+        if settlement_authority_identity is not None:
+            _sha256(
+                settlement_authority_identity,
+                "settlement_authority_identity",
+            )
+    else:
         raise ProductDecisionActivationError(
             "product composition schema version is invalid"
         )
@@ -592,7 +613,6 @@ def _validated_scientific_registry_records(
     return records
 
 
-
 def _validated_strategy_version_payload(
     entry: dict[str, object],
     wanted_strategy_version_id: str,
@@ -734,6 +754,7 @@ def _validated_model_version_payload(
         )
     return dict(payload)
 
+
 def _registry_strategy_prefix(
     workspace: Path,
     registry: ScientificRegistry,
@@ -823,6 +844,7 @@ def _registry_strategy_prefix(
         strategy_record_sha256,
         model_record_sha256,
     )
+
 
 @dataclass(frozen=True, slots=True)
 class ProductDecisionActivationBinding:
@@ -1067,10 +1089,6 @@ class ProductDecisionActivationStore:
         durable_goal_store = object.__new__(
             _CANONICAL_ECONOMIC_GOAL_STORE_CLASS
         )
-        # Do not call the otherwise-canonical constructor here: its implementation
-        # resolves self.FILE_NAME dynamically. Build the two canonical store fields
-        # from the already-owned workspace and the import-time frozen filename so a
-        # transient class-attribute rebind cannot redirect START authority.
         durable_goal_store.workspace = self.workspace
         durable_goal_store.path = (
             self.workspace / _CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME
@@ -1084,11 +1102,6 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "canonical EconomicGoalStore instance dispatch changed"
             )
-        # Do not let EconomicGoalStore.load() or its mutable decoder graph grant
-        # positive START authority. The canonical owner writer uses atomic_write_json,
-        # whose exact deterministic encoding is mirrored by _durable_json_bytes().
-        # Bind the exact on-disk bytes to the exact caller-supplied canonical contract
-        # before that contract can participate in risk/provenance activation.
         try:
             expected_goal_bytes = _durable_json_bytes(
                 _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD(economic_goal)
@@ -1122,11 +1135,6 @@ class ProductDecisionActivationStore:
             raise ProductDecisionActivationError(
                 "execution_config must be the exact canonical PaperExecutionModelConfig"
             )
-        # Never dispatch START authority through the live class descriptor. Even an
-        # exact frozen dataclass instance can be relabelled if caller code temporarily
-        # replaces PaperExecutionModelConfig.fingerprint. Require the original
-        # import-time property/getter/code identity and invoke that captured getter
-        # directly, so transient class-descriptor substitution fails closed.
         live_fingerprint_property = _CANONICAL_EXECUTION_CONFIG_CLASS.fingerprint
         if (
             not isinstance(_CANONICAL_EXECUTION_FINGERPRINT_PROPERTY, property)
@@ -1308,9 +1316,6 @@ class ProductDecisionActivationStore:
                     "cannot prepare product decision activation anti-rollback witness"
                 ) from exc
 
-            # A failure here deliberately leaves PREPARE durable. On restart,
-            # _recover_authority() aborts if the local file is still absent or
-            # commits only if the exact prepared bytes were published.
             atomic_write_json(self.path, root)
             published = self._observed_state_sha256()
             if published != intended:
@@ -1366,9 +1371,6 @@ class ProductDecisionActivationStore:
                 "product decision activation store must be the exact canonical class"
             )
         with WorkspaceEconomicLock(self.workspace):
-            # Preserve precise malformed-state diagnostics before freshness
-            # adjudication. Structurally valid old/rebound bytes are then rejected
-            # by the independent authority below.
             if self.path.exists() or self.path.is_symlink():
                 binding = self._load_local()
                 self._recover_authority()
@@ -1412,6 +1414,7 @@ class ProductDecisionActivationStore:
                     "supported START activation evidence no longer matches durable authority"
                 )
             return persisted
+
 
 def _seal_product_decision_activation_derive_dispatch() -> None:
     """Seal positive START derivation and its nested anti-rollback authority."""
@@ -1476,11 +1479,6 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         canonical_observed_state, "__code__", None
     )
 
-    # The exact store methods above still resolve this defining module at call time.
-    # Snapshot first-order product bindings so a caller cannot keep _derive's code
-    # object unchanged while replacing one of its authority-bearing helpers.
-    # Exclude only globals with dedicated, more specific trust checks and the one-shot
-    # seal symbol deleted after composition.
     canonical_product_module_globals = getattr(
         canonical_derive,
         "__globals__",
@@ -1512,10 +1510,6 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         else ()
     )
 
-    # pathlib.Path is a mutable Python class. Freezing only the Path class object
-    # does not freeze inherited member dispatch such as read_bytes/exists/resolve.
-    # These members are reached by the product, nested MWA and workspace-binding
-    # trust graph before positive START can be returned.
     canonical_path_member_names = (
         "__truediv__",
         "absolute",
@@ -1552,10 +1546,6 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         name: getattr(method, "__code__", None)
         for name, method in canonical_authority_methods.items()
     }
-    # The public MWA entrypoints above still virtual-dispatch through these lower
-    # class helpers. Freezing only read_history/recover/prepare/commit therefore
-    # leaves a transient helper substitution able to forge history or suppress a
-    # durable append while the checked top-level methods remain unchanged.
     canonical_authority_helper_names = (
         "_load_bound_history",
         "_validate_workspace_binding",
@@ -1614,9 +1604,6 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         name: getattr(member, "__code__", None)
         for name, member in canonical_authority_json_members.items()
     }
-    # hashlib is also a mutable module object. Freezing only its module identity
-    # leaves sha256 member substitution able to relabel activation bytes and every
-    # downstream digest while all first-order MWA global checks still pass.
     canonical_authority_hashlib_module = (
         canonical_authority_module_globals.get("hashlib")
         if isinstance(canonical_authority_module_globals, dict)
@@ -1632,9 +1619,6 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         for name, member in canonical_authority_hashlib_members.items()
     }
 
-    # Nested MWA operations also virtual-dispatch into WorkspaceIdentityBinding.
-    # Capture the exact descriptor graph rather than getattr()-bound methods so
-    # classmethod/staticmethod identity remains stable and independently checkable.
     canonical_workspace_binding_descriptor_names = (
         "resolve",
         "validate_existing",
@@ -1665,11 +1649,6 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         for name, descriptor in canonical_workspace_binding_descriptors.items()
     }
 
-    # Descriptor identity alone does not close this trust graph: those exact
-    # functions resolve schema, parsing, hashing and durable-create helpers through
-    # their module globals at call time. Freeze the binding module surface that can
-    # change what durable workspace identity evidence means without changing any
-    # WorkspaceIdentityBinding descriptor or code object.
     canonical_workspace_binding_globals = getattr(
         workspace_binding_descriptor_callable(
             canonical_workspace_binding_descriptors["resolve"]
@@ -2381,4 +2360,3 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
 
 _seal_product_decision_activation_derive_dispatch()
 del _seal_product_decision_activation_derive_dispatch
-

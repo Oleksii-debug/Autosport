@@ -108,8 +108,16 @@ class _ControlledDateTime(datetime):
     def now(cls, tz=None):
         value = cls.current
         if tz is None:
-            return value.replace(tzinfo=None)
-        return value.astimezone(tz)
+            return cls(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+            )
+        return cls.fromtimestamp(value.timestamp(), tz=tz)
 
 
 def test_raw_acquisition_minting_seams_are_not_exposed() -> None:

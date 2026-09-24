@@ -17,6 +17,20 @@ from autosport.provider_liquidity import (
 D = Decimal
 
 
+class _HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("Decimal subclass virtual method must not execute")
+
+    def __lt__(self, other):
+        raise AssertionError("Decimal subclass comparison must not execute")
+
+    def as_tuple(self):
+        raise AssertionError("Decimal subclass canonicalization must not execute")
+
+    def __sub__(self, other):
+        raise AssertionError("Decimal subclass arithmetic must not execute")
+
+
 def account(
     provider_id: str,
     cash: str,
@@ -354,6 +368,40 @@ def test_account_rejects_unsafe_money_values(field: str, value: object) -> None:
 
     with pytest.raises(ValueError):
         ProviderLiquidityAccount(**kwargs)
+
+
+def test_money_ingress_rejects_decimal_subclass_before_virtual_dispatch() -> None:
+    hostile = _HostileDecimal("10")
+
+    with pytest.raises(ValueError, match="finite exact Decimal"):
+        ProviderLiquidityAccount(
+            provider_id="provider-a",
+            account_id="account-main",
+            currency="EUR",
+            cash_balance=hostile,
+            committed_cash=D("0"),
+            minimum_cash=D("1"),
+            target_cash=D("2"),
+        )
+
+    with pytest.raises(ValueError, match="finite exact Decimal"):
+        GlobalLiquiditySnapshot(
+            bankroll_id="bankroll-main",
+            currency="EUR",
+            bank_cash=hostile,
+            bank_reserve=D("0"),
+            provider_accounts=(),
+        )
+
+    with pytest.raises(ValueError, match="finite exact Decimal"):
+        LiquidityTransfer(
+            provider_id="provider-a",
+            account_id="account-main",
+            currency="EUR",
+            direction=LiquidityTransferDirection.BANK_TO_PROVIDER,
+            stage=LiquidityTransferStage.RESTORE_MINIMUM,
+            amount=hostile,
+        )
 
 
 def test_account_and_snapshot_invariants_fail_closed() -> None:

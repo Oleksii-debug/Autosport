@@ -156,6 +156,21 @@ class ForecastLogLossEndpointPolicyTests(unittest.TestCase):
             float(-Decimal("1e-1000000").ln()),
         )
 
+    def test_excessive_negative_exponent_fails_before_context_growth(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "log-loss probability Decimal exponent exceeds supported resource bound",
+        ):
+            self._evaluate_one("1e-1000001", 1)
+
+    def test_excessive_coefficient_fails_before_context_growth(self) -> None:
+        oversized = "0." + ("1" * 4097)
+        with self.assertRaisesRegex(
+            ValueError,
+            "log-loss probability Decimal coefficient exceeds supported resource bound",
+        ):
+            self._evaluate_one(oversized, 1)
+
     def test_log_loss_is_independent_of_ambient_decimal_precision(self) -> None:
         probability = "0.999999999999999999999999999999"
         with localcontext() as context:

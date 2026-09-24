@@ -80,6 +80,7 @@ class SettlementEngine(metaclass=_SettlementEngineMeta):
     _outcomes_authority: tuple[tuple[object, object], ...] | None = field(
         init=False,
         repr=False,
+        compare=False,
         default=None,
     )
 

@@ -308,6 +308,21 @@ def test_clopper_pearson_exact_all_ruined_edge_stays_constant_work() -> None:
     ) == Decimal(1)
 
 
+def test_request_resource_budget_precedes_stake_iteration() -> None:
+    supported = risk_module._MAX_SUPPORTED_EVALUATED_STAKES
+    poison_stakes = (object(),) * (supported + 1)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="UNSUPPORTED_RESOURCE_DOMAIN",
+    ):
+        replace(
+            _request(planned=1),
+            target_kind=RiskTargetKind.VECTOR,
+            evaluated_stakes=poison_stakes,
+        )
+
+
 def test_request_resource_budget_precedes_observation_iteration() -> None:
     supported = risk_module._MAX_SUPPORTED_FIXED_N_OBSERVATIONS
     poison_observations = (object(),) * (supported + 1)

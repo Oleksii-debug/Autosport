@@ -306,6 +306,35 @@ def test_reservation_admission_rejects_instance_insert_shadow(
     assert store.active_reserved_amount() == Decimal("0")
 
 
+def test_reservation_admission_rejects_store_path_retarget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("path-retarget", stake="25")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    original_path = store.path
+    store.path = tmp_path / "decoy-reservations.sqlite3"
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation store binding changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=precheck,
+            execution_ledger=ledger,
+        )
+
+    assert not store.path.exists()
+    store.path = original_path
+    assert store.active_reserved_amount() == Decimal("0")
+
+
 def test_local_reservations_close_same_balance_double_spend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

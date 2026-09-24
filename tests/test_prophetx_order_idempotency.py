@@ -300,6 +300,92 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 )
             )
 
+    def test_provider_order_correlation_rejects_rebound_identity_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            genuine = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            forged = type(genuine)(
+                attempt_id=genuine.attempt_id,
+                environment=genuine.environment,
+                transport=genuine.transport,
+                client_order_id=genuine.client_order_id,
+                effect_fingerprint="f" * 64,
+                production_write_qualified=genuine.production_write_qualified,
+            )
+            matched = _evidence(
+                forged,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id="provider-order-transitive",
+                effect_fingerprint=forged.effect_fingerprint,
+            )
+            attacker_calls = []
+
+            def forged_durable_facts(*_args, **_kwargs):
+                attacker_calls.append("_durable_attempt_facts")
+                return PROPHETX_SANDBOX_REST_PROFILE, forged.effect_fingerprint
+
+            with patch.object(
+                prophetx_module,
+                "_durable_attempt_facts",
+                forged_durable_facts,
+            ):
+                self.assertEqual(
+                    reconciliation_disposition(forged, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.CONFLICT,
+                )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
+    def test_provider_order_correlation_rejects_in_place_profile_map_substitution(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            genuine = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            forged = type(genuine)(
+                attempt_id=genuine.attempt_id,
+                environment=PROPHETX_SANDBOX_FIX_PROFILE.environment,
+                transport=PROPHETX_SANDBOX_FIX_PROFILE.transport,
+                client_order_id=genuine.client_order_id,
+                effect_fingerprint=genuine.effect_fingerprint,
+                production_write_qualified=(
+                    PROPHETX_SANDBOX_FIX_PROFILE.production_write_qualified
+                ),
+            )
+            matched = _evidence(
+                forged,
+                ProphetXEvidenceKind.FIX_EXECUTION_REPORT,
+                provider_order_id="provider-order-profile-map",
+                effect_fingerprint=forged.effect_fingerprint,
+            )
+            rest_version = PROPHETX_SANDBOX_REST_PROFILE.bookmaker_profile_version
+
+            with patch.dict(
+                prophetx_module._PROFILE_BY_VERSION,
+                {rest_version: PROPHETX_SANDBOX_FIX_PROFILE},
+            ):
+                self.assertEqual(
+                    reconciliation_disposition(forged, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.CONFLICT,
+                )
+
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
     def test_positive_provider_order_consumer_ignores_reexposed_binder_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "execution.jsonl"

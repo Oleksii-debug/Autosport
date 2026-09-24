@@ -409,6 +409,40 @@ def test_caller_reconstructed_continuity_object_cannot_authorize_reconciliation(
     assert store.latest_snapshot() is None
 
 
+def test_rebound_issuance_predicate_cannot_authorize_forged_reconciliation(
+    monkeypatch,
+    tmp_path,
+):
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    forged = BetdaqContinuousAccountEvidence(
+        snapshot=current.snapshot,
+        source_evidence=current.source_evidence,
+        principal_context=current.principal_context,
+    )
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+
+    monkeypatch.setattr(
+        continuity_module,
+        "_is_product_issued_continuity_evidence",
+        lambda _value: True,
+        raising=False,
+    )
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity issuance authority was exposed",
+    ):
+        append_to_reconciliation(store, forged)
+
+    assert store.latest_snapshot() is None
+
+
 def test_dataclass_replace_cannot_copy_product_issuance_authority(
     monkeypatch,
     tmp_path,
@@ -739,14 +773,13 @@ def test_reconciliation_lower_helper_instance_shadow_cannot_report_success(
         "_principal_context",
         "_project_snapshot",
         "_issue_continuous_evidence",
+        "_is_product_issued_continuity_evidence",
     ),
 )
 def test_positive_continuity_rejects_post_import_composition_helper_rebind(
-    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     helper_name: str,
 ) -> None:
-    del tmp_path  # parity with other filesystem-backed authority falsifiers
     opener = QueueUrlopen(balance())
     monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
     client = BetdaqAccountContinuityClient(

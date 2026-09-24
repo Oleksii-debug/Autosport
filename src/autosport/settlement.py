@@ -8,8 +8,45 @@ from .paper import PaperBook
 
 
 VALID_OUTCOMES = {"win", "loss", "void"}
+
+
+class _SettlementEngineMeta(type):
+    """Seal authority-bearing public settlement entry bindings after composition."""
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if (
+            cls.__dict__.get("_public_entry_bindings_sealed", False)
+            and name
+            in {
+                "record",
+                "settle_ready",
+                "_public_entry_bindings_sealed",
+            }
+        ):
+            raise TypeError(
+                "canonical settlement public entry binding is immutable"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if (
+            cls.__dict__.get("_public_entry_bindings_sealed", False)
+            and name
+            in {
+                "record",
+                "settle_ready",
+                "_public_entry_bindings_sealed",
+            }
+        ):
+            raise TypeError(
+                "canonical settlement public entry binding is immutable"
+            )
+        super().__delattr__(name)
+
+
 @dataclass(slots=True)
-class SettlementEngine:
+class SettlementEngine(metaclass=_SettlementEngineMeta):
+    _public_entry_bindings_sealed = False
     """Version-1 deterministic settlement state. Strategy code never receives this state during replay."""
 
     outcomes: dict[str, str] = field(default_factory=dict)
@@ -387,4 +424,5 @@ def _build_serialized_settlement_operations():
 SettlementEngine.record, SettlementEngine.settle_ready = (
     _build_serialized_settlement_operations()
 )
+SettlementEngine._public_entry_bindings_sealed = True
 del _build_serialized_settlement_operations

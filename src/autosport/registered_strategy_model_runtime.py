@@ -359,6 +359,7 @@ class RegisteredStrategyModelRuntime:
     research_protocol_id: str
     dataset_snapshot_id: str
     feature_set_id: str
+    authority_as_of: str
     training_cutoff: str
     _model: MeanBaselineModel = field(repr=False, compare=False)
 
@@ -389,6 +390,11 @@ class RegisteredStrategyModelRuntime:
         if _instant(self.training_cutoff, "model training_cutoff") > decision:
             raise RegisteredStrategyModelRuntimeError(
                 "registered model training cutoff exceeds decision time"
+            )
+        authority = _instant(self.authority_as_of, "runtime authority_as_of")
+        if decision != authority:
+            raise RegisteredStrategyModelRuntimeError(
+                "decision_at must equal runtime authority as_of"
             )
         value = self._model.mean_target
         if not math.isfinite(value):
@@ -830,6 +836,7 @@ def resolve_registered_strategy_model(
         research_protocol_id=research_protocol_id,
         dataset_snapshot_id=dataset_snapshot_id,
         feature_set_id=feature_set_id,
+        authority_as_of=as_of,
         training_cutoff=rebuilt.training_cutoff,
         _model=rebuilt,
     )

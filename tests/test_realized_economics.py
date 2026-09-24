@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, Inexact, ROUND_FLOOR, Rounded, localcontext
 
 import pytest
 
@@ -20,10 +20,14 @@ def test_realized_path_reports_growth_turnover_and_drawdown_without_authority():
     assert report.net_pnl == Decimal("100")
     assert report.gross_turnover == Decimal("550")
     assert report.return_on_start == Decimal("0.1")
-    assert report.return_on_turnover == Decimal("100") / Decimal("550")
+    with localcontext() as canonical:
+        canonical.prec = 50
+        assert report.return_on_turnover == Decimal("100") / Decimal("550")
     assert report.peak_bankroll == Decimal("1100")
     assert report.max_drawdown_amount == Decimal("250")
-    assert report.max_drawdown_fraction == Decimal("250") / Decimal("1100")
+    with localcontext() as canonical:
+        canonical.prec = 50
+        assert report.max_drawdown_fraction == Decimal("250") / Decimal("1100")
     assert report.observation_count == 4
     assert report.profitability_proven is False
     assert report.promotion_authority is False
@@ -76,4 +80,50 @@ def test_negative_bankroll_path_is_rejected():
             starting_bankroll=Decimal("100"),
             realized_pnls=(Decimal("-101"),),
             stakes=(Decimal("100"),),
+        )
+
+
+
+class _AdversarialDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("subclass hook must not run")
+
+
+def test_decimal_subclass_is_rejected_before_virtual_dispatch():
+    with pytest.raises(ValueError, match="must be a finite Decimal"):
+        summarize_realized_economics(
+            starting_bankroll=_AdversarialDecimal("100"),
+            realized_pnls=(),
+            stakes=(),
+        )
+
+
+def test_realized_economics_isolated_from_ambient_decimal_context():
+    arguments = dict(
+        starting_bankroll=Decimal("1000"),
+        realized_pnls=(Decimal("100"), Decimal("-250"), Decimal("50"), Decimal("200")),
+        stakes=(Decimal("100"), Decimal("150"), Decimal("100"), Decimal("200")),
+    )
+    baseline = summarize_realized_economics(**arguments)
+
+    with localcontext() as hostile:
+        hostile.prec = 2
+        hostile.rounding = ROUND_FLOOR
+        hostile.traps[Inexact] = True
+        hostile.traps[Rounded] = True
+        altered = summarize_realized_economics(**arguments)
+
+    assert altered == baseline
+
+
+def test_money_arithmetic_fails_closed_instead_of_silently_rounding():
+    huge = Decimal("9" * 51)
+    with pytest.raises(
+        ValueError,
+        match="not representable in the canonical Decimal context",
+    ):
+        summarize_realized_economics(
+            starting_bankroll=huge,
+            realized_pnls=(Decimal("1"),),
+            stakes=(Decimal("0"),),
         )

@@ -48,7 +48,8 @@ def _busy_disabled_ids() -> frozenset[str]:
         Path(web_shell_index_path()).with_name("app.js").read_text(encoding="utf-8")
     )
     match = re.search(
-        r"\[([0-9,\s]+)\]\.forEach\(\(id\)\s*=>\s*\{\s*byId\(id\)\.disabled\s*=\s*Boolean\(busy\)",
+        r"\[([0-9,\s]+)\]\.forEach\(\(id\)\s*=>\s*\{\s*"
+        r"setDisabledWithFocusFallback\(\s*byId\(id\),\s*busyDisabled\s*\);",
         script,
     )
     if match is None:

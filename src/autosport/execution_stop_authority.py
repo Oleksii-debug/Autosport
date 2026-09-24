@@ -584,7 +584,7 @@ class ExecutionStopAuthority:
         binding = _CANONICAL_ADMISSION_MONOTONIC_BINDING(self)
         try:
             authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY(self)
-            history = authority.read_history()
+            history = _CANONICAL_ADMISSION_MONOTONIC_READ_HISTORY(authority)
             receipt_exists = _CANONICAL_ADMISSION_READ_MONOTONIC_RECEIPT_UNLOCKED(
                 self,
                 authority,
@@ -608,7 +608,8 @@ class ExecutionStopAuthority:
                     semantic_binding_sha256=binding,
                     authority_tip_sha256=None,
                 )
-                authority.prepare(
+                _CANONICAL_ADMISSION_MONOTONIC_PREPARE(
+                    authority,
                     tx_id=tx_id,
                     observed_state_sha256=None,
                     intended_state_sha256=observed,
@@ -619,7 +620,8 @@ class ExecutionStopAuthority:
                     authority,
                     semantic_binding_sha256=binding,
                 )
-                authority.commit(
+                _CANONICAL_ADMISSION_MONOTONIC_COMMIT(
+                    authority,
                     tx_id=tx_id,
                     observed_state_sha256=observed,
                     semantic_binding_sha256=binding,
@@ -637,13 +639,17 @@ class ExecutionStopAuthority:
                 latest.phase is AuthorityPhase.PREPARE
                 and observed == latest.intended_state_sha256
             ):
-                authority.recover(
+                _CANONICAL_ADMISSION_MONOTONIC_RECOVER(
+                    authority,
                     observed_state_sha256=observed,
                     tx_id=latest.tx_id,
                     semantic_binding_sha256=binding,
                 )
             else:
-                authority.recover(observed_state_sha256=observed)
+                _CANONICAL_ADMISSION_MONOTONIC_RECOVER(
+                    authority,
+                    observed_state_sha256=observed,
+                )
         except MonotonicWorkspaceAuthorityError as exc:
             _CANONICAL_ADMISSION_RAISE_MONOTONIC_ERROR(exc)
 
@@ -664,7 +670,7 @@ class ExecutionStopAuthority:
         binding = self._monotonic_binding()
         try:
             authority = self._monotonic_authority()
-            history = authority.read_history()
+            history = _CANONICAL_ADMISSION_MONOTONIC_READ_HISTORY(authority)
             tip = None if not history else history[-1].record_sha256
             tx_id = self._monotonic_tx_id(
                 operation="APPEND_STOP_AUTHORITY_RECORD",
@@ -673,7 +679,8 @@ class ExecutionStopAuthority:
                 semantic_binding_sha256=binding,
                 authority_tip_sha256=tip,
             )
-            authority.prepare(
+            _CANONICAL_ADMISSION_MONOTONIC_PREPARE(
+                authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 intended_state_sha256=intended,
@@ -706,7 +713,8 @@ class ExecutionStopAuthority:
                 "STOP transition local state differs from monotonic PREPARE"
             )
         try:
-            authority.commit(
+            _CANONICAL_ADMISSION_MONOTONIC_COMMIT(
+                authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 semantic_binding_sha256=binding,
@@ -1314,6 +1322,26 @@ class ExecutionStopAuthority:
         return state
 
 
+# Freeze the public MonotonicWorkspaceAuthority entry points consumed by STOP
+# state verification/transitions. Calling these exact unbound functions prevents
+# a class-attribute rebind from silently changing authority semantics.
+_CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS = MonotonicWorkspaceAuthority
+_CANONICAL_ADMISSION_MONOTONIC_READ_HISTORY = (
+    MonotonicWorkspaceAuthority.read_history
+)
+_CANONICAL_ADMISSION_MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
+_CANONICAL_ADMISSION_MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
+_CANONICAL_ADMISSION_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH = tuple(
+    (name, value)
+    for name, value in MonotonicWorkspaceAuthority.__dict__.items()
+)
+_CANONICAL_ADMISSION_MONOTONIC_CLASS_CODES = tuple(
+    (name, getattr(value, "__code__", None))
+    for name, value in _CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH
+)
+
+
 # admission_lease is consumed across irreversible provider effects. Capture the
 # complete class-level helper graph reachable from its linearization lock and durable
 # current-state verification. Security-critical edges below the lease invoke these
@@ -1442,6 +1470,36 @@ def _require_canonical_admission_graph() -> None:
         ):
             raise ExecutionStopIntegrityError(
                 "canonical execution admission helper graph changed"
+            )
+
+    if (
+        MonotonicWorkspaceAuthority
+        is not _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority class changed"
+        )
+    live_monotonic_graph = MonotonicWorkspaceAuthority.__dict__
+    expected_monotonic_codes = dict(
+        _CANONICAL_ADMISSION_MONOTONIC_CLASS_CODES
+    )
+    if len(live_monotonic_graph) != len(
+        _CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority helper graph changed"
+        )
+    for method_name, expected_method in (
+        _CANONICAL_ADMISSION_MONOTONIC_CLASS_GRAPH
+    ):
+        live_method = live_monotonic_graph.get(method_name)
+        if (
+            live_method is not expected_method
+            or getattr(live_method, "__code__", None)
+            is not expected_monotonic_codes[method_name]
+        ):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority helper graph changed"
             )
 
     live_operation_generator = getattr(

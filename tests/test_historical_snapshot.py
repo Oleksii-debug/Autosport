@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import http.client as http_client
 import json
 import tempfile
 import threading
@@ -210,6 +211,68 @@ class HistoricalSnapshotTests(unittest.TestCase):
                 )
             self.assertFalse(output_path.exists())
             self.assertFalse(evidence_path.exists())
+
+        self.assertEqual(forged_calls, [])
+
+    def test_product_owned_capture_rejects_precall_https_connection_rebind(self) -> None:
+        forged_calls: list[str] = []
+
+        class ForgedHTTPSConnection:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+                forged_calls.append("init")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            http_client,
+            "HTTPSConnection",
+            ForgedHTTPSConnection,
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "network dispatch changed before construction",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+        self.assertEqual(forged_calls, [])
+
+    def test_product_owned_capture_rejects_https_connection_method_drift(self) -> None:
+        forged_calls: list[str] = []
+
+        for method_name in ("request", "getresponse", "connect"):
+            with self.subTest(method_name=method_name):
+                def forged_method(*args, _method_name=method_name, **kwargs):
+                    del args, kwargs
+                    forged_calls.append(_method_name)
+                    raise AssertionError("forged HTTPS connection dispatch must not run")
+
+                with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+                    http_client.HTTPSConnection,
+                    method_name,
+                    forged_method,
+                ):
+                    output_path = Path(temp) / "market.jsonl"
+                    evidence_path = Path(temp) / "evidence.json"
+                    with self.assertRaisesRegex(
+                        ProviderPayloadError,
+                        "network dispatch changed before construction",
+                    ):
+                        capture_product_owned_historical_snapshot(
+                            api_key="secret-key-must-not-leak",
+                            requested_at="2026-09-12T10:03:00Z",
+                            output_path=output_path,
+                            evidence_path=evidence_path,
+                        )
+                    self.assertFalse(output_path.exists())
+                    self.assertFalse(evidence_path.exists())
 
         self.assertEqual(forged_calls, [])
     def test_product_owned_capture_rejects_live_constructor_rebind_before_io(self) -> None:

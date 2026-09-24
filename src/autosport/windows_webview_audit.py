@@ -82,6 +82,11 @@ _REQUIRED_LANDMARKS = {"header", "nav", "main"}
 _REQUIRED_SHORTCUT_MARKERS = (
     'event.key === "F2"',
     'event.key === "F8"',
+    "event.altKey",
+    "event.ctrlKey",
+    "event.metaKey",
+    "event.shiftKey",
+    "if (hasShortcutModifier(event)) return;",
 )
 _FORBIDDEN_SHORTCUT_MARKERS = (
     'event.ctrlKey && event.altKey',
@@ -329,6 +334,18 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     for marker in _FORBIDDEN_SHORTCUT_MARKERS:
         if marker in javascript:
             failures.append(f"screen-reader/browser shortcut collision remains: {marker}")
+    modifier_guard = "if (hasShortcutModifier(event)) return;"
+    modifier_guard_index = javascript.find(modifier_guard)
+    for shortcut_marker in ('event.key === "F2"', 'event.key === "F8"'):
+        shortcut_index = javascript.find(shortcut_marker)
+        if (
+            modifier_guard_index < 0
+            or shortcut_index < 0
+            or modifier_guard_index > shortcut_index
+        ):
+            failures.append(
+                f"{shortcut_marker}: modifier fence must run before preventDefault handling"
+            )
     if "replaceChildren()" in javascript:
         failures.append("poll projection must preserve semantic descendants when state is unchanged")
     for marker in (

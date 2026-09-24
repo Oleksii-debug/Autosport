@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
+import hmac
 import json
 import http.client as _http_client
 import os
@@ -344,6 +345,29 @@ def test_json_dumps_code_mutation_cannot_mask_issued_field_mutation(
             require_authoritative_betfair_account_identity(value, client=client)
     finally:
         json.dumps.__code__ = original_dumps_code
+
+
+def test_hmac_digest_code_mutation_cannot_mask_issued_field_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    original_digest_code = hmac.digest.__code__
+
+    def forged_digest(_key, _msg, _digest):
+        return b"\\x00" * 32
+
+    try:
+        hmac.digest.__code__ = forged_digest.__code__
+        client = _client()
+        value = resolve_betfair_authenticated_account_identity(client)
+
+        object.__setattr__(value, "currency_code", "GBP")
+
+        assert not is_authoritative_betfair_account_identity(value, client=client)
+        with pytest.raises(BetfairAccountIdentityError, match="lacks current"):
+            require_authoritative_betfair_account_identity(value, client=client)
+    finally:
+        hmac.digest.__code__ = original_digest_code
 
 
 def test_identity_class_post_init_rebinding_cannot_mint_altered_k07_identity(

@@ -1,9 +1,10 @@
 """Closed product-owned source registry for operator-selectable product sources.
 
 The registry maps a stable operator-facing machine identifier to an already-supported
-canonical source factory specification.  It does not load or execute the factory and
-does not grant runtime authority.  The canonical product composition root must still
-pass the returned factory specification through ``product_entrypoint._validated_source``.
+canonical source factory specification.  It does not execute the factory and does
+not grant runtime authority.  For the packaged trusted-code profile it also retains
+the exact product-imported callable identity so the runtime can reject a dynamically
+rebound registered symbol before durable composition.
 """
 
 from __future__ import annotations
@@ -11,6 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import keyword
 import re
+from typing import Callable
+
+from .product_source import create_parlay_product_source
+
+
+SourceFactory = Callable[[], object]
 
 
 _SOURCE_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z", re.ASCII)
@@ -92,6 +99,10 @@ _PRODUCT_SOURCE_ENTRIES = (
     ),
 )
 
+_PRODUCT_SOURCE_FACTORIES: dict[str, SourceFactory] = {
+    "parlayapi-table-tennis": create_parlay_product_source,
+}
+
 if len({entry.source_id for entry in _PRODUCT_SOURCE_ENTRIES}) != len(
     _PRODUCT_SOURCE_ENTRIES
 ):
@@ -100,6 +111,17 @@ if len({entry.factory_spec for entry in _PRODUCT_SOURCE_ENTRIES}) != len(
     _PRODUCT_SOURCE_ENTRIES
 ):
     raise RuntimeError("duplicate canonical product source factory_spec")
+if set(_PRODUCT_SOURCE_FACTORIES) != {
+    entry.source_id for entry in _PRODUCT_SOURCE_ENTRIES
+}:
+    raise RuntimeError("product source callable registry does not match source entries")
+for _entry in _PRODUCT_SOURCE_ENTRIES:
+    _factory = _PRODUCT_SOURCE_FACTORIES[_entry.source_id]
+    if (
+        getattr(_factory, "__module__", None) + ":" + getattr(_factory, "__name__", "")
+        != _entry.factory_spec
+    ):
+        raise RuntimeError("product source callable identity does not match factory_spec")
 
 
 def list_product_source_entries() -> tuple[ProductSourceRegistryEntry, ...]:
@@ -122,3 +144,25 @@ def resolve_product_source_factory_spec(source_id: str) -> str:
     """Return product-owned factory text for later canonical runtime validation."""
 
     return resolve_product_source_entry(source_id).factory_spec
+
+
+def resolve_product_source_runtime_binding(
+    factory_spec: str,
+    expected_provider_source_id: str,
+) -> tuple[ProductSourceRegistryEntry, SourceFactory]:
+    """Resolve exact shipped metadata plus its import-time callable identity."""
+
+    canonical_factory_spec = _factory_spec(factory_spec)
+    canonical_provider_id = _provider_source_id(expected_provider_source_id)
+    matches = tuple(
+        entry
+        for entry in _PRODUCT_SOURCE_ENTRIES
+        if entry.factory_spec == canonical_factory_spec
+        and entry.expected_provider_source_id == canonical_provider_id
+    )
+    if len(matches) != 1:
+        raise OperatorSourceRegistryError(
+            "source binding is not registered by this product build"
+        )
+    entry = matches[0]
+    return entry, _PRODUCT_SOURCE_FACTORIES[entry.source_id]

@@ -533,6 +533,83 @@ class ProductDecisionActivationTests(unittest.TestCase):
         canonical = self._initialize()
         self.assertEqual(canonical.product_source_id, "provider-a")
 
+    def test_workspace_binding_entrypoint_rebinds_fail_before_start_publication(
+        self,
+    ) -> None:
+        binding_type = type(self.store._authority.workspace_binding)
+
+        def forged_validate_existing(_binding, **_kwargs):
+            return True, True
+
+        def forged_ensure_bound(_binding):
+            return None
+
+        with mock.patch.object(
+            binding_type,
+            "validate_existing",
+            forged_validate_existing,
+        ), mock.patch.object(
+            binding_type,
+            "ensure_bound",
+            forged_ensure_bound,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested workspace identity binding dispatch changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
+    def test_workspace_binding_lower_helper_rebind_fails_before_start_publication(
+        self,
+    ) -> None:
+        binding_type = type(self.store._authority.workspace_binding)
+        workspace_instance_id = self.store._authority.workspace_instance_id
+
+        def forged_read_workspace_marker_id(_path):
+            return workspace_instance_id
+
+        with mock.patch.object(
+            binding_type,
+            "_read_workspace_marker_id",
+            staticmethod(forged_read_workspace_marker_id),
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested workspace identity binding dispatch changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+
+    def test_workspace_binding_resolve_rebind_fails_before_store_construction(
+        self,
+    ) -> None:
+        binding_type = type(self.store._authority.workspace_binding)
+
+        def forged_resolve(_cls, **_kwargs):
+            raise AssertionError("forged workspace binding resolve must never execute")
+
+        with mock.patch.object(
+            binding_type,
+            "resolve",
+            classmethod(forged_resolve),
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested workspace identity binding dispatch changed",
+            ):
+                ProductDecisionActivationStore(self.workspace)
+
+        reopened = ProductDecisionActivationStore(self.workspace)
+        self.assertEqual(reopened.path, self.store.path)
+
     def test_exact_same_root_mwa_cannot_replace_constructor_authority(
         self,
     ) -> None:

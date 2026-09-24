@@ -150,5 +150,8 @@ def test_keyword_package_name_and_symlinked_source_fail_closed(tmp_path: Path) -
         link.symlink_to(target)
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation unavailable")
-    with pytest.raises(\n        ArchitectureFitnessError,\n        match=r"symlinked package entry is not canonical: linked\\.py",\n    ):
+    with pytest.raises(
+        ArchitectureFitnessError,
+        match=r"symlinked package entry is not canonical: linked\.py",
+    ):
         analyze_package(package)

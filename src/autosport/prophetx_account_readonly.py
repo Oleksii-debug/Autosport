@@ -191,6 +191,7 @@ def _build_provider_fetch_factory():
     timeout_error_type = TimeoutError
     os_error_type = OSError
     http_exception_type = HTTPException
+    balance_url = BALANCE_URL
 
     def make_provider_fetch(
         opener: object,
@@ -499,7 +500,7 @@ def _build_provider_fetch_factory():
             headers: Mapping[str, str],
             timeout_seconds: float,
         ) -> ProphetXHttpResponse:
-            if url != BALANCE_URL:
+            if url != balance_url:
                 raise error_type(
                     "ProphetX transport target is outside the fixed balance origin"
                 )

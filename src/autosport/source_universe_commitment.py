@@ -15,6 +15,7 @@ _CANONICAL_READ_SEAM_NAMES = frozenset(
         "collector_cycle_evidence",
         "_connect",
         "_connect_path",
+        "_path_file_identity",
         "_cycle_terminal_payload_sha256",
     }
 )

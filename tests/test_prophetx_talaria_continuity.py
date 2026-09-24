@@ -137,3 +137,61 @@ def test_clock_rollback_and_secret_shaped_digest_fail_closed():
 def test_source_contains_no_production_websocket_target():
     import autosport.prophetx_talaria_continuity as module
     text=open(module.__file__,encoding="utf-8").read(); assert "wss://" not in text and "prophetx.co:443" not in text
+
+
+def test_dirty_signal_requires_snapshot_at_or_after_rebase_trigger():
+    scope = TalariaScope("1")
+    m, g, ch = setup((scope,))
+    handshake(m, g, ch)
+    rebase(m, g, (scope,))
+    channel = next(iter(ch))
+    update = raw("market_selections", {"scope": {"event_id": "1"}, "markets": [{"v": 1}]}, channel)
+    m.handle_frame(g, update, observed_at="2026-09-22T18:00:20+00:00")
+
+    with pytest.raises(ProphetXTalariaContractError, match="rebase trigger"):
+        m.acknowledge_rebase(
+            g,
+            scope=scope,
+            snapshot_evidence_sha256="d" * 64,
+            snapshot_available_at="2026-09-22T18:00:15+00:00",
+            observed_at="2026-09-22T18:00:21+00:00",
+        )
+    assert m.state is TalariaContinuityState.REBASE_REQUIRED
+
+    m.acknowledge_rebase(
+        g,
+        scope=scope,
+        snapshot_evidence_sha256="e" * 64,
+        snapshot_available_at="2026-09-22T18:00:20+00:00",
+        observed_at="2026-09-22T18:00:21+00:00",
+    )
+    assert m.state is TalariaContinuityState.REBASED
+
+
+def test_second_dirty_signal_raises_rebase_snapshot_lower_bound():
+    scope = TalariaScope("1")
+    m, g, ch = setup((scope,))
+    handshake(m, g, ch)
+    rebase(m, g, (scope,))
+    channel = next(iter(ch))
+    first = raw("market_selections", {"scope": {"event_id": "1"}, "markets": [{"v": 1}]}, channel)
+    second = raw("market_selections", {"scope": {"event_id": "1"}, "markets": [{"v": 2}]}, channel)
+    m.handle_frame(g, first, observed_at="2026-09-22T18:00:20+00:00")
+    m.handle_frame(g, second, observed_at="2026-09-22T18:00:22+00:00")
+
+    with pytest.raises(ProphetXTalariaContractError, match="rebase trigger"):
+        m.acknowledge_rebase(
+            g,
+            scope=scope,
+            snapshot_evidence_sha256="d" * 64,
+            snapshot_available_at="2026-09-22T18:00:21+00:00",
+            observed_at="2026-09-22T18:00:23+00:00",
+        )
+    m.acknowledge_rebase(
+        g,
+        scope=scope,
+        snapshot_evidence_sha256="e" * 64,
+        snapshot_available_at="2026-09-22T18:00:22+00:00",
+        observed_at="2026-09-22T18:00:23+00:00",
+    )
+    assert m.state is TalariaContinuityState.REBASED

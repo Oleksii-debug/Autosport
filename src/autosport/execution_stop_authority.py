@@ -1858,6 +1858,83 @@ def _require_canonical_admission_graph() -> None:
         )
 
 
+def _build_public_stop_read_authority():
+    """Remove instance virtual dispatch from public positive STOP reads."""
+
+    require_admission_graph = _require_canonical_admission_graph
+    operation_lock = _CANONICAL_ADMISSION_OPERATION_LOCK
+    current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+    authority_error = ExecutionStopAuthorityError
+    stopped_error = ExecutionStoppedError
+    armed_mode = ExecutionAuthorityMode.ARMED
+    stopped_mode = ExecutionAuthorityMode.STOPPED
+    decision_type = ExecutionAdmissionDecision
+
+    def current(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        require_admission_graph()
+        with operation_lock(self):
+            state = current_unlocked(self)
+        require_admission_graph()
+        return state
+
+    def decision(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAdmissionDecision:
+        try:
+            state = current(self)
+        except authority_error as exc:
+            return decision_type(
+                allowed=False,
+                mode=stopped_mode,
+                revision=None,
+                reason=f"fail-closed: {exc}",
+            )
+        if state.mode is not armed_mode:
+            return decision_type(
+                allowed=False,
+                mode=state.mode,
+                revision=state.revision,
+                reason=state.reason,
+            )
+        return decision_type(
+            allowed=True,
+            mode=state.mode,
+            revision=state.revision,
+            reason=state.reason,
+        )
+
+    def assert_execution_allowed(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        state = current(self)
+        if state.mode is not armed_mode:
+            raise stopped_error(
+                f"execution STOP is active at revision {state.revision}: "
+                f"{state.reason}"
+            )
+        return state
+
+    return current, decision, assert_execution_allowed
+
+
+(
+    _canonical_public_current,
+    _canonical_public_decision,
+    _canonical_public_assert_execution_allowed,
+) = _build_public_stop_read_authority()
+ExecutionStopAuthority.current = _canonical_public_current
+ExecutionStopAuthority.decision = _canonical_public_decision
+ExecutionStopAuthority.assert_execution_allowed = (
+    _canonical_public_assert_execution_allowed
+)
+del _canonical_public_current
+del _canonical_public_decision
+del _canonical_public_assert_execution_allowed
+del _build_public_stop_read_authority
+
+
 def _build_sealed_admission_lease():
     """Bind positive STOP admission to the import-time canonical module graph.
 

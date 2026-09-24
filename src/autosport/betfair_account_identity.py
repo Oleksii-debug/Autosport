@@ -744,6 +744,10 @@ def _make_account_identity_authority():
                 if record is not None and record.value_ref is dead_ref:
                     issued.pop(identity, None)
 
+        if not identity_projection_dependencies_are_current():
+            raise identity_error_type(
+                "account identity projection dependencies changed before issuance"
+            )
         hidden_digest = issued_identity_digest(value)
         expected_public_id = public_identity_digest(value)
         try:
@@ -752,7 +756,10 @@ def _make_account_identity_authority():
             raise identity_error_type(
                 "account identity public projection cannot be verified"
             ) from exc
-        if not hmac_compare_digest(expected_public_id, current_public_id):
+        if (
+            not identity_projection_dependencies_are_current()
+            or not hmac_compare_digest(expected_public_id, current_public_id)
+        ):
             raise identity_error_type(
                 "account identity public projection changed before issuance"
             )
@@ -904,6 +911,8 @@ def _make_account_identity_authority():
                 expected_public_id = public_identity_digest(value)
                 current_public_id = value.identity_id
             except (identity_error_type, AttributeError, TypeError, ValueError):
+                return False
+            if not identity_projection_dependencies_are_current():
                 return False
             if not hmac_compare_digest(record.identity_id, current_identity_digest):
                 return False

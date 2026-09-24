@@ -1122,6 +1122,21 @@ def _build_canonical_reservation_admission_authority():
         name: callable_code(helper)
         for name, helper in module_helpers.items()
     }
+    execution_action_class = ExecutionAction
+    execution_action_method_names = ("__init__", "__post_init__", "to_dict")
+    execution_action_methods = {
+        name: getattr(execution_action_class, name)
+        for name in execution_action_method_names
+    }
+    execution_action_method_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in execution_action_methods.items()
+    }
+    execution_action_field_descriptors = tuple(
+        (name, vars(execution_action_class)[name])
+        for name in getattr(execution_action_class, "__slots__", ())
+        if name != "__weakref__" and name in vars(execution_action_class)
+    )
     connect = store_methods["_connect"]
     read_all = store_methods["_read_all"]
     admission_error = BetfairPreTradeReservationError
@@ -1173,6 +1188,26 @@ def _build_canonical_reservation_admission_authority():
             ):
                 raise admission_error(
                     "canonical Betfair reservation admission helper dispatch changed"
+                )
+        if module_globals.get("ExecutionAction") is not execution_action_class:
+            raise admission_error(
+                "canonical Betfair execution action dispatch changed"
+            )
+        for name in execution_action_method_names:
+            expected_method = execution_action_methods[name]
+            live_method = getattr(execution_action_class, name, None)
+            if (
+                live_method is not expected_method
+                or getattr(live_method, "__code__", None)
+                is not execution_action_method_codes[name]
+            ):
+                raise admission_error(
+                    "canonical Betfair execution action dispatch changed"
+                )
+        for name, expected_descriptor in execution_action_field_descriptors:
+            if vars(execution_action_class).get(name) is not expected_descriptor:
+                raise admission_error(
+                    "canonical Betfair execution action field dispatch changed"
                 )
         return store
 

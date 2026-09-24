@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
+from autosport import _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root
+from autosport.dataset_snapshot_lineage import (
+    DatasetSnapshotLineageAuthority,
+    membership_manifest_sha256,
+)
 from autosport.holdout_disclosure import (
     DisclosureChannel,
     DisclosureKind,
@@ -12,12 +19,29 @@ from autosport.point_in_time_evidence import (
     HoldoutAlreadyConsumedError,
     HoldoutConsumptionLedger,
 )
-from autosport.scientific_registry import DatasetSnapshot
+from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
 
 
-_MANIFEST_A = "a" * 64
-_MANIFEST_B = "b" * 64
+def _member(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_MEMBERS_A = (_member("a"), _member("b"))
+_MEMBERS_B = (*_MEMBERS_A, _member("c"))
+_MANIFEST_A = membership_manifest_sha256(_MEMBERS_A)
+_MANIFEST_B = membership_manifest_sha256(_MEMBERS_B)
 _DISCLOSED_AT = "2026-09-21T12:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _product_machine_authority(tmp_path, monkeypatch):
+    root = (tmp_path / "product-machine-authority").resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: root,
+    )
+    return root
 
 
 def _snapshot(
@@ -38,9 +62,41 @@ def _snapshot(
 
 
 def _ledger(tmp_path) -> HoldoutConsumptionLedger:
+    workspace = tmp_path / "holdout-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    registry = ScientificRegistry.initialize_pristine(
+        workspace / "scientific-registry.json"
+    )
+    snapshots = (
+        (_snapshot(), _MEMBERS_A, None),
+        (
+            _snapshot(snapshot_id="renamed-snapshot"),
+            _MEMBERS_A,
+            "confirmation-a",
+        ),
+        (
+            _snapshot(snapshot_id="confirmation-b", manifest_sha256=_MANIFEST_B),
+            _MEMBERS_B,
+            "renamed-snapshot",
+        ),
+    )
+    for snapshot, _, _ in snapshots:
+        registry.append(snapshot)
+    authority_root = lineage_trust_root._machine_account_authority_root()
+    lineage = DatasetSnapshotLineageAuthority.initialize_pristine(
+        workspace / "dataset-snapshot-lineage.json",
+        registry,
+        authority_root=authority_root,
+    )
+    for snapshot, members, parent in snapshots:
+        lineage.register(
+            snapshot_id=snapshot.dataset_snapshot_id,
+            member_sha256=members,
+            parent_snapshot_id=parent,
+        )
     return HoldoutConsumptionLedger(
-        tmp_path / "holdout-consumption.json",
-        authority_root=tmp_path.parent / f"{tmp_path.name}-machine-authority",
+        workspace / "holdout-consumption.json",
+        lineage_authority=lineage,
     )
 
 
@@ -250,7 +306,6 @@ def test_gate_rejects_instance_shadowed_ledger_consume(tmp_path) -> None:
     snapshot = _snapshot()
     ledger = _ledger(tmp_path)
     gate = HoldoutDisclosureGate(ledger)
-
     ledger.consume = lambda **_: None  # type: ignore[method-assign]
 
     with pytest.raises(HoldoutDisclosureError, match="instance-shadowed"):
@@ -271,7 +326,6 @@ def test_gate_rejects_rebound_canonical_consume_dispatch(tmp_path, monkeypatch) 
     snapshot = _snapshot()
     ledger = _ledger(tmp_path)
     gate = HoldoutDisclosureGate(ledger)
-
     monkeypatch.setattr(HoldoutConsumptionLedger, "consume", lambda self, **_: None)
 
     with pytest.raises(HoldoutDisclosureError, match="dispatch was rebound"):

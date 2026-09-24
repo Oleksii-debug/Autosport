@@ -55,6 +55,18 @@ class _BlockingRuntime:
         self.closed = True
 
 
+class _BlockingStartRuntime(_BlockingRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = threading.Event()
+        self.release_start = threading.Event()
+
+    def start(self) -> object:
+        self.start_entered.set()
+        assert self.release_start.wait(2.0)
+        return self._status
+
+
 def _patch_profile_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
         profile_module,
@@ -288,6 +300,54 @@ def test_canonical_worker_issues_after_start_and_revokes_on_stop(
     assert runtime.closed is True
     assert revoked == [profile]
     assert worker.trusted_runtime_profile is None
+
+
+def test_stop_during_start_cannot_publish_trusted_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _BlockingStartRuntime()
+    issued = False
+
+    def build(
+        _workspace: Path,
+        _source_factory: str,
+        _bankroll: str,
+        *,
+        expected_source_id: str | None = None,
+    ) -> _BlockingStartRuntime:
+        assert expected_source_id == _PROVIDER_SOURCE_ID
+        return runtime
+
+    def forbidden_issue(*_args, **_kwargs):
+        nonlocal issued
+        issued = True
+        raise AssertionError("STOP won before trusted profile issuance")
+
+    monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
+    monkeypatch.setattr(
+        worker_module,
+        "issue_trusted_runtime_code_profile",
+        forbidden_issue,
+    )
+
+    worker = ProductGuiWorker(runtime_builder=build)
+    assert worker.start(
+        workspace=tmp_path,
+        source_factory=_FACTORY_SPEC,
+        expected_source_id=_PROVIDER_SOURCE_ID,
+        poll_seconds=60.0,
+    )
+    assert runtime.start_entered.wait(2.0)
+
+    assert worker.request_stop("operator_stop")
+    runtime.release_start.set()
+    assert worker.join(2.0)
+
+    assert issued is False
+    assert worker.trusted_runtime_profile is None
+    assert runtime.stop_reason == "operator_stop"
+    assert runtime.closed is True
 
 
 def test_arbitrary_headless_builder_never_mints_trusted_profile(

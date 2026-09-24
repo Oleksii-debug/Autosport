@@ -1396,6 +1396,31 @@ _CANONICAL_ADMISSION_MONOTONIC_DEPENDENCY_CLASSES = tuple(
         ),
     )
 )
+# pathlib dispatch is part of the transitive monotonic read/durability graph.
+# Freezing only the module-level Path object is insufficient: its inherited class
+# members can be rebound while Path identity remains unchanged, allowing a forged
+# directory view to hide a newer STOP authority suffix.
+_CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS = _monotonic_authority_module.Path
+_CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS = type(
+    _CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS(".")
+)
+_CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH = tuple(
+    (
+        path_class,
+        tuple(
+            (
+                member_name,
+                member,
+                _monotonic_dependency_callable_state(member),
+            )
+            for member_name, member in path_class.__dict__.items()
+        ),
+    )
+    for path_class in _CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS.__mro__
+    if path_class is not object
+)
+
+
 _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_ID = (
     _monotonic_authority_module.AUTHORITY_ID
 )
@@ -1445,6 +1470,41 @@ def _require_canonical_monotonic_module_graph() -> None:
             ):
                 raise ExecutionStopIntegrityError(
                     "canonical monotonic authority dependency class graph changed"
+                )
+
+    expected_path_mro = tuple(
+        path_class
+        for path_class, _members in _CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH
+    )
+    live_path_mro = tuple(
+        path_class
+        for path_class in _CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS.__mro__
+        if path_class is not object
+    )
+    if (
+        live_graph.get("Path") is not _CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS
+        or live_path_mro != expected_path_mro
+    ):
+        raise ExecutionStopIntegrityError(
+            "canonical monotonic authority filesystem dispatch graph changed"
+        )
+    for path_class, expected_members in (
+        _CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH
+    ):
+        live_members = path_class.__dict__
+        if len(live_members) != len(expected_members):
+            raise ExecutionStopIntegrityError(
+                "canonical monotonic authority filesystem dispatch graph changed"
+            )
+        for member_name, expected_member, expected_state in expected_members:
+            live_member = live_members.get(member_name)
+            if (
+                live_member is not expected_member
+                or _monotonic_dependency_callable_state(live_member)
+                != expected_state
+            ):
+                raise ExecutionStopIntegrityError(
+                    "canonical monotonic authority filesystem dispatch graph changed"
                 )
 
 

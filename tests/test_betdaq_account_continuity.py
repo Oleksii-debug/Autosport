@@ -1001,3 +1001,41 @@ def test_positive_continuity_rejects_projection_validation_rebind_before_provide
     assert attacker_calls == []
     assert opener.calls == []
 
+
+def test_positive_continuity_rejects_slot_field_descriptor_rebind_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = QueueUrlopen(balance())
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    client = BetdaqAccountContinuityClient(
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    descriptor_calls: list[str] = []
+
+    class ForgedPrincipalIdDescriptor:
+        def __get__(self, instance, owner=None):
+            del instance, owner
+            descriptor_calls.append("get")
+            return "betdaq-authenticated-principal:" + ("f" * 64)
+
+        def __set__(self, instance, value):
+            del instance, value
+            descriptor_calls.append("set")
+
+    monkeypatch.setattr(
+        BetdaqAuthenticatedPrincipalContext,
+        "principal_context_id",
+        ForgedPrincipalIdDescriptor(),
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity field descriptor changed",
+    ):
+        client.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert descriptor_calls == []
+    assert opener.calls == []

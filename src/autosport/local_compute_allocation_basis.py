@@ -863,7 +863,11 @@ def _build_allocation_basis_store_runtime():
             "canonical EconomicGoal descriptor authority is unavailable"
         )
 
-    json_dumps = json.dumps
+    json_module = json
+    json_loads = json_module.loads
+    json_dumps = json_module.dumps
+    json_encoder_type = json_module.JSONEncoder
+    json_decoder_type = json_module.JSONDecoder
     sha256 = hashlib.sha256
     open_file = open
     os_fspath = os.fspath
@@ -1101,7 +1105,19 @@ def _build_allocation_basis_store_runtime():
                 "allocation basis authority coordinates changed"
             )
 
+    def require_json_member_authority() -> None:
+        if (
+            json_module.loads is not json_loads
+            or json_module.dumps is not json_dumps
+            or json_module.JSONEncoder is not json_encoder_type
+            or json_module.JSONDecoder is not json_decoder_type
+        ):
+            raise error_type(
+                "current EconomicGoal stdlib JSON authority changed"
+            )
+
     def require_goal_parser_authority() -> None:
+        require_json_member_authority()
         live_globals = getattr(goal_store_load, "__globals__", {})
         live_parser = live_globals.get("economic_goal_from_json")
         if (
@@ -1136,6 +1152,7 @@ def _build_allocation_basis_store_runtime():
                 raise error_type(
                     "current EconomicGoal value descriptor authority changed"
                 )
+        require_json_member_authority()
 
     def sealed_current_goal(self):
         require_state(self)

@@ -32,6 +32,7 @@ from .monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
 )
+from .monotonic_workspace_binding import WorkspaceIdentityBinding
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -777,6 +778,7 @@ def _build_allocation_basis_store_runtime():
 
     path_type = Path
     authority_type = MonotonicWorkspaceAuthority
+    binding_type = WorkspaceIdentityBinding
     lock_type = WorkspaceEconomicLock
     file_name = FILE_NAME
     authority_domain = AUTHORITY_DOMAIN
@@ -813,6 +815,39 @@ def _build_allocation_basis_store_runtime():
         name: getattr(method, "__code__", None)
         for name, method in authority_dispatch.items()
     }
+    binding_descriptor_names = (
+        "resolve",
+        "validate_existing",
+        "ensure_bound",
+        "_read_workspace_marker_id",
+        "_read_path_binding_id",
+        "_ensure_path_binding",
+        "_ensure_workspace_marker",
+        "_workspace_payload",
+        "_path_payload",
+    )
+    binding_descriptors = {
+        name: binding_type.__dict__.get(name)
+        for name in binding_descriptor_names
+    }
+
+    def binding_descriptor_callable(descriptor: object) -> object:
+        if isinstance(descriptor, (classmethod, staticmethod)):
+            return descriptor.__func__
+        return descriptor
+
+    binding_descriptor_codes = {
+        name: getattr(binding_descriptor_callable(descriptor), "__code__", None)
+        for name, descriptor in binding_descriptors.items()
+    }
+    if (
+        any(descriptor is None for descriptor in binding_descriptors.values())
+        or any(code is None for code in binding_descriptor_codes.values())
+    ):
+        raise error_type(
+            "canonical allocation basis workspace binding dispatch is unavailable"
+        )
+    sealed_binding = weakref.WeakKeyDictionary()
     sha256_file_fn = sha256_file
     object_getattribute = object.__getattribute__
 
@@ -850,6 +885,19 @@ def _build_allocation_basis_store_runtime():
             )
         return root
 
+    def require_binding_dispatch() -> None:
+        for name, canonical in binding_descriptors.items():
+            live = binding_type.__dict__.get(name)
+            live_callable = binding_descriptor_callable(live)
+            if (
+                live is not canonical
+                or getattr(live_callable, "__code__", None)
+                is not binding_descriptor_codes[name]
+            ):
+                raise error_type(
+                    "allocation basis workspace binding dispatch changed"
+                )
+
     def require_state(self) -> None:
         try:
             (
@@ -858,6 +906,7 @@ def _build_allocation_basis_store_runtime():
                 frozen_authority,
                 frozen_root,
             ) = sealed_state[self]
+            frozen_binding = sealed_binding[self]
         except (KeyError, TypeError) as exc:
             raise error_type(
                 "allocation basis authority state is not sealed"
@@ -892,6 +941,14 @@ def _build_allocation_basis_store_runtime():
                 )
 
         binding = authority.workspace_binding
+        if (
+            binding is not frozen_binding
+            or type(binding) is not binding_type
+        ):
+            raise error_type(
+                "allocation basis workspace binding identity changed"
+            )
+        require_binding_dispatch()
         workspace_instance_id = authority.workspace_instance_id
         namespace_material = "\0".join(
             (
@@ -1006,6 +1063,7 @@ def _build_allocation_basis_store_runtime():
 
     def sealed_init(self, workspace: str | Path) -> None:
         authority_root = canonical_root()
+        require_binding_dispatch()
         workspace_path = (
             path_type(workspace).absolute().resolve(strict=False)
         )
@@ -1017,6 +1075,12 @@ def _build_allocation_basis_store_runtime():
             key=authority_key,
             authority_root=authority_root,
         )
+        binding = authority.workspace_binding
+        require_binding_dispatch()
+        if type(binding) is not binding_type:
+            raise error_type(
+                "allocation basis workspace binding identity changed"
+            )
         self.workspace = workspace_path
         self.path = state_path
         self._authority = authority
@@ -1026,6 +1090,7 @@ def _build_allocation_basis_store_runtime():
             authority,
             authority_root,
         )
+        sealed_binding[self] = binding
         require_state(self)
         with lock_type(workspace_path):
             sealed_recover(self)

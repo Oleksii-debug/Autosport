@@ -3,6 +3,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.domain as domain_module
 import autosport.paper as paper_module
 import autosport.settlement as settlement_module
 from autosport.domain import TicketLeg, TicketStatus
@@ -203,6 +204,89 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         self.assertIs(ticket.status, TicketStatus.WON)
         self.assertEqual(ticket.payout, Decimal("20"))
         self.assertEqual(book.balance, Decimal("110"))
+
+    def test_ticket_leg_quote_key_descriptor_rebind_fails_closed(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        forged_quote_key = "forged-event|winner|mallory"
+        engine = SettlementEngine({forged_quote_key: "win"})
+
+        with patch.object(
+            TicketLeg,
+            "quote_key",
+            new=property(lambda _leg: forged_quote_key),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "settlement domain DTO authority dispatch changed",
+            ):
+                engine.settle_ready(book)
+
+        ticket = next(iter(book.tickets.values()))
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(engine.settle_ready(book), [])
+
+    def test_ticket_leg_locked_odds_descriptor_rebind_fails_closed(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+
+        with patch.object(
+            TicketLeg,
+            "locked_odds",
+            new=property(lambda _leg: Decimal("99")),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "settlement domain DTO authority dispatch changed",
+            ):
+                engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+        self.assertEqual(ticket.payout, Decimal("20"))
+        self.assertEqual(book.balance, Decimal("110"))
+
+    def test_ticket_leg_quote_identity_global_rebind_fails_closed(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        forged_quote_key = "forged-event|winner|mallory"
+        engine = SettlementEngine({forged_quote_key: "win"})
+
+        with patch.object(
+            domain_module,
+            "_quote_identity",
+            new=lambda *_args, **_kwargs: forged_quote_key,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "settlement quote identity authority globals changed",
+            ):
+                engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(engine.settle_ready(book), [])
 
     def test_paperbook_module_decimal_context_helper_rebind_fails_closed(self) -> None:
         book = PaperBook("100")

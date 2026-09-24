@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+import sys
 
 import pytest
 
@@ -593,6 +594,58 @@ def test_generic_deepcopy_protocol_cannot_alias_product_issuance_baseline(
     assert deepcopy_calls == []
     assert store.latest_snapshot() is None
     assert not store_path.exists()
+
+
+def test_public_snapshot_mutation_after_issuance_check_cannot_change_durable_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "app"),
+        clock=at(0, 1),
+    )
+    original_snapshot = current.snapshot
+    assert original_snapshot.balance is not None
+    forged_balance = replace(
+        original_snapshot.balance,
+        available_balance=Decimal("999.99"),
+    )
+    forged_snapshot = replace(original_snapshot, balance=forged_balance)
+    store = BookmakerAccountReconciliationStore(
+        tmp_path / "workspace" / "betdaq-account.json",
+        authority_root=tmp_path / "authority",
+    )
+    mutation_events: list[str] = []
+    append_code = append_to_reconciliation.__code__
+
+    def mutate_after_issuance_check(frame, event, arg):
+        del arg
+        if (
+            event == "line"
+            and frame.f_code is append_code
+            and "issued_evidence" in frame.f_locals
+            and not mutation_events
+        ):
+            object.__setattr__(current, "snapshot", forged_snapshot)
+            mutation_events.append("after-issuance-check")
+        return mutate_after_issuance_check
+
+    previous_trace = sys.gettrace()
+    sys.settrace(mutate_after_issuance_check)
+    try:
+        assert append_to_reconciliation(store, current) is True
+    finally:
+        sys.settrace(previous_trace)
+
+    assert mutation_events == ["after-issuance-check"]
+    assert current.snapshot is forged_snapshot
+    durable = store.latest_snapshot()
+    assert durable is not None
+    assert durable.balance is not None
+    assert durable.balance.available_balance == Decimal("100.01")
+    assert durable.balance.available_balance != current.snapshot.balance.available_balance
+
 
 def test_reconciliation_store_subclass_cannot_bypass_canonical_durability(
     monkeypatch,

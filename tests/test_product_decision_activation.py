@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import autosport.economic_goal_store as economic_goal_store_module
+import autosport.monotonic_workspace_binding as workspace_binding_module
 import autosport.product_decision_activation as activation_module
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
@@ -532,6 +533,37 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         canonical = self._initialize()
         self.assertEqual(canonical.product_source_id, "provider-a")
+
+    def test_workspace_binding_global_parser_rebind_cannot_mint_start(
+        self,
+    ) -> None:
+        binding = self.store._authority.workspace_binding
+        workspace_payload = binding._workspace_payload()
+        path_payload = binding._path_payload()
+        binding.workspace_marker_path.parent.mkdir(parents=True, exist_ok=True)
+        binding.path_binding_path.parent.mkdir(parents=True, exist_ok=True)
+        binding.workspace_marker_path.write_text("{}\n", encoding="utf-8")
+        binding.path_binding_path.write_text("{}\n", encoding="utf-8")
+
+        def forged_read_strict_object(path, _expected_keys):
+            if path == binding.workspace_marker_path:
+                return dict(workspace_payload)
+            if path == binding.path_binding_path:
+                return dict(path_payload)
+            raise AssertionError("unexpected workspace binding path")
+
+        with mock.patch.object(
+            workspace_binding_module,
+            "_read_strict_object",
+            forged_read_strict_object,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested workspace identity binding global trust changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
 
     def test_workspace_binding_entrypoint_rebinds_fail_before_start_publication(
         self,

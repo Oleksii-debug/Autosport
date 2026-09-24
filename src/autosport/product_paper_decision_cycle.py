@@ -204,6 +204,12 @@ class ProductPaperDecisionCycle:
         input_ids = tuple(item.input_id for item in inputs)
         if len(set(input_ids)) != len(input_ids):
             raise ValueError("inputs must not contain duplicate input_id values")
+        runtime_source_id = runtime.manifest.source_id
+        expected_source_scope = (runtime_source_id,)
+        if any(item.source_ids != expected_source_scope for item in inputs):
+            raise ProductPaperDecisionCycleError(
+                "every PAPER decision input must bind exactly to the canonical runtime source"
+            )
         if bounds is not None and not isinstance(bounds, LiveLoopBounds):
             raise TypeError("bounds must be LiveLoopBounds or None")
         if clock is not None and not callable(clock):
@@ -370,8 +376,21 @@ class ProductPaperDecisionCycle:
             bounds=self.bounds,
             clock=self.clock,
             observation_runner=self._no_provider_observation,
+            commit_fence=self.runtime.decision_commit_fence,
         )
         try:
+            restored_input_ids = tuple(loop.dependencies.input_ids)
+            configured_input_ids = tuple(
+                sorted(decision_input.input_id for decision_input in self.inputs)
+            )
+            if (
+                restored_input_ids
+                and tuple(sorted(restored_input_ids)) != configured_input_ids
+            ):
+                raise ProductPaperDecisionCycleError(
+                    "configured PAPER decision inputs conflict with durable "
+                    "dependency registry"
+                )
             for decision_input in self.inputs:
                 decision_input.register(loop)
             result = loop.run_cycle()

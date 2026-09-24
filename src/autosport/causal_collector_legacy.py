@@ -838,11 +838,93 @@ class DesktopDeltaConsumer:
                 "apply_health must be included inside the durable apply_event boundary"
             )
 
+    def _contiguous_available_deltas(
+        self,
+        *,
+        available: tuple[CollectorDelta, ...],
+        as_of: datetime,
+    ) -> tuple[CollectorDelta, ...]:
+        """Project visible deltas in durable transport order without crossing a causal gap.
+
+        deltas_after_commit is the canonical desktop transport order. The causal
+        availability projection can be cursor-sorted and can expose a later commit
+        before an earlier commit becomes desktop-visible. Walk the durable source
+        feed instead: a not-yet-visible row fences only later commits in its own
+        epoch, while rows already committed before that hidden row remain eligible.
+        Revisions therefore preserve their actual commit position.
+        """
+
+        if not available:
+            return ()
+
+        available_by_id = {delta.delta_id: delta for delta in available}
+        if len(available_by_id) != len(available):
+            raise DeltaConflictError(
+                "desktop availability projection contains duplicate delta_id"
+            )
+
+        expected_ids = set(available_by_id)
+        accounted_ids: set[str] = set()
+        ordered: list[CollectorDelta] = []
+        page_size = 1000
+
+        for source_id in sorted({delta.source_id for delta in available}):
+            source_expected_ids = {
+                delta.delta_id
+                for delta in available
+                if delta.source_id == source_id
+            }
+            after_delta_id: str | None = None
+            hidden_epoch_rows: set[str] = set()
+
+            while True:
+                page = self.collector.deltas_after_commit(
+                    source_id=source_id,
+                    after_delta_id=after_delta_id,
+                    max_items=page_size,
+                )
+                if not page:
+                    break
+
+                for committed in page:
+                    selected = available_by_id.get(committed.delta_id)
+                    if selected is not None:
+                        accounted_ids.add(committed.delta_id)
+
+                    if _instant(
+                        committed.desktop_available_at,
+                        "desktop_available_at",
+                    ) > as_of:
+                        hidden_epoch_rows.add(committed.stream_epoch)
+                        continue
+                    if committed.stream_epoch in hidden_epoch_rows:
+                        continue
+                    if selected is not None:
+                        ordered.append(selected)
+
+                if source_expected_ids.issubset(accounted_ids):
+                    break
+
+                after_delta_id = page[-1].delta_id
+                if len(page) < page_size:
+                    break
+
+        if accounted_ids != expected_ids:
+            raise CursorRegressionError(
+                "desktop availability projection is not present in durable commit order"
+            )
+
+        return tuple(ordered)
+
     def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
+        contiguous_available = self._contiguous_available_deltas(
+            available=available,
+            as_of=now,
+        )
         delivered: list[str] = []
-        for delta in available:
+        for delta in contiguous_available:
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
                     item.gap_state is GapState.RECOVERED

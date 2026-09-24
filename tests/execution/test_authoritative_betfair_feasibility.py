@@ -591,6 +591,65 @@ def test_market_book_authority_declares_trusted_process_boundary() -> None:
         == "trusted-process-api-provenance-v1"
     )
 
+def test_authoritative_market_book_binds_rest_acquisition_interval() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    acquisition_started_at = (
+        betfair_account_readonly.market_book_depth_acquisition_started_at(receipt)
+    )
+    response_received_at = datetime.fromisoformat(receipt.evidence.observed_at)
+
+    assert acquisition_started_at.tzinfo is not None
+    assert response_received_at.tzinfo is not None
+    assert acquisition_started_at <= response_received_at
+
+
+def test_authoritative_feasibility_uses_acquisition_start_for_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    acquisition_started_at = (
+        betfair_account_readonly.market_book_depth_acquisition_started_at(receipt)
+    )
+    response_received_at = datetime.fromisoformat(receipt.evidence.observed_at)
+    bound = _bound(datetime.now(timezone.utc))
+    captured: dict[str, object] = {}
+    original_assess = feasibility_module._assess_execution_feasibility
+
+    def capture_request(request, snapshot, limits, *, max_snapshot_age, product_owned):
+        captured["snapshot"] = snapshot
+        return original_assess(
+            request,
+            snapshot,
+            limits,
+            max_snapshot_age=max_snapshot_age,
+            product_owned=product_owned,
+        )
+
+    monkeypatch.setattr(
+        feasibility_module,
+        "_assess_execution_feasibility",
+        capture_request,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    snapshot = captured["snapshot"]
+    assert snapshot.observed_at == acquisition_started_at
+    assert snapshot.received_at == response_received_at
+    assert snapshot.observed_at <= snapshot.received_at <= result.decision_at
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
 def test_authoritative_decision_time_is_issued_by_product_clock() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport()

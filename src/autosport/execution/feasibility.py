@@ -12,6 +12,7 @@ from weakref import ref
 from ..betfair_account_readonly import (
     BetfairMarketBookDepthObservation,
     assert_market_book_depth_authoritative,
+    market_book_depth_acquisition_started_at,
 )
 from ..real_execution_ledger import RealExecutionLedger
 from ..supervised_execution import BoundSupervisedExecutionPlan
@@ -420,7 +421,9 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         raise TypeError("bound must be BoundSupervisedExecutionPlan")
     if not isinstance(receipt, BetfairMarketBookDepthObservation):
         raise TypeError("receipt must be BetfairMarketBookDepthObservation")
+    acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
     decision_at = assert_market_book_depth_authoritative(receipt)
+    _require_aware(acquisition_started_at, "acquisition_started_at")
     _require_aware(decision_at, "decision_at")
     bound.verify_binding()
     try:
@@ -449,7 +452,9 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
 
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     action_digest = _canonical_digest(action.to_dict())
-    provider_observed_at = _provider_timestamp(receipt.evidence.observed_at)
+    response_received_at = _provider_timestamp(receipt.evidence.observed_at)
+    if response_received_at < acquisition_started_at:
+        raise ValueError("market-book response received before acquisition started")
     try:
         action_quote_observed_at = datetime.fromisoformat(
             action.quote_observed_at.replace("Z", "+00:00")
@@ -463,7 +468,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         "execution action quote_observed_at",
     )
     action_quote_observed_at = action_quote_observed_at.astimezone(timezone.utc)
-    if provider_observed_at.astimezone(timezone.utc) < action_quote_observed_at:
+    if acquisition_started_at.astimezone(timezone.utc) < action_quote_observed_at:
         raise ValueError(
             "market-book depth observation predates durable execution quote"
         )
@@ -493,10 +498,11 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     )
     snapshot_digest = _canonical_digest(
         {
-            "schema": "autosport.betfair.market-book-authority.v1",
+            "schema": "autosport.betfair.market-book-authority.v2",
             "request_scope_sha256": receipt.request_scope_sha256,
             "source_payload_sha256": receipt.evidence.source_payload_sha256,
-            "provider_observed_at": receipt.evidence.observed_at,
+            "acquisition_started_at": _timestamp(acquisition_started_at),
+            "response_received_at": _timestamp(response_received_at),
         }
     )
     snapshot = MarketBookSnapshot(
@@ -526,8 +532,12 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         market_version=receipt.market_version,
         inplay=receipt.inplay,
         bet_delay_seconds=receipt.bet_delay_seconds,
-        observed_at=provider_observed_at,
-        received_at=provider_observed_at,
+        # listMarketBook has no provider publish timestamp. Use the sealed local
+        # request start as a conservative observation lower bound and the
+        # post-response product timestamp as received_at. Generic freshness then
+        # covers the entire acquisition interval instead of only post-receipt age.
+        observed_at=acquisition_started_at,
+        received_at=response_received_at,
         # listMarketBook is an independent point-in-time read, not a Stream API
         # sequence. Keep stream sequence/gap explicitly unavailable instead of
         # inventing one from marketVersion.

@@ -1360,7 +1360,7 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
 # isolation: arbitrary same-interpreter reflection/object-graph/code mutation is
 # explicitly outside MARKET_BOOK_AUTHORITY_TRUST_BOUNDARY.
 def _install_market_book_depth_authority():
-    issued: dict[int, tuple[object, str, object]] = {}
+    issued: dict[int, tuple[object, str, object, datetime]] = {}
     raw_read = BetfairReadOnlyClient.read_market_book_depth
     fingerprint = _market_book_depth_fingerprint
 
@@ -1402,11 +1402,28 @@ def _install_market_book_depth_authority():
             and urlopen is canonical_urlopen
         )
 
+    def canonical_now(label: str) -> datetime:
+        value = canonical_clock()
+        if (
+            not isinstance(value, canonical_datetime_type)
+            or value.tzinfo is None
+            or value.utcoffset() is None
+        ):
+            raise BetfairReadOnlyError(
+                f"canonical MarketBook product clock returned an invalid {label}"
+            )
+        return value.astimezone(canonical_utc)
+
     def authoritative_read(
         self: BetfairReadOnlyClient,
         market_id: str,
         selection_id: int,
     ) -> BetfairMarketBookDepthObservation:
+        # listMarketBook does not carry an authoritative provider publish instant.
+        # Capture the local request-start boundary before network IO so downstream
+        # freshness can conservatively include the entire REST acquisition interval
+        # rather than treating response receipt as if it were source observation.
+        acquisition_started_at = canonical_now("acquisition-start instant")
         observation = raw_read(self, market_id, selection_id)
         observation_id = id(observation)
 
@@ -1419,19 +1436,13 @@ def _install_market_book_depth_authority():
             ref(observation, forget),
             fingerprint(observation),
             ref(self),
+            acquisition_started_at,
         )
         return observation
 
-    def assert_authoritative(
+    def require_authoritative(
         observation: BetfairMarketBookDepthObservation,
-    ) -> datetime:
-        """Enforce trusted-process API provenance and return the product decision instant.
-
-        This pure-Python fence detects supported API/object substitution and
-        post-issuance tamper. It does not claim resistance to arbitrary hostile
-        reflection or memory/code mutation inside the same interpreter.
-        """
-
+    ) -> tuple[object, str, object, datetime]:
         if type(observation) is not BetfairMarketBookDepthObservation:
             raise BetfairReadOnlyError(
                 "market-book depth authority requires exact BetfairMarketBookDepthObservation"
@@ -1447,22 +1458,37 @@ def _install_market_book_depth_authority():
             raise BetfairReadOnlyError(
                 "market-book depth observation lacks canonical direct Betfair provider IO origin"
             )
-        decision_at = canonical_clock()
-        if (
-            not isinstance(decision_at, canonical_datetime_type)
-            or decision_at.tzinfo is None
-            or decision_at.utcoffset() is None
-        ):
-            raise BetfairReadOnlyError(
-                "canonical MarketBook product clock returned an invalid datetime"
-            )
-        return decision_at.astimezone(canonical_utc)
+        return current
+
+    def assert_authoritative(
+        observation: BetfairMarketBookDepthObservation,
+    ) -> datetime:
+        """Enforce provenance and return the current product decision instant.
+
+        This pure-Python fence detects supported API/object substitution and
+        post-issuance tamper. It does not claim resistance to arbitrary hostile
+        reflection or memory/code mutation inside the same interpreter.
+        """
+
+        require_authoritative(observation)
+        return canonical_now("decision instant")
+
+    def acquisition_started_at(
+        observation: BetfairMarketBookDepthObservation,
+    ) -> datetime:
+        """Return the sealed local lower bound of the REST acquisition interval."""
+
+        current = require_authoritative(observation)
+        return current[3]
 
     BetfairReadOnlyClient.read_market_book_depth = authoritative_read
-    return assert_authoritative
+    return assert_authoritative, acquisition_started_at
 
 
-assert_market_book_depth_authoritative = _install_market_book_depth_authority()
+(
+    assert_market_book_depth_authoritative,
+    market_book_depth_acquisition_started_at,
+) = _install_market_book_depth_authority()
 del _install_market_book_depth_authority
 
 

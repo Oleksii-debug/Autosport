@@ -96,7 +96,67 @@ def _build_serialized_settlement_operations():
     settlement_result = paper_book_type._settlement_result
     settle_book = paper_book_type.settle
 
+    # Capturing a Python function freezes its code object, not the values it
+    # resolves from its module globals at call time. Seal the same-module global
+    # dependency graph reachable from the PaperBook methods above so a caller
+    # cannot transiently rebind TicketStatus, Decimal/context helpers, or another
+    # PaperBook helper without changing any class descriptor.
+    paper_module_globals = descriptor_function(
+        paper_book_type.__dict__["settle"]
+    ).__globals__
+    paper_global_seal: dict[str, tuple[object, object | None]] = {}
+    pending_functions = [
+        descriptor_function(descriptor)
+        for _, descriptor, _ in paper_dispatch_seal
+    ]
+    seen_function_ids: set[int] = set()
+    while pending_functions:
+        function = pending_functions.pop()
+        function_id = id(function)
+        if function_id in seen_function_ids:
+            continue
+        seen_function_ids.add(function_id)
+        if getattr(function, "__globals__", None) is not paper_module_globals:
+            continue
+        for global_name in function.__code__.co_names:
+            if global_name not in paper_module_globals:
+                continue
+            value = paper_module_globals[global_name]
+            code = getattr(value, "__code__", None)
+            existing = paper_global_seal.get(global_name)
+            if existing is not None and (
+                existing[0] is not value or existing[1] is not code
+            ):
+                raise RuntimeError(
+                    "PaperBook settlement global dependency is inconsistent"
+                )
+            paper_global_seal[global_name] = (value, code)
+            if (
+                code is not None
+                and getattr(value, "__globals__", None) is paper_module_globals
+            ):
+                pending_functions.append(value)
+    frozen_paper_globals = tuple(
+        (name, value, code)
+        for name, (value, code) in sorted(paper_global_seal.items())
+    )
+
+    def require_paper_module_globals() -> None:
+        for name, value, code in frozen_paper_globals:
+            if (
+                name not in paper_module_globals
+                or paper_module_globals[name] is not value
+            ):
+                raise ValueError(
+                    "PaperBook settlement authority globals changed"
+                )
+            if code is not None and getattr(value, "__code__", None) is not code:
+                raise ValueError(
+                    "PaperBook settlement authority global code changed"
+                )
+
     def require_paper_book_dispatch(book: PaperBook) -> None:
+        require_paper_module_globals()
         if type(book) is not paper_book_type:
             raise ValueError("settlement book must be an exact PaperBook")
         instance_state = vars(book)

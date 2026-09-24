@@ -53,6 +53,46 @@ class BetfairAccountIdentityMode(str, Enum):
     LICENSED_VENDOR = "LICENSED_VENDOR"
 
 
+def _identity_projection_material(
+    schema: str,
+    schema_version: int,
+    venue_id: str,
+    mode: str,
+    identity_scope: str,
+    session_context_id: str,
+    currency_code: str,
+    account_details_sha256: str,
+    observed_at: str,
+) -> bytes:
+    """Encode K07 identity fields without a mutable JSON codec dependency.
+
+    The length-prefixed field order is versioned by schema and schema_version.
+    This helper deliberately depends only on immutable scalar inputs and Python
+    built-ins; the authority closure pins both its function identity and bytecode.
+    """
+
+    parts = (
+        schema,
+        str(schema_version),
+        venue_id,
+        mode,
+        identity_scope,
+        session_context_id,
+        currency_code,
+        account_details_sha256,
+        observed_at,
+        "false",
+        "false",
+        "false",
+    )
+    encoded = bytearray()
+    for part in parts:
+        raw = part.encode("utf-8")
+        encoded.extend(len(raw).to_bytes(8, "big", signed=False))
+        encoded.extend(raw)
+    return bytes(encoded)
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairAuthenticatedAccountIdentity:
     """Ephemeral process-issued identity for one exact authenticated session context."""
@@ -112,21 +152,18 @@ class BetfairAuthenticatedAccountIdentity:
 
     @property
     def identity_id(self) -> str:
-        payload = {
-            "schema": IDENTITY_SCHEMA,
-            "schema_version": IDENTITY_SCHEMA_VERSION,
-            "venue_id": self.venue_id,
-            "mode": self.mode.value,
-            "identity_scope": self.identity_scope,
-            "session_context_id": self.session_context_id,
-            "currency_code": self.currency_code,
-            "account_details_sha256": self.account_details_sha256,
-            "observed_at": self.observed_at,
-            "remote_provider_origin_proven": False,
-            "provider_account_details_origin_proven": False,
-            "stable_account_identity_proven": False,
-        }
-        return sha256(_canonical_json(payload)).hexdigest()
+        material = _identity_projection_material(
+            IDENTITY_SCHEMA,
+            IDENTITY_SCHEMA_VERSION,
+            self.venue_id,
+            self.mode.value,
+            self.identity_scope,
+            self.session_context_id,
+            self.currency_code,
+            self.account_details_sha256,
+            self.observed_at,
+        )
+        return sha256(material).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +221,10 @@ def _make_account_identity_authority():
     identity_schema_version = IDENTITY_SCHEMA_VERSION
     context_prefix = _CONTEXT_PREFIX
     readonly_module = _readonly_module
-    json_dumps = json.dumps
+    identity_projection_material = _identity_projection_material
+    identity_projection_material_code = getattr(
+        identity_projection_material, "__code__", None
+    )
     sha256_fn = sha256
     hmac_digest = hmac.digest
     hmac_compare_digest = hmac.compare_digest
@@ -339,40 +379,58 @@ def _make_account_identity_authority():
         )
         return hmac_digest(process_hmac_key, material, "sha256")
 
-    def issued_identity_digest(value: BetfairAuthenticatedAccountIdentity) -> str:
-        # Authority integrity must not depend on the public identity_id property
-        # or module-level validation/JSON helpers after closure initialization.
-        payload = {
-            "schema": identity_schema,
-            "schema_version": identity_schema_version,
-            "venue_id": value.venue_id,
-            "mode": value.mode.value,
-            "identity_scope": value.identity_scope,
-            "session_context_id": value.session_context_id,
-            "currency_code": value.currency_code,
-            "account_details_sha256": value.account_details_sha256,
-            "observed_at": value.observed_at,
-            "remote_provider_origin_proven": False,
-            "provider_account_details_origin_proven": False,
-            "stable_account_identity_proven": False,
-        }
+    def identity_projection_material_for(
+        value: BetfairAuthenticatedAccountIdentity,
+    ) -> bytes:
         try:
-            encoded = json_dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            ).encode("utf-8")
-        except (AttributeError, TypeError, ValueError, UnicodeEncodeError) as exc:
+            return identity_projection_material(
+                identity_schema,
+                identity_schema_version,
+                value.venue_id,
+                value.mode.value,
+                value.identity_scope,
+                value.session_context_id,
+                value.currency_code,
+                value.account_details_sha256,
+                value.observed_at,
+            )
+        except (AttributeError, TypeError, UnicodeEncodeError, OverflowError) as exc:
             raise identity_error_type(
-                "account identity cannot be verified as canonical JSON"
+                "account identity projection fields are malformed"
             ) from exc
-        return sha256_fn(encoded).hexdigest()
+
+    def public_identity_digest(
+        value: BetfairAuthenticatedAccountIdentity,
+    ) -> str:
+        return sha256_fn(identity_projection_material_for(value)).hexdigest()
+
+    def issued_identity_digest(
+        value: BetfairAuthenticatedAccountIdentity,
+    ) -> str:
+        # Hidden issuance integrity uses a process-local keyed digest over the
+        # same deterministic scalar projection as the public identity_id. It
+        # intentionally does not depend on json.dumps/JSONEncoder executable
+        # state, so JSON-code mutation cannot mask post-issuance DTO mutation.
+        return hmac_digest(
+            process_hmac_key,
+            identity_projection_material_for(value),
+            "sha256",
+        ).hex()
+
+    def identity_projection_dependencies_are_current() -> bool:
+        return bool(
+            _identity_projection_material is identity_projection_material
+            and getattr(_identity_projection_material, "__code__", None)
+            is identity_projection_material_code
+            and sha256 is sha256_fn
+            and IDENTITY_SCHEMA == identity_schema
+            and IDENTITY_SCHEMA_VERSION == identity_schema_version
+        )
 
     def identity_class_is_current() -> bool:
         return bool(
-            identity_type.__init__ is canonical_identity_init
+            identity_projection_dependencies_are_current()
+            and identity_type.__init__ is canonical_identity_init
             and identity_type.__post_init__ is canonical_identity_post_init
             and all(
                 identity_type.__dict__.get(name) is descriptor
@@ -686,10 +744,23 @@ def _make_account_identity_authority():
                 if record is not None and record.value_ref is dead_ref:
                     issued.pop(identity, None)
 
+        hidden_digest = issued_identity_digest(value)
+        expected_public_id = public_identity_digest(value)
+        try:
+            current_public_id = value.identity_id
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise identity_error_type(
+                "account identity public projection cannot be verified"
+            ) from exc
+        if not hmac_compare_digest(expected_public_id, current_public_id):
+            raise identity_error_type(
+                "account identity public projection changed before issuance"
+            )
+
         with lock:
             issued[identity] = issued_record_type(
                 value_ref=weakref_fn(value, discard),
-                identity_id=issued_identity_digest(value),
+                identity_id=hidden_digest,
                 client_ref=weakref_fn(client),
                 session_context_id=context.session_context_id,
             )
@@ -830,9 +901,13 @@ def _make_account_identity_authority():
                 return False
             try:
                 current_identity_digest = issued_identity_digest(value)
-            except identity_error_type:
+                expected_public_id = public_identity_digest(value)
+                current_public_id = value.identity_id
+            except (identity_error_type, AttributeError, TypeError, ValueError):
                 return False
             if not hmac_compare_digest(record.identity_id, current_identity_digest):
+                return False
+            if not hmac_compare_digest(expected_public_id, current_public_id):
                 return False
             issued_client = record.client_ref()
             if issued_client is None:

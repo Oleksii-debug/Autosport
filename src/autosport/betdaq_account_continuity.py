@@ -339,6 +339,14 @@ def _require_canonical_reconciliation_store(store: object) -> None:
         raise BetdaqAccountContinuityError(
             "reconciliation target is not the canonical durable #790 store"
         )
+    instance_state = vars(store)
+    if any(
+        helper_name in instance_state
+        for helper_name in _CANONICAL_RECONCILIATION_HELPER_NAMES
+    ):
+        raise BetdaqAccountContinuityError(
+            "canonical BETDAQ reconciliation store helper dispatch was shadowed"
+        )
     bound_latest = getattr(store, "latest_snapshot", None)
     bound_append = getattr(store, "append_snapshot", None)
     if (

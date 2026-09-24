@@ -1233,3 +1233,170 @@ def _sha256_hex(value: object, field: str) -> str:
             f"{field} must be lowercase 64-character SHA-256"
         )
     return text
+
+
+def _build_positive_wallet_provenance_guard():
+    """Freeze the parser/DTO graph used to mint canonical wallet evidence."""
+
+    client_type = ProphetXReadOnlyClient
+    error_type = ProphetXReadOnlyError
+    profile_impl = client_type.capability_profile
+    snapshot_impl = client_type.read_account_snapshot
+    validate_response_impl = client_type._validate_http_response
+    observed_at_impl = client_type._observed_at
+    profile_for_impl = client_type._profile_for
+    require_sync_impl = client_type._require_synchronized_wallet
+
+    decode_json_impl = _decode_json
+    mapping_impl = _mapping
+    provider_text_impl = _provider_text
+    provider_money_impl = _provider_money
+    required_text_impl = _required_text
+    nonnegative_decimal_impl = _nonnegative_decimal
+    iso_timestamp_impl = _iso_timestamp
+    sha256_hex_impl = _sha256_hex
+
+    decode_json_code = decode_json_impl.__code__
+    mapping_code = mapping_impl.__code__
+    provider_text_code = provider_text_impl.__code__
+    provider_money_code = provider_money_impl.__code__
+    required_text_code = required_text_impl.__code__
+    nonnegative_decimal_code = nonnegative_decimal_impl.__code__
+    iso_timestamp_code = iso_timestamp_impl.__code__
+    sha256_hex_code = sha256_hex_impl.__code__
+    validate_response_code = validate_response_impl.__code__
+    observed_at_code = observed_at_impl.__code__
+    profile_for_code = profile_for_impl.__code__
+    require_sync_code = require_sync_impl.__code__
+
+    json_module = json
+    json_loads_impl = json.loads
+    decimal_type = Decimal
+    datetime_type = datetime
+    mapping_type = Mapping
+    sha256_impl = sha256
+    evidence_type = ProphetXEvidence
+    wallet_type = ProphetXWalletObservation
+    response_type = ProphetXHttpResponse
+
+    account_snapshot_type = BookmakerAccountSnapshot
+    balance_observation_type = BookmakerBalanceObservation
+    capability_type = BookmakerCapability
+    capability_fact_type = BookmakerCapabilityFact
+    capability_profile_type = BookmakerCapabilityProfile
+    capability_state_type = BookmakerCapabilityState
+    adapter_id = ADAPTER_ID
+    adapter_version = ADAPTER_VERSION
+    provider_currency = PROVIDER_CURRENCY
+
+    def same_function(current, expected, expected_code) -> bool:
+        return (
+            current is expected
+            and getattr(current, "__code__", None) is expected_code
+        )
+
+    def require_provenance(client) -> None:
+        instance_dict = getattr(client, "__dict__", None)
+        if (
+            type(client) is not client_type
+            or type(instance_dict) is not dict
+            or any(
+                name in instance_dict
+                for name in ("_validate_http_response", "_observed_at")
+            )
+            or not same_function(
+                client_type._validate_http_response,
+                validate_response_impl,
+                validate_response_code,
+            )
+            or not same_function(
+                client_type._observed_at,
+                observed_at_impl,
+                observed_at_code,
+            )
+            or not same_function(
+                profile_for_impl,
+                client_type._profile_for,
+                profile_for_code,
+            )
+            or not same_function(
+                require_sync_impl,
+                client_type._require_synchronized_wallet,
+                require_sync_code,
+            )
+            or not same_function(_decode_json, decode_json_impl, decode_json_code)
+            or not same_function(_mapping, mapping_impl, mapping_code)
+            or not same_function(
+                _provider_text,
+                provider_text_impl,
+                provider_text_code,
+            )
+            or not same_function(
+                _provider_money,
+                provider_money_impl,
+                provider_money_code,
+            )
+            or not same_function(
+                _required_text,
+                required_text_impl,
+                required_text_code,
+            )
+            or not same_function(
+                _nonnegative_decimal,
+                nonnegative_decimal_impl,
+                nonnegative_decimal_code,
+            )
+            or not same_function(
+                _iso_timestamp,
+                iso_timestamp_impl,
+                iso_timestamp_code,
+            )
+            or not same_function(
+                _sha256_hex,
+                sha256_hex_impl,
+                sha256_hex_code,
+            )
+            or json is not json_module
+            or json.loads is not json_loads_impl
+            or Decimal is not decimal_type
+            or datetime is not datetime_type
+            or Mapping is not mapping_type
+            or sha256 is not sha256_impl
+            or ProphetXReadOnlyError is not error_type
+            or ProphetXEvidence is not evidence_type
+            or ProphetXWalletObservation is not wallet_type
+            or ProphetXHttpResponse is not response_type
+            or BookmakerAccountSnapshot is not account_snapshot_type
+            or BookmakerBalanceObservation is not balance_observation_type
+            or BookmakerCapability is not capability_type
+            or BookmakerCapabilityFact is not capability_fact_type
+            or BookmakerCapabilityProfile is not capability_profile_type
+            or BookmakerCapabilityState is not capability_state_type
+            or ADAPTER_ID != adapter_id
+            or ADAPTER_VERSION != adapter_version
+            or PROVIDER_CURRENCY != provider_currency
+        ):
+            raise error_type(
+                "canonical ProphetX account parsing authority changed"
+            )
+
+    def capability_profile(self):
+        require_provenance(self)
+        result = profile_impl(self)
+        require_provenance(self)
+        return result
+
+    def read_account_snapshot(self, requested_capabilities, /):
+        require_provenance(self)
+        result = snapshot_impl(self, requested_capabilities)
+        require_provenance(self)
+        return result
+
+    return capability_profile, read_account_snapshot
+
+
+(
+    ProphetXReadOnlyClient.capability_profile,
+    ProphetXReadOnlyClient.read_account_snapshot,
+) = _build_positive_wallet_provenance_guard()
+del _build_positive_wallet_provenance_guard

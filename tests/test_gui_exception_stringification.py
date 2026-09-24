@@ -106,7 +106,7 @@ def test_startup_exception_with_broken_str_keeps_shell_reachable(tmp_path: Path)
     assert app.accessibility_configured
     assert app.close_protocol_bound
     assert app.session is None
-    assert app._startup_economic_error == "_BrokenTextError: <повідомлення недоступне>"
+    assert app._startup_economic_error == "RuntimeError: <повідомлення недоступне>"
     assert app._recovery_required_workspaces == {workspace}
     assert app.status.value == text("ui.status.startup.recovery_required")
     assert "недоступний до успішного відновлення" in app.bank.value
@@ -129,7 +129,7 @@ def test_startup_exception_with_hostile_type_metadata_and_str_keeps_shell_reacha
     assert app.accessibility_configured
     assert app.close_protocol_bound
     assert app.session is None
-    assert app._startup_economic_error == "_BrokenMetadataAndTextError: <повідомлення недоступне>"
+    assert app._startup_economic_error == "RuntimeError: <повідомлення недоступне>"
     assert app._recovery_required_workspaces == {workspace}
     assert app.status.value == text("ui.status.startup.recovery_required")
 
@@ -166,7 +166,7 @@ def test_teardown_exception_with_broken_str_still_quarantines_and_returns_false(
     assert app.tickets.lines == ["Economic state hidden pending terminal transition."]
     assert len(logs) == 1
     assert f"робоча область={workspace}" in logs[0]
-    assert "вторинна_помилка=_BrokenTextError: <повідомлення недоступне>" in logs[0]
+    assert "вторинна_помилка=RuntimeError: <повідомлення недоступне>" in logs[0]
 
 
 @pytest.mark.parametrize("control_exception", [KeyboardInterrupt, SystemExit])
@@ -215,7 +215,7 @@ def test_reconcile_failure_with_broken_str_keeps_recovery_actionable(tmp_path: P
     ):
         AutosportApp.repair_workspace(app)
 
-    expected = "Відновлення робочої області відхилено закрито при помилці: _BrokenTextError: <повідомлення недоступне>"
+    expected = "Відновлення робочої області відхилено закрито при помилці: RuntimeError: <повідомлення недоступне>"
     assert app._recovery_required_workspaces == {workspace}
     assert expected in logs
     assert "економічний стан лишається недоступним" in app.status.value
@@ -245,7 +245,7 @@ def test_post_recovery_reopen_failure_with_broken_str_keeps_recovery_actionable(
     ):
         AutosportApp.repair_workspace(app)
 
-    expected = "Повторне відкриття робочої області після відновлення відхилено закрито при помилці: _BrokenTextError: <повідомлення недоступне>"
+    expected = "Повторне відкриття робочої області після відновлення відхилено закрито при помилці: RuntimeError: <повідомлення недоступне>"
     assert app._recovery_required_workspaces == {workspace}
     assert expected in logs
     assert "стан економічного сеансу лишається недоступним" in app.status.value
@@ -284,7 +284,7 @@ def test_post_replay_reopen_failure_with_hostile_exception_keeps_feedback_action
 
     expected = (
         "Повторне відкриття робочої області після повтору відхилено закрито при помилці: "
-        "_BrokenMetadataAndTextError: <повідомлення недоступне>"
+        "RuntimeError: <повідомлення недоступне>"
     )
     assert app.session is None
     assert app._recovery_required_workspaces == {workspace}

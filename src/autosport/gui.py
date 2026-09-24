@@ -15,6 +15,7 @@ from .gui_evidence_export import (
 )
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
+from .secret_redaction import redact_operator_text, safe_exception_text
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
 from .recovery import reconcile_late_crashes
@@ -88,17 +89,13 @@ def strategy_id_from_display(display: str) -> str:
 
 
 def _safe_exception_text(exc: BaseException) -> str:
-    """Describe a caught failure without allowing hostile metadata/stringification to escape."""
+    """Describe a caught failure through the canonical operator-redaction boundary."""
 
-    try:
-        name = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        name = "BaseException"
-    try:
-        detail = str(exc)
-    except BaseException:
-        return text("ui.error.exception.message_unavailable", exception_type=name)
-    return f"{name}: {detail}" if detail else name
+    unavailable_detail = text(
+        "ui.error.exception.message_unavailable",
+        exception_type="",
+    ).removeprefix(": ")
+    return safe_exception_text(exc, unavailable_detail=unavailable_detail)
 
 
 class AutosportApp(tk.Tk):
@@ -550,7 +547,7 @@ class AutosportApp(tk.Tk):
         self._pending_dataset_path = None
         self._set_replay_controls_busy(False)
         if message.error is not None:
-            message_text = text("ui.error.dataset.rejected", detail=message.error)
+            message_text = text("ui.error.dataset.rejected", detail=redact_operator_text(message.error))
             self.status.set(text("ui.status.dataset.validation_failed"))
             self._append_log(message_text)
             messagebox.showerror(text("ui.dialog.title"), message_text)
@@ -632,7 +629,7 @@ class AutosportApp(tk.Tk):
             return
         self.live_refresh_button.state(["!disabled"])
         if message.error is not None:
-            message_text = text("ui.error.live.snapshot", detail=message.error)
+            message_text = text("ui.error.live.snapshot", detail=redact_operator_text(message.error))
             self.live_status.set(message_text)
             self.status.set(text("ui.status.live.failed"))
             self._append_log(message_text)
@@ -771,7 +768,7 @@ class AutosportApp(tk.Tk):
 
         self._set_replay_controls_busy(False)
         if message.error is not None:
-            message_text = text("ui.error.evidence_export.failed", error=message.error)
+            message_text = text("ui.error.evidence_export.failed", error=redact_operator_text(message.error))
             self.status.set(message_text)
             self._append_log(message_text)
             messagebox.showerror(text("ui.dialog.title"), message_text)
@@ -978,7 +975,7 @@ class AutosportApp(tk.Tk):
         if message.error is not None:
             self._recovery_required_workspaces.add(active_workspace)
             self._hide_uncertain_economic_state(text("ui.status.replay.error_ticket"))
-            message_text = text("ui.error.replay.worker", detail=message.error)
+            message_text = text("ui.error.replay.worker", detail=redact_operator_text(message.error))
             self._append_log(message_text)
             self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
             self.status.set(text("ui.status.replay.failed_recovery"))

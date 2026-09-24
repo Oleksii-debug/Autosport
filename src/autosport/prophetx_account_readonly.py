@@ -11,9 +11,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException
+import hmac
 import json
 import math
+from secrets import token_bytes, token_hex
 import ssl
+from threading import RLock
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import (
@@ -44,6 +47,9 @@ ADAPTER_ID = "prophetx-trading-api-readonly-sandbox"
 ADAPTER_VERSION = "1"
 PROVIDER_CURRENCY = "USD"
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_PROVIDER_VENUE_ID = "prophetx"
+_ACCOUNT_CONTEXT_PREFIX = "prophetx-auth-context:"
+_ACCOUNT_CONTEXT_SCOPE = "AUTHENTICATED_BEARER_SESSION_CONTEXT"
 
 
 class ProphetXReadOnlyError(RuntimeError):
@@ -59,6 +65,130 @@ class ProphetXSessionToken:
 
     def __repr__(self) -> str:
         return "ProphetXSessionToken(access_token=<redacted>)"
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXAuthenticatedAccountContext:
+    """Opaque process-local scope for one exact ProphetX bearer-session context.
+
+    The wallet endpoint used by this adapter does not expose a stable provider account
+    identifier. Positive balance evidence therefore uses this product-issued live-session
+    scope instead of caller labels and explicitly refuses cross-session identity claims.
+    """
+
+    venue_id: str
+    session_context_id: str
+    identity_scope: str = _ACCOUNT_CONTEXT_SCOPE
+    stable_account_identity_proven: bool = False
+    cross_session_equivalence_proven: bool = False
+
+    def __post_init__(self) -> None:
+        if self.venue_id != _PROVIDER_VENUE_ID:
+            raise ProphetXReadOnlyError(
+                "ProphetX authenticated account context has invalid venue"
+            )
+        if (
+            type(self.session_context_id) is not str
+            or not self.session_context_id.startswith(_ACCOUNT_CONTEXT_PREFIX)
+        ):
+            raise ProphetXReadOnlyError(
+                "session_context_id is not a canonical ProphetX context id"
+            )
+        digest = self.session_context_id.removeprefix(_ACCOUNT_CONTEXT_PREFIX)
+        if (
+            len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ProphetXReadOnlyError(
+                "session_context_id must contain a lowercase SHA-256-sized id"
+            )
+        if self.identity_scope != _ACCOUNT_CONTEXT_SCOPE:
+            raise ProphetXReadOnlyError(
+                "ProphetX account context identity scope is product-owned"
+            )
+        if self.stable_account_identity_proven is not False:
+            raise ProphetXReadOnlyError(
+                "ProphetX wallet read does not prove stable account identity"
+            )
+        if self.cross_session_equivalence_proven is not False:
+            raise ProphetXReadOnlyError(
+                "ProphetX wallet read does not prove cross-session account equivalence"
+            )
+
+
+def _build_authenticated_account_context_resolver():
+    """Keep bearer-session identity material and its equivalence map closure-owned."""
+
+    session_type = ProphetXSessionToken
+    context_type = ProphetXAuthenticatedAccountContext
+    error_type = ProphetXReadOnlyError
+    provider_venue_id = _PROVIDER_VENUE_ID
+    context_prefix = _ACCOUNT_CONTEXT_PREFIX
+    adapter_id = ADAPTER_ID
+    adapter_version = ADAPTER_VERSION
+    endpoint = BALANCE_URL
+    hmac_digest = hmac.digest
+    json_dumps = json.dumps
+    issue_random_id = token_hex
+    process_hmac_key = token_bytes(32)
+    contexts: dict[bytes, ProphetXAuthenticatedAccountContext] = {}
+    lock = RLock()
+
+    def canonical_access_token(session: object) -> str:
+        if type(session) is not session_type:
+            raise error_type(
+                "authenticated account context requires canonical ProphetXSessionToken"
+            )
+        value = session.access_token
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or any(
+                character.isspace()
+                or ord(character) < 32
+                or ord(character) == 127
+                for character in value
+            )
+        ):
+            raise error_type(
+                "authenticated account context requires canonical access_token"
+            )
+        return value
+
+    def resolve(session: object) -> ProphetXAuthenticatedAccountContext:
+        access_token = canonical_access_token(session)
+        material = json_dumps(
+            {
+                "access_token": access_token,
+                "adapter_id": adapter_id,
+                "adapter_version": adapter_version,
+                "endpoint": endpoint,
+                "venue_id": provider_venue_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        binding = hmac_digest(process_hmac_key, material, "sha256")
+        with lock:
+            existing = contexts.get(binding)
+            if existing is not None:
+                return existing
+            value = context_type(
+                venue_id=provider_venue_id,
+                session_context_id=context_prefix + issue_random_id(32),
+            )
+            contexts[binding] = value
+            return value
+
+    return resolve
+
+
+_AUTHENTICATED_ACCOUNT_CONTEXT_RESOLVER = (
+    _build_authenticated_account_context_resolver()
+)
+del _build_authenticated_account_context_resolver
 
 
 @dataclass(frozen=True, slots=True)
@@ -661,10 +791,73 @@ class UrllibProphetXHttpTransport:
 del _build_transport_init
 
 _CANONICAL_WALLET_GET = UrllibProphetXHttpTransport.get
-_PROVIDER_TRANSPORTS: WeakKeyDictionary[
-    object, UrllibProphetXHttpTransport
-] = WeakKeyDictionary()
-_PROVIDER_FETCHES: WeakKeyDictionary[object, object] = WeakKeyDictionary()
+
+
+def _build_provider_origin_registry():
+    """Keep positive acquisition state outside caller-mutable module containers."""
+
+    canonical_transport_type = UrllibProphetXHttpTransport
+    canonical_wallet_get = _CANONICAL_WALLET_GET
+    context_resolver = _AUTHENTICATED_ACCOUNT_CONTEXT_RESOLVER
+    error_type = ProphetXReadOnlyError
+    transports: WeakKeyDictionary[object, UrllibProphetXHttpTransport] = (
+        WeakKeyDictionary()
+    )
+    fetches: WeakKeyDictionary[object, object] = WeakKeyDictionary()
+    contexts: WeakKeyDictionary[
+        object, ProphetXAuthenticatedAccountContext
+    ] = WeakKeyDictionary()
+    lock = RLock()
+
+    def register(client: object, transport: object) -> None:
+        if type(transport) is not canonical_transport_type:
+            raise error_type(
+                "canonical ProphetX account authority requires product-owned transport"
+            )
+        expected_fetch = transport._provider_fetch
+        expected_context = context_resolver(client._session)
+        with lock:
+            transports[client] = transport
+            fetches[client] = expected_fetch
+            contexts[client] = expected_context
+
+    def resolve(
+        client: object,
+    ) -> tuple[object, ProphetXAuthenticatedAccountContext]:
+        with lock:
+            canonical = transports.get(client)
+            expected_fetch = fetches.get(client)
+            expected_context = contexts.get(client)
+        if (
+            canonical is None
+            or type(canonical) is not canonical_transport_type
+            or client._transport is not canonical
+            or type(canonical).get is not canonical_wallet_get
+            or expected_fetch is None
+            or canonical._provider_fetch is not expected_fetch
+            or expected_context is None
+        ):
+            raise error_type(
+                "canonical ProphetX account authority requires product-owned transport"
+            )
+        current_context = context_resolver(client._session)
+        if current_context is not expected_context:
+            raise error_type(
+                "ProphetX authenticated account context changed during acquisition"
+            )
+        return expected_fetch, expected_context
+
+    return register, resolve
+
+
+_REGISTER_PROVIDER_ORIGIN, _RESOLVE_PROVIDER_ORIGIN = (
+    _build_provider_origin_registry()
+)
+del _build_provider_origin_registry
+
+# Compatibility/test aliases only. Positive issuance never reads these mutable maps.
+_PROVIDER_TRANSPORTS: dict[object, object] = {}
+_PROVIDER_FETCHES: dict[object, object] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,8 +947,7 @@ class ProphetXReadOnlyClient:
             canonical_transport = UrllibProphetXHttpTransport()
             self._transport: ProphetXHttpTransport = canonical_transport
             if type(self) is ProphetXReadOnlyClient:
-                _PROVIDER_TRANSPORTS[self] = canonical_transport
-                _PROVIDER_FETCHES[self] = canonical_transport._provider_fetch
+                _REGISTER_PROVIDER_ORIGIN(self, canonical_transport)
         else:
             self._transport = transport
         self._timeout_seconds = float(timeout_seconds)
@@ -790,21 +982,14 @@ class ProphetXReadOnlyClient:
                 timeout_seconds=self._timeout_seconds,
             )
         else:
-            canonical_transport = _PROVIDER_TRANSPORTS.get(self)
-            if canonical_transport is not None:
-                authority_resolver = _require_canonical_network_authority
-                authoritative_fetch = authority_resolver(self)
-                response = authoritative_fetch(
-                    BALANCE_URL,
-                    headers=headers,
-                    timeout_seconds=self._timeout_seconds,
-                )
-            else:
-                response = self._transport.get(
-                    BALANCE_URL,
-                    headers=headers,
-                    timeout_seconds=self._timeout_seconds,
-                )
+            # Public read_wallet is a structural/non-authoritative parsing seam.
+            # Positive profile/snapshot issuance supplies a closure-owned resolver
+            # explicitly and never reaches this virtual transport branch.
+            response = self._transport.get(
+                BALANCE_URL,
+                headers=headers,
+                timeout_seconds=self._timeout_seconds,
+            )
         self._validate_http_response(response)
         if (
             authoritative_fetch is not None
@@ -897,12 +1082,25 @@ class ProphetXReadOnlyClient:
         )
 
     def _profile_for(
-        self, wallet: ProphetXWalletObservation
+        self,
+        wallet: ProphetXWalletObservation,
+        *,
+        account_context: ProphetXAuthenticatedAccountContext | None = None,
     ) -> BookmakerCapabilityProfile:
         digest = wallet.evidence.source_payload_sha256
+        venue_id = (
+            self._venue_id
+            if account_context is None
+            else account_context.venue_id
+        )
+        account_id = (
+            self._account_id
+            if account_context is None
+            else account_context.session_context_id
+        )
         return BookmakerCapabilityProfile(
-            venue_id=self._venue_id,
-            account_id=self._account_id,
+            venue_id=venue_id,
+            account_id=account_id,
             adapter_id=ADAPTER_ID,
             adapter_version=ADAPTER_VERSION,
             profile_version=1,
@@ -978,48 +1176,44 @@ class ProphetXReadOnlyClient:
         read_wallet_impl,
         require_sync_impl,
         profile_for_impl,
-        provider_transports,
-        provider_fetches,
-        canonical_transport_type,
-        canonical_wallet_get,
+        provider_origin_resolver,
         error_type,
     ):
         """Bind positive issuance to captured provider-origin authorities."""
 
         def authoritative_network_fetch(client):
-            canonical = provider_transports.get(client)
-            expected_fetch = provider_fetches.get(client)
-            if (
-                canonical is None
-                or type(canonical) is not canonical_transport_type
-                or client._transport is not canonical
-                or type(canonical).get is not canonical_wallet_get
-                or expected_fetch is None
-                or canonical._provider_fetch is not expected_fetch
-            ):
-                raise error_type(
-                    "canonical ProphetX account authority requires "
-                    "product-owned transport"
-                )
+            expected_fetch, _account_context = provider_origin_resolver(client)
             return expected_fetch
 
         def authoritative_wallet(client):
-            expected_fetch = authoritative_network_fetch(client)
+            expected_fetch, expected_context = provider_origin_resolver(client)
             wallet = read_wallet_impl(
                 client,
                 _authority_resolver=authoritative_network_fetch,
             )
-            if authoritative_network_fetch(client) is not expected_fetch:
+            final_fetch, final_context = provider_origin_resolver(client)
+            if (
+                final_fetch is not expected_fetch
+                or final_context is not expected_context
+            ):
                 raise error_type(
-                    "canonical ProphetX account network authority changed "
-                    "during acquisition"
+                    "canonical ProphetX account authority changed during acquisition"
                 )
             require_sync_impl(wallet)
-            return wallet
+            return wallet, expected_context
 
         def capability_profile(self) -> BookmakerCapabilityProfile:
-            wallet = authoritative_wallet(self)
-            return profile_for_impl(self, wallet)
+            wallet, account_context = authoritative_wallet(self)
+            result = profile_for_impl(
+                self,
+                wallet,
+                account_context=account_context,
+            )
+            if provider_origin_resolver(self)[1] is not account_context:
+                raise error_type(
+                    "ProphetX authenticated account context changed during publication"
+                )
+            return result
 
         def read_account_snapshot(
             self,
@@ -1039,11 +1233,15 @@ class ProphetXReadOnlyClient:
                     "ProphetX wallet adapter implements only balance_read"
                 )
 
-            wallet = authoritative_wallet(self)
-            profile = profile_for_impl(self, wallet)
+            wallet, account_context = authoritative_wallet(self)
+            profile = profile_for_impl(
+                self,
+                wallet,
+                account_context=account_context,
+            )
             balance = BookmakerBalanceObservation(
-                venue_id=self._venue_id,
-                account_id=self._account_id,
+                venue_id=account_context.venue_id,
+                account_id=account_context.session_context_id,
                 adapter_id=ADAPTER_ID,
                 observation_id=(
                     f"wallet:{wallet.evidence.source_payload_sha256}"
@@ -1057,7 +1255,7 @@ class ProphetXReadOnlyClient:
                 retained_commission=None,
                 exposure_limit=None,
             )
-            return BookmakerAccountSnapshot(
+            result = BookmakerAccountSnapshot(
                 profile=profile,
                 observed_capabilities=frozenset(
                     {BookmakerCapability.BALANCE_READ}
@@ -1065,6 +1263,11 @@ class ProphetXReadOnlyClient:
                 observed_at=wallet.evidence.observed_at,
                 balance=balance,
             )
+            if provider_origin_resolver(self)[1] is not account_context:
+                raise error_type(
+                    "ProphetX authenticated account context changed during publication"
+                )
+            return result
 
         return capability_profile, read_account_snapshot
 
@@ -1077,10 +1280,7 @@ class ProphetXReadOnlyClient:
             read_wallet,
             _require_synchronized_wallet.__func__,
             _profile_for,
-            _PROVIDER_TRANSPORTS,
-            _PROVIDER_FETCHES,
-            UrllibProphetXHttpTransport,
-            _CANONICAL_WALLET_GET,
+            _RESOLVE_PROVIDER_ORIGIN,
             ProphetXReadOnlyError,
         )
     )
@@ -1090,23 +1290,13 @@ class ProphetXReadOnlyClient:
 def _require_canonical_network_authority(
     client: ProphetXReadOnlyClient,
 ):
-    """Return the exact construction-time wallet fetch or fail closed on drift."""
+    """Compatibility resolver for structural callers; positive issuance captures its own."""
 
-    canonical = _PROVIDER_TRANSPORTS.get(client)
-    expected_fetch = _PROVIDER_FETCHES.get(client)
-    if (
-        type(client) is not ProphetXReadOnlyClient
-        or canonical is None
-        or type(canonical) is not UrllibProphetXHttpTransport
-        or client._transport is not canonical
-        or type(canonical).get is not _CANONICAL_WALLET_GET
-        or expected_fetch is None
-        or canonical._provider_fetch is not expected_fetch
-    ):
+    if type(client) is not ProphetXReadOnlyClient:
         raise ProphetXReadOnlyError(
-            "canonical ProphetX account authority requires product-owned transport"
+            "canonical ProphetX account authority requires exact client type"
         )
-    return expected_fetch
+    return _RESOLVE_PROVIDER_ORIGIN(client)[0]
 
 
 def _decode_json(payload: bytes) -> object:

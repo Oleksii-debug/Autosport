@@ -36,7 +36,13 @@ from .betdaq_account_readonly import (
     BetdaqAuthenticatedAccountContext,
     BetdaqCredentials,
 )
-from .bookmaker_capability import BookmakerAccountSnapshot, BookmakerCapability
+from .bookmaker_capability import (
+    BookmakerAccountSnapshot,
+    BookmakerBalanceObservation,
+    BookmakerCapability,
+    BookmakerCapabilityProfile,
+    BookmakerPositionObservation,
+)
 from .bookmaker_account_reconciliation import BookmakerAccountReconciliationStore
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 
@@ -655,6 +661,28 @@ def _project_snapshot(
         raise BetdaqAccountContinuityError(
             "source snapshot must be canonical BookmakerAccountSnapshot"
         )
+    if type(snapshot.profile) is not BookmakerCapabilityProfile:
+        raise BetdaqAccountContinuityError(
+            "source capability profile must be canonical BookmakerCapabilityProfile"
+        )
+    if (
+        snapshot.balance is not None
+        and type(snapshot.balance) is not BookmakerBalanceObservation
+    ):
+        raise BetdaqAccountContinuityError(
+            "source balance must be canonical BookmakerBalanceObservation"
+        )
+    if any(type(item) is not BookmakerPositionObservation for item in snapshot.open_positions):
+        raise BetdaqAccountContinuityError(
+            "source open positions must be canonical BookmakerPositionObservation values"
+        )
+    if any(
+        type(item) is not BookmakerPositionObservation
+        for item in snapshot.settled_positions
+    ):
+        raise BetdaqAccountContinuityError(
+            "source settled positions must be canonical BookmakerPositionObservation values"
+        )
     if type(principal_context) is not BetdaqAuthenticatedPrincipalContext:
         raise BetdaqAccountContinuityError(
             "principal_context must be canonical BetdaqAuthenticatedPrincipalContext"
@@ -812,6 +840,70 @@ def _build_canonical_continuity_authority():
     json_dumps = json.dumps
     json_dumps_code = getattr(json_dumps, "__code__", None)
 
+    # dataclasses.replace() and ordinary class calls dispatch through mutable class
+    # attributes even when the class object itself remains the exact captured global.
+    # Freeze every constructor/validation descriptor reached while projecting and
+    # issuing positive continuity evidence.
+    class_dispatch_specs = (
+        (
+            "BetdaqAuthenticatedPrincipalContext",
+            BetdaqAuthenticatedPrincipalContext,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BetdaqContinuousAccountEvidence",
+            BetdaqContinuousAccountEvidence,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerCapabilityProfile",
+            BookmakerCapabilityProfile,
+            ("__init__", "__post_init__", "state_of", "require"),
+        ),
+        (
+            "BookmakerBalanceObservation",
+            BookmakerBalanceObservation,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerPositionObservation",
+            BookmakerPositionObservation,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerAccountSnapshot",
+            BookmakerAccountSnapshot,
+            (
+                "__init__",
+                "__post_init__",
+                "_validate_cross_state_position_identity",
+                "_validate_balance",
+                "_validate_positions",
+                "_validate_not_after_snapshot",
+                "_validate_identity",
+            ),
+        ),
+    )
+    class_dispatch_graph = tuple(
+        (
+            class_name,
+            expected_class,
+            tuple(
+                (
+                    descriptor_name,
+                    getattr(expected_class, descriptor_name),
+                    getattr(
+                        getattr(expected_class, descriptor_name),
+                        "__code__",
+                        None,
+                    ),
+                )
+                for descriptor_name in descriptor_names
+            ),
+        )
+        for class_name, expected_class, descriptor_names in class_dispatch_specs
+    )
+
     def require_composition_graph() -> None:
         expected_codes = dict(helper_codes)
         for helper_name, expected_helper in helper_graph:
@@ -846,6 +938,22 @@ def _build_canonical_continuity_authority():
             raise continuity_error(
                 "canonical BETDAQ continuity transitive dependency changed"
             )
+        for class_name, expected_class, descriptors in class_dispatch_graph:
+            for (
+                descriptor_name,
+                expected_descriptor,
+                expected_descriptor_code,
+            ) in descriptors:
+                live_descriptor = getattr(expected_class, descriptor_name, None)
+                if (
+                    live_descriptor is not expected_descriptor
+                    or getattr(live_descriptor, "__code__", None)
+                    is not expected_descriptor_code
+                ):
+                    raise continuity_error(
+                        "canonical BETDAQ continuity class dispatch changed: "
+                        f"{class_name}.{descriptor_name}"
+                    )
         # Issuance and the matching positive predicate are closure-only. Re-exposing
         # either module name creates an alternate caller-visible minting/admission
         # surface and is therefore authority drift.

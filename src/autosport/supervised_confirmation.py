@@ -802,14 +802,18 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "confirmation receipt has already been consumed"
                 )
-            now = self._now()
-            self._observe_clock_locked(records, digest, clock_high_water, now)
-            if require_unconsumed and now >= _parse_timestamp(
-                "expires_at", review.expires_at
-            ):
-                raise SupervisedConfirmationConflictError(
-                    "confirmation receipt expired with its bound review"
+            if require_unconsumed:
+                now = self._now()
+                self._observe_clock_locked(
+                    records,
+                    digest,
+                    clock_high_water,
+                    now,
                 )
+                if now >= _parse_timestamp("expires_at", review.expires_at):
+                    raise SupervisedConfirmationConflictError(
+                        "confirmation receipt expired with its bound review"
+                    )
             return SupervisedConfirmationBinding(
                 receipt=receipt,
                 review=review,

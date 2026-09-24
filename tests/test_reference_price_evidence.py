@@ -6,8 +6,10 @@ import unittest
 
 from autosport.domain import MarketEvent, MarketType
 from autosport.reference_price_evidence import (
+    ReferenceCandidateCoverage,
     ReferenceCandidateDisposition,
     ReferenceCandidateNamespace,
+    ReferenceObservation,
     ReferencePriceDecisionResolution,
     ReferencePriceEvidenceError,
     ReferencePriceProtocol,
@@ -881,6 +883,128 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                     "2.05",
                     bookmaker_key="other-target",
                 ),
+                decision_ts=self.DECISION,
+                protocol=protocol,
+            )
+
+    def test_public_resolution_constructor_rejects_cross_market_candidate_bytes(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event("provider-a", "2.00", sequence=1),
+                self.event("provider-b", "2.10", sequence=2),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        wrong_json = ReferenceObservation.from_event(
+            self.event(
+                "provider-a",
+                "2.00",
+                selection_id="other-selection",
+            )
+        ).event_canonical_json
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=candidate.disposition,
+                    event_canonical_jsons=(wrong_json,),
+                )
+                if candidate.namespace
+                is ReferenceCandidateNamespace.TRANSPORT_SOURCE
+                and candidate.source_id == "provider-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "candidate event market identity",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.INSUFFICIENT_REFERENCE_EVIDENCE,
+                consensus_evidence=None,
+            )
+
+    def test_positive_resolution_constructor_binds_candidate_bytes_to_consensus(
+        self,
+    ) -> None:
+        protocol = self.protocol(("provider-a", "provider-b"))
+        legitimate = resolve_reference_price_decision_evidence(
+            (
+                self.event("provider-a", "2.00", sequence=1),
+                self.event("provider-b", "2.10", sequence=2),
+            ),
+            target_event=self.target_event(),
+            decision_ts=self.DECISION,
+            protocol=protocol,
+        )
+        alternate_json = ReferenceObservation.from_event(
+            self.event("provider-a", "9.00", sequence=1)
+        ).event_canonical_json
+        forged_candidates = tuple(
+            (
+                ReferenceCandidateCoverage(
+                    namespace=candidate.namespace,
+                    source_id=candidate.source_id,
+                    disposition=candidate.disposition,
+                    event_canonical_jsons=(alternate_json,),
+                )
+                if candidate.namespace
+                is ReferenceCandidateNamespace.TRANSPORT_SOURCE
+                and candidate.source_id == "provider-a"
+                else candidate
+            )
+            for candidate in legitimate.candidates
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "qualified candidate bytes do not match consensus evidence",
+        ):
+            ReferencePriceDecisionResolution(
+                target_event_canonical_json=legitimate.target_event_canonical_json,
+                protocol=protocol,
+                decision_ts=self.DECISION,
+                candidates=forged_candidates,
+                state=ReferencePriceResolutionState.PREDECLARED_CONSENSUS_REFERENCE,
+                consensus_evidence=legitimate.consensus_evidence,
+            )
+
+    def test_missing_resolution_does_not_launder_incompatible_price_semantics(
+        self,
+    ) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "price_semantics does not match frozen protocol",
+        ):
+            resolve_reference_price_decision_evidence(
+                (
+                    self.event(
+                        "provider-a",
+                        "2.00",
+                        price_semantics="last_traded_price",
+                    ),
+                    self.event("provider-b", "2.10"),
+                ),
+                target_event=self.target_event(),
                 decision_ts=self.DECISION,
                 protocol=protocol,
             )

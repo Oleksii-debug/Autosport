@@ -4,6 +4,7 @@ import json
 import runpy
 from decimal import Decimal, localcontext
 from pathlib import Path
+from urllib.request import Request
 
 import pytest
 
@@ -738,4 +739,88 @@ def test_post_init_transport_limit_mutation_cannot_enter_authoritative_size_path
         assert _trusted_client_record(client)[9] == captured_limit
     finally:
         transport._max_response_bytes = original_limit
+
+def test_authoritative_rpc_rejects_request_constructor_rebind_before_network() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+    )
+    original_init = Request.__init__
+    called = False
+
+    def forged_init(self, *args, **kwargs):
+        nonlocal called
+        called = True
+        return original_init(self, *args, **kwargs)
+
+    Request.__init__ = forged_init
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair network authority changed",
+        ):
+            client._rpc("SportsAPING/v1.0/listCurrentOrders", {})
+    finally:
+        Request.__init__ = original_init
+
+    assert called is False
+
+
+def test_canonical_network_post_rejects_request_host_retarget_before_dispatch() -> None:
+    post = _canonical_network_post()
+    original_parse = Request._parse
+    called = False
+
+    def forged_parse(self):
+        nonlocal called
+        called = True
+        original_parse(self)
+        self.host = "attacker.invalid"
+
+    Request._parse = forged_parse
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair outbound request state changed",
+        ):
+            post(
+                1024,
+                "https://api.betfair.com/exchange/betting/json-rpc/v1",
+                headers={},
+                body=b"{}",
+                timeout_seconds=1.0,
+            )
+    finally:
+        Request._parse = original_parse
+
+    assert called is True
+
+
+def test_canonical_network_post_rejects_request_body_retarget_before_dispatch() -> None:
+    post = _canonical_network_post()
+    original_data = Request.data
+
+    def forged_setter(self, value):
+        del value
+        object.__setattr__(self, "_data", b'{"method":"forged"}')
+
+    Request.data = property(
+        original_data.fget,
+        forged_setter,
+        original_data.fdel,
+        original_data.__doc__,
+    )
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="canonical Betfair outbound request state changed",
+        ):
+            post(
+                1024,
+                "https://api.betfair.com/exchange/betting/json-rpc/v1",
+                headers={},
+                body=b'{"method":"expected"}',
+                timeout_seconds=1.0,
+            )
+    finally:
+        Request.data = original_data
 

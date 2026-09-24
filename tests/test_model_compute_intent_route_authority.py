@@ -412,6 +412,232 @@ def test_loader_shadow_cannot_inject_preexisting_router_origin(
         assert resolved.request == issued.payload()
 
 
+def test_digest_helper_global_spoof_cannot_mask_deleted_state(
+    monkeypatch,
+) -> None:
+    first_intent = _canonical_intent(suffix="state-global-digest-a")
+    second_intent = _canonical_intent(suffix="state-global-digest-b")
+    issued_at = max(
+        _proposal(first_intent),
+        _proposal(second_intent),
+    ) + timedelta(seconds=2)
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: _time_text(issued_at),
+    )
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        first = _issue(
+            store,
+            router,
+            first_intent,
+            request_id="intent-route-a",
+        )
+        _route(router, first)
+        canonical_sha256_file = subject.sha256_file
+        observed = canonical_sha256_file(store.path)
+        store.path.unlink()
+        calls: list[str] = []
+
+        def forged_sha256_file(_path) -> str:
+            calls.append("sha256-file")
+            return observed
+
+        monkeypatch.setattr(
+            subject,
+            "sha256_file",
+            forged_sha256_file,
+        )
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="state-read dependency graph changed",
+        ):
+            _issue(
+                store,
+                router,
+                second_intent,
+                request_id="intent-route-b",
+            )
+        assert calls == []
+
+        monkeypatch.setattr(
+            subject,
+            "sha256_file",
+            canonical_sha256_file,
+        )
+        assert not store.path.exists()
+        assert router.get_request("intent-route-b") is None
+        with pytest.raises(MonotonicAuthorityRollbackError):
+            subject.ModelComputeIntentRouteAuthorityStore(workspace)
+
+
+def test_strict_json_global_injection_cannot_persist_prerouted_origin(
+    monkeypatch,
+) -> None:
+    first_intent = _canonical_intent(suffix="state-global-parser-a")
+    caller_intent = _canonical_intent(suffix="state-global-parser-caller")
+    issued_intent = _canonical_intent(suffix="state-global-parser-b")
+    issued_at = max(
+        _proposal(first_intent),
+        _proposal(caller_intent),
+        _proposal(issued_intent),
+    ) + timedelta(seconds=2)
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: _time_text(issued_at),
+    )
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        first = _issue(
+            store,
+            router,
+            first_intent,
+            request_id="intent-route-a",
+        )
+        _route(router, first)
+
+        caller_request = ComputeRouteRequest(
+            request_id="caller-preexisting-parser",
+            created_at=_time_text(issued_at),
+            decision_deadline=_time_text(
+                issued_at + timedelta(seconds=5)
+            ),
+            required_capability="intent-economics",
+            data_classification=DataClassification.PUBLIC,
+            allow_cloud=False,
+            max_cost=Decimal("0"),
+            response_ttl_seconds=Decimal("5"),
+            baseline_candidate_id="local-deterministic",
+            decision_input_sha256=caller_intent.intent_sha256,
+            decision_evidence_sha256=(
+                caller_intent.evidence.evidence_sha256
+            ),
+        )
+        _route(router, caller_request)
+        caller_identity = subject._intent_identity(caller_intent)
+        forged_record = subject.ModelComputeIntentRouteRecord(
+            router_store_relpath=store._router_relpath(router),
+            intent_id=caller_identity["intent_id"],
+            intent_sha256=caller_identity["intent_sha256"],
+            intent_audit_sha256=caller_identity["intent_audit_sha256"],
+            opportunity_id=caller_identity["opportunity_id"],
+            opportunity_evidence_sha256=caller_identity[
+                "opportunity_evidence_sha256"
+            ],
+            candidate_sha256=caller_identity["candidate_sha256"],
+            proposal_ts=caller_identity["proposal_ts"],
+            issued_at=caller_request.created_at,
+            request=caller_request.payload(),
+            request_sha256=subject._digest(
+                caller_request.payload()
+            ),
+        )
+
+        canonical_state_text = store.path.read_text(encoding="utf-8")
+        forged_state = json.loads(canonical_state_text)
+        forged_state["records"].append(forged_record.to_dict())
+        forged_state["records"].sort(key=lambda item: item["request_id"])
+        canonical_strict_json_loads = subject.strict_json_loads
+        calls: list[str] = []
+
+        def forged_strict_json_loads(_text: str):
+            calls.append("strict-json")
+            return json.loads(json.dumps(forged_state))
+
+        monkeypatch.setattr(
+            subject,
+            "strict_json_loads",
+            forged_strict_json_loads,
+        )
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="state-read dependency graph changed",
+        ):
+            _issue(
+                store,
+                router,
+                issued_intent,
+                request_id="intent-route-b",
+            )
+        assert calls == []
+
+        monkeypatch.setattr(
+            subject,
+            "strict_json_loads",
+            canonical_strict_json_loads,
+        )
+        assert store.path.read_text(encoding="utf-8") == canonical_state_text
+        assert router.get_request("intent-route-b") is None
+
+        reopened = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        resolved = reopened.resolve_current(
+            intent=first_intent,
+            router_store=router,
+            request_id=first.request_id,
+        )
+        assert resolved.request == first.payload()
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="issuance is missing",
+        ):
+            reopened.resolve_current(
+                intent=caller_intent,
+                router_store=router,
+                request_id=caller_request.request_id,
+            )
+
+
+def test_state_reader_rejects_json_scanner_lower_dispatch_rebind(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="state-global-json-scanner")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: _time_text(issued_at),
+    )
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        request = _issue(store, router, intent)
+        _route(router, request)
+
+        json_module = subject.strict_json_loads.__globals__["json"]
+        scanner_module = json_module.scanner
+        canonical_make_scanner = scanner_module.make_scanner
+        calls: list[str] = []
+
+        def forged_make_scanner(*args, **kwargs):
+            calls.append("make-scanner")
+            return canonical_make_scanner(*args, **kwargs)
+
+        monkeypatch.setattr(
+            scanner_module,
+            "make_scanner",
+            forged_make_scanner,
+        )
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="state-read dependency graph changed",
+        ):
+            store.resolve_current(
+                intent=intent,
+                router_store=router,
+                request_id=request.request_id,
+            )
+        assert calls == []
+
 
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
     intent = _canonical_intent(suffix="origin")

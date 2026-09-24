@@ -642,6 +642,17 @@ def _validate_scenario_space_binding(
     identity_by_quote = _scenario_identity_index(scenario_identities)
     for group in groups:
         outcome_keys = {outcome.quote_key for outcome in group.outcomes}
+        missing_sport_identities = sorted(
+            quote_key
+            for quote_key in outcome_keys
+            if quote_key.startswith("sport-v2-")
+            and quote_key not in identity_by_quote
+        )
+        if missing_sport_identities:
+            raise ValueError(
+                "sport-qualified research scenario outcome requires structured identity: "
+                + ",".join(missing_sport_identities)
+            )
         observed_outcomes: list[MarketEvent] = []
         for quote_key in sorted(outcome_keys):
             event = latest_quotes.get(quote_key)

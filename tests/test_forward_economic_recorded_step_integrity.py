@@ -350,3 +350,42 @@ def test_recorded_step_guard_rejects_canonical_digest_rebind(monkeypatch) -> Non
     ):
         accumulator.summary()
 
+def test_recorded_step_guard_rejects_stateful_instant_text_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accumulator, _resolver = _filled_accumulator(event_count=1)
+    baseline = accumulator.summary()
+    original_instant_text = forward_evidence._instant_text
+    calls = 0
+
+    def stateful_instant_text(value: datetime) -> str:
+        nonlocal calls
+        calls += 1
+        text = original_instant_text(value)
+        if calls % 3 == 2:
+            return text.replace("2026-", "2099-", 1)
+        return text
+
+    monkeypatch.setattr(
+        forward_evidence,
+        "_instant_text",
+        stateful_instant_text,
+    )
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        accumulator.summary()
+
+    # Reject transitive substitution before it can participate in either guard
+    # validation or raw summary publication.
+    assert calls == 0
+
+    monkeypatch.setattr(
+        forward_evidence,
+        "_instant_text",
+        original_instant_text,
+    )
+    assert accumulator.summary().evidence_sha256 == baseline.evidence_sha256
+

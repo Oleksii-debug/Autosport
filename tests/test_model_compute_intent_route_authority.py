@@ -104,7 +104,47 @@ def _route(
 def _workspace():
     root = tempfile.TemporaryDirectory()
     root_path = Path(root.name)
-    return root, root_path / "workspace", root_path / "machine-authority"
+    return root, root_path / "workspace"
+
+
+def test_machine_authority_root_cannot_be_retargeted_after_local_state_loss(
+    monkeypatch,
+) -> None:
+    intent = _canonical_intent(suffix="root-binding")
+    issued_at = _proposal(intent) + timedelta(seconds=2)
+    monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        authority = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        request = _issue(authority, router, intent)
+        _route(router, request)
+
+        canonical_root = authority._authority.authority_root
+        alternate_root = workspace.parent / "alternate-machine-authority"
+        monkeypatch.setattr(
+            subject,
+            "_product_monotonic_authority_root",
+            lambda: alternate_root,
+        )
+
+        authority.path.unlink()
+
+        with pytest.raises(TypeError, match="authority_root"):
+            subject.ModelComputeIntentRouteAuthorityStore(
+                workspace,
+                authority_root=alternate_root,  # type: ignore[call-arg]
+            )
+
+        with pytest.raises(
+            MonotonicAuthorityRollbackError,
+            match="missing, rolled back, or unproven",
+        ):
+            subject.ModelComputeIntentRouteAuthorityStore(workspace)
+
+        assert authority._authority.authority_root == canonical_root
+        assert not alternate_root.exists()
 
 
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
@@ -112,12 +152,11 @@ def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         request = _issue(authority, router, intent)
 
@@ -135,7 +174,6 @@ def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
         reopened_router = ModelComputeRouterStore(workspace / "router.json")
         reopened_authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         record = reopened_authority.resolve_current(
             intent=intent,
@@ -180,12 +218,11 @@ def test_future_dated_intent_proposal_fails_before_state_publish(
     issued_at = _proposal(intent) - timedelta(seconds=1)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
 
         with pytest.raises(
@@ -205,7 +242,7 @@ def test_existing_router_request_cannot_be_backfilled_with_origin_authority(
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         caller_request = ComputeRouteRequest(
@@ -226,7 +263,6 @@ def test_existing_router_request_cannot_be_backfilled_with_origin_authority(
         _route(router, caller_request)
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
 
         with pytest.raises(
@@ -245,12 +281,11 @@ def test_same_id_retry_is_idempotent_and_cannot_retimestamp(
     first_at = _proposal(intent) + timedelta(seconds=1)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(first_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         first = _issue(authority, router, intent)
         _route(router, first)
@@ -278,12 +313,11 @@ def test_same_request_id_cannot_be_rebound_to_another_intent(
     ) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         first = _issue(authority, router, first_intent)
         _route(router, first)
@@ -304,12 +338,11 @@ def test_resolve_rejects_cross_intent_substitution(monkeypatch) -> None:
     ) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         request = _issue(authority, router, first_intent)
         _route(router, request)
@@ -332,12 +365,11 @@ def test_resolve_rejects_same_id_router_request_substitution(
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         issued = _issue(authority, router, intent)
 
@@ -390,12 +422,11 @@ def test_resolve_requires_router_request_to_exist(monkeypatch) -> None:
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         request = _issue(authority, router, intent)
 
@@ -415,12 +446,11 @@ def test_timestamp_only_historical_resolution_fails_closed(monkeypatch) -> None:
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         request = _issue(authority, router, intent)
         _route(router, request)
@@ -453,7 +483,7 @@ def test_router_instance_get_request_shadow_is_rejected(monkeypatch) -> None:
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         setattr(
@@ -465,7 +495,6 @@ def test_router_instance_get_request_shadow_is_rejected(monkeypatch) -> None:
         )
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
 
         with pytest.raises(
@@ -490,12 +519,11 @@ def test_opportunity_intent_module_rebind_cannot_redefine_canonical_origin(
             return getattr(self._canonical, name)
 
     forged = ReboundOpportunityIntent(intent)
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         monkeypatch.setattr(
             subject,
@@ -528,13 +556,12 @@ def test_router_store_module_rebind_cannot_redefine_canonical_origin(
         def get_request(self, request_id: str):
             return self._canonical.get_request(request_id)
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         canonical_router = ModelComputeRouterStore(workspace / "router.json")
         forged_router = ReboundRouterStore(canonical_router)
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         monkeypatch.setattr(
             subject,
@@ -575,12 +602,11 @@ def test_route_request_module_rebind_does_not_control_product_construction(
             item._canonical = ComputeRouteRequest.from_payload(raw)
             return item
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         monkeypatch.setattr(
             subject,
@@ -615,12 +641,11 @@ def test_record_class_module_rebind_cannot_forge_durable_origin(
                 "live record class must not parse durable origin authority"
             )
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         monkeypatch.setattr(
             subject,
@@ -634,7 +659,6 @@ def test_record_class_module_rebind_cannot_forge_durable_origin(
 
         reopened = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         resolved = reopened.resolve_current(
             intent=intent,
@@ -665,12 +689,11 @@ def test_module_namespace_rebind_cannot_create_second_origin_authority(
     canonical_domain = subject.AUTHORITY_DOMAIN
     canonical_key = subject.AUTHORITY_KEY
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         first_store = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         first = _issue(first_store, router, first_intent)
         assert first.request_id == "intent-route-1"
@@ -690,7 +713,6 @@ def test_module_namespace_rebind_cannot_create_second_origin_authority(
 
         second_store = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         assert second_store.path == first_store.path
         assert second_store.path.name == canonical_file_name
@@ -715,12 +737,11 @@ def test_deleted_authority_state_fails_monotonic_rollback_fence(
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         _issue(authority, router, intent)
         authority.path.unlink()
@@ -728,8 +749,7 @@ def test_deleted_authority_state_fails_monotonic_rollback_fence(
         with pytest.raises(MonotonicAuthorityRollbackError):
             subject.ModelComputeIntentRouteAuthorityStore(
                 workspace,
-                authority_root=authority_root,
-            )
+                )
 
 
 def test_tampered_authority_bytes_fail_monotonic_fence(monkeypatch) -> None:
@@ -737,12 +757,11 @@ def test_tampered_authority_bytes_fail_monotonic_fence(monkeypatch) -> None:
     issued_at = _proposal(intent) + timedelta(seconds=2)
     monkeypatch.setattr(subject, "_authority_now", lambda: _time_text(issued_at))
 
-    temporary, workspace, authority_root = _workspace()
+    temporary, workspace = _workspace()
     with temporary:
         router = ModelComputeRouterStore(workspace / "router.json")
         authority = subject.ModelComputeIntentRouteAuthorityStore(
             workspace,
-            authority_root=authority_root,
         )
         _issue(authority, router, intent)
 
@@ -756,5 +775,4 @@ def test_tampered_authority_bytes_fail_monotonic_fence(monkeypatch) -> None:
         with pytest.raises(MonotonicAuthorityRollbackError):
             subject.ModelComputeIntentRouteAuthorityStore(
                 workspace,
-                authority_root=authority_root,
-            )
+                )

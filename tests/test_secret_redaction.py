@@ -225,6 +225,43 @@ class SecretRedactionTests(unittest.TestCase):
                 self.assertIn(escaped_key, redacted)
                 self.assertIn(REDACTED, redacted)
 
+    def test_text_redacts_short_escaped_separator_sensitive_serialized_keys(self) -> None:
+        cases = (
+            (r'{"api\\tkey":"short-tab-secret-804"}', "short-tab-secret-804", r"api\\tkey"),
+            (
+                r'{"session\\ntoken":"short-newline-secret-804"}',
+                "short-newline-secret-804",
+                r"session\\ntoken",
+            ),
+            (
+                r"{'client\\rsecret':'short-cr-secret-804'}",
+                "short-cr-secret-804",
+                r"client\\rsecret",
+            ),
+        )
+
+        for source, secret, escaped_key in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertNotIn(secret, redacted)
+                self.assertIn(escaped_key, redacted)
+                self.assertIn(REDACTED, redacted)
+
+    def test_safe_exception_text_redacts_short_escaped_credential_key(self) -> None:
+        secret = "short-escape-exception-secret-804"
+        source = r'{"api\\tkey":"' + secret + '"}'
+
+        rendered = safe_exception_text(RuntimeError(source))
+
+        self.assertNotIn(secret, rendered)
+        self.assertIn(r"api\\tkey", rendered)
+        self.assertIn(REDACTED, rendered)
+
+    def test_non_sensitive_short_escaped_serialized_key_is_preserved(self) -> None:
+        source = r'{"market\\tname":"winner"}'
+
+        self.assertEqual(redact_operator_text(source), source)
+
     def test_safe_exception_text_redacts_escaped_serialized_credential_key(self) -> None:
         secret = "serialized-secret-804"
         source = r'{"session\u005ftoken":"' + secret + '"}'

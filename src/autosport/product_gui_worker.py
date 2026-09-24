@@ -18,6 +18,8 @@ from .product_runtime import AutonomousProductRuntime, build_autonomous_product_
 from .trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfile,
     TrustedRuntimeCodeProfileError,
+    _clear_started_product_runtime_origin,
+    _register_started_product_runtime_origin,
     issue_trusted_runtime_code_profile,
     require_product_owned_source_factory_identity,
     revoke_trusted_runtime_code_profile,
@@ -340,11 +342,12 @@ class ProductGuiWorker:
             else:
                 started_status = runtime.start()
                 if expected_source_id is not None and not self._stop_event.is_set():
-                    runtime_profile = issue_trusted_runtime_code_profile(
+                    _register_started_product_runtime_origin(
                         runtime,
                         source_factory=source_factory,
                         expected_provider_source_id=expected_source_id,
                     )
+                    runtime_profile = issue_trusted_runtime_code_profile(runtime)
                     with self._lock:
                         self._trusted_runtime_profile = runtime_profile
                 self._messages.put(
@@ -383,6 +386,7 @@ class ProductGuiWorker:
                     if self._trusted_runtime_profile is runtime_profile:
                         self._trusted_runtime_profile = None
             if runtime is not None:
+                _clear_started_product_runtime_origin(runtime)
                 try:
                     runtime.close()
                 except BaseException as exc:

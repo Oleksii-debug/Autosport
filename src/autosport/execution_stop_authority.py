@@ -2142,10 +2142,122 @@ def _build_sealed_admission_lease():
                 # semantics for an already-attempted external effect.
                 require_sealed_module_graph()
 
-    return sealed_admission_lease
+    return sealed_admission_lease, require_sealed_module_graph
 
 
 # Install the sealed lease only after the complete canonical helper graph above
-# has been frozen. Importers therefore capture this exact closure-backed method,
-# not the class-body implementation that resolves its dispatch globals live.
-ExecutionStopAuthority.admission_lease = _build_sealed_admission_lease()
+# has been frozen. Reuse the exact same closure-owned module verifier below for
+# the public positive read APIs so they cannot have a weaker transitive trust graph.
+(
+    _canonical_sealed_admission_lease,
+    _CANONICAL_ADMISSION_REQUIRE_SEALED_MODULE_GRAPH,
+) = _build_sealed_admission_lease()
+ExecutionStopAuthority.admission_lease = _canonical_sealed_admission_lease
+del _canonical_sealed_admission_lease
+
+
+def _build_module_guarded_public_stop_read_authority():
+    """Bind public positive STOP reads to the sealed module dependency graph."""
+
+    require_sealed_module_graph = (
+        _CANONICAL_ADMISSION_REQUIRE_SEALED_MODULE_GRAPH
+    )
+    operation_lock = _CANONICAL_ADMISSION_OPERATION_LOCK
+    current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
+    authority_error = ExecutionStopAuthorityError
+    stopped_error = ExecutionStoppedError
+    armed_mode = ExecutionAuthorityMode.ARMED
+    stopped_mode = ExecutionAuthorityMode.STOPPED
+    decision_type = ExecutionAdmissionDecision
+    integrity_error = ExecutionStopIntegrityError
+
+    def current(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        require_sealed_module_graph()
+        with operation_lock(self):
+            require_sealed_module_graph()
+            state = current_unlocked(self)
+            require_sealed_module_graph()
+        require_sealed_module_graph()
+        return state
+
+    def decision(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAdmissionDecision:
+        try:
+            state = current(self)
+        except authority_error as exc:
+            return decision_type(
+                allowed=False,
+                mode=stopped_mode,
+                revision=None,
+                reason=f"fail-closed: {exc}",
+            )
+        if state.mode is not armed_mode:
+            return decision_type(
+                allowed=False,
+                mode=state.mode,
+                revision=state.revision,
+                reason=state.reason,
+            )
+        return decision_type(
+            allowed=True,
+            mode=state.mode,
+            revision=state.revision,
+            reason=state.reason,
+        )
+
+    def assert_execution_allowed(
+        self: ExecutionStopAuthority,
+    ) -> ExecutionAuthorityState:
+        state = current(self)
+        if state.mode is not armed_mode:
+            raise stopped_error(
+                f"execution STOP is active at revision {state.revision}: "
+                f"{state.reason}"
+            )
+        return state
+
+    def sealed_public_method(method):
+        class SealedPublicMethod:
+            __slots__ = ()
+
+            def __get__(self, instance, owner=None):
+                if instance is None:
+                    return method
+                return method.__get__(instance, owner)
+
+            def __set__(self, _instance, _value) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+            def __delete__(self, _instance) -> None:
+                raise integrity_error(
+                    "canonical public STOP authority method is immutable"
+                )
+
+        return SealedPublicMethod()
+
+    return (
+        sealed_public_method(current),
+        sealed_public_method(decision),
+        sealed_public_method(assert_execution_allowed),
+    )
+
+
+(
+    _canonical_guarded_public_current,
+    _canonical_guarded_public_decision,
+    _canonical_guarded_public_assert_execution_allowed,
+) = _build_module_guarded_public_stop_read_authority()
+ExecutionStopAuthority.current = _canonical_guarded_public_current
+ExecutionStopAuthority.decision = _canonical_guarded_public_decision
+ExecutionStopAuthority.assert_execution_allowed = (
+    _canonical_guarded_public_assert_execution_allowed
+)
+del _canonical_guarded_public_current
+del _canonical_guarded_public_decision
+del _canonical_guarded_public_assert_execution_allowed
+del _build_module_guarded_public_stop_read_authority

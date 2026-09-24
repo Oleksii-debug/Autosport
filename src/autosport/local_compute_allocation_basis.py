@@ -906,7 +906,16 @@ def _build_allocation_basis_store_runtime():
                 frozen_authority,
                 frozen_root,
             ) = sealed_state[self]
-            frozen_binding = sealed_binding[self]
+            (
+                frozen_binding,
+                frozen_binding_workspace,
+                frozen_binding_root,
+                frozen_binding_instance_id,
+                frozen_workspace_marker,
+                frozen_path_binding,
+                frozen_workspace_locator,
+                frozen_workspace_locator_sha256,
+            ) = sealed_binding[self]
         except (KeyError, TypeError) as exc:
             raise error_type(
                 "allocation basis authority state is not sealed"
@@ -941,12 +950,22 @@ def _build_allocation_basis_store_runtime():
                 )
 
         binding = authority.workspace_binding
-        if (
-            binding is not frozen_binding
-            or type(binding) is not binding_type
-        ):
+        if binding is not frozen_binding or type(binding) is not binding_type:
             raise error_type(
                 "allocation basis workspace binding identity changed"
+            )
+        if (
+            binding.workspace != frozen_binding_workspace
+            or binding.authority_root != frozen_binding_root
+            or binding.workspace_instance_id != frozen_binding_instance_id
+            or binding.workspace_marker_path != frozen_workspace_marker
+            or binding.path_binding_path != frozen_path_binding
+            or binding.workspace_locator != frozen_workspace_locator
+            or binding.workspace_locator_sha256
+            != frozen_workspace_locator_sha256
+        ):
+            raise error_type(
+                "allocation basis workspace binding state changed"
             )
         require_binding_dispatch()
         workspace_instance_id = authority.workspace_instance_id
@@ -1090,7 +1109,16 @@ def _build_allocation_basis_store_runtime():
             authority,
             authority_root,
         )
-        sealed_binding[self] = binding
+        sealed_binding[self] = (
+            binding,
+            binding.workspace,
+            binding.authority_root,
+            binding.workspace_instance_id,
+            binding.workspace_marker_path,
+            binding.path_binding_path,
+            binding.workspace_locator,
+            binding.workspace_locator_sha256,
+        )
         require_state(self)
         with lock_type(workspace_path):
             sealed_recover(self)

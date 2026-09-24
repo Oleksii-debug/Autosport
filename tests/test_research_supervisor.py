@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +14,23 @@ from autosport.research_supervisor import (
     StaleResearchCheckpointError,
     SupervisorStatus,
 )
-from autosport.scientific_registry import Hypothesis, ResearchQuestion, ScientificRegistry
+from autosport.scientific_registry import (
+    DatasetSnapshot,
+    EvaluationBundleRef,
+    ExperimentRecord,
+    FeatureSet,
+    Hypothesis,
+    ModelVersion,
+    Postmortem,
+    PromotionAction,
+    PromotionDecision,
+    ResearchOutcome,
+    ResearchProtocol,
+    ResearchQuestion,
+    ScientificRegistry,
+    StrategyVersion,
+)
+from autosport.strategy_experiment import ScientificProtocolBinding
 
 
 SOURCE_SHA = "1" * 64
@@ -34,6 +51,57 @@ def _workspace(tmp_path):
         registry,
     )
     return registry, supervisor
+
+
+def _payload_sha(record) -> str:
+    import hashlib
+
+    canonical = json.dumps(
+        record.to_payload(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _protocol(
+    question: ResearchQuestion,
+    hypothesis: Hypothesis,
+    *,
+    protocol_id: str,
+    question_sha256: str | None = None,
+    hypothesis_sha256: str | None = None,
+) -> ResearchProtocol:
+    binding = ScientificProtocolBinding(
+        research_protocol_id=protocol_id,
+        research_question_id=question.question_id,
+        research_question_sha256=question_sha256 or _payload_sha(question),
+        hypothesis_id=hypothesis.hypothesis_id,
+        hypothesis_sha256=hypothesis_sha256 or _payload_sha(hypothesis),
+        inclusion_criteria="predeclared cases",
+        exclusion_criteria="invalid provenance",
+        lawful_source_requirements="retained lawful evidence",
+        causal_cutoff="2026-09-17T12:09:00Z",
+        evaluation_design="frozen walk-forward",
+        feature_set_version="v1",
+        uncertainty_method="bootstrap interval",
+        multiple_comparison_control="single frozen primary metric",
+        robustness_checks=("time split",),
+        random_seed_policy="fixed before evaluation",
+        stopping_rule="one final evaluation",
+        promotion_rule="positive effect and guardrails",
+        expected_artifacts=("evaluation bundle",),
+        code_config_sha256=SOURCE_SHA,
+        frozen_at_utc="2026-09-17T12:09:00Z",
+    )
+    return ResearchProtocol(
+        binding,
+        SOURCE_SHA,
+        SOURCE_SHA,
+        SOURCE_SHA,
+        "2026-09-17T12:09:00Z",
+    )
 
 
 def _trigger(**overrides):
@@ -87,6 +155,133 @@ def test_restart_preserves_checkpoint_and_rejects_stale_phase(tmp_path):
             expected_phase=ResearchPhase.QUESTION,
             at="2026-09-17T12:03:00Z",
         )
+
+
+
+def test_scientific_registry_authority_cannot_be_retargeted_after_construction(
+    tmp_path,
+):
+    registry, supervisor = _workspace(tmp_path)
+    alternate = ScientificRegistry.initialize_pristine(
+        tmp_path / "alternate" / "scientific-registry.json"
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="scientific registry authority binding is immutable",
+    ):
+        supervisor.scientific_registry = alternate
+
+    supervisor.__dict__["scientific_registry"] = alternate
+    assert supervisor.scientific_registry is registry
+
+    original_registry_path = registry.path
+    registry.path = alternate.path
+    try:
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority binding changed",
+        ):
+            supervisor.accept_trigger(_trigger())
+    finally:
+        registry.path = original_registry_path
+
+    original_supervisor_path = supervisor.path
+    supervisor.path = tmp_path / "alternate" / "research-supervisor.json"
+    try:
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority binding changed",
+        ):
+            _ = supervisor.scientific_registry
+    finally:
+        supervisor.path = original_supervisor_path
+
+    assert supervisor.scientific_registry is registry
+
+    descriptor = ResearchSupervisor.__dict__["scientific_registry"]
+    try:
+        ResearchSupervisor.scientific_registry = alternate
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority class binding changed",
+        ):
+            supervisor.accept_trigger(
+                _trigger(trigger_id="registry-class-binding-replaced")
+            )
+    finally:
+        ResearchSupervisor.scientific_registry = descriptor
+
+    try:
+        del ResearchSupervisor.scientific_registry
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority class binding changed",
+        ):
+            supervisor.accept_trigger(
+                _trigger(trigger_id="registry-class-binding-deleted")
+            )
+    finally:
+        ResearchSupervisor.scientific_registry = descriptor
+
+    class ShadowedResearchSupervisor(ResearchSupervisor):
+        pass
+
+    ShadowedResearchSupervisor.scientific_registry = alternate
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="scientific registry authority class binding changed",
+    ):
+        ShadowedResearchSupervisor(supervisor.path, registry)
+
+
+def test_scientific_registry_authority_rejects_relative_path_retarget(
+    tmp_path,
+    monkeypatch,
+):
+    alternate_root = tmp_path / "alternate-root"
+    alternate_root.mkdir()
+    _, alternate_supervisor = _workspace(alternate_root / "workspace")
+
+    original_root = tmp_path / "original-root"
+    original_root.mkdir()
+    monkeypatch.chdir(original_root)
+    _, supervisor = _workspace(Path("workspace"))
+
+    monkeypatch.chdir(alternate_root)
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="scientific registry authority binding changed",
+    ):
+        supervisor.accept_trigger(
+            _trigger(trigger_id="relative-path-retarget")
+        )
+
+    assert alternate_supervisor.list_runs() == ()
+
+
+def test_scientific_registry_authority_accessor_dispatch_cannot_be_shadowed(
+    tmp_path,
+):
+    _registry, supervisor = _workspace(tmp_path)
+    alternate = ScientificRegistry.initialize_pristine(
+        tmp_path / "alternate-accessor" / "scientific-registry.json"
+    )
+    decoy_calls = 0
+
+    def decoy_authority():
+        nonlocal decoy_calls
+        decoy_calls += 1
+        return alternate
+
+    supervisor.__dict__["_assert_scientific_registry_class_binding"] = lambda: None
+    supervisor.__dict__["_scientific_registry_authority"] = decoy_authority
+
+    started = supervisor.accept_trigger(
+        _trigger(trigger_id="registry-accessor-shadow")
+    )
+    assert supervisor.status(started.run_id).trigger_id == "registry-accessor-shadow"
+    assert decoy_calls == 0
 
 
 def test_scientific_binding_must_exist_and_be_causally_available(tmp_path):
@@ -261,3 +456,599 @@ def test_trigger_cannot_reference_future_question(tmp_path):
                 budget_units=5,
             )
         )
+
+
+def test_hypothesis_binding_must_belong_to_run_question(tmp_path):
+    registry, supervisor = _workspace(tmp_path)
+    registry.append(
+        ResearchQuestion(
+            question_id="question-2",
+            statement="Independent second question",
+            source_sha256=SOURCE_SHA,
+            created_at="2026-09-17T12:04:00Z",
+        )
+    )
+    registry.append(
+        Hypothesis(
+            hypothesis_id="hypothesis-2",
+            research_question_id="question-2",
+            statement="Second-lineage hypothesis.",
+            falsifiable_prediction="Metric improves.",
+            failure_criteria="Metric does not improve.",
+            primary_metric="score",
+            protective_metrics=(),
+            created_at="2026-09-17T12:05:00Z",
+        )
+    )
+    started = supervisor.accept_trigger(_trigger())
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="hypothesis research question does not match supervisor run",
+    ):
+        supervisor.advance(
+            started.run_id,
+            expected_phase=ResearchPhase.QUESTION,
+            at="2026-09-17T12:06:00Z",
+            bindings=(("hypothesis_id", "hypothesis-2"),),
+        )
+
+
+def test_protocol_binding_requires_explicit_supervisor_hypothesis(tmp_path):
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    registry.append(_protocol(question, hypothesis, protocol_id="protocol-1"))
+
+    started = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol requires explicit supervisor hypothesis binding",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.HYPOTHESIS,
+            at="2026-09-17T12:10:00Z",
+            bindings=(("research_protocol_id", "protocol-1"),),
+        )
+
+
+def test_restart_rejects_protocol_without_explicit_supervisor_hypothesis(tmp_path):
+    import hashlib
+
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    registry.append(_protocol(question, hypothesis, protocol_id="protocol-1"))
+
+    started = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", "hypothesis-1"),),
+    )
+    supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", "protocol-1"),),
+    )
+
+    payload = json.loads(supervisor.path.read_text(encoding="utf-8"))
+    run = payload["runs"][0]
+    del run["bindings"]["hypothesis_id"]
+
+    def digest(value):
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    run["run_sha256"] = digest(
+        {key: value for key, value in run.items() if key != "run_sha256"}
+    )
+    payload["state_sha256"] = digest(
+        {key: value for key, value in payload.items() if key != "state_sha256"}
+    )
+    supervisor.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol requires explicit supervisor hypothesis binding",
+    ):
+        ResearchSupervisor(supervisor.path, registry)
+
+
+def test_protocol_binding_must_match_run_question_hypothesis_and_payload_digests(tmp_path):
+    registry, supervisor = _workspace(tmp_path)
+    question_1 = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis_1 = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    question_2 = ResearchQuestion(
+        question_id="question-2",
+        statement="Independent second question",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis_2 = Hypothesis(
+        hypothesis_id="hypothesis-2",
+        research_question_id="question-2",
+        statement="Independent second hypothesis.",
+        falsifiable_prediction="Second metric improves.",
+        failure_criteria="Second metric does not improve.",
+        primary_metric="other-score",
+        protective_metrics=(),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    for record in (hypothesis_1, question_2, hypothesis_2):
+        registry.append(record)
+    registry.append(_protocol(question_2, hypothesis_2, protocol_id="protocol-2"))
+
+    started = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", "hypothesis-1"),),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol question does not match supervisor run",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.HYPOTHESIS,
+            at="2026-09-17T12:10:00Z",
+            bindings=(("research_protocol_id", "protocol-2"),),
+        )
+
+    registry.append(
+        _protocol(
+            question_1,
+            hypothesis_1,
+            protocol_id="protocol-bad-question-digest",
+            question_sha256="f" * 64,
+        )
+    )
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol question digest does not match canonical question",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.HYPOTHESIS,
+            at="2026-09-17T12:10:00Z",
+            bindings=(("research_protocol_id", "protocol-bad-question-digest"),),
+        )
+
+    registry.append(
+        _protocol(
+            question_1,
+            hypothesis_1,
+            protocol_id="protocol-bad-hypothesis-digest",
+            hypothesis_sha256="e" * 64,
+        )
+    )
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="research protocol hypothesis digest does not match canonical hypothesis",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.HYPOTHESIS,
+            at="2026-09-17T12:10:00Z",
+            bindings=(("research_protocol_id", "protocol-bad-hypothesis-digest"),),
+        )
+
+    registry.append(_protocol(question_1, hypothesis_1, protocol_id="protocol-1"))
+    valid = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", "protocol-1"),),
+    )
+    assert ("research_protocol_id", "protocol-1") in valid.bindings
+
+
+def test_restart_rejects_self_consistent_cross_linked_scientific_binding(tmp_path):
+    import hashlib
+
+    registry, supervisor = _workspace(tmp_path)
+    registry.append(
+        Hypothesis(
+            hypothesis_id="hypothesis-1",
+            research_question_id="question-1",
+            statement="Candidate is better.",
+            falsifiable_prediction="Primary metric improves.",
+            failure_criteria="Primary metric does not improve.",
+            primary_metric="score",
+            protective_metrics=(),
+            created_at="2026-09-17T12:05:00Z",
+        )
+    )
+    registry.append(
+        ResearchQuestion(
+            question_id="question-2",
+            statement="Independent second question",
+            source_sha256=SOURCE_SHA,
+            created_at="2026-09-17T12:04:00Z",
+        )
+    )
+    registry.append(
+        Hypothesis(
+            hypothesis_id="hypothesis-2",
+            research_question_id="question-2",
+            statement="Second-lineage hypothesis.",
+            falsifiable_prediction="Other metric improves.",
+            failure_criteria="Other metric does not improve.",
+            primary_metric="other-score",
+            protective_metrics=(),
+            created_at="2026-09-17T12:05:00Z",
+        )
+    )
+    started = supervisor.accept_trigger(_trigger())
+    supervisor.advance(
+        started.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", "hypothesis-1"),),
+    )
+
+    payload = json.loads(supervisor.path.read_text(encoding="utf-8"))
+    run = payload["runs"][0]
+    run["bindings"]["hypothesis_id"] = "hypothesis-2"
+
+    def digest(value):
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    run["run_sha256"] = digest(
+        {key: value for key, value in run.items() if key != "run_sha256"}
+    )
+    payload["state_sha256"] = digest(
+        {key: value for key, value in payload.items() if key != "state_sha256"}
+    )
+    supervisor.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="hypothesis research question does not match supervisor run",
+    ):
+        ResearchSupervisor(supervisor.path, registry)
+
+
+def _append_downstream_chain(registry, protocol, *, suffix: str):
+    dataset = DatasetSnapshot(
+        dataset_snapshot_id=f"dataset-{suffix}",
+        manifest_sha256=SOURCE_SHA,
+        source_identity=f"source-{suffix}",
+        license_identity="licensed",
+        causal_cutoff="2026-09-17T12:09:00Z",
+        available_at_utc="2026-09-17T12:10:00Z",
+    )
+    feature = FeatureSet(
+        feature_set_id=f"feature-{suffix}",
+        version="v1",
+        definition_sha256="2" * 64,
+        source_sha256=SOURCE_SHA,
+        available_at_utc="2026-09-17T12:10:00Z",
+    )
+    model = ModelVersion(
+        model_version_id=f"model-{suffix}",
+        model_family="baseline",
+        artifact_sha256="3" * 64,
+        source_sha256=SOURCE_SHA,
+        environment_sha256=SOURCE_SHA,
+        dataset_snapshot_id=dataset.record_id,
+        feature_set_id=feature.record_id,
+        research_protocol_id=protocol.record_id,
+        seed=7,
+        config_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:11:00Z",
+    )
+    strategy = StrategyVersion(
+        strategy_version_id=f"strategy-{suffix}",
+        canonical_strategy_id="research-supervisor-test",
+        source_sha256=SOURCE_SHA,
+        environment_sha256=SOURCE_SHA,
+        config_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:12:00Z",
+        model_version_id=model.record_id,
+    )
+    bundle = EvaluationBundleRef(
+        evaluation_bundle_id=f"evaluation-{suffix}",
+        bundle_sha256="4" * 64,
+        evaluator_source_sha256=SOURCE_SHA,
+        dataset_snapshot_id=dataset.record_id,
+        protocol_sha256=protocol.protocol_sha256,
+        artifact_hashes=("5" * 64,),
+        created_at="2026-09-17T12:13:00Z",
+        evaluated_strategy_version_id=strategy.record_id,
+        evaluated_model_version_id=model.record_id,
+    )
+    experiment = ExperimentRecord(
+        experiment_id=f"experiment-{suffix}",
+        research_protocol_id=protocol.record_id,
+        dataset_snapshot_id=dataset.record_id,
+        feature_set_id=feature.record_id,
+        model_version_id=model.record_id,
+        strategy_version_id=strategy.record_id,
+        evaluation_bundle_id=bundle.record_id,
+        seed=7,
+        config_sha256=SOURCE_SHA,
+        outcome=ResearchOutcome.NULL,
+        created_at="2026-09-17T12:12:30Z",
+        completed_at="2026-09-17T12:14:00Z",
+    )
+    for record in (dataset, feature, model, strategy, bundle, experiment):
+        registry.append(record)
+    decision = PromotionDecision(
+        promotion_decision_id=f"decision-{suffix}",
+        action=PromotionAction.RETAIN,
+        candidate_strategy_version_id=strategy.record_id,
+        candidate_model_version_id=model.record_id,
+        research_protocol_id=protocol.record_id,
+        protocol_sha256=protocol.protocol_sha256,
+        evaluation_bundle_id=bundle.record_id,
+        evaluation_bundle_sha256=bundle.bundle_sha256,
+        decided_at="2026-09-17T12:15:00Z",
+        reason="retain after null result",
+    )
+    registry.record_promotion(decision)
+    postmortem = Postmortem(
+        postmortem_id=f"postmortem-{suffix}",
+        experiment_id=experiment.record_id,
+        classification=ResearchOutcome.NULL,
+        finding="No material improvement.",
+        retest_conditions=("new independent data",),
+        created_at="2026-09-17T12:16:00Z",
+    )
+    registry.append(postmortem)
+    return {
+        "dataset": dataset.record_id,
+        "feature": feature.record_id,
+        "model": model.record_id,
+        "strategy": strategy.record_id,
+        "evaluation": bundle.record_id,
+        "experiment": experiment.record_id,
+        "decision": decision.record_id,
+        "postmortem": postmortem.record_id,
+    }
+
+
+def test_downstream_scientific_bindings_must_stay_on_one_durable_lineage(tmp_path):
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    protocol = _protocol(question, hypothesis, protocol_id="protocol-1")
+    registry.append(protocol)
+    first = _append_downstream_chain(registry, protocol, suffix="one")
+    second = _append_downstream_chain(registry, protocol, suffix="two")
+
+    state = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", hypothesis.record_id),),
+    )
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", protocol.record_id),),
+    )
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.SOURCE_SEARCH,
+        at="2026-09-17T12:14:00Z",
+        bindings=(
+            ("dataset_snapshot_id", first["dataset"]),
+            ("evaluation_bundle_id", first["evaluation"]),
+            ("feature_set_id", first["feature"]),
+            ("model_version_id", first["model"]),
+            ("strategy_version_id", first["strategy"]),
+        ),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="experiment dataset_snapshot_id does not match supervisor binding",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.PROTOCOL_FREEZE,
+            at="2026-09-17T12:14:30Z",
+            bindings=(("experiment_id", second["experiment"]),),
+        )
+
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.PROTOCOL_FREEZE,
+        at="2026-09-17T12:14:30Z",
+        bindings=(("experiment_id", first["experiment"]),),
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match=(
+            "promotion decision candidate_strategy_version_id "
+            "does not match supervisor binding"
+        ),
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.DATASET_SNAPSHOT,
+            at="2026-09-17T12:15:00Z",
+            bindings=(("promotion_decision_id", second["decision"]),),
+        )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="postmortem experiment does not match supervisor binding",
+    ):
+        supervisor.advance(
+            state.run_id,
+            expected_phase=ResearchPhase.DATASET_SNAPSHOT,
+            at="2026-09-17T12:16:00Z",
+            bindings=(("postmortem_id", second["postmortem"]),),
+        )
+
+
+def test_restart_rejects_rehashed_cross_linked_downstream_experiment(tmp_path):
+    import hashlib
+
+    registry, supervisor = _workspace(tmp_path)
+    question = ResearchQuestion(
+        question_id="question-1",
+        statement="Does the challenger improve the frozen primary metric?",
+        source_sha256=SOURCE_SHA,
+        created_at="2026-09-17T12:00:00Z",
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="hypothesis-1",
+        research_question_id="question-1",
+        statement="Candidate is better.",
+        falsifiable_prediction="Primary metric improves.",
+        failure_criteria="Primary metric does not improve.",
+        primary_metric="score",
+        protective_metrics=("drawdown",),
+        created_at="2026-09-17T12:05:00Z",
+    )
+    registry.append(hypothesis)
+    protocol = _protocol(question, hypothesis, protocol_id="protocol-1")
+    registry.append(protocol)
+    first = _append_downstream_chain(registry, protocol, suffix="one")
+    second = _append_downstream_chain(registry, protocol, suffix="two")
+
+    state = supervisor.accept_trigger(_trigger())
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.QUESTION,
+        at="2026-09-17T12:06:00Z",
+        bindings=(("hypothesis_id", hypothesis.record_id),),
+    )
+    state = supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.HYPOTHESIS,
+        at="2026-09-17T12:10:00Z",
+        bindings=(("research_protocol_id", protocol.record_id),),
+    )
+    supervisor.advance(
+        state.run_id,
+        expected_phase=ResearchPhase.SOURCE_SEARCH,
+        at="2026-09-17T12:14:00Z",
+        bindings=(
+            ("dataset_snapshot_id", first["dataset"]),
+            ("evaluation_bundle_id", first["evaluation"]),
+            ("experiment_id", first["experiment"]),
+            ("feature_set_id", first["feature"]),
+            ("model_version_id", first["model"]),
+            ("strategy_version_id", first["strategy"]),
+        ),
+    )
+
+    payload = json.loads(supervisor.path.read_text(encoding="utf-8"))
+    run = payload["runs"][0]
+    run["bindings"]["experiment_id"] = second["experiment"]
+
+    def digest(value):
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    run["run_sha256"] = digest(
+        {key: value for key, value in run.items() if key != "run_sha256"}
+    )
+    payload["state_sha256"] = digest(
+        {key: value for key, value in payload.items() if key != "state_sha256"}
+    )
+    supervisor.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="experiment dataset_snapshot_id does not match supervisor binding",
+    ):
+        ResearchSupervisor(supervisor.path, registry)

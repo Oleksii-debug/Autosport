@@ -1,8 +1,8 @@
 """Bind confirmation-holdout freshness to canonical physical evaluation content.
 
-``promotion_holdout_access_id`` is an immutable provenance/attempt identity.  It may
+``promotion_holdout_access_id`` is an immutable provenance/attempt identity. It may
 therefore change when a protocol, source label, licence record, or confirmation
-family changes.  Those metadata changes do not make already-observed evaluation
+family changes. Those metadata changes do not make already-observed evaluation
 points unseen again.
 
 This guard composes the existing #716 holdout ledger and ScientificRegistry instead
@@ -13,11 +13,15 @@ of adding another store:
   content so an old record blocks a relabelled consume;
 * factory PromotionEvidence history resolves every DatasetSnapshot through the
   canonical registry and treats the same manifest as consumed unless it is the exact
-  same frozen attempt being resumed.
+  same frozen attempt being resumed;
+* different manifests do not imply disjoint observations: absent explicit canonical
+  observation-membership evidence they fail closed as already consumed; when both
+  snapshots carry exact SHA-256 membership, only proven-disjoint populations may
+  open fresh confirmation capacity.
 
-The durable access id remains unchanged and continues to carry provenance.  A truly
-distinct frozen holdout must therefore have a distinct canonical content/subset
-manifest rather than merely different authority labels.
+The durable access id remains unchanged and continues to carry provenance. A truly
+distinct frozen holdout therefore needs product-owned evidence of disjoint physical
+observations rather than merely a different manifest or authority label.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from . import _strategy_model_factory_impl as _factory
 from . import point_in_time_evidence as _evidence
 
 
-# Capture the already-composed #716 behavior.  The runtime repair has been installed
+# Capture the already-composed #716 behavior. The runtime repair has been installed
 # before this module is imported from package __init__.
 _LEGACY_FRESHNESS_ID = _evidence._holdout_freshness_id
 _ORIGINAL_LEDGER_LOAD = _evidence.HoldoutConsumptionLedger._load
@@ -53,7 +57,7 @@ def _physical_freshness_id(
     """Return reset-resistant identity for one exact governed point population.
 
     The extra parameters stay in the signature for compatibility with the canonical
-    ledger call surface.  They are validated as provenance by HoldoutConsumption and
+    ledger call surface. They are validated as provenance by HoldoutConsumption and
     ``promotion_holdout_access_id`` but intentionally cannot mint fresh capacity.
     """
 
@@ -143,7 +147,19 @@ def _load_with_physical_reindex(self: _evidence.HoldoutConsumptionLedger) -> Non
     self._records = normalized
 
 
-def _manifest_for_snapshot(registry: object, snapshot_id: object) -> str:
+def _snapshot_physical_identity(
+    registry: object,
+    snapshot_id: object,
+) -> tuple[str, frozenset[str] | None]:
+    """Resolve manifest plus optional exact observation membership from registry truth.
+
+    Existing canonical DatasetSnapshot records currently expose a manifest but not
+    observation membership. That absence is intentionally represented as ``None``:
+    callers must not infer disjointness merely because two manifest hashes differ.
+    A future/extended canonical record may expose ``observation_membership_sha256s``;
+    when present it must be a non-empty duplicate-free JSON list of canonical hashes.
+    """
+
     snapshot_id = _factory._text(snapshot_id, "promotion evidence dataset_snapshot_id")
     getter = getattr(registry, "get", None)
     if not callable(getter):
@@ -156,10 +172,35 @@ def _manifest_for_snapshot(registry: object, snapshot_id: object) -> str:
     payload = getattr(snapshot, "payload", None)
     if type(payload) is not dict:
         raise ValueError("DatasetSnapshot physical authority payload is invalid")
-    return _factory._sha256(
+    manifest = _factory._sha256(
         payload.get("manifest_sha256"),
         "promotion evidence dataset manifest_sha256",
     )
+
+    membership = payload.get("observation_membership_sha256s")
+    if membership is None:
+        return manifest, None
+    if type(membership) is not list or not membership:
+        raise ValueError(
+            "DatasetSnapshot observation membership must be a non-empty JSON list"
+        )
+    normalized = tuple(
+        _factory._sha256(
+            item,
+            "promotion evidence observation membership SHA-256",
+        )
+        for item in membership
+    )
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("DatasetSnapshot observation membership contains duplicates")
+    return manifest, frozenset(normalized)
+
+
+def _manifest_for_snapshot(registry: object, snapshot_id: object) -> str:
+    """Compatibility helper returning the exact canonical snapshot manifest."""
+
+    manifest, _membership = _snapshot_physical_identity(registry, snapshot_id)
+    return manifest
 
 
 def _holdout_consumed_by_physical_evidence(
@@ -168,7 +209,12 @@ def _holdout_consumed_by_physical_evidence(
     same_attempt_identity: Mapping[str, object],
     registry: object,
 ) -> bool:
-    """Return whether the exact physical holdout was disclosed by another attempt."""
+    """Return whether physical holdout evidence was disclosed by another attempt.
+
+    Manifest inequality is not proof of physical disjointness. Distinct manifests
+    therefore remain consumed unless both immutable DatasetSnapshot records expose
+    exact observation membership and those memberships are provably disjoint.
+    """
 
     payloads = tuple(prior_payloads)
     if _ORIGINAL_FACTORY_HELPER(
@@ -177,7 +223,7 @@ def _holdout_consumed_by_physical_evidence(
     ):
         return True
 
-    current_manifest = _manifest_for_snapshot(
+    current_manifest, current_membership = _snapshot_physical_identity(
         registry,
         same_attempt_identity.get("dataset_snapshot_id"),
     )
@@ -187,11 +233,15 @@ def _holdout_consumed_by_physical_evidence(
             for key, value in same_attempt_identity.items()
         ):
             continue
-        prior_manifest = _manifest_for_snapshot(
+        prior_manifest, prior_membership = _snapshot_physical_identity(
             registry,
             payload.get("dataset_snapshot_id"),
         )
         if prior_manifest == current_manifest:
+            return True
+        if current_membership is None or prior_membership is None:
+            return True
+        if not current_membership.isdisjoint(prior_membership):
             return True
     return False
 
@@ -203,7 +253,7 @@ def _factory_holdout_consumed(
 ) -> bool:
     registry = _ACTIVE_FACTORY_REGISTRY.get()
     if registry is None:
-        # This private helper has historically been unit-tested in isolation.  The
+        # This private helper has historically been unit-tested in isolation. The
         # product ExperimentRunner always installs registry context below; preserving
         # the old isolated behavior avoids inventing an ambient registry authority.
         return _ORIGINAL_FACTORY_HELPER(
@@ -248,7 +298,7 @@ def _install_physical_guards() -> None:
 
 def _runtime_install_with_physical_guard() -> None:
     # The #716 reload guard reinstalls its own methods after point_in_time_evidence
-    # reload.  Reapply our content identity last so reload cannot reopen the alias.
+    # reload. Reapply our content identity last so reload cannot reopen the alias.
     _ORIGINAL_RUNTIME_INSTALL()
     _install_physical_guards()
 

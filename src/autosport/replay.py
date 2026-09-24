@@ -7,13 +7,17 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from .domain import MarketEvent, utc_now_iso
 from .json_integrity import jsonl_bytes_are_blank, strict_json_loads
+
+
+_REPLAY_STOP_CONTEXT = threading.local()
 
 
 def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
@@ -31,6 +35,88 @@ def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
 
 class FutureLeakageError(RuntimeError):
     pass
+
+
+class ReplayStopRequested(RuntimeError):
+    """Cooperative operator STOP before a replay may complete and unlock results."""
+
+
+class ReplayStopToken:
+    """Single-worker STOP authority with an atomic completion boundary."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._accepting = True
+
+    @property
+    def accepting(self) -> bool:
+        with self._lock:
+            return self._accepting
+
+    def request(self) -> bool:
+        """Request STOP only while the replay can still honor it truthfully."""
+
+        with self._lock:
+            if not self._accepting:
+                return False
+            self._event.set()
+            return True
+
+    def checkpoint(self) -> None:
+        if self._event.is_set():
+            raise ReplayStopRequested("paper replay stopped by operator")
+
+    def wait(self, timeout: float) -> bool:
+        return self._event.wait(timeout)
+
+    def finish(self, complete: Callable[[], None]) -> None:
+        """Atomically choose STOP or completion; never acknowledge both."""
+
+        with self._lock:
+            if not self._accepting or self._event.is_set():
+                self._accepting = False
+                raise ReplayStopRequested("paper replay stopped by operator")
+            try:
+                complete()
+            finally:
+                self._accepting = False
+
+    def disarm(self) -> None:
+        with self._lock:
+            self._accepting = False
+
+
+@contextmanager
+def replay_stop_scope(stop_token: ReplayStopToken | None) -> Iterator[None]:
+    """Bind one cooperative STOP token to only the current replay worker thread.
+
+    The token is deliberately thread-local: concurrent independent replays cannot
+    stop each other, and callers outside the worker keep the historical replay API.
+    Nested scopes restore the prior binding exactly.
+    """
+
+    had_previous = hasattr(_REPLAY_STOP_CONTEXT, "token")
+    previous = getattr(_REPLAY_STOP_CONTEXT, "token", None)
+    _REPLAY_STOP_CONTEXT.token = stop_token
+    try:
+        yield
+    finally:
+        if had_previous:
+            _REPLAY_STOP_CONTEXT.token = previous
+        else:
+            delattr(_REPLAY_STOP_CONTEXT, "token")
+
+
+def _active_replay_stop_token() -> ReplayStopToken | None:
+    token = getattr(_REPLAY_STOP_CONTEXT, "token", None)
+    return token if isinstance(token, ReplayStopToken) else None
+
+
+def _checkpoint_replay_stop() -> None:
+    token = _active_replay_stop_token()
+    if token is not None:
+        token.checkpoint()
 
 
 class ReplayLeakageFirewall:
@@ -133,6 +219,10 @@ class ReplayEngine:
         speed: float = 0.0,
         run_id: str | None = None,
     ) -> ReplayRun:
+        stop_token = _active_replay_stop_token()
+        # STOP is checked before claiming the firewall so an already-requested
+        # cancellation cannot retire a fresh firewall merely by entering run().
+        _checkpoint_replay_stop()
         # Claim before any strategy-visible callback. The raw completion capability
         # remains local to this run; the firewall stores only its digest. A failed
         # run deliberately leaves the firewall retired IN_USE and therefore sealed.
@@ -140,15 +230,34 @@ class ReplayEngine:
         previous: float | None = None
         started = utc_now_iso()
         count = 0
-        for event in self.events:
-            if speed > 0:
-                current = _iso_seconds(event.observed_ts)
-                if previous is not None:
-                    time.sleep(max(0.0, current - previous) / speed)
-                previous = current
-            on_event(event)
-            count += 1
-        self.firewall._complete_replay(completion_capability)
+        try:
+            for event in self.events:
+                _checkpoint_replay_stop()
+                if speed > 0:
+                    current = _iso_seconds(event.observed_ts)
+                    if previous is not None:
+                        delay = max(0.0, current - previous) / speed
+                        if delay > 0:
+                            if stop_token is None:
+                                time.sleep(delay)
+                            elif stop_token.wait(delay):
+                                raise ReplayStopRequested("paper replay stopped by operator")
+                    previous = current
+                _checkpoint_replay_stop()
+                on_event(event)
+                count += 1
+            # Completion and STOP acknowledgement are serialized on the same token
+            # lock. A request can therefore never return True after result unlock.
+            if stop_token is None:
+                self.firewall._complete_replay(completion_capability)
+            else:
+                stop_token.finish(
+                    lambda: self.firewall._complete_replay(completion_capability)
+                )
+        except BaseException:
+            if stop_token is not None:
+                stop_token.disarm()
+            raise
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),
             dataset_hash=self.dataset_hash,

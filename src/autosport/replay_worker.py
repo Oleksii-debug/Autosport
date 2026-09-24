@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from .dataset import load_dataset
+from .replay import ReplayStopRequested, ReplayStopToken, replay_stop_scope
 from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession, SessionResult
 from .strategies import experiment_strategy_id
@@ -19,10 +20,12 @@ ReplayTask = Callable[[], SessionResult]
 class ReplayWorkerMessage:
     result: SessionResult | None = None
     error: str | None = None
+    stopped: bool = False
 
     def __post_init__(self) -> None:
-        if (self.result is None) == (self.error is None):
-            raise ValueError("worker message must contain exactly one of result or error")
+        terminal_count = int(self.result is not None) + int(self.error is not None) + int(self.stopped)
+        if terminal_count != 1:
+            raise ValueError("worker message must contain exactly one terminal outcome")
 
 
 def _terminal_error(exc: BaseException) -> str:
@@ -53,17 +56,49 @@ class OneShotReplayWorker:
         self._lock = threading.Lock()
         self._busy = False
         self._thread: threading.Thread | None = None
+        self._stop_token: ReplayStopToken | None = None
+        self._accepted_stop_token: ReplayStopToken | None = None
+        self._stopped_pending = False
 
     @property
     def busy(self) -> bool:
         with self._lock:
             return self._busy
 
+    @property
+    def stop_available(self) -> bool:
+        with self._lock:
+            token = self._stop_token
+            return bool(self._busy and token is not None and token.accepting)
+
+    @property
+    def stopped_pending(self) -> bool:
+        """Allow the UI to intercept only STOP terminals without consuming others."""
+
+        with self._lock:
+            return self._stopped_pending
+
+    def request_stop(self) -> bool:
+        """Request cooperative STOP only while the replay can still honor it."""
+
+        with self._lock:
+            if not self._busy or self._stop_token is None:
+                return False
+            token = self._stop_token
+            accepted = token.request()
+            if accepted:
+                self._accepted_stop_token = token
+            return accepted
+
     def start(self, task: ReplayTask) -> bool:
         with self._lock:
             if self._busy:
                 return False
             self._busy = True
+            self._stop_token = ReplayStopToken()
+            self._accepted_stop_token = None
+            self._stopped_pending = False
+            stop_token = self._stop_token
         # Economic replay may be inside PRECOMMIT/promotion. A daemon thread could
         # be killed with the process at an arbitrary point, so keep it non-daemon.
         # The helper additionally waits behind a start-commit gate: Thread.start()
@@ -74,7 +109,7 @@ class OneShotReplayWorker:
             cancelled = threading.Event()
             thread = threading.Thread(
                 target=self._run_when_committed,
-                args=(task, start_gate, cancelled),
+                args=(task, start_gate, cancelled, stop_token),
                 name="autosport-paper-replay",
                 daemon=False,
             )
@@ -118,33 +153,66 @@ class OneShotReplayWorker:
         # returns True for ordinary setup failure and publishes exactly one terminal
         # error; poll() is what restores idle. False remains "already busy" only.
         self._thread = None
+        with self._lock:
+            token = self._stop_token
+            self._stop_token = None
+            self._accepted_stop_token = None
+        if token is not None:
+            token.disarm()
         self._messages.put(ReplayWorkerMessage(error=_terminal_error(exc)))
 
     def _release_unstarted_slot(self) -> None:
         self._thread = None
         with self._lock:
+            token = self._stop_token
+            self._stop_token = None
+            self._accepted_stop_token = None
             self._busy = False
+        if token is not None:
+            token.disarm()
 
     def _run_when_committed(
         self,
         task: ReplayTask,
         start_gate: threading.Event,
         cancelled: threading.Event,
+        stop_token: ReplayStopToken,
     ) -> None:
         start_gate.wait()
         if cancelled.is_set():
+            stop_token.disarm()
             return
-        self._run(task)
+        self._run(task, stop_token)
 
-    def _run(self, task: ReplayTask) -> None:
+    def _run(self, task: ReplayTask, stop_token: ReplayStopToken) -> None:
         try:
-            message = ReplayWorkerMessage(result=task())
+            with replay_stop_scope(stop_token):
+                message = ReplayWorkerMessage(result=task())
+        except ReplayStopRequested as exc:
+            # Close the exact token before classifying the exception so a forged
+            # task exception cannot be retroactively laundered into operator STOP
+            # by a request that arrives only after the exception has escaped task().
+            stop_token.disarm()
+            with self._lock:
+                accepted_stop = self._accepted_stop_token is stop_token
+            if accepted_stop:
+                message = ReplayWorkerMessage(stopped=True)
+            else:
+                message = ReplayWorkerMessage(error=_terminal_error(exc))
         except BaseException as exc:
             # SystemExit/KeyboardInterrupt raised inside this detached background
             # thread do not provide a GUI terminal outcome by themselves. Publish
             # one so poll() clears the single-flight state instead of leaving the
             # application permanently busy after the worker thread has died.
             message = ReplayWorkerMessage(error=_terminal_error(exc))
+        finally:
+            stop_token.disarm()
+        with self._lock:
+            if self._stop_token is stop_token:
+                self._stop_token = None
+            if self._accepted_stop_token is stop_token:
+                self._accepted_stop_token = None
+            self._stopped_pending = message.stopped
         self._messages.put(message)
 
     def poll(self) -> ReplayWorkerMessage | None:
@@ -154,6 +222,9 @@ class OneShotReplayWorker:
             return None
         with self._lock:
             self._busy = False
+            self._stop_token = None
+            self._accepted_stop_token = None
+            self._stopped_pending = False
         return message
 
 

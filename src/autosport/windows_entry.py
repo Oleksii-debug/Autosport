@@ -160,10 +160,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Install before importing any audit module or entering the normal GUI path.
     # This guarantees that packaged release audits inspect the same compact
-    # layout that users receive rather than an audit-only geometry variant.
+    # layout and replay STOP surface that users receive rather than audit-only
+    # geometry or controls.
     from autosport.windows_layout import install_compact_windows_layout
 
     install_compact_windows_layout()
+    from autosport.windows_replay_stop import install_windows_replay_stop
+
+    install_windows_replay_stop()
     if args and args[0] == "--diagnostic-output":
         from autosport.diagnostic import run_machine_diagnostic
 

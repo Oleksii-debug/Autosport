@@ -8,11 +8,13 @@ from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
+from .windows_replay_stop import REPLAY_STOP_AUTOMATION_ID
 
 
 _ACTION_BINDINGS = {
     "<Control-o>": "choose_dataset",
     "<Control-r>": "run_replay",
+    "<Control-s>": "stop_replay",
     "<Control-Shift-R>": "repair_workspace",
     "<Control-l>": "live_refresh",
     "<Control-Alt-Left>": "shell_previous",
@@ -45,6 +47,7 @@ _FOCUSABLE_CONTROLS = (
     "research_plan",
     "choose_dataset",
     "run_replay",
+    "stop_replay",
     "repair_workspace",
     "replay_speed",
     "live_mode",
@@ -76,22 +79,30 @@ def summarize_keyboard_contract(
     focus_results: dict[str, bool],
     tab_reachable_controls: list[str],
     reverse_tab_reachable_controls: list[str] | None = None,
+    *,
+    require_replay_stop: bool = False,
 ) -> dict[str, Any]:
+    action_bindings = dict(_ACTION_BINDINGS)
+    focusable_controls = list(_FOCUSABLE_CONTROLS)
+    if not require_replay_stop:
+        action_bindings.pop("<Control-s>", None)
+        focusable_controls.remove("stop_replay")
+
     failures: list[str] = []
-    for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS):
+    for sequence in (*action_bindings, *_FOCUS_BINDINGS):
         if not bindings.get(sequence, False):
             failures.append(f"{sequence}: keyboard binding missing")
     for sequence, control in _FOCUS_BINDINGS.items():
         if not focus_results.get(sequence, False):
             failures.append(f"{sequence}: did not move focus to {control}")
-    missing_tab = [name for name in _FOCUSABLE_CONTROLS if name not in tab_reachable_controls]
+    missing_tab = [name for name in focusable_controls if name not in tab_reachable_controls]
     if missing_tab:
         failures.append("Tab traversal cannot reach: " + ", ".join(missing_tab))
     if reverse_tab_reachable_controls is None:
         failures.append("Shift+Tab traversal evidence missing")
     else:
         missing_reverse_tab = [
-            name for name in _FOCUSABLE_CONTROLS if name not in reverse_tab_reachable_controls
+            name for name in focusable_controls if name not in reverse_tab_reachable_controls
         ]
         if missing_reverse_tab:
             failures.append("Shift+Tab traversal cannot reach: " + ", ".join(missing_reverse_tab))
@@ -110,6 +121,8 @@ def summarize_keyboard_contract(
     def automation_id_for(name: str) -> int:
         if name == "bankroll":
             return WINDOWS_BANKROLL_AUTOMATION_ID
+        if name == "stop_replay":
+            return REPLAY_STOP_AUTOMATION_ID
         if name in workbench_names:
             return WORKBENCH_AUTOMATION_IDS[workbench_names[name]]
         if name.startswith("shell_") or name.startswith("owner_economic_"):
@@ -126,11 +139,11 @@ def summarize_keyboard_contract(
             ]
         return AUTOMATION_IDS[name]
 
-    expected_ids = {name: automation_id_for(name) for name in _FOCUSABLE_CONTROLS}
+    expected_ids = {name: automation_id_for(name) for name in focusable_controls}
     return {
         "status": "PASS" if not failures else "FAIL",
         "action_shortcuts_bound": {
-            sequence: bool(bindings.get(sequence, False)) for sequence in _ACTION_BINDINGS
+            sequence: bool(bindings.get(sequence, False)) for sequence in action_bindings
         },
         "focus_shortcuts_executed": {
             sequence: {
@@ -146,9 +159,9 @@ def summarize_keyboard_contract(
         "expected_automation_ids": expected_ids,
         "failures": failures,
         "evidence_scope": (
-            "in-process packaged Windows GUI keyboard contract: action shortcuts and shell cycling are bound, "
-            "F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus the manual "
-            "calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
+            "in-process packaged Windows GUI keyboard contract: action shortcuts include cooperative Ctrl+S replay STOP, "
+            "shell cycling is bound, F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus "
+            "the manual calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
             "not physical keyboard or NVDA speech proof"
         ),
         "human_tested": False,
@@ -173,6 +186,7 @@ def _critical_widgets(
         "research_plan": app.research_plan_button,
         "choose_dataset": app.choose_button,
         "run_replay": app.run_button,
+        "stop_replay": app.stop_replay_button,
         "repair_workspace": app.repair_button,
         "replay_speed": app.speed,
         "live_mode": app.live_mode,
@@ -270,6 +284,7 @@ def run_keyboard_audit(output_path: str | Path) -> int:
             _execute_focus_shortcuts(app, dialog),
             _tab_reachable_controls(app, workbench_dialog=dialog),
             _tab_reachable_controls(app, reverse=True, workbench_dialog=dialog),
+            require_replay_stop=True,
         )
     except Exception as exc:
         report = {

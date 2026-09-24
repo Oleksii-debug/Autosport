@@ -789,10 +789,20 @@ def _build_allocation_basis_store_runtime():
     goal_store_load = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
     goal_store_file_name = goal_store_type.FILE_NAME
     goal_to_payload = _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD
+    goal_store_load_globals = getattr(goal_store_load, "__globals__", {})
+    goal_parser = goal_store_load_globals.get("economic_goal_from_json")
+    goal_parser_code = getattr(goal_parser, "__code__", None)
+    goal_to_payload_code = getattr(goal_to_payload, "__code__", None)
+    if goal_parser_code is None or goal_to_payload_code is None:
+        raise LocalComputeAllocationBasisError(
+            "canonical EconomicGoal parser authority is unavailable"
+        )
     json_dumps = json.dumps
     sha256 = hashlib.sha256
     object_new = object.__new__
     object_setattr = object.__setattr__
+    path_read_bytes = path_type.read_bytes
+    path_read_bytes_code = getattr(path_read_bytes, "__code__", None)
 
     class GoalStoreReader:
         __slots__ = ("path",)
@@ -1030,25 +1040,57 @@ def _build_allocation_basis_store_runtime():
                 "allocation basis authority coordinates changed"
             )
 
+    def require_goal_parser_authority() -> None:
+        live_globals = getattr(goal_store_load, "__globals__", {})
+        live_parser = live_globals.get("economic_goal_from_json")
+        if (
+            live_parser is not goal_parser
+            or getattr(live_parser, "__code__", None) is not goal_parser_code
+            or getattr(goal_to_payload, "__code__", None)
+            is not goal_to_payload_code
+            or getattr(path_read_bytes, "__code__", None)
+            is not path_read_bytes_code
+        ):
+            raise error_type(
+                "current EconomicGoal parser authority changed"
+            )
+
     def sealed_current_goal(self):
         require_state(self)
+        require_goal_parser_authority()
         try:
             frozen_workspace, _path, _authority, _root = sealed_state[self]
+            goal_path = frozen_workspace / goal_store_file_name
             goal_store = object_new(goal_store_reader_type)
-            object_setattr(
-                goal_store,
-                "path",
-                frozen_workspace / goal_store_file_name,
-            )
+            object_setattr(goal_store, "path", goal_path)
             goal = goal_store_load(goal_store)
+            payload = goal_to_payload(goal)
+            durable_bytes = path_read_bytes(goal_path)
+            expected_bytes = (
+                json_dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            if durable_bytes != expected_bytes:
+                raise error_type(
+                    "current EconomicGoal does not match durable canonical bytes"
+                )
             raw = json_dumps(
-                goal_to_payload(goal),
+                payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
                 allow_nan=False,
             ).encode("utf-8")
+            require_goal_parser_authority()
         except Exception as exc:
+            if isinstance(exc, error_type):
+                raise
             raise error_type(
                 "current durable EconomicGoal is required"
             ) from exc

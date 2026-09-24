@@ -514,7 +514,81 @@ resolve_registered_live_feature_authority = (
 )
 
 
+def _make_canonical_market_event_dispatch():
+    market_event_type = MarketEvent
+    from_dict_descriptor = market_event_type.__dict__.get("from_dict")
+    to_dict_descriptor = market_event_type.__dict__.get("to_dict")
+    quote_key_descriptor = market_event_type.__dict__.get("quote_key")
+    if (
+        type(from_dict_descriptor) is not classmethod
+        or not callable(getattr(from_dict_descriptor, "__func__", None))
+        or not callable(to_dict_descriptor)
+        or type(quote_key_descriptor) is not property
+        or not callable(getattr(quote_key_descriptor, "fget", None))
+    ):
+        raise RegisteredStrategyLiveFeatureError(
+            "canonical MarketEvent dispatch is unavailable"
+        )
+
+    from_dict_callable = from_dict_descriptor.__func__
+    to_dict_callable = to_dict_descriptor
+    quote_key_callable = quote_key_descriptor.fget
+    from_dict_code = getattr(from_dict_callable, "__code__", None)
+    to_dict_code = getattr(to_dict_callable, "__code__", None)
+    quote_key_code = getattr(quote_key_callable, "__code__", None)
+
+    def require_canonical_market_event_dispatch() -> None:
+        if MarketEvent is not market_event_type:
+            raise RegisteredStrategyLiveFeatureError(
+                "canonical MarketEvent dispatch changed"
+            )
+        current_from_dict = market_event_type.__dict__.get("from_dict")
+        current_to_dict = market_event_type.__dict__.get("to_dict")
+        current_quote_key = market_event_type.__dict__.get("quote_key")
+        if (
+            current_from_dict is not from_dict_descriptor
+            or getattr(from_dict_descriptor.__func__, "__code__", None)
+            is not from_dict_code
+            or current_to_dict is not to_dict_descriptor
+            or getattr(to_dict_descriptor, "__code__", None) is not to_dict_code
+            or current_quote_key is not quote_key_descriptor
+            or getattr(quote_key_descriptor.fget, "__code__", None)
+            is not quote_key_code
+        ):
+            raise RegisteredStrategyLiveFeatureError(
+                "canonical MarketEvent dispatch changed"
+            )
+
+    def canonical_from_dict(payload: dict[str, object]) -> MarketEvent:
+        require_canonical_market_event_dispatch()
+        return from_dict_callable(market_event_type, payload)
+
+    def canonical_to_dict(event: MarketEvent) -> dict[str, object]:
+        require_canonical_market_event_dispatch()
+        return to_dict_callable(event)
+
+    def canonical_quote_key(event: MarketEvent) -> str:
+        require_canonical_market_event_dispatch()
+        return quote_key_callable(event)
+
+    return (
+        require_canonical_market_event_dispatch,
+        canonical_from_dict,
+        canonical_to_dict,
+        canonical_quote_key,
+    )
+
+
+(
+    _require_canonical_market_event_dispatch,
+    _canonical_market_event_from_dict,
+    _canonical_market_event_to_dict,
+    _canonical_market_event_quote_key,
+) = _make_canonical_market_event_dispatch()
+
+
 def _canonical_snapshot_events(snapshot: MirrorSnapshot) -> tuple[MarketEvent, ...]:
+    _require_canonical_market_event_dispatch()
     if type(snapshot) is not MirrorSnapshot:
         raise RegisteredStrategyLiveFeatureError(
             "snapshot must be the canonical MirrorSnapshot"
@@ -536,7 +610,9 @@ def _canonical_snapshot_events(snapshot: MirrorSnapshot) -> tuple[MarketEvent, .
                 "snapshot contains a non-canonical MarketEvent"
             )
         try:
-            rebound = MarketEvent.from_dict(event.to_dict())
+            rebound = _canonical_market_event_from_dict(
+                _canonical_market_event_to_dict(event)
+            )
         except (TypeError, ValueError) as exc:
             raise RegisteredStrategyLiveFeatureError(
                 "snapshot contains an invalid MarketEvent"
@@ -549,7 +625,7 @@ def _canonical_snapshot_events(snapshot: MirrorSnapshot) -> tuple[MarketEvent, .
             raise RegisteredStrategyLiveFeatureError(
                 "live feature input must be decision-eligible open market state"
             )
-        identity = (event.source_id, event.quote_key)
+        identity = (event.source_id, _canonical_market_event_quote_key(event))
         if identity in identities:
             raise RegisteredStrategyLiveFeatureError(
                 "snapshot contains duplicate source/quote identity"
@@ -577,7 +653,9 @@ def market_snapshot_sha256(snapshot: MirrorSnapshot) -> str:
     """Hash exact market evidence, excluding the process-local mirror revision."""
 
     events = _canonical_snapshot_events(snapshot)
-    return _canonical_json_sha256([event.to_dict() for event in events])
+    return _canonical_json_sha256(
+        [_canonical_market_event_to_dict(event) for event in events]
+    )
 
 
 def observe_registered_strategy_live_features(
@@ -605,7 +683,7 @@ def observe_registered_strategy_live_features(
     )
     events = _canonical_snapshot_events(snapshot)
     snapshot_sha256 = _canonical_json_sha256(
-        [event.to_dict() for event in events]
+        [_canonical_market_event_to_dict(event) for event in events]
     )
 
     result: list[LiveFeatureObservation] = []
@@ -651,14 +729,16 @@ def observe_registered_strategy_live_features(
                 "decimal odds produced an invalid live feature"
             )
 
-        event_sha256 = _canonical_json_sha256(event.to_dict())
+        event_payload = _canonical_market_event_to_dict(event)
+        event_sha256 = _canonical_json_sha256(event_payload)
+        quote_key = _canonical_market_event_quote_key(event)
         available_text = available.isoformat().replace("+00:00", "Z")
         freshness_text = freshness_timestamp.isoformat().replace("+00:00", "Z")
         evidence_payload = {
             "schema": "autosport.registered_strategy_live_feature_observation",
             "schema_version": 1,
             "input_id": wanted_input,
-            "quote_key": event.quote_key,
+            "quote_key": quote_key,
             "feature_set_id": authority.feature_set_id,
             "feature_version": authority.feature_version,
             "feature_definition_sha256": authority.feature_definition_sha256,
@@ -679,7 +759,7 @@ def observe_registered_strategy_live_features(
         result.append(
             LiveFeatureObservation(
                 input_id=wanted_input,
-                quote_key=event.quote_key,
+                quote_key=quote_key,
                 feature=feature,
                 available_at=available_text,
                 decision_at=decision_text,

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 from statistics import NormalDist
 from typing import Iterable
@@ -19,9 +20,9 @@ from .forecasting import (
     parse_iso_timestamp,
 )
 
-_EPSILON = 1e-15
+_LOG_LOSS_PROBABILITY_SUPPORT_FLOOR = Decimal("1e-15")
 _BRIER_INTERVAL_METHOD = "hoeffding-bounded-brier-v1"
-_LOG_LOSS_INTERVAL_METHOD = "hoeffding-clipped-log-loss-v1"
+_LOG_LOSS_INTERVAL_METHOD = "hoeffding-predeclared-probability-support-v2"
 _CALIBRATION_INTERVAL_METHOD = "bonferroni-wilson-binomial-v1"
 _ECE_INTERVAL_METHOD = "simultaneous-bin-envelope-v1"
 _DEPENDENCE_SCREEN_METHOD = "canonical-event-snapshot-evidence-uniqueness-v2"
@@ -788,10 +789,12 @@ def evaluate_calibration_diagnostics(
     """Build bounded calibration uncertainty evidence for one complete temporal cohort.
 
     Point Brier/log-loss values come from the canonical forecast evaluator.
-    Their bands use bounded-loss Hoeffding diagnostics. Per-bin observed-rate
-    intervals use a Bonferroni-adjusted Wilson construction so all non-empty
-    bin intervals are treated as one simultaneous diagnostic family. The ECE
-    envelope is then derived from those bin intervals. These are diagnostics,
+    Their bands use bounded-loss Hoeffding diagnostics. Log-loss bands are published
+    only for the product-predeclared symmetric forecast-probability support; rows
+    outside that support are rejected rather than clipped or outcome-conditioned.
+    Per-bin observed-rate intervals use a Bonferroni-adjusted Wilson construction so
+    all non-empty bin intervals are treated as one simultaneous diagnostic family.
+    The ECE envelope is then derived from those bin intervals. These are diagnostics,
     not promotion or execution authority.
     """
 
@@ -844,6 +847,20 @@ def evaluate_calibration_diagnostics(
         raise ValueError(
             "calibration outcome facts revealed after evaluation cutoff: "
             + ", ".join(late_outcomes)
+        )
+
+    support_floor = _LOG_LOSS_PROBABILITY_SUPPORT_FLOOR
+    support_ceiling = Decimal(1) - support_floor
+    unsupported = tuple(
+        record.forecast_id
+        for record in selected
+        if record.probability < support_floor or record.probability > support_ceiling
+    )
+    if unsupported:
+        raise ValueError(
+            "predeclared log-loss probability support requires every selected "
+            f"forecast probability inside [{support_floor}, {support_ceiling}]; "
+            "out-of-support forecasts: " + ", ".join(sorted(unsupported))
         )
 
     if dependence_assumption is not None and (
@@ -923,6 +940,8 @@ def evaluate_calibration_diagnostics(
         "dependence_screen_method": _DEPENDENCE_SCREEN_METHOD,
         "brier_interval_method": _BRIER_INTERVAL_METHOD,
         "log_loss_interval_method": _LOG_LOSS_INTERVAL_METHOD,
+        "log_loss_probability_support_floor": str(support_floor),
+        "log_loss_probability_support_ceiling": str(support_ceiling),
         "calibration_interval_method": _CALIBRATION_INTERVAL_METHOD,
         "ece_interval_method": _ECE_INTERVAL_METHOD,
     }
@@ -995,11 +1014,7 @@ def evaluate_calibration_diagnostics(
         confidence_level=confidence_level,
         method=_BRIER_INTERVAL_METHOD,
     )
-    upper_clip = 1.0 - _EPSILON
-    max_log_loss = max(
-        -math.log(_EPSILON),
-        -math.log1p(-upper_clip),
-    )
+    max_log_loss = -math.log(float(support_floor))
     log_loss = _bounded_mean_interval(
         summary.log_loss,
         count=summary.count,

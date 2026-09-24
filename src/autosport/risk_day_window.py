@@ -3,7 +3,7 @@
 This module owns only the UTC day boundary that later risk composition can consume.
 It does not calculate turnover, grant turnover headroom, define a risk session, or
 authorize execution. Positive consumers must re-resolve evidence with
-\`\`ProductDayRiskWindowStore.require_current\`\` immediately before use.
+``ProductDayRiskWindowStore.require_current`` immediately before use.
 """
 
 from __future__ import annotations

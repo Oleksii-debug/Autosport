@@ -389,3 +389,37 @@ def test_recorded_step_guard_rejects_stateful_instant_text_rebind(
     )
     assert accumulator.summary().evidence_sha256 == baseline.evidence_sha256
 
+def test_summary_rejects_transitive_json_encoder_publication_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accumulator, _resolver = _filled_accumulator(event_count=1)
+    baseline = accumulator.summary()
+    encoder_type = forward_evidence.json.JSONEncoder
+    original_encode = encoder_type.encode
+    forged_publications = 0
+
+    def stateful_encode(self: object, value: object) -> str:
+        nonlocal forged_publications
+        text = original_encode(self, value)
+        if (
+            type(value) is dict
+            and value.get("schema_version") == 1
+            and "steps" in value
+        ):
+            forged_publications += 1
+            return text.replace("2026-", "2099-", 1)
+        return text
+
+    monkeypatch.setattr(encoder_type, "encode", stateful_encode)
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="recorded step evidence publication identity drift",
+    ):
+        accumulator.summary()
+
+    assert forged_publications == 1
+
+    monkeypatch.setattr(encoder_type, "encode", original_encode)
+    assert accumulator.summary().evidence_sha256 == baseline.evidence_sha256
+

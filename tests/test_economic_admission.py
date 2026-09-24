@@ -175,6 +175,54 @@ def test_risk_context_legs_must_match_ticket_that_is_opened(tmp_path):
     assert book.tickets == {}
 
 
+def test_risk_context_proposal_time_must_match_ticket_placed_at(tmp_path):
+    book = PaperBook("1000")
+    context = ProposedTicketRiskContext(
+        legs=(_leg(),),
+        proposal_ts="2026-09-24T16:00:00Z",
+    )
+
+    with pytest.raises(ValueError, match="proposal_ts must match admitted ticket placed_at"):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must not substitute a later ticket time after risk review",
+            placed_at="2026-09-24T17:00:00Z",
+            context=context,
+        )
+
+    assert book.balance == Decimal("1000")
+    assert book.tickets == {}
+    assert not (tmp_path / "paper_book.json").exists()
+
+
+def test_matching_risk_context_proposal_time_is_persisted_exactly(tmp_path):
+    book = PaperBook("1000")
+    book.save(tmp_path / "paper_book.json")
+    context = ProposedTicketRiskContext(
+        legs=(_leg(),),
+        proposal_ts="2026-09-24T16:00:00Z",
+    )
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=PaperRiskPolicy(),
+        stake=Decimal("10"),
+        legs=(_leg(),),
+        reason="preserve reviewed proposal time",
+        placed_at=context.proposal_ts,
+        context=context,
+    )
+
+    assert result.admitted is True
+    assert result.ticket is not None
+    assert result.ticket.placed_at == context.proposal_ts
+
+
 def test_risk_context_bankroll_identity_must_match_persisted_ticket(tmp_path):
     book = PaperBook("1000")
     context = ProposedTicketRiskContext(
@@ -228,7 +276,6 @@ def test_matching_risk_context_remains_admissible(tmp_path):
     assert result.ticket.legs == context.legs
     assert result.ticket.bankroll_id == context.bankroll_id
     assert result.ticket.currency == context.currency
-
 
 
 def test_second_stale_book_refreshes_under_lock_before_risk_admission(tmp_path):

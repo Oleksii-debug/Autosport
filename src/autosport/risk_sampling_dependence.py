@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any, Iterable
 
 from .risk_sampling_membership import ResolvedFixedNRiskMembership
@@ -426,7 +427,7 @@ def inspect_fixed_n_iid_occurrences(
         raise RiskSamplingDependenceError(
             "structure must be an exact ResolvedFixedNIidSamplingStructure"
         )
-    values = tuple(occurrences)
+    values = tuple(islice(iter(occurrences), structure.planned_n + 1))
     if len(values) != structure.planned_n:
         raise RiskSamplingDependenceError(
             "all precommitted fixed-N members must complete; denominator changes are forbidden"

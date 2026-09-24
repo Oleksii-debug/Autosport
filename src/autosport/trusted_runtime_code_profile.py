@@ -143,7 +143,13 @@ def require_product_owned_source_factory_identity(
             expected_provider_source_id,
         )
         observed_factory = _load_source_factory(source_factory)
-    except (OperatorSourceRegistryError, ImportError, AttributeError, TypeError, ValueError) as exc:
+    except (
+        OperatorSourceRegistryError,
+        ImportError,
+        AttributeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise TrustedRuntimeCodeProfileError(
             "runtime code profile requires one exact product-shipped source binding"
         ) from exc

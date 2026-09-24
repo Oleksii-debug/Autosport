@@ -55,6 +55,12 @@ _LEDGER_NOT_FOUND_STATES = frozenset({AttemptState.RECONCILED_NOT_FOUND})
 # absence authority. Keep all local capital held until a stronger Betfair
 # witness is composed into this serialized transition.
 _RELEASE_STATES: frozenset[AttemptState] = frozenset()
+# Every current ledger state remains capital-bearing unless it has explicit
+# release authority. Keeping this derived from the enum makes newly added
+# states fail closed by default until release semantics are deliberately composed.
+_CAPITAL_HOLD_STATES: frozenset[AttemptState] = frozenset(
+    state for state in AttemptState if state not in _RELEASE_STATES
+)
 _RESERVATION_FIELDS = frozenset(
     {
         "schema_version",
@@ -454,7 +460,7 @@ class BetfairPreTradeReservationStore:
                 attempt.attempt_id == candidate.attempt_id
                 or attempt.action.bookmaker_id != _VENUE_ID
                 or attempt.action.account_id != self.account_id
-                or attempt.state not in _ACTIVE_STATES
+                or attempt.state not in _CAPITAL_HOLD_STATES
             ):
                 continue
             # Later pure RESERVED attempts may be queued behind the candidate and
@@ -1113,6 +1119,7 @@ def _build_canonical_reservation_admission_authority():
         "_reservation_status",
         "_currency",
         "_nonnegative_int",
+        "_CAPITAL_HOLD_STATES",
     )
     module_helpers = {
         name: globals()[name]

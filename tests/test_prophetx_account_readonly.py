@@ -585,6 +585,55 @@ def test_canonical_wallet_origin_rejects_module_balance_url_rebind_before_networ
     assert network_calls == []
 
 
+@pytest.mark.parametrize("operation", ["profile", "snapshot"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["decode-json", "sha256", "validator-instance", "balance-dto"],
+)
+def test_canonical_account_issuance_rejects_parser_provenance_drift_before_network(
+    monkeypatch,
+    operation: str,
+    mutation: str,
+):
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
+    network_calls: list[str] = []
+
+    def forbidden_connect(connection):
+        network_calls.append(type(connection).__name__)
+        raise OSError("network must not start after parser provenance drift")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", forbidden_connect)
+
+    if mutation == "decode-json":
+        monkeypatch.setattr(
+            subject,
+            "_decode_json",
+            lambda payload: {"data": {"balance": Decimal("999999")}},
+        )
+    elif mutation == "sha256":
+        monkeypatch.setattr(subject, "sha256", lambda payload: None)
+    elif mutation == "validator-instance":
+        setattr(client, "_validate_http_response", lambda response: None)
+    else:
+        monkeypatch.setattr(subject, "BookmakerBalanceObservation", object)
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="parsing authority changed",
+    ):
+        if operation == "profile":
+            client.capability_profile()
+        else:
+            client.read_account_snapshot(
+                frozenset({BookmakerCapability.BALANCE_READ})
+            )
+
+    assert network_calls == []
+
+
 @pytest.mark.parametrize("mutation", ["replace", "weaken-in-place"])
 
 def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(

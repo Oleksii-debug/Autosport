@@ -32,6 +32,37 @@ def _positive_decimal(value: Decimal | str) -> Decimal:
     return amount
 
 
+def _validate_context_binding(
+    *,
+    context: ProposedTicketRiskContext | None,
+    legs: tuple[TicketLeg, ...],
+    provider_source_ids: tuple[str, ...],
+    provider_accounts: tuple[tuple[str, str], ...],
+    bankroll_id: str | None,
+    currency: str | None,
+) -> None:
+    """Bind the risk-reviewed proposal to the exact ticket that will be opened."""
+
+    if context is None:
+        return
+    if context.legs != legs:
+        raise ValueError("risk context legs must match admitted ticket legs")
+    if context.provider_accounts != provider_accounts:
+        raise ValueError(
+            "risk context provider accounts must match admitted ticket provenance"
+        )
+    if context.bankroll_id != bankroll_id or context.currency != currency:
+        raise ValueError(
+            "risk context bankroll and currency must match admitted ticket provenance"
+        )
+    if context.quotes:
+        quote_source_ids = tuple(sorted({quote.source_id for quote in context.quotes}))
+        if quote_source_ids != provider_source_ids:
+            raise ValueError(
+                "risk context quote sources must match admitted ticket provider sources"
+            )
+
+
 def admit_paper_ticket(
     *,
     workspace: str | Path,
@@ -67,6 +98,14 @@ def admit_paper_ticket(
         raise ValueError("legs must be a non-empty canonical tuple")
 
     amount = _positive_decimal(stake)
+    _validate_context_binding(
+        context=context,
+        legs=legs,
+        provider_source_ids=provider_source_ids,
+        provider_accounts=provider_accounts,
+        bankroll_id=bankroll_id,
+        currency=currency,
+    )
 
     with WorkspaceEconomicLock(workspace):
         decision = risk_policy.evaluate(book, amount, context=context)

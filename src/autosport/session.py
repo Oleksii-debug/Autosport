@@ -544,6 +544,12 @@ class AutosportSession:
                         "goal_id": goal_provenance.goal_id,
                         "revision": goal_provenance.revision,
                         "bankroll_id": goal_provenance.bankroll_id,
+                        # Currency is part of the hashed EconomicGoalContract already,
+                        # but campaign denomination must be re-resolvable after the
+                        # current owner goal moves on. Persist the exact runtime value
+                        # inside this transaction-bound run summary so later campaign
+                        # authority never has to relabel history from "current" state.
+                        "currency": economic_goal.currency,
                         "contract_sha256": goal_provenance.contract_sha256,
                     }
                 ),

@@ -117,6 +117,34 @@ def test_reopen_without_injected_id_resolves_durable_workspace_identity(
     assert reopened.recover(observed_state_sha256=state).committed_generation == 1
 
 
+def test_bound_workspace_rejects_monotonic_authority_root_redirection(
+    tmp_path: Path,
+) -> None:
+    authority = _authority(tmp_path)
+    state = _sha("generation-1")
+    _commit(
+        authority,
+        tx_id="tx-1",
+        previous=None,
+        state=state,
+        binding=_sha("binding-1"),
+    )
+    redirected_root = tmp_path / "machine-state-redirected"
+    redirected_root.mkdir()
+
+    with pytest.raises(
+        MonotonicAuthorityConfigurationError,
+        match="authority root|authority-root",
+    ):
+        MonotonicWorkspaceAuthority(
+            workspace=authority.workspace,
+            workspace_instance_id=None,
+            domain="test-domain",
+            key="test-key",
+            authority_root=redirected_root,
+        )
+
+
 def test_same_workspace_cannot_remint_instance_identity_after_commit(
     tmp_path: Path,
 ) -> None:

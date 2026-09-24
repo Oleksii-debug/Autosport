@@ -144,3 +144,8 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # Replay must recognize the cross-ledger witness kind, but callers must not mint that
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
+
+# Campaign denomination is positive only while the complete canonical
+# FinalizedCampaignAuthority re-resolution graph remains the product-loaded graph.
+# Any same-process class monkeypatch fails closed to missing denomination authority.
+from . import _campaign_denomination_dispatch_seal as _campaign_denomination_dispatch_seal  # noqa: F401,E402

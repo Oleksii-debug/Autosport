@@ -595,6 +595,15 @@ class PaperCampaign:
         self.sessions = tuple(self.sessions)
         object.__setattr__(self, "finalized", True)
         object.__setattr__(self, "_sealed", True)
+
+        # Finalization is the canonical product transition that may create
+        # positive campaign denomination authority.  Import locally to avoid a
+        # module cycle: campaign_economic_authority depends on PaperCampaign.
+        # The authority itself derives identity only from frozen run/goal
+        # evidence and samples availability inside its serialized durable write.
+        from .campaign_economic_authority import FinalizedCampaignAuthority
+
+        FinalizedCampaignAuthority(self).issue_denomination_binding()
         return self.summary()
 
     def fork_new_version(self, new_version: int) -> "PaperCampaign":

@@ -282,6 +282,15 @@ class PaperCampaignTests(unittest.TestCase):
                 "strategy_runtime": {
                     "strategy_id": "baseline-v1",
                     "canonical_strategy_id": "baseline-v1",
+                    **(
+                        {
+                            "economic_goal_provenance": dict(
+                                self._economic_goal_provenance
+                            )
+                        }
+                        if hasattr(self, "_economic_goal_provenance")
+                        else {}
+                    ),
                 },
                 "experiment_key": experiment_key,
                 "market_sha256": market_sha256,

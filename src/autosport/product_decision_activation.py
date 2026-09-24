@@ -16,10 +16,12 @@ from .economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
+    AUTHORITY_ID as MONOTONIC_AUTHORITY_ID,
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .monotonic_workspace_binding import WorkspaceIdentityBinding
 from .paper_execution_reality import PaperExecutionModelConfig
 from .risk import PaperRiskPolicy
 from .scientific_registry import ScientificRegistry
@@ -1411,31 +1413,93 @@ class ProductDecisionActivationStore:
             return persisted
 
 def _seal_product_decision_activation_derive_dispatch() -> None:
-    """Seal positive START derivation against transient class descriptor rebinding."""
+    """Seal positive START derivation and its nested anti-rollback authority."""
 
     store_class = ProductDecisionActivationStore
     authority_type = MonotonicWorkspaceAuthority
+    workspace_binding_type = WorkspaceIdentityBinding
     path_type = Path
     authority_domain = _ACTIVATION_AUTHORITY_DOMAIN
+    authority_id = MONOTONIC_AUTHORITY_ID
     activation_filename = "product_decision_activation.json"
+
+    canonical_authority_root = _product_activation_authority_root
+    canonical_authority_root_code = getattr(canonical_authority_root, "__code__", None)
+
     canonical_derive = store_class.__dict__.get("_derive")
     canonical_derive_code = getattr(canonical_derive, "__code__", None)
-    canonical_load = store_class.__dict__.get("load")
-    canonical_load_code = getattr(canonical_load, "__code__", None)
+    canonical_load_local = store_class.__dict__.get("_load_local")
+    canonical_load_local_code = getattr(canonical_load_local, "__code__", None)
+    canonical_observed_state = store_class.__dict__.get("_observed_state_sha256")
+    canonical_observed_state_code = getattr(
+        canonical_observed_state, "__code__", None
+    )
+
+    canonical_authority_methods = {
+        name: authority_type.__dict__.get(name)
+        for name in ("read_history", "recover", "prepare", "commit")
+    }
+    canonical_authority_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_authority_methods.items()
+    }
+
     if (
-        canonical_derive is None
+        canonical_authority_root_code is None
+        or canonical_derive is None
         or canonical_derive_code is None
-        or canonical_load is None
-        or canonical_load_code is None
+        or canonical_load_local is None
+        or canonical_load_local_code is None
+        or canonical_observed_state is None
+        or canonical_observed_state_code is None
+        or any(method is None for method in canonical_authority_methods.values())
+        or any(code is None for code in canonical_authority_codes.values())
     ):
         raise RuntimeError(
-            "canonical product decision activation derivation/load is unavailable"
+            "canonical product decision activation authority composition is unavailable"
         )
+
+    def require_store_helper(
+        name: str,
+        canonical: object,
+        canonical_code: object,
+    ) -> None:
+        live = store_class.__dict__.get(name)
+        if live is not canonical or getattr(live, "__code__", None) is not canonical_code:
+            raise ProductDecisionActivationError(
+                f"canonical product decision activation {name} authority changed"
+            )
+
+    def require_authority_dispatch(authority: MonotonicWorkspaceAuthority) -> None:
+        instance_state = getattr(authority, "__dict__", None)
+        if type(instance_state) is not dict:
+            raise ProductDecisionActivationError(
+                "nested anti-rollback authority instance state is unavailable"
+            )
+        for name, canonical in canonical_authority_methods.items():
+            live = authority_type.__dict__.get(name)
+            if (
+                live is not canonical
+                or getattr(live, "__code__", None)
+                is not canonical_authority_codes[name]
+                or name in instance_state
+            ):
+                raise ProductDecisionActivationError(
+                    "nested anti-rollback authority dispatch changed"
+                )
 
     def require_store_state(store: ProductDecisionActivationStore) -> None:
         if type(store) is not store_class:
             raise ProductDecisionActivationError(
                 "product decision activation store must be the exact canonical class"
+            )
+        if (
+            _product_activation_authority_root is not canonical_authority_root
+            or getattr(_product_activation_authority_root, "__code__", None)
+            is not canonical_authority_root_code
+        ):
+            raise ProductDecisionActivationError(
+                "product decision activation authority root resolver changed"
             )
         try:
             workspace = store.workspace
@@ -1445,6 +1509,14 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             raise ProductDecisionActivationError(
                 "product decision activation store construction state changed"
             ) from exc
+
+        try:
+            expected_root = canonical_authority_root()
+        except (OSError, RuntimeError) as exc:
+            raise ProductDecisionActivationError(
+                "cannot resolve product decision activation authority root"
+            ) from exc
+
         if (
             not isinstance(workspace, path_type)
             or not isinstance(path, path_type)
@@ -1453,10 +1525,164 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             or authority.workspace != workspace
             or authority.domain != authority_domain
             or authority.key != activation_filename
+            or authority.authority_root != expected_root
+            or type(authority.workspace_binding) is not workspace_binding_type
         ):
             raise ProductDecisionActivationError(
                 "product decision activation store construction state changed"
             )
+
+        binding = authority.workspace_binding
+        expected_namespace = hashlib.sha256(
+            "\0".join(
+                (
+                    authority_id,
+                    authority.workspace_instance_id,
+                    authority_domain,
+                    activation_filename,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        expected_journal = (
+            expected_root
+            / "journals"
+            / expected_namespace[:2]
+            / expected_namespace
+        )
+        expected_records = expected_journal / "records"
+        expected_namespace_marker = (
+            expected_root
+            / "namespace-bindings"
+            / expected_namespace[:2]
+            / f"{expected_namespace}.json"
+        )
+        expected_workspace_marker = (
+            workspace / ".autosport" / "monotonic-workspace-binding.json"
+        )
+        expected_path_binding = (
+            expected_root
+            / "workspace-bindings"
+            / binding.workspace_locator_sha256[:2]
+            / f"{binding.workspace_locator_sha256}.json"
+        )
+        if (
+            binding.workspace != workspace
+            or binding.authority_root != expected_root
+            or binding.workspace_instance_id != authority.workspace_instance_id
+            or binding.workspace_marker_path != expected_workspace_marker
+            or binding.path_binding_path != expected_path_binding
+            or hashlib.sha256(
+                binding.workspace_locator.encode("utf-8")
+            ).hexdigest()
+            != binding.workspace_locator_sha256
+            or authority.workspace_binding_path != expected_workspace_marker
+            or authority.namespace_sha256 != expected_namespace
+            or authority.journal_dir != expected_journal
+            or authority.records_dir != expected_records
+            or authority.namespace_marker_path != expected_namespace_marker
+        ):
+            raise ProductDecisionActivationError(
+                "nested anti-rollback authority construction state changed"
+            )
+        require_authority_dispatch(authority)
+
+    def observed_state_canonically(
+        store: ProductDecisionActivationStore,
+    ) -> str | None:
+        require_store_state(store)
+        require_store_helper(
+            "_observed_state_sha256",
+            canonical_observed_state,
+            canonical_observed_state_code,
+        )
+        return canonical_observed_state(store)
+
+    def load_local_canonically(
+        store: ProductDecisionActivationStore,
+    ) -> ProductDecisionActivationBinding:
+        require_store_state(store)
+        require_store_helper(
+            "_load_local",
+            canonical_load_local,
+            canonical_load_local_code,
+        )
+        return canonical_load_local(store)
+
+    def recover_authority_canonically(
+        store: ProductDecisionActivationStore,
+    ) -> str | None:
+        require_store_state(store)
+        authority = store._authority
+        observed = observed_state_canonically(store)
+        read_history = canonical_authority_methods["read_history"]
+        recover = canonical_authority_methods["recover"]
+        try:
+            history = read_history(authority)
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            if pending is None:
+                recover(authority, observed_state_sha256=observed)
+            else:
+                recover(
+                    authority,
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductDecisionActivationError(
+                "product decision activation anti-rollback authority rejected workspace state"
+            ) from exc
+        require_store_state(store)
+        return observed
+
+    def prepare_authority_canonically(
+        store: ProductDecisionActivationStore,
+        *,
+        tx_id: str,
+        intended_state_sha256: str,
+        semantic_binding_sha256: str,
+    ) -> None:
+        require_store_state(store)
+        prepare = canonical_authority_methods["prepare"]
+        try:
+            prepare(
+                store._authority,
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductDecisionActivationError(
+                "cannot prepare product decision activation anti-rollback witness"
+            ) from exc
+        require_store_state(store)
+
+    def commit_authority_canonically(
+        store: ProductDecisionActivationStore,
+        *,
+        tx_id: str,
+        observed_state_sha256: str,
+        semantic_binding_sha256: str,
+    ) -> None:
+        require_store_state(store)
+        commit = canonical_authority_methods["commit"]
+        try:
+            commit(
+                store._authority,
+                tx_id=tx_id,
+                observed_state_sha256=observed_state_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductDecisionActivationError(
+                "cannot commit product decision activation anti-rollback witness"
+            ) from exc
+        require_store_state(store)
 
     def derive_canonically(
         store: ProductDecisionActivationStore,
@@ -1501,7 +1727,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
 
         require_store_state(self)
         with WorkspaceEconomicLock(self.workspace):
-            observed = self._recover_authority()
+            observed = recover_authority_canonically(self)
             expected = derive_canonically(
                 self,
                 scientific_registry=scientific_registry,
@@ -1512,7 +1738,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 intent_producer=intent_producer,
             )
             if self.path.exists():
-                existing = self._load_local()
+                existing = load_local_canonically(self)
                 if existing != expected:
                     raise ProductDecisionActivationError(
                         "durable product decision activation conflicts with requested START"
@@ -1528,45 +1754,36 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             semantic_binding = _digest(
                 {
                     "kind": "PRODUCT_DECISION_ACTIVATION_CREATE",
-                    "activation_filename": "product_decision_activation.json",
+                    "activation_filename": activation_filename,
                     "binding_sha256": expected.binding_sha256,
                     "intended_state_sha256": intended,
                 }
             )
             tx_id = f"activation-{uuid.uuid4().hex}"
-            try:
-                self._authority.prepare(
-                    tx_id=tx_id,
-                    observed_state_sha256=None,
-                    intended_state_sha256=intended,
-                    semantic_binding_sha256=semantic_binding,
-                )
-            except MonotonicWorkspaceAuthorityError as exc:
-                raise ProductDecisionActivationError(
-                    "cannot prepare product decision activation anti-rollback witness"
-                ) from exc
+            prepare_authority_canonically(
+                self,
+                tx_id=tx_id,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=semantic_binding,
+            )
 
             atomic_write_json(self.path, root)
-            published = self._observed_state_sha256()
+            published = observed_state_canonically(self)
             if published != intended:
                 raise ProductDecisionActivationError(
                     "published product decision activation differs from prepared bytes"
                 )
-            persisted = self._load_local()
+            persisted = load_local_canonically(self)
             if persisted != expected:
                 raise ProductDecisionActivationError(
                     "persisted product decision activation does not match requested START"
                 )
-            try:
-                self._authority.commit(
-                    tx_id=tx_id,
-                    observed_state_sha256=published,
-                    semantic_binding_sha256=semantic_binding,
-                )
-            except MonotonicWorkspaceAuthorityError as exc:
-                raise ProductDecisionActivationError(
-                    "cannot commit product decision activation anti-rollback witness"
-                ) from exc
+            commit_authority_canonically(
+                self,
+                tx_id=tx_id,
+                observed_state_sha256=published,
+                semantic_binding_sha256=semantic_binding,
+            )
             return persisted
 
     def verify(
@@ -1584,11 +1801,11 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         require_store_state(self)
         with WorkspaceEconomicLock(self.workspace):
             if self.path.exists() or self.path.is_symlink():
-                persisted = self._load_local()
-                self._recover_authority()
+                persisted = load_local_canonically(self)
+                recover_authority_canonically(self)
             else:
-                self._recover_authority()
-                persisted = self._load_local()
+                recover_authority_canonically(self)
+                persisted = load_local_canonically(self)
             expected = derive_canonically(
                 self,
                 scientific_registry=scientific_registry,
@@ -1605,15 +1822,16 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             return persisted
 
     def load(self: ProductDecisionActivationStore) -> ProductDecisionActivationBinding:
-        """Load only bytes from the constructor-bound canonical store namespace."""
+        """Load only bytes that match the sealed nested monotonic authority."""
 
         require_store_state(self)
-        live_load = canonical_load
-        if getattr(live_load, "__code__", None) is not canonical_load_code:
-            raise ProductDecisionActivationError(
-                "canonical product decision activation load authority changed"
-            )
-        return live_load(self)
+        with WorkspaceEconomicLock(self.workspace):
+            if self.path.exists() or self.path.is_symlink():
+                binding = load_local_canonically(self)
+                recover_authority_canonically(self)
+                return binding
+            recover_authority_canonically(self)
+            return load_local_canonically(self)
 
     setattr(store_class, "initialize_owner", initialize_owner)
     setattr(store_class, "verify", verify)

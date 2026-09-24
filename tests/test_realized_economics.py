@@ -27,8 +27,6 @@ def test_realized_path_reports_growth_turnover_and_drawdown_without_authority():
     assert report.max_drawdown_amount == Decimal("250")
     with localcontext() as canonical:
         canonical.prec = 50
-        with localcontext() as canonical:
-        canonical.prec = 50
         assert report.max_drawdown_fraction == Decimal("250") / Decimal("1100")
     assert report.observation_count == 4
     assert report.profitability_proven is False

@@ -360,7 +360,7 @@ class ExecutionStopAuthority:
     def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
         absolute = Path(os.path.abspath(os.fspath(self.path)))
         expected_workspace = absolute.parent
-        expected_root = _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT()
+        expected_root = _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT
         expected_key = _CANONICAL_ADMISSION_MONOTONIC_KEY(absolute)
         _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH()
         authority = _CANONICAL_ADMISSION_MONOTONIC_AUTHORITY_CLASS(
@@ -1633,6 +1633,12 @@ _CANONICAL_ADMISSION_MONOTONIC_CLASS_CODES = tuple(
 # exact unbound callables rather than re-resolving self.<helper> dynamically.
 _CANONICAL_ADMISSION_AUTHORITY_CLASS = ExecutionStopAuthority
 _CANONICAL_ADMISSION_MONOTONIC_KEY = ExecutionStopAuthority._monotonic_key
+# Resolve the supported product root once at import composition time. Positive
+# admission must not re-enter mutable OS user-state resolver dispatch after the
+# canonical trust graph has been frozen.
+_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT = (
+    ExecutionStopAuthority._product_monotonic_authority_root()
+)
 _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
 )

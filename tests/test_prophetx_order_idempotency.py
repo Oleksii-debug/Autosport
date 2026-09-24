@@ -426,6 +426,54 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 )
             )
 
+    def test_provider_order_correlation_rejects_in_place_profile_payload_mutation(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            genuine = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            forged = type(genuine)(
+                attempt_id=genuine.attempt_id,
+                environment=genuine.environment,
+                transport=genuine.transport,
+                client_order_id=genuine.client_order_id,
+                effect_fingerprint=genuine.effect_fingerprint,
+                production_write_qualified=True,
+            )
+            matched = _evidence(
+                forged,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id="provider-order-profile-payload",
+                effect_fingerprint=forged.effect_fingerprint,
+            )
+
+            original = PROPHETX_SANDBOX_REST_PROFILE.production_write_qualified
+            object.__setattr__(
+                PROPHETX_SANDBOX_REST_PROFILE,
+                "production_write_qualified",
+                True,
+            )
+            try:
+                self.assertEqual(
+                    reconciliation_disposition(forged, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.CONFLICT,
+                )
+            finally:
+                object.__setattr__(
+                    PROPHETX_SANDBOX_REST_PROFILE,
+                    "production_write_qualified",
+                    original,
+                )
+
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
     def test_positive_provider_order_consumer_ignores_reexposed_binder_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "execution.jsonl"

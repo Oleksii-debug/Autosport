@@ -376,13 +376,22 @@ def _bind_provider_assigned_order_id_impl(
     *,
     identity_resolver,
     identity_resolver_code: object,
+    identity_eq,
+    identity_eq_code: object,
 ) -> bool:
     try:
         _require_canonical_provider_order_ledger(ledger)
         if getattr(identity_resolver, "__code__", None) is not identity_resolver_code:
             return False
         ledger_path = ledger.path
-        if identity_resolver(ledger, attempt_id=identity.attempt_id) != identity:
+        resolved_identity = identity_resolver(
+            ledger,
+            attempt_id=identity.attempt_id,
+        )
+        if (
+            getattr(identity_eq, "__code__", None) is not identity_eq_code
+            or identity_eq(resolved_identity, identity) is not True
+        ):
             return False
         _require_canonical_provider_order_ledger(ledger)
         bound = _CANONICAL_LEDGER_BIND_PROVIDER_ASSIGNED_ORDER_ID(
@@ -543,6 +552,19 @@ def _build_provider_order_correlation_authority():
     identity_resolver = load_identity
     identity_resolver_code = getattr(identity_resolver, "__code__", None)
     durable_attempt_facts = _durable_attempt_facts
+    identity_init = ProphetXOrderIdentity.__init__
+    identity_post_init = ProphetXOrderIdentity.__post_init__
+    identity_eq = ProphetXOrderIdentity.__eq__
+    identity_class_methods = (
+        ("__init__", identity_init, getattr(identity_init, "__code__", None)),
+        (
+            "__post_init__",
+            identity_post_init,
+            getattr(identity_post_init, "__code__", None),
+        ),
+        ("__eq__", identity_eq, getattr(identity_eq, "__code__", None)),
+    )
+    identity_eq_code = getattr(identity_eq, "__code__", None)
     bind_impl = _bind_provider_assigned_order_id_impl
     reconciliation_impl = _reconciliation_disposition_impl
     normalize_impl = _normalize_fix_execution_reports_impl
@@ -607,6 +629,15 @@ def _build_provider_order_correlation_authority():
             raise ProphetXOrderIdentityError(
                 "canonical ProphetX identity profile authority changed"
             )
+        for method_name, expected_method, expected_code in identity_class_methods:
+            live_method = getattr(ProphetXOrderIdentity, method_name, None)
+            if (
+                live_method is not expected_method
+                or getattr(live_method, "__code__", None) is not expected_code
+            ):
+                raise ProphetXOrderIdentityError(
+                    "canonical ProphetX identity class dispatch changed"
+                )
 
     def bind_provider_order_id(
         ledger: RealExecutionLedger,
@@ -623,6 +654,8 @@ def _build_provider_order_correlation_authority():
             provider_order_id,
             identity_resolver=identity_resolver,
             identity_resolver_code=identity_resolver_code,
+            identity_eq=identity_eq,
+            identity_eq_code=identity_eq_code,
         )
         try:
             require_identity_resolver_graph()

@@ -526,6 +526,86 @@ def test_order_result_sibling_smuggling_is_rejected(monkeypatch):
         client.read_order_details(123)
 
 
+
+class _AdversarialDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("Decimal subclass hook must not execute")
+
+
+class _AdversarialDatetime(datetime):
+    def isoformat(self, *args, **kwargs):
+        raise AssertionError("datetime subclass hook must not execute")
+
+    def astimezone(self, *args, **kwargs):
+        raise AssertionError("datetime subclass hook must not execute")
+
+
+class _ForgedEconomicEvidence:
+    evidence_id = "betdaq-economic:" + ("0" * 64)
+
+
+def test_order_observation_rejects_forged_evidence_object(monkeypatch):
+    client, _ = economic_client(monkeypatch, order_details())
+    value = client.read_order_details(123)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="order settlement evidence must be canonical BETDAQ economic evidence",
+    ):
+        replace(value, evidence=_ForgedEconomicEvidence())
+
+
+def test_public_economic_dto_rejects_decimal_subclass_before_virtual_dispatch(
+    monkeypatch,
+):
+    client, _ = economic_client(monkeypatch, order_details())
+    value = client.read_order_details(123)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="requested_stake must be an exact finite Decimal",
+    ):
+        replace(value, requested_stake=_AdversarialDecimal("10.00"))
+
+
+def test_postings_readback_rejects_mutable_container(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    value = client.read_account_postings_by_id(9001)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="postings must be an exact immutable tuple",
+    ):
+        replace(value, postings=list(value.postings))
+
+
+def test_identity_timestamp_must_use_canonical_utc_spelling(monkeypatch):
+    client, _ = economic_client(monkeypatch, order_details())
+    value = client.read_order_details(123)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="issued_at must use canonical UTC timestamp spelling",
+    ):
+        replace(value, issued_at="2026-09-23T00:00:00+02:00")
+
+
+def test_request_datetime_subclass_rejected_before_virtual_dispatch(monkeypatch):
+    client, opener = economic_client(monkeypatch)
+    hostile = _AdversarialDatetime(2026, 9, 22, tzinfo=timezone.utc)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="start_at must be an exact timezone-aware datetime",
+    ):
+        client.read_account_postings(
+            hostile,
+            datetime(2026, 9, 23, tzinfo=timezone.utc),
+        )
+
+    assert opener.calls == []
+
+
 def test_repr_never_exposes_credentials(monkeypatch):
     client, _ = economic_client(monkeypatch)
     value = repr(client)

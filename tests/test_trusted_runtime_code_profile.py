@@ -14,6 +14,8 @@ from autosport.product_entrypoint import ProductEntrypointError
 from autosport.product_gui_worker import ProductGuiWorker
 from autosport.trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfileError,
+    _clear_started_product_runtime_origin,
+    _register_started_product_runtime_origin,
     is_authoritative_trusted_runtime_code_profile,
     issue_trusted_runtime_code_profile,
     require_authoritative_trusted_runtime_code_profile,
@@ -75,18 +77,29 @@ def _patch_profile_runtime(monkeypatch) -> None:
     )
 
 
-def test_profile_is_origin_bound_and_not_provider_write_authority(
+def _register_profile_runtime(runtime: _ProfileRuntime) -> None:
+    _register_started_product_runtime_origin(
+        runtime,
+        source_factory=_FACTORY_SPEC,
+        expected_provider_source_id=_PROVIDER_SOURCE_ID,
+    )
+
+
+def test_profile_requires_canonical_started_origin_and_is_not_write_authority(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _patch_profile_runtime(monkeypatch)
     runtime = _ProfileRuntime(tmp_path)
 
-    profile = issue_trusted_runtime_code_profile(
-        runtime,
-        source_factory=_FACTORY_SPEC,
-        expected_provider_source_id=_PROVIDER_SOURCE_ID,
-    )
+    with pytest.raises(
+        TrustedRuntimeCodeProfileError,
+        match="lacks canonical started product-code origin",
+    ):
+        issue_trusted_runtime_code_profile(runtime)
+
+    _register_profile_runtime(runtime)
+    profile = issue_trusted_runtime_code_profile(runtime)
 
     assert require_authoritative_trusted_runtime_code_profile(
         profile,
@@ -102,17 +115,13 @@ def test_profile_is_origin_bound_and_not_provider_write_authority(
     assert forged == profile
     assert forged is not profile
     assert is_authoritative_trusted_runtime_code_profile(forged) is False
-    with pytest.raises(
-        TrustedRuntimeCodeProfileError,
-        match="not current and authoritative",
-    ):
-        require_authoritative_trusted_runtime_code_profile(forged)
 
     assert revoke_trusted_runtime_code_profile(profile) is True
     assert is_authoritative_trusted_runtime_code_profile(profile) is False
+    _clear_started_product_runtime_origin(runtime)
 
 
-def test_profile_requires_exact_closed_registry_binding_before_issuance(
+def test_started_origin_requires_exact_closed_registry_binding(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -123,7 +132,7 @@ def test_profile_requires_exact_closed_registry_binding_before_issuance(
         TrustedRuntimeCodeProfileError,
         match="one exact product-shipped source binding",
     ):
-        issue_trusted_runtime_code_profile(
+        _register_started_product_runtime_origin(
             runtime,
             source_factory="external.module:factory",
             expected_provider_source_id=_PROVIDER_SOURCE_ID,
@@ -133,23 +142,19 @@ def test_profile_requires_exact_closed_registry_binding_before_issuance(
         TrustedRuntimeCodeProfileError,
         match="runtime manifest source_id does not match",
     ):
-        issue_trusted_runtime_code_profile(
+        _register_started_product_runtime_origin(
             _ProfileRuntime(tmp_path, source_id="different:provider"),
             source_factory=_FACTORY_SPEC,
             expected_provider_source_id=_PROVIDER_SOURCE_ID,
         )
 
 
-
-
-
-def test_registered_symbol_drift_fails_before_profile_or_runtime_construction(
+def test_registered_symbol_drift_fails_before_started_origin(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _patch_profile_runtime(monkeypatch)
     runtime = _ProfileRuntime(tmp_path)
-
     monkeypatch.setattr(
         product_source_module,
         "create_parlay_product_source",
@@ -160,23 +165,40 @@ def test_registered_symbol_drift_fails_before_profile_or_runtime_construction(
         TrustedRuntimeCodeProfileError,
         match="callable identity has drifted",
     ):
-        issue_trusted_runtime_code_profile(
-            runtime,
-            source_factory=_FACTORY_SPEC,
-            expected_provider_source_id=_PROVIDER_SOURCE_ID,
+        _register_profile_runtime(runtime)
+
+
+def test_runtime_builder_rechecks_factory_identity_after_source_construction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = SimpleNamespace(source_id=_PROVIDER_SOURCE_ID)
+    built = False
+
+    def changing_source(_factory: str, *, workspace: Path) -> object:
+        assert workspace == tmp_path
+        monkeypatch.setattr(
+            product_source_module,
+            "create_parlay_product_source",
+            lambda: source,
         )
+        return source
 
-    source_constructed = False
+    def forbidden_build(**_kwargs) -> object:
+        nonlocal built
+        built = True
+        raise AssertionError("runtime build must not follow factory-symbol drift")
 
-    def forbidden_source(*_args, **_kwargs):
-        nonlocal source_constructed
-        source_constructed = True
-        raise AssertionError("drifted registered factory must fail before source build")
+    monkeypatch.setattr(worker_module, "_validated_source", changing_source)
+    monkeypatch.setattr(
+        worker_module,
+        "build_autonomous_product_runtime",
+        forbidden_build,
+    )
 
-    monkeypatch.setattr(worker_module, "_validated_source", forbidden_source)
     with pytest.raises(
         ProductEntrypointError,
-        match="not product-owned by this build",
+        match="changed during source construction",
     ):
         worker_module._runtime_builder(
             tmp_path,
@@ -184,7 +206,8 @@ def test_registered_symbol_drift_fails_before_profile_or_runtime_construction(
             "10000",
             expected_source_id=_PROVIDER_SOURCE_ID,
         )
-    assert source_constructed is False
+
+    assert built is False
 
 
 def test_profile_serializes_one_active_runtime_per_workspace(
@@ -194,60 +217,53 @@ def test_profile_serializes_one_active_runtime_per_workspace(
     _patch_profile_runtime(monkeypatch)
     first = _ProfileRuntime(tmp_path)
     second = _ProfileRuntime(tmp_path)
+    _register_profile_runtime(first)
+    _register_profile_runtime(second)
 
-    first_profile = issue_trusted_runtime_code_profile(
-        first,
-        source_factory=_FACTORY_SPEC,
-        expected_provider_source_id=_PROVIDER_SOURCE_ID,
-    )
+    first_profile = issue_trusted_runtime_code_profile(first)
     with pytest.raises(
         TrustedRuntimeCodeProfileError,
         match="workspace already has an active",
     ):
-        issue_trusted_runtime_code_profile(
-            second,
-            source_factory=_FACTORY_SPEC,
-            expected_provider_source_id=_PROVIDER_SOURCE_ID,
-        )
+        issue_trusted_runtime_code_profile(second)
 
     assert revoke_trusted_runtime_code_profile(first_profile) is True
-    second_profile = issue_trusted_runtime_code_profile(
-        second,
-        source_factory=_FACTORY_SPEC,
-        expected_provider_source_id=_PROVIDER_SOURCE_ID,
-    )
+    second_profile = issue_trusted_runtime_code_profile(second)
     assert is_authoritative_trusted_runtime_code_profile(second_profile)
     assert revoke_trusted_runtime_code_profile(second_profile) is True
+    _clear_started_product_runtime_origin(first)
+    _clear_started_product_runtime_origin(second)
 
 
-def test_runtime_or_workspace_drift_revokes_positive_resolution(
+def test_runtime_drift_revokes_positive_profile_resolution(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _patch_profile_runtime(monkeypatch)
     runtime = _ProfileRuntime(tmp_path)
-    profile = issue_trusted_runtime_code_profile(
-        runtime,
-        source_factory=_FACTORY_SPEC,
-        expected_provider_source_id=_PROVIDER_SOURCE_ID,
-    )
+    _register_profile_runtime(runtime)
+    profile = issue_trusted_runtime_code_profile(runtime)
 
     runtime.manifest.source_id = "different:provider"
+
     assert is_authoritative_trusted_runtime_code_profile(profile) is False
     assert is_authoritative_trusted_runtime_code_profile(
         profile,
         workspace=tmp_path / "other",
     ) is False
     assert revoke_trusted_runtime_code_profile(profile) is True
+    _clear_started_product_runtime_origin(runtime)
 
 
-def test_canonical_worker_issues_after_start_and_revokes_on_stop(
+def test_canonical_worker_registers_after_start_and_clears_on_stop(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     runtime = _BlockingRuntime()
-    issued: list[tuple[object, str, str]] = []
+    registered: list[tuple[object, str, str]] = []
+    issued: list[object] = []
     revoked: list[object] = []
+    cleared: list[object] = []
     profile = object()
 
     def build(
@@ -260,21 +276,34 @@ def test_canonical_worker_issues_after_start_and_revokes_on_stop(
         assert expected_source_id == _PROVIDER_SOURCE_ID
         return runtime
 
-    def issue(
+    def register(
         value: object,
         *,
         source_factory: str,
         expected_provider_source_id: str,
-    ) -> object:
-        issued.append((value, source_factory, expected_provider_source_id))
+    ) -> None:
+        registered.append((value, source_factory, expected_provider_source_id))
+
+    def issue(value: object) -> object:
+        issued.append(value)
         return profile
 
     monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
+    monkeypatch.setattr(
+        worker_module,
+        "_register_started_product_runtime_origin",
+        register,
+    )
     monkeypatch.setattr(worker_module, "issue_trusted_runtime_code_profile", issue)
     monkeypatch.setattr(
         worker_module,
         "revoke_trusted_runtime_code_profile",
         lambda value: revoked.append(value) or True,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_clear_started_product_runtime_origin",
+        lambda value: cleared.append(value),
     )
 
     worker = ProductGuiWorker(runtime_builder=build)
@@ -286,7 +315,8 @@ def test_canonical_worker_issues_after_start_and_revokes_on_stop(
     )
     assert runtime.tick_entered.wait(2.0)
 
-    assert issued == [(runtime, _FACTORY_SPEC, _PROVIDER_SOURCE_ID)]
+    assert registered == [(runtime, _FACTORY_SPEC, _PROVIDER_SOURCE_ID)]
+    assert issued == [runtime]
     assert worker.trusted_runtime_profile is profile
     started = worker.poll()
     assert started is not None
@@ -299,14 +329,16 @@ def test_canonical_worker_issues_after_start_and_revokes_on_stop(
     assert runtime.stop_reason == "operator_stop"
     assert runtime.closed is True
     assert revoked == [profile]
+    assert cleared == [runtime]
     assert worker.trusted_runtime_profile is None
 
 
-def test_stop_during_start_cannot_publish_trusted_profile(
+def test_stop_during_start_cannot_register_or_publish_trusted_profile(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     runtime = _BlockingStartRuntime()
+    registered = False
     issued = False
 
     def build(
@@ -319,12 +351,22 @@ def test_stop_during_start_cannot_publish_trusted_profile(
         assert expected_source_id == _PROVIDER_SOURCE_ID
         return runtime
 
-    def forbidden_issue(*_args, **_kwargs):
+    def forbidden_register(*_args, **_kwargs) -> None:
+        nonlocal registered
+        registered = True
+        raise AssertionError("STOP won before trusted origin registration")
+
+    def forbidden_issue(*_args, **_kwargs) -> object:
         nonlocal issued
         issued = True
         raise AssertionError("STOP won before trusted profile issuance")
 
     monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
+    monkeypatch.setattr(
+        worker_module,
+        "_register_started_product_runtime_origin",
+        forbidden_register,
+    )
     monkeypatch.setattr(
         worker_module,
         "issue_trusted_runtime_code_profile",
@@ -344,25 +386,31 @@ def test_stop_during_start_cannot_publish_trusted_profile(
     runtime.release_start.set()
     assert worker.join(2.0)
 
+    assert registered is False
     assert issued is False
     assert worker.trusted_runtime_profile is None
     assert runtime.stop_reason == "operator_stop"
     assert runtime.closed is True
 
 
-def test_arbitrary_headless_builder_never_mints_trusted_profile(
+def test_arbitrary_headless_builder_never_enters_trusted_profile_path(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     runtime = _BlockingRuntime()
 
-    def forbidden_issue(*_args, **_kwargs):
+    def forbidden_profile_path(*_args, **_kwargs):
         raise AssertionError("arbitrary source-factory mode must remain unprofiled")
 
     monkeypatch.setattr(
         worker_module,
+        "_register_started_product_runtime_origin",
+        forbidden_profile_path,
+    )
+    monkeypatch.setattr(
+        worker_module,
         "issue_trusted_runtime_code_profile",
-        forbidden_issue,
+        forbidden_profile_path,
     )
     worker = ProductGuiWorker(runtime_builder=lambda *_args: runtime)
 
@@ -380,7 +428,7 @@ def test_arbitrary_headless_builder_never_mints_trusted_profile(
     assert worker.trusted_runtime_profile is None
 
 
-def test_failed_runtime_start_cannot_publish_trusted_profile(
+def test_failed_runtime_start_cannot_register_or_publish_trusted_profile(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -389,6 +437,7 @@ def test_failed_runtime_start_cannot_publish_trusted_profile(
             raise RuntimeError("synthetic start failure")
 
     runtime = _FailingStartRuntime()
+    registered = False
     issued = False
 
     def build(
@@ -401,12 +450,22 @@ def test_failed_runtime_start_cannot_publish_trusted_profile(
         assert expected_source_id == _PROVIDER_SOURCE_ID
         return runtime
 
-    def forbidden_issue(*_args, **_kwargs):
+    def forbidden_register(*_args, **_kwargs) -> None:
+        nonlocal registered
+        registered = True
+        raise AssertionError("origin registration must follow successful runtime.start")
+
+    def forbidden_issue(*_args, **_kwargs) -> object:
         nonlocal issued
         issued = True
         raise AssertionError("profile issuance must follow successful runtime.start")
 
     monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", build)
+    monkeypatch.setattr(
+        worker_module,
+        "_register_started_product_runtime_origin",
+        forbidden_register,
+    )
     monkeypatch.setattr(
         worker_module,
         "issue_trusted_runtime_code_profile",
@@ -422,6 +481,7 @@ def test_failed_runtime_start_cannot_publish_trusted_profile(
     )
     assert worker.join(2.0)
 
+    assert registered is False
     assert issued is False
     assert worker.trusted_runtime_profile is None
     terminal = worker.poll()

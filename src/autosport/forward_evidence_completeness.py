@@ -898,6 +898,19 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
             or root.previous_cohort_root_sha256 != previous_root_sha256
         ):
             codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+        latest_observed_upper = max(item.observed_upper for item in prefix)
+        if (
+            root.anchor_lower is None
+            or root.anchor_upper is None
+            or latest_observed_upper > root.anchor_lower
+        ):
+            # A commitment cannot causally contain bytes that were not yet
+            # observable when its anchor interval began.
+            codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+            details.setdefault(
+                "root_anchor_causal_order",
+                root.cohort_root_sha256,
+            )
         previous_root_sha256 = root.cohort_root_sha256
 
     terminal_root_sha256 = roots[-1].cohort_root_sha256 if roots else None
@@ -930,6 +943,23 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
             or close.last_sequence != opportunities[-1].candidate_sequence
         ):
             codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+        terminal_root = roots[-1] if roots else None
+        if (
+            close.close_state is CampaignCloseState.CLOSED
+            and terminal_root is not None
+            and (
+                terminal_root.anchor_upper is None
+                or close.anchor_lower is None
+                or terminal_root.anchor_upper > close.anchor_lower
+            )
+        ):
+            # CLOSED is a commitment over the terminal root, so the terminal
+            # root must already be causally available before close anchoring.
+            codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+            details.setdefault(
+                "close_anchor_causal_order",
+                close.close_sha256,
+            )
 
     boundary_by_id, boundary_conflict = _resolve_boundary_receipts(
         evidence.reveal_boundaries

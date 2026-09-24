@@ -1449,6 +1449,35 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         name: getattr(method, "__code__", None)
         for name, method in canonical_authority_methods.items()
     }
+    # The public MWA entrypoints above still virtual-dispatch through these lower
+    # class helpers. Freezing only read_history/recover/prepare/commit therefore
+    # leaves a transient helper substitution able to forge history or suppress a
+    # durable append while the checked top-level methods remain unchanged.
+    canonical_authority_helper_names = (
+        "_load_bound_history",
+        "_validate_workspace_binding",
+        "_ensure_workspace_bound",
+        "_load_history",
+        "_decode_record",
+        "_latest_record_for_tx",
+        "_require_same_transaction",
+        "_validate_prepare_retry",
+        "_new_record",
+        "_new_terminal_record",
+        "_append_record",
+        "_payload",
+        "_namespace_payload",
+        "_ensure_namespace_marker",
+        "_validate_namespace_marker",
+    )
+    canonical_authority_helpers = {
+        name: getattr(authority_type, name, None)
+        for name in canonical_authority_helper_names
+    }
+    canonical_authority_helper_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_authority_helpers.items()
+    }
 
     if (
         canonical_authority_root_code is None
@@ -1462,6 +1491,8 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         or canonical_observed_state_code is None
         or any(method is None for method in canonical_authority_methods.values())
         or any(code is None for code in canonical_authority_codes.values())
+        or any(method is None for method in canonical_authority_helpers.values())
+        or any(code is None for code in canonical_authority_helper_codes.values())
     ):
         raise RuntimeError(
             "canonical product decision activation authority composition is unavailable"
@@ -1494,6 +1525,17 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             ):
                 raise ProductDecisionActivationError(
                     "nested anti-rollback authority dispatch changed"
+                )
+        for name, canonical in canonical_authority_helpers.items():
+            live = getattr(authority_type, name, None)
+            if (
+                live is not canonical
+                or getattr(live, "__code__", None)
+                is not canonical_authority_helper_codes[name]
+                or name in instance_state
+            ):
+                raise ProductDecisionActivationError(
+                    "nested anti-rollback authority lower dispatch changed"
                 )
 
     def require_store_state(store: ProductDecisionActivationStore) -> None:

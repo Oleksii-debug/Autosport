@@ -119,6 +119,36 @@ class ReleaseTruthAudit:
     real_money_evidence_ref: str | None
     whole_product_complete_claimed: bool
 
+    def __post_init__(self) -> None:
+        # This audit type is intentionally a negative-truth projection until a
+        # separate product-issued physical/execution resolver exists. Keep that
+        # invariant at the public constructor boundary as well as in
+        # audit_release_truth(), so a caller cannot instantiate a seemingly
+        # complete HUMAN/NVDA/REAL audit merely by supplying positive booleans.
+        _require_bool(self.human_tested, "human_tested")
+        _require_bool(self.nvda_verified, "nvda_verified")
+        _require_bool(self.real_money_execution, "real_money_execution")
+        _require_bool(
+            self.whole_product_complete_claimed,
+            "whole_product_complete_claimed",
+        )
+        if self.human_tested or self.nvda_verified or self.real_money_execution:
+            raise ValueError(
+                "ReleaseTruthAudit cannot carry positive human/NVDA/real-money truth"
+            )
+        _require_optional_canonical_text(
+            self.human_test_evidence_ref,
+            "human_test_evidence_ref",
+        )
+        _require_optional_canonical_text(
+            self.nvda_evidence_ref,
+            "nvda_evidence_ref",
+        )
+        _require_optional_canonical_text(
+            self.real_money_evidence_ref,
+            "real_money_evidence_ref",
+        )
+
     @property
     def machine_evidence_complete(self) -> bool:
         return not self.missing_machine_proofs and not self.failed_machine_proofs

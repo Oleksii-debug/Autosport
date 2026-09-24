@@ -38,6 +38,13 @@ from .reference_price_evidence import (
 )
 
 
+_CANONICAL_LEDGER_VERIFIED_RECORDS = JsonlDecisionLedger.verified_records
+_CANONICAL_LEDGER_VERIFIED_RECORDS_CODE = getattr(
+    _CANONICAL_LEDGER_VERIFIED_RECORDS,
+    "__code__",
+    None,
+)
+
 _BINDING_KEY: Final = "reference_price_decision_evidence"
 _BINDING_SCHEMA: Final = "autosport.reference-price-decision-evidence"
 _BINDING_SCHEMA_VERSION: Final = 1
@@ -458,9 +465,28 @@ def resolve_ledger_reference_price_evidence(
             "ledger must be exact JsonlDecisionLedger"
         )
     _text(decision_id, "decision_id")
+    if (
+        JsonlDecisionLedger.verified_records is not _CANONICAL_LEDGER_VERIFIED_RECORDS
+        or getattr(
+            JsonlDecisionLedger.verified_records,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_LEDGER_VERIFIED_RECORDS_CODE
+    ):
+        raise ReferencePriceDecisionBindingError(
+            "canonical Decision Ledger verified-record reader changed"
+        )
+
+    # The caller owns the supplied ledger and can add ordinary instance
+    # attributes. Re-open the same durable location through a fresh exact ledger
+    # so instance-level verified_records/verified_snapshot shadows cannot
+    # substitute in-memory records for restart-proven bytes.
+    durable_ledger = JsonlDecisionLedger(ledger.path)
+    records = _CANONICAL_LEDGER_VERIFIED_RECORDS(durable_ledger)
     matches = tuple(
         record
-        for record in ledger.verified_records()
+        for record in records
         if record.decision_id == decision_id
     )
     if len(matches) != 1:

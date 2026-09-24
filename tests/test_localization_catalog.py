@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -336,6 +337,44 @@ _CRITICAL_TECHNICAL_ONLY_KEYS = {
     "ui.speed.1000x",
 }
 
+# Latin-script tokens are allowed only when their shape or exact identity is
+# technical. Product prose around those tokens must remain Ukrainian-first.
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:/\\+\-]*")
+_ALLOWED_TECHNICAL_LATIN_TOKENS = frozenset(
+    {
+        "API",
+        "Autosport",
+        "Betfair",
+        "Control",
+        "ID",
+        "NVDA",
+        "PaperBook",
+        "Provider",
+        "SHA",
+        "Tk",
+        "UIA",
+        "UTC",
+        "Windows",
+    }
+)
+
+
+def _untranslated_latin_product_words(value: str) -> tuple[str, ...]:
+    words: list[str] = []
+    for token in _LATIN_TOKEN_RE.findall(value):
+        if token in _ALLOWED_TECHNICAL_LATIN_TOKENS:
+            continue
+        if any(character.isdigit() for character in token):
+            continue
+        if any(character in "_.:/\\+-" for character in token):
+            continue
+        if token.isupper():
+            continue
+        if any(character.isupper() for character in token[1:]):
+            continue
+        words.append(token)
+    return tuple(words)
+
 
 def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert value.strip(), f"{key} resolved to empty/whitespace presentation"
@@ -343,6 +382,11 @@ def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert any(
         character in _UKRAINIAN_PRESENTATION_LETTERS for character in value
     ), f"{key} has no Ukrainian presentation text: {value!r}"
+    untranslated = _untranslated_latin_product_words(value)
+    assert not untranslated, (
+        f"{key} contains untranslated Latin product words: {untranslated!r}; "
+        f"value={value!r}"
+    )
 
 
 def test_critical_visible_and_uia_surfaces_require_ukrainian_presentation() -> None:
@@ -371,4 +415,10 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         _assert_ukrainian_critical_presentation(
             "sample.english_only",
             "Retry Betfair API request after timeout.",
+        )
+
+    with pytest.raises(AssertionError, match="untranslated Latin product words"):
+        _assert_ukrainian_critical_presentation(
+            "sample.mixed_fallback",
+            "Betfair API: Retry request після помилки.",
         )

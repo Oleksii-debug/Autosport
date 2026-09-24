@@ -785,6 +785,10 @@ def _build_allocation_basis_store_runtime():
     authority_key = AUTHORITY_KEY
     authority_id = AUTHORITY_ID
     error_type = LocalComputeAllocationBasisError
+    goal_store_type = _CANONICAL_ECONOMIC_GOAL_STORE_CLASS
+    goal_store_load = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD
+    goal_to_payload = _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD
+    json_dumps = json.dumps
     sha256 = hashlib.sha256
     sealed_state = weakref.WeakKeyDictionary()
     authority_operations = {
@@ -1018,6 +1022,25 @@ def _build_allocation_basis_store_runtime():
                 "allocation basis authority coordinates changed"
             )
 
+    def sealed_current_goal(self):
+        require_state(self)
+        try:
+            frozen_workspace, _path, _authority, _root = sealed_state[self]
+            goal_store = goal_store_type(frozen_workspace)
+            goal = goal_store_load(goal_store)
+            raw = json_dumps(
+                goal_to_payload(goal),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except Exception as exc:
+            raise error_type(
+                "current durable EconomicGoal is required"
+            ) from exc
+        return goal, sha256(raw).hexdigest()
+
     def authority_call(self, name: str, **kwargs):
         require_state(self)
         try:
@@ -1060,6 +1083,8 @@ def _build_allocation_basis_store_runtime():
     def sealed_getattribute(self, name: str):
         if name == "_recover":
             return lambda: sealed_recover(self)
+        if name == "_current_goal":
+            return lambda: sealed_current_goal(self)
         if name == "_authority_prepare":
             return lambda **kwargs: authority_call(
                 self,

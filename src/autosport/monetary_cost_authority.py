@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
+import heapq
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ _SOURCE_PREFIX = "economics.monetary-source.v2"
 _ALLOCATION_PREFIX = "economics.monetary-allocation.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
+_MAX_CANONICAL_DECIMAL_TEXT_CHARS = 4096
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
 _STORE_LOCK_LOCAL = threading.local()
@@ -241,10 +243,8 @@ class SharedAllocationSnapshot:
             _amount(share, "allocation share")
             if share <= 0:
                 raise MonetaryAuthorityError("allocation shares must be positive")
-        if (
-            not self.shares
-            or sum((share for _, share in self.shares), Decimal("0"))
-            != Decimal("1")
+        if not _exact_decimal_sum_is_one(
+            tuple(share for _, share in self.shares)
         ):
             raise MonetaryAuthorityError(
                 "allocation shares must conserve exactly one source amount"
@@ -877,6 +877,55 @@ def _amount(value: Decimal, label: str) -> None:
         )
 
 
+def _exact_decimal_sum_is_one(values: tuple[Decimal, ...]) -> bool:
+    """Test exact positive-Decimal conservation without exponent-gap expansion.
+
+    Decimal coefficient digits are accumulated into sparse base-10 columns and
+    normalized only across occupied columns plus actual carry positions. Runtime and
+    memory therefore scale with stored coefficient digits/carries, not with the
+    numeric distance between exponents.
+    """
+    if not values:
+        return False
+
+    columns: dict[int, int] = {}
+    pending: list[int] = []
+
+    def add_column(power: int, amount: int) -> None:
+        existing = columns.get(power)
+        if existing is None:
+            columns[power] = amount
+            heapq.heappush(pending, power)
+        else:
+            columns[power] = existing + amount
+
+    for value in values:
+        _amount(value, "exact sum value")
+        decimal_tuple = value.as_tuple()
+        exponent = int(decimal_tuple.exponent)
+        width = len(decimal_tuple.digits)
+        for index, digit in enumerate(decimal_tuple.digits):
+            if digit:
+                add_column(exponent + width - 1 - index, digit)
+
+    saw_unit = False
+    while pending:
+        power = heapq.heappop(pending)
+        total = columns.pop(power)
+        digit = total % 10
+        carry = total // 10
+
+        if digit:
+            if power != 0 or digit != 1 or saw_unit:
+                return False
+            saw_unit = True
+
+        if carry:
+            add_column(power + 1, carry)
+
+    return saw_unit
+
+
 def _sorted_text(values: tuple[str, ...], label: str) -> None:
     for value in values:
         _text(value, label)
@@ -895,10 +944,32 @@ def _utc(value: datetime, label: str) -> None:
         raise MonetaryAuthorityError(f"{label} must be UTC")
 
 
+def _fixed_decimal_text_size_upper_bound(value: Decimal) -> int:
+    """Return fixed-point text size without materializing exponent-distance zeros."""
+
+    decimal_tuple = value.as_tuple()
+    digit_count = len(decimal_tuple.digits)
+    exponent = int(decimal_tuple.exponent)
+    if exponent >= 0:
+        return digit_count + exponent
+
+    integer_digit_count = digit_count + exponent
+    if integer_digit_count > 0:
+        return digit_count + 1
+    return 2 - exponent
+
+
 def _decimal(value: Decimal) -> str:
     _amount(value, "decimal")
     if value == 0:
         return "0"
+    if (
+        _fixed_decimal_text_size_upper_bound(value)
+        > _MAX_CANONICAL_DECIMAL_TEXT_CHARS
+    ):
+        raise MonetaryAuthorityError(
+            "decimal fixed-point encoding exceeds canonical resource bound"
+        )
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 

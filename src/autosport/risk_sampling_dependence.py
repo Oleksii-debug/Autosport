@@ -19,6 +19,11 @@ _REQUIRED_MANIFEST_FIELDS = frozenset(
         "kind",
         "experiment_id",
         "membership_design_sha256",
+        "membership_protocol_record_sha256",
+        "membership_dataset_record_sha256",
+        "membership_causal_cutoff",
+        "membership_precommitted_at",
+        "membership_outcome_reveal_after",
         "research_protocol_id",
         "protocol_sha256",
         "dataset_snapshot_id",
@@ -146,6 +151,11 @@ class ResolvedFixedNIidSamplingStructure:
 
     experiment_id: str
     membership_design_sha256: str
+    membership_protocol_record_sha256: str
+    membership_dataset_record_sha256: str
+    membership_causal_cutoff: str
+    membership_precommitted_at: str
+    membership_outcome_reveal_after: str
     research_protocol_id: str
     protocol_sha256: str
     dataset_snapshot_id: str
@@ -254,6 +264,47 @@ def inspect_fixed_n_iid_sampling_structure(
             "IID design does not bind the exact fixed-N membership design"
         )
 
+    membership_protocol_record_sha256 = _sha256(
+        payload.get("membership_protocol_record_sha256"),
+        "membership_protocol_record_sha256",
+    )
+    if membership_protocol_record_sha256 != membership.protocol_record_sha256:
+        raise RiskSamplingDependenceError(
+            "IID design parent membership protocol record provenance mismatch"
+        )
+    membership_dataset_record_sha256 = _sha256(
+        payload.get("membership_dataset_record_sha256"),
+        "membership_dataset_record_sha256",
+    )
+    if membership_dataset_record_sha256 != membership.dataset_record_sha256:
+        raise RiskSamplingDependenceError(
+            "IID design parent membership dataset record provenance mismatch"
+        )
+    membership_causal_cutoff = _canonical_text(
+        payload.get("membership_causal_cutoff"),
+        "membership_causal_cutoff",
+    )
+    if membership_causal_cutoff != membership.causal_cutoff:
+        raise RiskSamplingDependenceError(
+            "IID design parent membership causal cutoff provenance mismatch"
+        )
+    membership_precommitted_at = _canonical_text(
+        payload.get("membership_precommitted_at"),
+        "membership_precommitted_at",
+    )
+    if membership_precommitted_at != membership.precommitted_at:
+        raise RiskSamplingDependenceError(
+            "IID design parent membership precommit chronology mismatch"
+        )
+    membership_outcome_reveal_after = _canonical_text(
+        payload.get("membership_outcome_reveal_after"),
+        "membership_outcome_reveal_after",
+    )
+    if membership_outcome_reveal_after != membership.outcome_reveal_after:
+        raise RiskSamplingDependenceError(
+            "IID design parent membership outcome reveal chronology mismatch"
+        )
+
     research_protocol_id = _canonical_text(
         payload.get("research_protocol_id"),
         "research_protocol_id",
@@ -343,6 +394,11 @@ def inspect_fixed_n_iid_sampling_structure(
     return ResolvedFixedNIidSamplingStructure(
         experiment_id=experiment_id,
         membership_design_sha256=membership_design_sha256,
+        membership_protocol_record_sha256=membership_protocol_record_sha256,
+        membership_dataset_record_sha256=membership_dataset_record_sha256,
+        membership_causal_cutoff=membership_causal_cutoff,
+        membership_precommitted_at=membership_precommitted_at,
+        membership_outcome_reveal_after=membership_outcome_reveal_after,
         research_protocol_id=research_protocol_id,
         protocol_sha256=protocol_sha256,
         dataset_snapshot_id=dataset_snapshot_id,

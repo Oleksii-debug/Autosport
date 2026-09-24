@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 import unittest
 
@@ -43,6 +44,11 @@ class RiskSamplingDependenceTests(unittest.TestCase):
             "kind": "autosport-risk-iid-resample-with-replacement-v1",
             "experiment_id": "iid-risk-exp-001",
             "membership_design_sha256": self.DESIGN_SHA,
+            "membership_protocol_record_sha256": "9" * 64,
+            "membership_dataset_record_sha256": "a" * 64,
+            "membership_causal_cutoff": "2026-09-01T00:00:00+00:00",
+            "membership_precommitted_at": "2026-09-02T12:05:00+00:00",
+            "membership_outcome_reveal_after": "2026-09-10T00:00:00+00:00",
             "research_protocol_id": "risk-fixed-n-protocol",
             "protocol_sha256": self.PROTOCOL_SHA,
             "dataset_snapshot_id": "risk-fixed-n-dataset",
@@ -177,6 +183,32 @@ class RiskSamplingDependenceTests(unittest.TestCase):
                 "protocol digest mismatch",
             ),
             (
+                self._manifest(membership_protocol_record_sha256="b" * 64),
+                "protocol record provenance mismatch",
+            ),
+            (
+                self._manifest(membership_dataset_record_sha256="c" * 64),
+                "dataset record provenance mismatch",
+            ),
+            (
+                self._manifest(
+                    membership_causal_cutoff="2026-08-31T23:00:00+00:00"
+                ),
+                "causal cutoff provenance mismatch",
+            ),
+            (
+                self._manifest(
+                    membership_precommitted_at="2026-09-03T12:05:00+00:00"
+                ),
+                "precommit chronology mismatch",
+            ),
+            (
+                self._manifest(
+                    membership_outcome_reveal_after="2026-09-11T00:00:00+00:00"
+                ),
+                "outcome reveal chronology mismatch",
+            ),
+            (
                 self._manifest(dataset_manifest_sha256="d" * 64),
                 "dataset manifest digest mismatch",
             ),
@@ -194,6 +226,64 @@ class RiskSamplingDependenceTests(unittest.TestCase):
                     self._membership(),
                     sampling_manifest_json=manifest,
                 )
+
+    def test_parent_membership_provenance_cannot_alias_iid_identity(self):
+        original = self._membership()
+        original_manifest = self._manifest()
+        original_structure = inspect_fixed_n_iid_sampling_structure(
+            original,
+            sampling_manifest_json=original_manifest,
+        )
+
+        variants = (
+            (
+                replace(original, protocol_record_sha256="b" * 64),
+                {"membership_protocol_record_sha256": "b" * 64},
+                "protocol record provenance mismatch",
+            ),
+            (
+                replace(original, dataset_record_sha256="c" * 64),
+                {"membership_dataset_record_sha256": "c" * 64},
+                "dataset record provenance mismatch",
+            ),
+            (
+                replace(
+                    original,
+                    causal_cutoff="2026-08-31T23:00:00+00:00",
+                    precommitted_at="2026-09-03T12:05:00+00:00",
+                    outcome_reveal_after="2026-09-11T00:00:00+00:00",
+                ),
+                {
+                    "membership_causal_cutoff": "2026-08-31T23:00:00+00:00",
+                    "membership_precommitted_at": "2026-09-03T12:05:00+00:00",
+                    "membership_outcome_reveal_after": "2026-09-11T00:00:00+00:00",
+                },
+                "causal cutoff provenance mismatch",
+            ),
+        )
+
+        for rebound_membership, rebound_manifest_fields, mismatch in variants:
+            with self.subTest(mismatch=mismatch):
+                with self.assertRaisesRegex(
+                    RiskSamplingDependenceError,
+                    mismatch,
+                ):
+                    inspect_fixed_n_iid_sampling_structure(
+                        rebound_membership,
+                        sampling_manifest_json=original_manifest,
+                    )
+
+                rebound_structure = inspect_fixed_n_iid_sampling_structure(
+                    rebound_membership,
+                    sampling_manifest_json=self._manifest(
+                        **rebound_manifest_fields
+                    ),
+                )
+                self.assertNotEqual(
+                    original_structure.manifest_sha256,
+                    rebound_structure.manifest_sha256,
+                )
+                self.assertNotEqual(original_structure, rebound_structure)
 
     def test_complete_occurrence_set_restarts_to_same_root(self):
         structure = inspect_fixed_n_iid_sampling_structure(

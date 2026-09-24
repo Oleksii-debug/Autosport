@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from .integrity import atomic_write_json
 from .scientific_registry import ScientificRegistry
@@ -241,7 +242,53 @@ class SupervisorSnapshot:
     updated_at: str
 
 
+def _scientific_registry_binding_descriptor():
+    bindings: WeakKeyDictionary[
+        object, tuple[ScientificRegistry, Path, Path]
+    ] = WeakKeyDictionary()
+
+    class _ScientificRegistryBinding:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            bound = bindings.get(instance)
+            if bound is None:
+                raise ResearchSupervisorError(
+                    "scientific registry authority is unbound"
+                )
+            registry, supervisor_path, registry_path = bound
+            if Path(instance.path) != supervisor_path or Path(registry.path) != registry_path:
+                raise ResearchSupervisorError(
+                    "scientific registry authority binding changed"
+                )
+            return registry
+
+        def __set__(self, instance, value) -> None:
+            if not isinstance(value, ScientificRegistry):
+                raise TypeError("scientific_registry must be ScientificRegistry")
+            binding = (value, Path(instance.path), Path(value.path))
+            current = bindings.get(instance)
+            if current is None:
+                bindings[instance] = binding
+                return
+            if current == binding:
+                return
+            raise ResearchSupervisorError(
+                "scientific registry authority binding is immutable"
+            )
+
+        def __delete__(self, instance) -> None:
+            raise ResearchSupervisorError(
+                "scientific registry authority binding is immutable"
+            )
+
+    return _ScientificRegistryBinding()
+
+
 class ResearchSupervisor:
+    scientific_registry = _scientific_registry_binding_descriptor()
     """Durable idempotent control seam for one scientific-research workspace."""
 
     def __init__(self, path: str | Path, scientific_registry: ScientificRegistry) -> None:

@@ -5,7 +5,7 @@ import pytest
 from autosport.domain import TicketLeg
 from autosport.economic_admission import admit_paper_ticket
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 
@@ -117,3 +117,86 @@ def test_invalid_stake_fails_before_economic_mutation(tmp_path, stake):
 
     assert book.balance == Decimal("1000")
     assert book.tickets == {}
+
+
+def _other_leg() -> TicketLeg:
+    return TicketLeg(
+        event_id="event-2",
+        market_id="market-2",
+        selection_id="selection-2",
+        locked_odds=Decimal("1.80"),
+    )
+
+
+def test_risk_context_legs_must_match_ticket_that_is_opened(tmp_path):
+    book = PaperBook("1000")
+    context = ProposedTicketRiskContext(legs=(_leg(),))
+
+    with pytest.raises(ValueError, match="risk context legs must match"):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_other_leg(),),
+            reason="must not swap ticket after risk review",
+            placed_at="2026-09-24T16:00:00Z",
+            context=context,
+        )
+
+    assert book.balance == Decimal("1000")
+    assert book.tickets == {}
+
+
+def test_risk_context_bankroll_identity_must_match_persisted_ticket(tmp_path):
+    book = PaperBook("1000")
+    context = ProposedTicketRiskContext(
+        legs=(_leg(),),
+        bankroll_id="bankroll-reviewed",
+        currency="EUR",
+    )
+
+    with pytest.raises(ValueError, match="bankroll and currency must match"):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must preserve reviewed bankroll identity",
+            placed_at="2026-09-24T16:00:00Z",
+            context=context,
+            bankroll_id="bankroll-opened",
+            currency="EUR",
+        )
+
+    assert book.balance == Decimal("1000")
+    assert book.tickets == {}
+
+
+def test_matching_risk_context_remains_admissible(tmp_path):
+    book = PaperBook("1000")
+    context = ProposedTicketRiskContext(
+        legs=(_leg(),),
+        bankroll_id="bankroll-1",
+        currency="EUR",
+    )
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=PaperRiskPolicy(),
+        stake=Decimal("10"),
+        legs=(_leg(),),
+        reason="matching reviewed ticket",
+        placed_at="2026-09-24T16:00:00Z",
+        context=context,
+        bankroll_id="bankroll-1",
+        currency="EUR",
+    )
+
+    assert result.admitted is True
+    assert result.ticket is not None
+    assert result.ticket.legs == context.legs
+    assert result.ticket.bankroll_id == context.bankroll_id
+    assert result.ticket.currency == context.currency

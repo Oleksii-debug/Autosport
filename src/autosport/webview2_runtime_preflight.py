@@ -40,6 +40,18 @@ WEBVIEW2_RELEASE_ENVIRONMENT_OVERRIDES = (
     "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER",
 )
 
+WEBVIEW2_RELEASE_POLICY_ROOT_SUBKEY = (
+    r"SOFTWARE\Policies\Microsoft\Edge\WebView2"
+)
+WEBVIEW2_RELEASE_REGISTRY_OVERRIDE_POLICIES = (
+    "BrowserExecutableFolder",
+    "UserDataFolder",
+    "AdditionalBrowserArguments",
+    "ReleaseChannelPreference",
+    "ReleaseChannels",
+    "ChannelSearchKind",
+)
+
 _VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 )
@@ -69,6 +81,10 @@ class WebView2ReleaseEnvironmentError(RuntimeError):
     """Unsupported process environment can redirect the qualified WebView2 runtime."""
 
 
+class WebView2ReleaseRegistryError(RuntimeError):
+    """Unsupported or unverifiable registry policy can redirect WebView2."""
+
+
 @dataclass(frozen=True)
 class WebView2ReleaseEnvironment:
     blocked_names: tuple[str, ...]
@@ -81,6 +97,32 @@ class WebView2ReleaseEnvironment:
         return {
             "blocked_names": list(self.blocked_names),
             "kind": "webview2_release_environment",
+            "safe": self.safe,
+            "schema_version": 1,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+
+@dataclass(frozen=True)
+class WebView2ReleaseRegistry:
+    blocked_entries: tuple[str, ...]
+
+    @property
+    def safe(self) -> bool:
+        return not self.blocked_entries
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "blocked_entries": list(self.blocked_entries),
+            "kind": "webview2_release_registry",
             "safe": self.safe,
             "schema_version": 1,
         }
@@ -206,6 +248,104 @@ def require_webview2_release_environment(
         names = ", ".join(result.blocked_names)
         raise WebView2ReleaseEnvironmentError(
             "Unsupported WebView2 release environment variable(s): " + names
+        )
+    return result
+
+
+def _release_policy_application_id(application_id: str | None) -> str:
+    candidate = (
+        os.path.basename(sys.executable)
+        if application_id is None
+        else application_id
+    )
+    if (
+        type(candidate) is not str
+        or not candidate
+        or candidate != candidate.strip()
+        or candidate == "*"
+        or "/" in candidate
+        or "\\" in candidate
+    ):
+        raise WebView2ReleaseRegistryError(
+            "WebView2 release application identity is not a canonical executable name"
+        )
+    return candidate
+
+
+def evaluate_webview2_release_registry(
+    registry_module: object,
+    *,
+    application_id: str | None = None,
+) -> WebView2ReleaseRegistry:
+    """Inspect documented WebView2 loader-policy values without retaining data."""
+
+    app_id = _release_policy_application_id(application_id)
+    try:
+        key_read = registry_module.KEY_READ
+        roots = (
+            ("HKLM", registry_module.HKEY_LOCAL_MACHINE),
+            ("HKCU", registry_module.HKEY_CURRENT_USER),
+        )
+        open_key = registry_module.OpenKey
+        query_value = registry_module.QueryValueEx
+    except AttributeError as exc:
+        raise WebView2ReleaseRegistryError(
+            "WebView2 release policy registry API is unavailable"
+        ) from exc
+
+    blocked: list[str] = []
+    for hive_name, root in roots:
+        for policy_name in WEBVIEW2_RELEASE_REGISTRY_OVERRIDE_POLICIES:
+            subkey = (
+                WEBVIEW2_RELEASE_POLICY_ROOT_SUBKEY
+                + "\\"
+                + policy_name
+            )
+            try:
+                key = open_key(root, subkey, 0, key_read)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise WebView2ReleaseRegistryError(
+                    f"WebView2 release policy registry read failed: {hive_name}:{policy_name}"
+                ) from exc
+
+            try:
+                with key:
+                    for value_name in ("*", app_id):
+                        try:
+                            query_value(key, value_name)
+                        except FileNotFoundError:
+                            continue
+                        except OSError as exc:
+                            raise WebView2ReleaseRegistryError(
+                                "WebView2 release policy registry value read failed: "
+                                f"{hive_name}:{policy_name}:{value_name}"
+                            ) from exc
+                        blocked.append(
+                            f"{hive_name}:{policy_name}:{value_name}"
+                        )
+            except OSError as exc:
+                raise WebView2ReleaseRegistryError(
+                    f"WebView2 release policy registry key close failed: {hive_name}:{policy_name}"
+                ) from exc
+
+    return WebView2ReleaseRegistry(blocked_entries=tuple(blocked))
+
+
+def require_webview2_release_registry(
+    registry_module: object,
+    *,
+    application_id: str | None = None,
+) -> WebView2ReleaseRegistry:
+    result = evaluate_webview2_release_registry(
+        registry_module,
+        application_id=application_id,
+    )
+    if not result.safe:
+        entries = ", ".join(result.blocked_entries)
+        raise WebView2ReleaseRegistryError(
+            "Unsupported WebView2 release registry override(s): " + entries
         )
     return result
 
@@ -485,6 +625,7 @@ def probe_webview2_runtime(
 
     import winreg
 
+    require_webview2_release_registry(winreg)
     windows_64bit = _is_64bit_windows()
     targets = _registry_targets(windows_64bit=windows_64bit)
     reads = tuple((target, _read_registry_pv(target)) for target in targets)

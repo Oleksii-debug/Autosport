@@ -233,6 +233,8 @@ class ForecastEvaluationSummary:
 
 
 _LOG_LOSS_MIN_DECIMAL_PRECISION = 64
+_LOG_LOSS_MAX_DECIMAL_COEFFICIENT_DIGITS = 4096
+_LOG_LOSS_MAX_DECIMAL_ABS_EFFECTIVE_EXPONENT = 1_000_000
 
 
 def _binary_log_loss(probability: Decimal, outcome: int) -> float:
@@ -263,12 +265,14 @@ def _binary_log_loss(probability: Decimal, outcome: int) -> float:
             "log loss is unbounded for probability=1 and realized outcome=0"
         )
 
-    if outcome == 0 and float(probability) == 0.0:
-        raise ValueError(
-            "positive log loss is not representable as a nonzero binary64 value"
-        )
-
     decimal_tuple = probability.as_tuple()
+    if len(decimal_tuple.digits) > _LOG_LOSS_MAX_DECIMAL_COEFFICIENT_DIGITS:
+        raise ValueError(
+            "log-loss probability Decimal coefficient exceeds supported resource bound"
+        )
+    raw_exponent = decimal_tuple.exponent
+    if not isinstance(raw_exponent, int):
+        raise ValueError("log-loss probability Decimal exponent must be an integer")
     significant_digits = len(decimal_tuple.digits)
     while (
         significant_digits > 1
@@ -276,7 +280,17 @@ def _binary_log_loss(probability: Decimal, outcome: int) -> float:
     ):
         significant_digits -= 1
     trailing_zeros = len(decimal_tuple.digits) - significant_digits
-    effective_exponent = decimal_tuple.exponent + trailing_zeros
+    effective_exponent = raw_exponent + trailing_zeros
+    if abs(effective_exponent) > _LOG_LOSS_MAX_DECIMAL_ABS_EFFECTIVE_EXPONENT:
+        raise ValueError(
+            "log-loss probability Decimal exponent exceeds supported resource bound"
+        )
+
+    if outcome == 0 and float(probability) == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+
     decimal_places = -effective_exponent if effective_exponent < 0 else 0
     precision = max(
         _LOG_LOSS_MIN_DECIMAL_PRECISION,

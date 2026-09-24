@@ -16,6 +16,10 @@ from .provider_output_governance import (
 from .provider_owner_approval import OwnerApprovalResolutionReason, OwnerApprovalStore
 
 
+_CANONICAL_OWNER_APPROVAL_STORE_TYPE = OwnerApprovalStore
+_CANONICAL_OWNER_APPROVAL_RESOLVE = OwnerApprovalStore.resolve
+
+
 def _owner_approval_reason(
     reason: OwnerApprovalResolutionReason,
     *,
@@ -53,8 +57,8 @@ def decide_provider_output_use_with_owner_approval(
     )
     if baseline.reason != "OWNER_APPROVAL_UNRESOLVED":
         return baseline
-    if not isinstance(owner_approval_store, OwnerApprovalStore):
-        raise ValueError("owner_approval_store must be OwnerApprovalStore")
+    if type(owner_approval_store) is not _CANONICAL_OWNER_APPROVAL_STORE_TYPE:
+        raise ValueError("owner_approval_store must be the exact canonical OwnerApprovalStore")
 
     identity = dict(
         governance_authority_id=authority.authority_id,
@@ -63,7 +67,8 @@ def decide_provider_output_use_with_owner_approval(
         owner_approval_reference=authority.owner_approval_reference,
         owner_approval_sha256=authority.owner_approval_sha256,
     )
-    acquisition_resolution = owner_approval_store.resolve(
+    acquisition_resolution = _CANONICAL_OWNER_APPROVAL_RESOLVE(
+        owner_approval_store,
         **identity,
         as_of=request.acquired_at,
     )
@@ -83,7 +88,8 @@ def decide_provider_output_use_with_owner_approval(
             max_retention_seconds=baseline.max_retention_seconds,
         )
 
-    decision_resolution = owner_approval_store.resolve(
+    decision_resolution = _CANONICAL_OWNER_APPROVAL_RESOLVE(
+        owner_approval_store,
         **identity,
         as_of=baseline.decided_at,
     )

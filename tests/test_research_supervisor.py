@@ -260,6 +260,30 @@ def test_scientific_registry_authority_rejects_relative_path_retarget(
     assert alternate_supervisor.list_runs() == ()
 
 
+def test_scientific_registry_authority_accessor_dispatch_cannot_be_shadowed(
+    tmp_path,
+):
+    _registry, supervisor = _workspace(tmp_path)
+    alternate = ScientificRegistry.initialize_pristine(
+        tmp_path / "alternate-accessor" / "scientific-registry.json"
+    )
+    decoy_calls = 0
+
+    def decoy_authority():
+        nonlocal decoy_calls
+        decoy_calls += 1
+        return alternate
+
+    supervisor.__dict__["_assert_scientific_registry_class_binding"] = lambda: None
+    supervisor.__dict__["_scientific_registry_authority"] = decoy_authority
+
+    started = supervisor.accept_trigger(
+        _trigger(trigger_id="registry-accessor-shadow")
+    )
+    assert supervisor.status(started.run_id).trigger_id == "registry-accessor-shadow"
+    assert decoy_calls == 0
+
+
 def test_scientific_binding_must_exist_and_be_causally_available(tmp_path):
     registry, supervisor = _workspace(tmp_path)
     registry.append(

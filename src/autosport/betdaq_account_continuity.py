@@ -767,8 +767,39 @@ def _build_canonical_continuity_authority():
         for name, helper in helper_graph
     )
 
+    # Capturing the top-level helper function objects is not sufficient: their
+    # bytecode still resolves security-critical module globals at call time.
+    # Freeze every direct module-global dependency consumed by the positive
+    # composition helpers plus the closure-only issuer/predicate.  This prevents
+    # identity-preserving helper code from being redirected through a rebound
+    # sha256/replace/deepcopy/class/constant dependency.
+    module_globals = globals()
+    dependency_functions = tuple(
+        helper for _name, helper in helper_graph
+    ) + (issue_evidence, is_issued_evidence)
+    dependency_names = tuple(
+        sorted(
+            {
+                global_name
+                for helper in dependency_functions
+                for global_name in helper.__code__.co_names
+                if global_name in module_globals
+            }
+        )
+    )
+    dependency_graph = tuple(
+        (
+            dependency_name,
+            module_globals[dependency_name],
+            getattr(module_globals[dependency_name], "__code__", None),
+        )
+        for dependency_name in dependency_names
+    )
+    json_module = json
+    json_dumps = json.dumps
+    json_dumps_code = getattr(json_dumps, "__code__", None)
+
     def require_composition_graph() -> None:
-        module_globals = globals()
         expected_codes = dict(helper_codes)
         for helper_name, expected_helper in helper_graph:
             live_helper = module_globals.get(helper_name)
@@ -780,6 +811,28 @@ def _build_canonical_continuity_authority():
                 raise continuity_error(
                     "canonical BETDAQ continuity composition helper dispatch changed"
                 )
+        for (
+            dependency_name,
+            expected_dependency,
+            expected_dependency_code,
+        ) in dependency_graph:
+            live_dependency = module_globals.get(dependency_name)
+            if (
+                live_dependency is not expected_dependency
+                or getattr(live_dependency, "__code__", None)
+                is not expected_dependency_code
+            ):
+                raise continuity_error(
+                    "canonical BETDAQ continuity transitive dependency changed"
+                )
+        if (
+            module_globals.get("json") is not json_module
+            or getattr(json_module, "dumps", None) is not json_dumps
+            or getattr(json_dumps, "__code__", None) is not json_dumps_code
+        ):
+            raise continuity_error(
+                "canonical BETDAQ continuity transitive dependency changed"
+            )
         # Issuance and the matching positive predicate are closure-only. Re-exposing
         # either module name creates an alternate caller-visible minting/admission
         # surface and is therefore authority drift.

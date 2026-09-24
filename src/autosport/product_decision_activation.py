@@ -1514,6 +1514,25 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         for name, method in canonical_authority_helpers.items()
     }
 
+    canonical_authority_module_globals = getattr(
+        canonical_authority_methods["read_history"],
+        "__globals__",
+        None,
+    )
+    canonical_authority_module_bindings = (
+        tuple(
+            (
+                name,
+                value,
+                getattr(value, "__code__", None),
+            )
+            for name, value in sorted(canonical_authority_module_globals.items())
+            if not name.startswith("__")
+        )
+        if isinstance(canonical_authority_module_globals, dict)
+        else ()
+    )
+
     # Nested MWA operations also virtual-dispatch into WorkspaceIdentityBinding.
     # Capture the exact descriptor graph rather than getattr()-bound methods so
     # classmethod/staticmethod identity remains stable and independently checkable.
@@ -1616,6 +1635,8 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         or any(code is None for code in canonical_authority_codes.values())
         or any(method is None for method in canonical_authority_helpers.values())
         or any(code is None for code in canonical_authority_helper_codes.values())
+        or not isinstance(canonical_authority_module_globals, dict)
+        or not canonical_authority_module_bindings
         or any(
             descriptor is None
             for descriptor in canonical_workspace_binding_descriptors.values()
@@ -1660,7 +1681,26 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 f"canonical product decision activation {name} authority changed"
             )
 
+    def require_authority_module_globals() -> None:
+        if not isinstance(canonical_authority_module_globals, dict):
+            raise ProductDecisionActivationError(
+                "nested anti-rollback authority defining globals unavailable"
+            )
+        for name, canonical, canonical_code in canonical_authority_module_bindings:
+            live = canonical_authority_module_globals.get(name)
+            if (
+                live is not canonical
+                or (
+                    canonical_code is not None
+                    and getattr(live, "__code__", None) is not canonical_code
+                )
+            ):
+                raise ProductDecisionActivationError(
+                    "nested anti-rollback authority defining globals changed"
+                )
+
     def require_authority_dispatch(authority: MonotonicWorkspaceAuthority) -> None:
+        require_authority_module_globals()
         instance_state = getattr(authority, "__dict__", None)
         if type(instance_state) is not dict:
             raise ProductDecisionActivationError(
@@ -1688,6 +1728,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 raise ProductDecisionActivationError(
                     "nested anti-rollback authority lower dispatch changed"
                 )
+        require_authority_module_globals()
 
     def require_workspace_binding_dispatch() -> None:
         for name, canonical in canonical_workspace_binding_descriptors.items():
@@ -2118,6 +2159,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         resolved_workspace = path_type(workspace).absolute().resolve(strict=False)
         object_setattr(self, "workspace", resolved_workspace)
         object_setattr(self, "path", resolved_workspace / activation_filename)
+        require_authority_module_globals()
         require_workspace_binding_dispatch()
         try:
             authority = object_new(authority_type)
@@ -2134,6 +2176,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             ) from exc
         object_setattr(self, "_authority", authority)
         require_authority_root_composition()
+        require_authority_module_globals()
         require_workspace_binding_dispatch()
         binding = authority.workspace_binding
         constructor_authorities[self] = authority

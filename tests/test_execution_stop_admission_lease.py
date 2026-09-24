@@ -320,6 +320,32 @@ def test_admission_lease_rejects_module_file_lock_rebind(
     assert forged_entries == []
 
 
+def test_admission_lease_rejects_file_lock_wrapped_code_replacement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority, _armed = _armed_authority(tmp_path)
+    original_generator = stop_module._exclusive_file_lock.__wrapped__
+
+    def no_op_file_lock(_path, *, guard_path=None):
+        yield
+
+    assert original_generator.__closure__ is None
+    assert no_op_file_lock.__closure__ is None
+    monkeypatch.setattr(
+        original_generator,
+        "__code__",
+        no_op_file_lock.__code__,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="callable state changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("in-place file-lock code mutation yielded a lease")
+
+
 def test_admission_lease_rejects_module_graph_verifier_rebind(
     tmp_path,
     monkeypatch,

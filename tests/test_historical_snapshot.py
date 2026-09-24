@@ -275,6 +275,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     self.assertFalse(evidence_path.exists())
 
         self.assertEqual(forged_calls, [])
+
     def test_product_owned_capture_rejects_live_constructor_rebind_before_io(self) -> None:
         calls: list[str] = []
 

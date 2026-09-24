@@ -183,6 +183,61 @@ def test_order_settlement_preserves_components_without_netting(monkeypatch):
     assert b'OrderId="123"' in request.data
 
 
+@pytest.mark.parametrize(
+    ("commission_attributes", "expected_order_commission", "expected_market_commission"),
+    [
+        ('OrderCommission="0.50"', Decimal("0.50"), None),
+        ('MarketCommission="0.25"', None, Decimal("0.25")),
+    ],
+)
+def test_settled_order_accepts_documented_single_commission_alternative(
+    monkeypatch,
+    commission_attributes,
+    expected_order_commission,
+    expected_market_commission,
+):
+    settlement = (
+        '<OrderSettlementInformation GrossSettlementAmount="12.34" '
+        f"{commission_attributes} "
+        'MarketSettledDate="2026-09-22T23:58:00Z" />'
+    )
+    client, _ = economic_client(
+        monkeypatch,
+        order_details(status=4, settlement=settlement),
+    )
+
+    value = client.read_order_details(123)
+
+    assert value.gross_settlement_amount == Decimal("12.34")
+    assert value.order_commission == expected_order_commission
+    assert value.market_commission == expected_market_commission
+    assert value.market_settled_at == "2026-09-22T23:58:00Z"
+    assert value.final_settlement_proven is True
+    assert value.denomination_proven is False
+    assert value.scalar_economic_use_proven is False
+
+
+def test_settled_order_without_either_commission_is_not_final_settlement(
+    monkeypatch,
+):
+    settlement = (
+        '<OrderSettlementInformation GrossSettlementAmount="12.34" '
+        'MarketSettledDate="2026-09-22T23:58:00Z" />'
+    )
+    client, _ = economic_client(
+        monkeypatch,
+        order_details(status=4, settlement=settlement),
+    )
+
+    value = client.read_order_details(123)
+
+    assert value.gross_settlement_amount == Decimal("12.34")
+    assert value.order_commission is None
+    assert value.market_commission is None
+    assert value.market_settled_at == "2026-09-22T23:58:00Z"
+    assert value.final_settlement_proven is False
+
+
 def test_settled_current_order_without_settlement_information_is_not_zero_economics(
     monkeypatch,
 ):

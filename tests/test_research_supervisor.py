@@ -156,6 +156,49 @@ def test_restart_preserves_checkpoint_and_rejects_stale_phase(tmp_path):
         )
 
 
+
+def test_scientific_registry_authority_cannot_be_retargeted_after_construction(
+    tmp_path,
+):
+    registry, supervisor = _workspace(tmp_path)
+    alternate = ScientificRegistry.initialize_pristine(
+        tmp_path / "alternate" / "scientific-registry.json"
+    )
+
+    with pytest.raises(
+        ResearchSupervisorError,
+        match="scientific registry authority binding is immutable",
+    ):
+        supervisor.scientific_registry = alternate
+
+    supervisor.__dict__["scientific_registry"] = alternate
+    assert supervisor.scientific_registry is registry
+
+    original_registry_path = registry.path
+    registry.path = alternate.path
+    try:
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority binding changed",
+        ):
+            supervisor.accept_trigger(_trigger())
+    finally:
+        registry.path = original_registry_path
+
+    original_supervisor_path = supervisor.path
+    supervisor.path = tmp_path / "alternate" / "research-supervisor.json"
+    try:
+        with pytest.raises(
+            ResearchSupervisorError,
+            match="scientific registry authority binding changed",
+        ):
+            _ = supervisor.scientific_registry
+    finally:
+        supervisor.path = original_supervisor_path
+
+    assert supervisor.scientific_registry is registry
+
+
 def test_scientific_binding_must_exist_and_be_causally_available(tmp_path):
     registry, supervisor = _workspace(tmp_path)
     registry.append(

@@ -785,16 +785,33 @@ def _build_allocation_basis_store_runtime():
     error_type = LocalComputeAllocationBasisError
     sha256 = hashlib.sha256
     sealed_state = weakref.WeakKeyDictionary()
-    authority_methods = {
+    authority_operations = {
         "read_history": authority_type.read_history,
         "recover": authority_type.recover,
         "prepare": authority_type.prepare,
         "abort": authority_type.abort,
         "commit": authority_type.commit,
     }
+    authority_dispatch = {
+        name: getattr(authority_type, name)
+        for name in authority_type.__dict__
+        if getattr(
+            getattr(authority_type, name, None),
+            "__code__",
+            None,
+        )
+        is not None
+    }
+    if any(
+        name not in authority_dispatch
+        for name in authority_operations
+    ):
+        raise error_type(
+            "canonical allocation basis authority operations are not sealed"
+        )
     authority_method_codes = {
         name: getattr(method, "__code__", None)
-        for name, method in authority_methods.items()
+        for name, method in authority_dispatch.items()
     }
     sha256_file_fn = sha256_file
     object_getattribute = object.__getattribute__
@@ -862,7 +879,7 @@ def _build_allocation_basis_store_runtime():
                 "allocation basis authority state changed"
             )
         instance_state = getattr(authority, "__dict__", {})
-        for name, method in authority_methods.items():
+        for name, method in authority_dispatch.items():
             live = getattr(authority_type, name, None)
             if (
                 name in instance_state
@@ -929,7 +946,7 @@ def _build_allocation_basis_store_runtime():
         require_state(self)
         try:
             _workspace, _path, authority, _root = sealed_state[self]
-            method = authority_methods[name]
+            method = authority_operations[name]
         except (KeyError, TypeError) as exc:
             raise error_type(
                 "allocation basis authority operation is not sealed"
@@ -949,17 +966,17 @@ def _build_allocation_basis_store_runtime():
             if frozen_path.exists()
             else None
         )
-        history = authority_methods["read_history"](authority)
+        history = authority_operations["read_history"](authority)
         if history and history[-1].phase is AuthorityPhase.PREPARE:
             pending = history[-1]
-            authority_methods["recover"](
+            authority_operations["recover"](
                 authority,
                 observed_state_sha256=observed,
                 tx_id=pending.tx_id,
                 semantic_binding_sha256=pending.semantic_binding_sha256,
             )
             return
-        authority_methods["recover"](
+        authority_operations["recover"](
             authority,
             observed_state_sha256=observed,
         )

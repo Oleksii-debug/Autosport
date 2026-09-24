@@ -13,6 +13,10 @@ from .continuous_session import (
     ContinuousTickResult,
     SessionStoppedError,
 )
+from .operator_source_registry import (
+    list_product_source_entries,
+    resolve_product_source_runtime_binding,
+)
 from .product_entrypoint import ProductEntrypointError, _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 from .trusted_runtime_code_profile import (
@@ -28,15 +32,58 @@ from .trusted_runtime_code_profile import (
 
 RuntimeBuilder = Callable[[Path, str, str], AutonomousProductRuntime]
 ProfiledRuntimeBuilder = Callable[..., AutonomousProductRuntime]
+SourceFactory = Callable[[], object]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfiledSourceBinding:
+    factory_spec: str
+    provider_source_id: str
+    factory: SourceFactory
+
+
+def _capture_product_source_bindings() -> tuple[_ProfiledSourceBinding, ...]:
+    """Freeze shipped registry metadata and callable identities at module import."""
+
+    bindings: list[_ProfiledSourceBinding] = []
+    for entry in list_product_source_entries():
+        bound_entry, factory = resolve_product_source_runtime_binding(
+            entry.factory_spec,
+            entry.expected_provider_source_id,
+        )
+        if bound_entry is not entry:
+            raise RuntimeError("product source registry returned inconsistent entry identity")
+        bindings.append(
+            _ProfiledSourceBinding(
+                factory_spec=entry.factory_spec,
+                provider_source_id=entry.expected_provider_source_id,
+                factory=factory,
+            )
+        )
+    return tuple(bindings)
+
+
+_CAPTURED_PRODUCT_SOURCE_BINDINGS = _capture_product_source_bindings()
 
 
 def _capture_profiled_runtime_builder(
     *,
-    validated_source: Callable[..., object],
+    source_bindings: tuple[_ProfiledSourceBinding, ...],
     runtime_factory: Callable[..., AutonomousProductRuntime],
-    source_identity_check: Callable[..., object],
+    runtime_type: type[AutonomousProductRuntime],
+    path_type: type[Path],
 ) -> ProfiledRuntimeBuilder:
-    """Capture the trusted construction chain without later module-global lookup."""
+    """Capture the trusted source-to-runtime chain without dynamic source loading."""
+
+    captured_bindings = tuple(source_bindings)
+
+    def canonical_workspace(value: object) -> Path:
+        try:
+            return path_type(value).expanduser().resolve(strict=False)
+        except (TypeError, ValueError, OSError, RuntimeError) as exc:
+            raise ProductEntrypointError(
+                "product runtime workspace cannot be resolved"
+            ) from exc
 
     def build(
         workspace: Path,
@@ -45,54 +92,101 @@ def _capture_profiled_runtime_builder(
         *,
         expected_source_id: str | None = None,
     ) -> AutonomousProductRuntime:
-        if expected_source_id is not None and (
+        if (
             type(expected_source_id) is not str
             or not expected_source_id
             or expected_source_id.strip() != expected_source_id
         ):
-            raise ValueError("expected_source_id must be a non-empty trimmed string")
-        if expected_source_id is not None:
-            try:
-                source_identity_check(
-                    source_factory=source_factory,
-                    expected_provider_source_id=expected_source_id,
-                )
-            except TrustedRuntimeCodeProfileError as exc:
-                raise ProductEntrypointError(
-                    "configured source factory is not product-owned by this build"
-                ) from exc
+            raise ProductEntrypointError(
+                "profiled runtime requires an exact expected source identity"
+            )
+        matches = tuple(
+            binding
+            for binding in captured_bindings
+            if binding.factory_spec == source_factory
+            and binding.provider_source_id == expected_source_id
+        )
+        if len(matches) != 1:
+            raise ProductEntrypointError(
+                "configured source factory is not product-owned by this build"
+            )
+        binding = matches[0]
 
-        source = validated_source(source_factory, workspace=workspace)
-
-        if expected_source_id is not None:
-            try:
-                source_identity_check(
-                    source_factory=source_factory,
-                    expected_provider_source_id=expected_source_id,
-                )
-            except TrustedRuntimeCodeProfileError as exc:
+        # Do not route the profiled path through product_entrypoint._validated_source:
+        # that compatibility helper intentionally performs a dynamic module:function
+        # load. The authority path calls the exact import-time registry callable.
+        source = binding.factory()
+        for field in ("source_id", "stream_epoch"):
+            value = getattr(source, field, None)
+            if type(value) is not str or not value or value.strip() != value:
                 raise ProductEntrypointError(
-                    "configured source factory changed during source construction"
-                ) from exc
-        if expected_source_id is not None and source.source_id != expected_source_id:
+                    f"product source {field} must be a non-empty trimmed string"
+                )
+        for method in ("fetch_catalog_page", "fetch_deltas", "resolve_event"):
+            if not callable(getattr(source, method, None)):
+                raise ProductEntrypointError(
+                    f"product source must provide callable {method}"
+                )
+
+        expected_workspace = canonical_workspace(workspace)
+        source_workspace = getattr(source, "workspace", None)
+        if (
+            source_workspace is not None
+            and canonical_workspace(source_workspace) != expected_workspace
+        ):
+            raise ProductEntrypointError(
+                "product source workspace must match product runtime workspace"
+            )
+        if source.source_id != expected_source_id:
             raise ProductEntrypointError(
                 "product source identity does not match the configured source"
             )
-        return runtime_factory(
+
+        runtime = runtime_factory(
             workspace=workspace,
             source=source,
             initial_bankroll=initial_bankroll,
         )
+        if type(runtime) is not runtime_type:
+            raise ProductEntrypointError(
+                "profiled runtime factory returned a non-canonical runtime type"
+            )
+
+        try:
+            runtime_workspace = canonical_workspace(runtime.workspace)
+            runtime_source_id = runtime.manifest.source_id
+            runtime_source = runtime.collector.source
+        except (AttributeError, TypeError, ValueError) as exc:
+            try:
+                runtime.close()
+            except BaseException:
+                pass
+            raise ProductEntrypointError(
+                "profiled runtime composition cannot prove exact source origin"
+            ) from exc
+        if (
+            runtime_workspace != expected_workspace
+            or runtime_source_id != expected_source_id
+            or runtime_source is not source
+        ):
+            try:
+                runtime.close()
+            except BaseException:
+                pass
+            raise ProductEntrypointError(
+                "profiled runtime does not retain the exact closed-registry source"
+            )
+        return runtime
 
     return build
 
 
 _PROFILED_RUNTIME_BUILDER = _capture_profiled_runtime_builder(
-    validated_source=_validated_source,
+    source_bindings=_CAPTURED_PRODUCT_SOURCE_BINDINGS,
     runtime_factory=build_autonomous_product_runtime,
-    source_identity_check=require_product_owned_source_factory_identity,
+    runtime_type=AutonomousProductRuntime,
+    path_type=Path,
 )
-
 
 def _runtime_builder(
     workspace: Path,
@@ -386,23 +480,28 @@ class ProductGuiWorker:
         stopped_status: ContinuousSessionStatus | None = None
         stop_reason: str | None = None
         try:
-            if self._runtime_builder is None:
+            if expected_source_id is not None:
+                if self._runtime_builder is not None:
+                    raise ProductEntrypointError(
+                        "configured source identity forbids "
+                        "caller-injected runtime builders"
+                    )
                 # The authoritative path uses a function-definition-time captured
-                # closure. Rebinding _CANONICAL_RUNTIME_BUILDER, _validated_source,
-                # build_autonomous_product_runtime, or _PROFILED_RUNTIME_BUILDER
-                # cannot redirect this public start() path.
+                # closure containing the exact import-time registry factory result.
                 runtime = _profiled_runtime_builder(
                     workspace,
                     source_factory,
                     initial_bankroll,
                     expected_source_id=expected_source_id,
                 )
+            elif self._runtime_builder is None:
+                # Compatibility-only default mode remains deliberately unprofiled.
+                runtime = _runtime_builder(
+                    workspace,
+                    source_factory,
+                    initial_bankroll,
+                )
             else:
-                if expected_source_id is not None:
-                    raise ProductEntrypointError(
-                        "configured source identity forbids "
-                        "caller-injected runtime builders"
-                    )
                 runtime = self._runtime_builder(
                     workspace,
                     source_factory,

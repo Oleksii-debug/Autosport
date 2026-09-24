@@ -27,6 +27,71 @@ from .trusted_runtime_code_profile import (
 
 
 RuntimeBuilder = Callable[[Path, str, str], AutonomousProductRuntime]
+ProfiledRuntimeBuilder = Callable[..., AutonomousProductRuntime]
+
+
+def _capture_profiled_runtime_builder(
+    *,
+    validated_source: Callable[..., object],
+    runtime_factory: Callable[..., AutonomousProductRuntime],
+    source_identity_check: Callable[..., object],
+) -> ProfiledRuntimeBuilder:
+    """Capture the trusted construction chain without later module-global lookup."""
+
+    def build(
+        workspace: Path,
+        source_factory: str,
+        initial_bankroll: str,
+        *,
+        expected_source_id: str | None = None,
+    ) -> AutonomousProductRuntime:
+        if expected_source_id is not None and (
+            type(expected_source_id) is not str
+            or not expected_source_id
+            or expected_source_id.strip() != expected_source_id
+        ):
+            raise ValueError("expected_source_id must be a non-empty trimmed string")
+        if expected_source_id is not None:
+            try:
+                source_identity_check(
+                    source_factory=source_factory,
+                    expected_provider_source_id=expected_source_id,
+                )
+            except TrustedRuntimeCodeProfileError as exc:
+                raise ProductEntrypointError(
+                    "configured source factory is not product-owned by this build"
+                ) from exc
+
+        source = validated_source(source_factory, workspace=workspace)
+
+        if expected_source_id is not None:
+            try:
+                source_identity_check(
+                    source_factory=source_factory,
+                    expected_provider_source_id=expected_source_id,
+                )
+            except TrustedRuntimeCodeProfileError as exc:
+                raise ProductEntrypointError(
+                    "configured source factory changed during source construction"
+                ) from exc
+        if expected_source_id is not None and source.source_id != expected_source_id:
+            raise ProductEntrypointError(
+                "product source identity does not match the configured source"
+            )
+        return runtime_factory(
+            workspace=workspace,
+            source=source,
+            initial_bankroll=initial_bankroll,
+        )
+
+    return build
+
+
+_PROFILED_RUNTIME_BUILDER = _capture_profiled_runtime_builder(
+    validated_source=_validated_source,
+    runtime_factory=build_autonomous_product_runtime,
+    source_identity_check=require_product_owned_source_factory_identity,
+)
 
 
 def _runtime_builder(
@@ -36,47 +101,19 @@ def _runtime_builder(
     *,
     expected_source_id: str | None = None,
 ) -> AutonomousProductRuntime:
-    """Build the canonical runtime through the same validated source boundary as CLI."""
+    """Compatibility wrapper; trusted worker authority does not depend on this name."""
 
-    if expected_source_id is not None and (
-        type(expected_source_id) is not str
-        or not expected_source_id
-        or expected_source_id.strip() != expected_source_id
-    ):
-        raise ValueError("expected_source_id must be a non-empty trimmed string")
-    if expected_source_id is not None:
-        try:
-            require_product_owned_source_factory_identity(
-                source_factory=source_factory,
-                expected_provider_source_id=expected_source_id,
-            )
-        except TrustedRuntimeCodeProfileError as exc:
-            raise ProductEntrypointError(
-                "configured source factory is not product-owned by this build"
-            ) from exc
-    source = _validated_source(source_factory, workspace=workspace)
-    if expected_source_id is not None:
-        try:
-            require_product_owned_source_factory_identity(
-                source_factory=source_factory,
-                expected_provider_source_id=expected_source_id,
-            )
-        except TrustedRuntimeCodeProfileError as exc:
-            raise ProductEntrypointError(
-                "configured source factory changed during source construction"
-            ) from exc
-    if expected_source_id is not None and source.source_id != expected_source_id:
-        raise ProductEntrypointError(
-            "product source identity does not match the configured source"
-        )
-    return build_autonomous_product_runtime(
-        workspace=workspace,
-        source=source,
-        initial_bankroll=initial_bankroll,
+    return _PROFILED_RUNTIME_BUILDER(
+        workspace,
+        source_factory,
+        initial_bankroll,
+        expected_source_id=expected_source_id,
     )
 
 
-_CANONICAL_RUNTIME_BUILDER = _runtime_builder
+# Compatibility/debug alias only. Trust eligibility never compares against this
+# mutable module-global binding.
+_CANONICAL_RUNTIME_BUILDER = _PROFILED_RUNTIME_BUILDER
 
 
 def _safe_error_type(exc: BaseException) -> str:
@@ -131,7 +168,10 @@ class ProductGuiWorker:
     and projects bounded messages to presentation.
     """
 
-    def __init__(self, *, runtime_builder: RuntimeBuilder = _runtime_builder) -> None:
+    def __init__(self, *, runtime_builder: RuntimeBuilder | None = None) -> None:
+        # None is the only public constructor state eligible for the profiled path.
+        # Supplying any builder is structurally unprofiled, regardless of mutable
+        # module-global aliases.
         self._runtime_builder = runtime_builder
         self._messages: queue.Queue[ProductGuiMessage] = queue.Queue()
         self._lock = threading.Lock()
@@ -308,6 +348,7 @@ class ProductGuiWorker:
         expected_source_id: str | None,
         initial_bankroll: str,
         poll_seconds: float,
+        _profiled_runtime_builder: ProfiledRuntimeBuilder = _PROFILED_RUNTIME_BUILDER,
     ) -> None:
         runtime: AutonomousProductRuntime | None = None
         runtime_profile: TrustedRuntimeCodeProfile | None = None
@@ -315,22 +356,26 @@ class ProductGuiWorker:
         stopped_status: ContinuousSessionStatus | None = None
         stop_reason: str | None = None
         try:
-            if expected_source_id is None:
-                runtime = self._runtime_builder(
-                    workspace,
-                    source_factory,
-                    initial_bankroll,
-                )
-            else:
-                if self._runtime_builder is not _CANONICAL_RUNTIME_BUILDER:
-                    raise ProductEntrypointError(
-                        "configured source identity requires the canonical runtime builder"
-                    )
-                runtime = _CANONICAL_RUNTIME_BUILDER(
+            if self._runtime_builder is None:
+                # The authoritative path uses a function-definition-time captured
+                # closure. Rebinding _CANONICAL_RUNTIME_BUILDER, _validated_source,
+                # build_autonomous_product_runtime, or _PROFILED_RUNTIME_BUILDER
+                # cannot redirect this public start() path.
+                runtime = _profiled_runtime_builder(
                     workspace,
                     source_factory,
                     initial_bankroll,
                     expected_source_id=expected_source_id,
+                )
+            else:
+                if expected_source_id is not None:
+                    raise ProductEntrypointError(
+                        "configured source identity forbids caller-injected runtime builders"
+                    )
+                runtime = self._runtime_builder(
+                    workspace,
+                    source_factory,
+                    initial_bankroll,
                 )
             with self._lock:
                 self._runtime = runtime

@@ -325,6 +325,41 @@ class RegisteredStrategyLiveFeatureTests(unittest.TestCase):
                     model_version_id="model-v1",
                 )
 
+    def test_canonical_feature_set_payload_schema_resolves_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = _registry(Path(directory))
+            entry = registry.get("FeatureSet", LIVE_FEATURE_SET_ID)
+            self.assertIsNotNone(entry)
+            assert entry is not None
+            self.assertEqual(
+                set(entry.payload),
+                {
+                    "feature_set_id",
+                    "version",
+                    "definition_sha256",
+                    "source_sha256",
+                    "available_at",
+                },
+            )
+            self.assertNotIn("available_at_utc", entry.payload)
+
+            authority = resolve_registered_live_feature_authority(
+                registry,
+                "model-v1",
+                decision_at=DECISION_AT,
+            )
+
+            self.assertEqual(authority.feature_set_id, LIVE_FEATURE_SET_ID)
+            self.assertEqual(authority.feature_available_at, FEATURE_AVAILABLE_AT)
+            self.assertEqual(
+                authority.feature_definition_sha256,
+                LIVE_FEATURE_DEFINITION_SHA256,
+            )
+            self.assertEqual(
+                authority.feature_source_sha256,
+                LIVE_FEATURE_SOURCE_SHA256,
+            )
+
     def test_feature_set_must_precede_model_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry = _registry(

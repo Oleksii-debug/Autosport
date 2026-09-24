@@ -53,13 +53,6 @@ def _canonical_json_sha256(payload: object) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def _sha256_hex(value: object, name: str) -> str:
-    text = _text(value, name)
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
-        raise ReferencePriceEvidenceError(f"{name} must be a lowercase SHA-256 hex digest")
-    return text
-
-
 def _json_object_exact(raw: object, name: str) -> dict[str, object]:
     text = _text(raw, name)
 
@@ -672,6 +665,19 @@ class ReferencePriceDecisionResolution:
             )
         object.__setattr__(self, "candidates", ordered)
 
+        target_identity = _market_identity(target)
+        for candidate in ordered:
+            for raw in candidate.event_canonical_jsons:
+                event = _market_event_from_canonical_json(raw)
+                if _market_identity(event) != target_identity:
+                    raise ReferencePriceEvidenceError(
+                        "candidate event market identity does not match target event"
+                    )
+                if event.metadata.get("price_semantics") != self.protocol.price_semantics:
+                    raise ReferencePriceEvidenceError(
+                        "candidate event price_semantics does not match frozen protocol"
+                    )
+
         missing = tuple(
             candidate
             for candidate in ordered
@@ -724,10 +730,36 @@ class ReferencePriceDecisionResolution:
                 self.consensus_evidence.market_type,
                 self.consensus_evidence.market_semantics_id,
             )
-            if consensus_identity != _market_identity(target):
+            if consensus_identity != target_identity:
                 raise ReferencePriceEvidenceError(
                     "consensus evidence market identity does not match target event"
                 )
+
+            consensus_by_transport: dict[str, set[str]] = {
+                source_id: set() for source_id in self.protocol.eligible_source_ids
+            }
+            consensus_by_price_source: dict[str, set[str]] = {
+                source_id: set()
+                for source_id in self.protocol.eligible_price_source_ids
+            }
+            for observation in self.consensus_evidence.observations:
+                consensus_by_transport[observation.source_id].add(
+                    observation.event_canonical_json
+                )
+                consensus_by_price_source[observation.price_source_id].add(
+                    observation.event_canonical_json
+                )
+            for candidate in ordered:
+                expected_events = (
+                    consensus_by_transport[candidate.source_id]
+                    if candidate.namespace
+                    is ReferenceCandidateNamespace.TRANSPORT_SOURCE
+                    else consensus_by_price_source[candidate.source_id]
+                )
+                if set(candidate.event_canonical_jsons) != expected_events:
+                    raise ReferencePriceEvidenceError(
+                        "qualified candidate bytes do not match consensus evidence"
+                    )
 
         object.__setattr__(
             self,
@@ -1130,6 +1162,10 @@ def resolve_reference_price_decision_evidence(
         if observation.source_id not in by_transport:
             raise ReferencePriceEvidenceError(
                 "reference observation transport source is outside frozen eligible universe"
+            )
+        if event.metadata.get("price_semantics") != protocol.price_semantics:
+            raise ReferencePriceEvidenceError(
+                "reference observation price_semantics does not match frozen protocol"
             )
         price_source_id = observation.price_source_id
         if price_source_id not in by_price_source:

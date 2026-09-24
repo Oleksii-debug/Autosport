@@ -866,6 +866,8 @@ def _build_allocation_basis_store_runtime():
     json_dumps = json.dumps
     sha256 = hashlib.sha256
     open_file = open
+    os_fspath = os.fspath
+    path_separator = os.sep
     sealed_state = weakref.WeakKeyDictionary()
     sealed_goal_file = weakref.WeakKeyDictionary()
     authority_operations = {
@@ -1293,7 +1295,20 @@ def _build_allocation_basis_store_runtime():
         )
         workspace_path.mkdir(parents=True, exist_ok=True)
         state_path = workspace_path / file_name
-        goal_path_text = str(workspace_path / goal_store_file_name)
+        workspace_text = os_fspath(workspace_path)
+        if (
+            type(workspace_text) is not str
+            or not workspace_text
+            or "\x00" in workspace_text
+        ):
+            raise error_type(
+                "canonical EconomicGoal workspace path is invalid"
+            )
+        goal_path_text = (
+            workspace_text + goal_store_file_name
+            if workspace_text.endswith(path_separator)
+            else workspace_text + path_separator + goal_store_file_name
+        )
         if not goal_path_text or "\x00" in goal_path_text:
             raise error_type(
                 "canonical EconomicGoal path is invalid"

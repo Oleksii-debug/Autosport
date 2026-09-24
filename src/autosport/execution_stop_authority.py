@@ -1507,7 +1507,6 @@ def _build_sealed_admission_lease():
     sealed_bindings = tuple(
         (name, module_globals[name]) for name in sealed_names
     )
-    authority_class = _CANONICAL_ADMISSION_AUTHORITY_CLASS
     authority_mode = ExecutionAuthorityMode
     stopped_error = ExecutionStoppedError
     integrity_error = ExecutionStopIntegrityError

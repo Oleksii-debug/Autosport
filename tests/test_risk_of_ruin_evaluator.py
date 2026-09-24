@@ -252,6 +252,89 @@ def test_clopper_pearson_confidence_resolution_is_resource_bounded() -> None:
         replace(_request(planned=1), confidence_level=pathological)
 
 
+def test_clopper_pearson_supported_work_budget_boundary() -> None:
+    supported = risk_module._MAX_SUPPORTED_FIXED_N_OBSERVATIONS
+
+    inside = clopper_pearson_upper_bound(
+        ruin_count=0,
+        independent_units=supported,
+        confidence_level=Decimal("0.95"),
+    )
+    assert Decimal(0) < inside < Decimal(1)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="UNSUPPORTED_RESOURCE_DOMAIN",
+    ):
+        clopper_pearson_upper_bound(
+            ruin_count=0,
+            independent_units=supported + 1,
+            confidence_level=Decimal("0.95"),
+        )
+
+
+def test_clopper_pearson_resource_rejection_precedes_recurrence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supported = risk_module._MAX_SUPPORTED_FIXED_N_OBSERVATIONS
+    calls: list[tuple[int, int]] = []
+
+    def forbidden_cdf(k: int, n: int, _p: Decimal) -> Decimal:
+        calls.append((k, n))
+        raise AssertionError("unsupported request reached binomial recurrence")
+
+    monkeypatch.setattr(risk_module, "_binomial_cdf", forbidden_cdf)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="UNSUPPORTED_RESOURCE_DOMAIN",
+    ):
+        clopper_pearson_upper_bound(
+            ruin_count=supported // 2,
+            independent_units=supported + 1,
+            confidence_level=Decimal("0.95"),
+        )
+
+    assert calls == []
+
+
+def test_clopper_pearson_exact_all_ruined_edge_stays_constant_work() -> None:
+    huge_exact_n = 10**50
+
+    assert clopper_pearson_upper_bound(
+        ruin_count=huge_exact_n,
+        independent_units=huge_exact_n,
+        confidence_level=Decimal("0.95"),
+    ) == Decimal(1)
+
+
+def test_request_resource_budget_precedes_observation_iteration() -> None:
+    supported = risk_module._MAX_SUPPORTED_FIXED_N_OBSERVATIONS
+    poison_observations = (object(),) * (supported + 1)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="UNSUPPORTED_RESOURCE_DOMAIN",
+    ):
+        replace(
+            _request(planned=1),
+            observations=poison_observations,
+        )
+
+
+def test_request_planned_n_above_implementation_budget_fails_closed() -> None:
+    supported = risk_module._MAX_SUPPORTED_FIXED_N_OBSERVATIONS
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="UNSUPPORTED_RESOURCE_DOMAIN",
+    ):
+        replace(
+            _request(planned=1),
+            planned_independent_units=supported + 1,
+        )
+
+
 def test_clopper_pearson_isolated_from_ambient_decimal_context() -> None:
     baseline = clopper_pearson_upper_bound(
         ruin_count=150,

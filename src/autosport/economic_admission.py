@@ -49,6 +49,20 @@ def _sync_book_state(target: PaperBook, source: PaperBook) -> None:
     PaperBook._validate_loaded_state(target)
 
 
+def _same_semantic_book_state(expected: PaperBook, observed: PaperBook) -> bool:
+    """Compare the complete validated economic state published by one admission."""
+
+    PaperBook._validate_loaded_state(expected)
+    PaperBook._validate_loaded_state(observed)
+    return (
+        observed.initial_bankroll == expected.initial_bankroll
+        and observed.balance == expected.balance
+        and observed.tickets == expected.tickets
+        and observed._lifecycle == expected._lifecycle
+        and observed._settlement_times == expected._settlement_times
+    )
+
+
 def _validate_context_binding(
     *,
     context: ProposedTicketRiskContext | None,
@@ -170,6 +184,10 @@ def admit_paper_ticket(
         if persisted_ticket is None:
             raise RuntimeError(
                 "persisted PaperBook lost the ticket opened inside admission"
+            )
+        if not _same_semantic_book_state(canonical_book, persisted):
+            raise RuntimeError(
+                "persisted PaperBook state does not match the admitted mutation"
             )
         _sync_book_state(book, persisted)
         return PaperAdmissionResult(

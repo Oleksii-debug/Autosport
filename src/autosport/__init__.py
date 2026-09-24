@@ -136,6 +136,11 @@ from . import _scientific_registry_read_authority as _scientific_registry_read_a
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
 
+# The exact frozen ResearchProtocol is the product's predeclared statistical family
+# namespace. A fresh caller-selected semantic variant must not mint a second alpha
+# budget or sibling multiplicity store under that same protocol revision.
+from . import _research_multiplicity_protocol_family_guard as _research_multiplicity_protocol_family_guard  # noqa: F401,E402
+
 # Sequential multiplicity evidence and PromotionEvidence live in separate durable
 # journals. Seal the registry prefix observed at look registration so a later write
 # can never retroactively authorize an already-durable promotion record.

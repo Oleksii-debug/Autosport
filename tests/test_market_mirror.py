@@ -505,6 +505,206 @@ class MarketMirrorTests(unittest.TestCase):
             finally:
                 reopened_store.close()
 
+    def test_from_store_reuses_startup_snapshot_without_second_history_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(db_path)
+            try:
+                store.append_many(
+                    [
+                        self.event(sequence=1, odds="2.00"),
+                        self.event(sequence=2, odds="2.20"),
+                    ]
+                )
+            finally:
+                store.close()
+
+            reopened_store = SQLiteMarketStore(db_path)
+            statements: list[str] = []
+            reopened_store.connection.set_trace_callback(statements.append)
+            try:
+                restored = MarketMirror.from_store(reopened_store)
+            finally:
+                reopened_store.connection.set_trace_callback(None)
+                reopened_store.close()
+
+            self.assertEqual(restored.view().revision, 2)
+            self.assertEqual(restored.snapshot()[0].decimal_odds, Decimal("2.20"))
+            self.assertFalse(
+                any("FROM market_events" in statement for statement in statements),
+                statements,
+            )
+
+    def test_from_store_recomputes_once_after_append_then_reuses_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(self.event(sequence=1, odds="2.00"))
+                first = MarketMirror.from_store(store)
+                self.assertEqual(first.view().revision, 1)
+
+                store.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.20",
+                        observed_ts="2026-09-16T19:00:01+00:00",
+                    )
+                )
+
+                statements: list[str] = []
+                store.connection.set_trace_callback(statements.append)
+                second = MarketMirror.from_store(store)
+                store.connection.set_trace_callback(None)
+                history_reads = [
+                    statement
+                    for statement in statements
+                    if "FROM market_events" in statement
+                ]
+                self.assertEqual(len(history_reads), 1, history_reads)
+                self.assertEqual(second.view().revision, 2)
+                self.assertEqual(second.snapshot()[0].decimal_odds, Decimal("2.20"))
+
+                statements.clear()
+                store.connection.set_trace_callback(statements.append)
+                third = MarketMirror.from_store(store)
+                store.connection.set_trace_callback(None)
+                self.assertEqual(third.view().revision, 2)
+                self.assertFalse(
+                    any("FROM market_events" in statement for statement in statements),
+                    statements,
+                )
+            finally:
+                store.connection.set_trace_callback(None)
+                store.close()
+
+    def test_from_store_detects_other_connection_append_before_reusing_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "market.db"
+            primary = SQLiteMarketStore(db_path)
+            secondary: SQLiteMarketStore | None = None
+            try:
+                primary.append(self.event(sequence=1, odds="2.00"))
+                first = MarketMirror.from_store(primary)
+                self.assertEqual(first.view().revision, 1)
+
+                secondary = SQLiteMarketStore(db_path)
+                secondary.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.20",
+                        observed_ts="2026-09-16T19:00:01+00:00",
+                    )
+                )
+
+                statements: list[str] = []
+                primary.connection.set_trace_callback(statements.append)
+                refreshed = MarketMirror.from_store(primary)
+                primary.connection.set_trace_callback(None)
+
+                self.assertEqual(refreshed.view().revision, 2)
+                self.assertEqual(refreshed.snapshot()[0].sequence, 2)
+                self.assertEqual(refreshed.snapshot()[0].decimal_odds, Decimal("2.20"))
+                self.assertEqual(
+                    len(
+                        [
+                            statement
+                            for statement in statements
+                            if "FROM market_events" in statement
+                        ]
+                    ),
+                    1,
+                    statements,
+                )
+
+                statements.clear()
+                primary.connection.set_trace_callback(statements.append)
+                cached = MarketMirror.from_store(primary)
+                primary.connection.set_trace_callback(None)
+                self.assertEqual(cached.view().revision, 2)
+                self.assertFalse(
+                    any("FROM market_events" in statement for statement in statements),
+                    statements,
+                )
+            finally:
+                primary.connection.set_trace_callback(None)
+                if secondary is not None:
+                    secondary.close()
+                primary.close()
+
+    def test_from_store_preserves_historical_revision_for_out_of_order_appends(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T18:59:00+00:00",
+                    )
+                )
+                store.append(
+                    self.event(
+                        sequence=3,
+                        odds="2.30",
+                        observed_ts="2026-09-16T19:01:00+00:00",
+                    )
+                )
+                store.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.20",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+
+                restored = MarketMirror.from_store(store)
+
+                self.assertEqual(restored.view().revision, 3)
+                self.assertEqual(restored.snapshot()[0].sequence, 3)
+                self.assertEqual(restored.snapshot()[0].decimal_odds, Decimal("2.30"))
+            finally:
+                store.close()
+
+    def test_from_store_keeps_same_sequence_conflict_fail_closed_without_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(db_path)
+            try:
+                store.append(
+                    self.event(
+                        sequence=7,
+                        odds="2.20",
+                        observed_ts="2026-09-16T18:59:00+00:00",
+                    )
+                )
+                store.append(
+                    self.event(
+                        sequence=7,
+                        odds="2.21",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+            finally:
+                store.close()
+
+            reopened_store = SQLiteMarketStore(db_path)
+            statements: list[str] = []
+            reopened_store.connection.set_trace_callback(statements.append)
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "conflicting MarketEvent payload reused an existing source-local sequence",
+                ):
+                    MarketMirror.from_store(reopened_store)
+            finally:
+                reopened_store.connection.set_trace_callback(None)
+                reopened_store.close()
+
+            self.assertFalse(
+                any("FROM market_events" in statement for statement in statements),
+                statements,
+            )
+
     def test_replay_view_reconstructs_pre_update_state_without_future_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

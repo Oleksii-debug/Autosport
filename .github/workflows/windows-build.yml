@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
     paths:
       - 'src/**'
       - 'tests/**'
@@ -24,7 +25,12 @@ concurrency:
 
 jobs:
   build:
+    # Build the expensive Windows candidate only for an integration-capable PR.
+    # ready_for_review starts the full gate; converted_to_draft/closed lets concurrency
+    # displace obsolete work; closed itself never qualifies the candidate.
+    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.draft == false)
     runs-on: windows-latest
+    timeout-minutes: 60
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:

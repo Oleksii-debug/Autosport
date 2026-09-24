@@ -1424,10 +1424,42 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     authority_id = MONOTONIC_AUTHORITY_ID
     activation_filename = "product_decision_activation.json"
 
+    canonical_machine_state_base = _product_machine_state_base
+    canonical_machine_state_base_code = getattr(
+        canonical_machine_state_base,
+        "__code__",
+        None,
+    )
+    canonical_authority_root_name = _PRODUCT_AUTHORITY_ROOT_NAME
     canonical_authority_root = _product_activation_authority_root
-    canonical_authority_root_code = getattr(canonical_authority_root, "__code__", None)
+    canonical_authority_root_code = getattr(
+        canonical_authority_root,
+        "__code__",
+        None,
+    )
+    try:
+        frozen_authority_root = canonical_authority_root()
+    except ProductDecisionActivationError as exc:
+        raise RuntimeError(
+            "canonical product decision activation authority root is unavailable"
+        ) from exc
+    if (
+        not isinstance(frozen_authority_root, path_type)
+        or not frozen_authority_root.is_absolute()
+    ):
+        raise RuntimeError(
+            "canonical product decision activation authority root is invalid"
+        )
     canonical_init = store_class.__dict__.get("__init__")
     canonical_init_code = getattr(canonical_init, "__code__", None)
+    canonical_authority_init = authority_type.__dict__.get("__init__")
+    canonical_authority_init_code = getattr(
+        canonical_authority_init,
+        "__code__",
+        None,
+    )
+    object_new = object.__new__
+    object_setattr = object.__setattr__
     constructor_authorities: weakref.WeakKeyDictionary[
         ProductDecisionActivationStore, MonotonicWorkspaceAuthority
     ] = weakref.WeakKeyDictionary()
@@ -1566,9 +1598,14 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
     }
 
     if (
-        canonical_authority_root_code is None
+        canonical_machine_state_base_code is None
+        or type(canonical_authority_root_name) is not str
+        or not canonical_authority_root_name
+        or canonical_authority_root_code is None
         or canonical_init is None
         or canonical_init_code is None
+        or canonical_authority_init is None
+        or canonical_authority_init_code is None
         or canonical_derive is None
         or canonical_derive_code is None
         or canonical_load_local is None
@@ -1593,6 +1630,24 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         raise RuntimeError(
             "canonical product decision activation authority composition is unavailable"
         )
+
+    def require_authority_root_composition() -> None:
+        if (
+            _product_machine_state_base is not canonical_machine_state_base
+            or getattr(_product_machine_state_base, "__code__", None)
+            is not canonical_machine_state_base_code
+            or _PRODUCT_AUTHORITY_ROOT_NAME != canonical_authority_root_name
+            or _product_activation_authority_root is not canonical_authority_root
+            or getattr(_product_activation_authority_root, "__code__", None)
+            is not canonical_authority_root_code
+            or authority_type.__dict__.get("__init__")
+            is not canonical_authority_init
+            or getattr(canonical_authority_init, "__code__", None)
+            is not canonical_authority_init_code
+        ):
+            raise ProductDecisionActivationError(
+                "product decision activation authority root trust changed"
+            )
 
     def require_store_helper(
         name: str,
@@ -1665,14 +1720,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             raise ProductDecisionActivationError(
                 "product decision activation store must be the exact canonical class"
             )
-        if (
-            _product_activation_authority_root is not canonical_authority_root
-            or getattr(_product_activation_authority_root, "__code__", None)
-            is not canonical_authority_root_code
-        ):
-            raise ProductDecisionActivationError(
-                "product decision activation authority root resolver changed"
-            )
+        require_authority_root_composition()
         try:
             workspace = store.workspace
             path = store.path
@@ -1692,12 +1740,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 "product decision activation constructor binding state is unavailable"
             )
 
-        try:
-            expected_root = canonical_authority_root()
-        except (OSError, RuntimeError) as exc:
-            raise ProductDecisionActivationError(
-                "cannot resolve product decision activation authority root"
-            ) from exc
+        expected_root = frozen_authority_root
 
         if (
             not isinstance(workspace, path_type)
@@ -2063,10 +2106,35 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             raise ProductDecisionActivationError(
                 "canonical product decision activation constructor authority changed"
             )
+        require_authority_root_composition()
+        if type(self) is not store_class:
+            raise ProductDecisionActivationError(
+                "product decision activation store must be the exact canonical class"
+            )
+        if store_class.FILE_NAME != activation_filename:
+            raise ProductDecisionActivationError(
+                "canonical product decision activation store namespace changed"
+            )
+        resolved_workspace = path_type(workspace).absolute().resolve(strict=False)
+        object_setattr(self, "workspace", resolved_workspace)
+        object_setattr(self, "path", resolved_workspace / activation_filename)
         require_workspace_binding_dispatch()
-        canonical_init(self, workspace)
+        try:
+            authority = object_new(authority_type)
+            canonical_authority_init(
+                authority,
+                workspace=resolved_workspace,
+                domain=authority_domain,
+                key=activation_filename,
+                authority_root=frozen_authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductDecisionActivationError(
+                "cannot bind product decision activation anti-rollback authority"
+            ) from exc
+        object_setattr(self, "_authority", authority)
+        require_authority_root_composition()
         require_workspace_binding_dispatch()
-        authority = self._authority
         binding = authority.workspace_binding
         constructor_authorities[self] = authority
         constructor_binding_states[self] = (

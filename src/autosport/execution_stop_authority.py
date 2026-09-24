@@ -1633,12 +1633,57 @@ _CANONICAL_ADMISSION_MONOTONIC_CLASS_CODES = tuple(
 # exact unbound callables rather than re-resolving self.<helper> dynamically.
 _CANONICAL_ADMISSION_AUTHORITY_CLASS = ExecutionStopAuthority
 _CANONICAL_ADMISSION_MONOTONIC_KEY = ExecutionStopAuthority._monotonic_key
-# Resolve the supported product root once at import composition time. Positive
-# admission must not re-enter mutable OS user-state resolver dispatch after the
-# canonical trust graph has been frozen.
-_CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT = (
-    ExecutionStopAuthority._product_monotonic_authority_root()
-)
+
+
+def _build_product_root_bound_monotonic_authority():
+    """Bind every STOP authority read/write to one import-composed product root."""
+
+    product_root = ExecutionStopAuthority._product_monotonic_authority_root()
+    path_class = Path
+    path_abspath = os.path.abspath
+    fspath = os.fspath
+    monotonic_key = ExecutionStopAuthority._monotonic_key
+    require_module_graph = _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_MODULE_GRAPH
+    authority_class = MonotonicWorkspaceAuthority
+    require_coordinates = _CANONICAL_ADMISSION_REQUIRE_MONOTONIC_COORDINATES
+    monotonic_domain = _MONOTONIC_DOMAIN
+
+    def monotonic_authority(
+        self: ExecutionStopAuthority,
+    ) -> MonotonicWorkspaceAuthority:
+        absolute = path_class(path_abspath(fspath(self.path)))
+        expected_workspace = absolute.parent
+        expected_key = monotonic_key(absolute)
+        require_module_graph()
+        authority = authority_class(
+            workspace=expected_workspace,
+            domain=monotonic_domain,
+            key=expected_key,
+            authority_root=product_root,
+        )
+        require_module_graph()
+        return require_coordinates(
+            authority,
+            expected_workspace=expected_workspace,
+            expected_root=product_root,
+            expected_key=expected_key,
+        )
+
+    return product_root, monotonic_authority
+
+
+# Resolve the supported product root once at import composition time, then bind it
+# into the canonical authority callable itself. The exported Path below is evidence,
+# not a live authority input: rebinding it cannot retarget current()/decision()/
+# assert_execution_allowed() or the sealed provider admission lease.
+(
+    _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT,
+    _product_root_bound_monotonic_authority,
+) = _build_product_root_bound_monotonic_authority()
+ExecutionStopAuthority._monotonic_authority = _product_root_bound_monotonic_authority
+del _product_root_bound_monotonic_authority
+del _build_product_root_bound_monotonic_authority
+
 _CANONICAL_ADMISSION_PRODUCT_MONOTONIC_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
 )

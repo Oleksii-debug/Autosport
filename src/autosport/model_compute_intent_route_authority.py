@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -183,6 +184,59 @@ def _authority_now() -> str:
     """Product clock seam. Tests may patch this private function."""
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _product_monotonic_authority_root() -> Path:
+    """Resolve one product-owned machine-state root without env retargeting."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+                None,
+                0x001C,  # CSIDL_LOCAL_APPDATA
+                None,
+                0,
+                buffer,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise ModelComputeIntentRouteAuthorityError(
+                "cannot resolve product-owned Windows authority root"
+            ) from exc
+        if result != 0 or not buffer.value:
+            raise ModelComputeIntentRouteAuthorityError(
+                "cannot resolve product-owned Windows authority root"
+            )
+        base = Path(buffer.value)
+        relative = (
+            Path("Autosport")
+            / "application-state"
+            / "monotonic-authority-v1"
+        )
+    else:
+        try:
+            import pwd
+
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (AttributeError, ImportError, KeyError, OSError) as exc:
+            raise ModelComputeIntentRouteAuthorityError(
+                "cannot resolve product-owned POSIX authority root"
+            ) from exc
+        base = Path(home) / ".local" / "state"
+        relative = Path("autosport") / "monotonic-authority-v1"
+
+    if not base.is_absolute():
+        raise ModelComputeIntentRouteAuthorityError(
+            "product-owned monotonic authority root must be absolute"
+        )
+    return base / relative
+
+
+_CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT: Final = (
+    _product_monotonic_authority_root
+)
 
 
 def _intent_identity(intent: OpportunityIntent) -> dict[str, str]:
@@ -396,8 +450,6 @@ class ModelComputeIntentRouteAuthorityStore:
     def __init__(
         self,
         workspace: str | Path,
-        *,
-        authority_root: str | Path | None = None,
     ) -> None:
         self.workspace = Path(workspace).absolute().resolve(strict=False)
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -406,7 +458,7 @@ class ModelComputeIntentRouteAuthorityStore:
             workspace=self.workspace,
             domain=_CANONICAL_AUTHORITY_DOMAIN,
             key=_CANONICAL_AUTHORITY_KEY,
-            authority_root=authority_root,
+            authority_root=_CANONICAL_PRODUCT_MONOTONIC_AUTHORITY_ROOT(),
         )
         with WorkspaceEconomicLock(self.workspace):
             self._recover()

@@ -17,7 +17,11 @@ from typing import Final
 
 from ._strategy_model_factory_impl import MeanBaselineModel
 from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
-from .strategy_model_factory import FactoryArtifactStore, WalkForwardEvaluationConfig
+from .strategy_model_factory import (
+    FactoryArtifactStore,
+    WalkForwardEvaluationConfig,
+    _registry_state_sha256,
+)
 
 
 SCIENTIFIC_REGISTRY_FILE: Final = "scientific_registry.json"
@@ -186,6 +190,52 @@ def _matching_positive_experiment(
             "promoted model Experiment must have POSITIVE outcome"
         )
     return experiment
+
+
+def _require_publication_registry_prefix(
+    registry: ScientificRegistry,
+    *,
+    final_registry_sha256: str,
+    model: RegistryEntry,
+) -> None:
+    """Bind a factory publication receipt to an authentic current registry prefix."""
+
+    try:
+        state = registry._read()
+    except (OSError, ValueError) as exc:
+        raise RegisteredStrategyModelRuntimeError(
+            "ScientificRegistry cannot prove factory publication lineage"
+        ) from exc
+    records = state.get("records")
+    if type(records) is not list:
+        raise RegisteredStrategyModelRuntimeError(
+            "ScientificRegistry records are invalid for publication binding"
+        )
+
+    matching_prefix: list[object] | None = None
+    for end in range(1, len(records) + 1):
+        prefix = {
+            "schema_version": ScientificRegistry.SCHEMA_VERSION,
+            "records": records[:end],
+        }
+        if _registry_state_sha256(prefix) == final_registry_sha256:
+            matching_prefix = records[:end]
+            break
+    if matching_prefix is None:
+        raise RegisteredStrategyModelRuntimeError(
+            "factory publication final registry is not a current registry prefix"
+        )
+
+    if not any(
+        type(raw) is dict
+        and raw.get("record_type") == "ModelVersion"
+        and raw.get("record_id") == model.record_id
+        and raw.get("record_sha256") == model.record_sha256
+        for raw in matching_prefix
+    ):
+        raise RegisteredStrategyModelRuntimeError(
+            "factory publication registry prefix does not bind promoted ModelVersion"
+        )
 
 
 def _decode_mean_baseline_artifact(
@@ -716,10 +766,15 @@ def resolve_registered_strategy_model(
         raise RegisteredStrategyModelRuntimeError(
             "factory publication does not bind the exact promoted model artifact"
         )
-    if not publication_record_sha256 or not publication_final_registry_sha256:
+    if not publication_record_sha256:
         raise RegisteredStrategyModelRuntimeError(
             "factory publication authority is incomplete"
         )
+    _require_publication_registry_prefix(
+        registry,
+        final_registry_sha256=publication_final_registry_sha256,
+        model=model,
+    )
 
     if _instant(rebuilt.training_cutoff, "model training_cutoff") > _instant(
         model.available_at,

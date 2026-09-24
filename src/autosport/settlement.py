@@ -58,6 +58,67 @@ def _build_serialized_settlement_operations():
     paper_book_type = PaperBook
     open_status = TicketStatus.OPEN
 
+    # Freeze the exact class-level executable graph that this boundary calls
+    # directly or through PaperBook.settle()/validation. Capturing only the class
+    # object is insufficient because its attributes remain mutable.
+    paper_dispatch_names = (
+        "settle",
+        "_validate_loaded_state",
+        "_settlement_result",
+        "_normalize_resolution_keys",
+        "_validate_settled_at",
+        "_validate_timestamp",
+        "_validate_placed_at",
+        "_require_utf8_string",
+        "_require_finite",
+        "_require_canonical_text",
+        "_validate_ticket_provenance",
+        "_validate_ticket_leg",
+        "_validate_lifecycle_reachability",
+        "_validate_lifecycle_entry",
+        "_debit_balance",
+    )
+
+    def descriptor_function(descriptor):
+        if isinstance(descriptor, (classmethod, staticmethod)):
+            return descriptor.__func__
+        return descriptor
+
+    paper_dispatch_seal = tuple(
+        (
+            name,
+            paper_book_type.__dict__[name],
+            descriptor_function(paper_book_type.__dict__[name]).__code__,
+        )
+        for name in paper_dispatch_names
+    )
+    validate_book = paper_book_type._validate_loaded_state
+    settlement_result = paper_book_type._settlement_result
+    settle_book = paper_book_type.settle
+
+    def require_paper_book_dispatch(book: PaperBook) -> None:
+        if type(book) is not paper_book_type:
+            raise ValueError("settlement book must be an exact PaperBook")
+        instance_state = vars(book)
+        for name, descriptor, code in paper_dispatch_seal:
+            current = paper_book_type.__dict__.get(name)
+            if current is not descriptor:
+                raise ValueError(
+                    "PaperBook settlement authority dispatch changed"
+                )
+            current_function = descriptor_function(current)
+            if (
+                not hasattr(current_function, "__code__")
+                or current_function.__code__ is not code
+            ):
+                raise ValueError(
+                    "PaperBook settlement authority code changed"
+                )
+            if name in instance_state:
+                raise ValueError(
+                    "settlement book mutation helpers must not be shadowed"
+                )
+
     def record(self, quote_outcomes: dict[str, str]) -> None:
         # Conflict detection and publication are one serialized transition.
         # The lock is closure-owned so a module-global rebind cannot split
@@ -80,23 +141,8 @@ def _build_serialized_settlement_operations():
         with serialization_lock:
             outcomes = validate_outcomes(self.outcomes)
 
-            if type(book) is not paper_book_type:
-                raise ValueError(
-                    "settlement book must be an exact PaperBook"
-                )
-
-            if any(
-                helper in vars(book)
-                for helper in (
-                    "_normalize_resolution_keys",
-                    "_settlement_result",
-                )
-            ):
-                raise ValueError(
-                    "settlement book mutation helpers must not be shadowed"
-                )
-
-            paper_book_type._validate_loaded_state(book)
+            require_paper_book_dispatch(book)
+            validate_book(book)
 
             plan: list[tuple[str, set[str], set[str]]] = []
             simulated_balance = book.balance
@@ -124,7 +170,7 @@ def _build_serialized_settlement_operations():
                     if outcomes.get(leg.quote_key) == "void"
                 }
                 _, _, simulated_balance = (
-                    paper_book_type._settlement_result(
+                    settlement_result(
                         ticket,
                         simulated_balance,
                         winning,
@@ -135,7 +181,10 @@ def _build_serialized_settlement_operations():
 
             settled: list[str] = []
             for ticket_id, winning, voids in plan:
-                paper_book_type.settle(
+                # Re-check the class graph immediately before each economic
+                # mutation, then invoke the captured canonical entrypoint.
+                require_paper_book_dispatch(book)
+                settle_book(
                     book,
                     ticket_id,
                     winning,

@@ -9,99 +9,69 @@ from autosport.paper import PaperBook
 from autosport.settlement import SettlementEngine
 
 
+def _closure_value(function, name: str):
+    cells = dict(
+        zip(
+            function.__code__.co_freevars,
+            function.__closure__ or (),
+            strict=True,
+        )
+    )
+    return cells[name].cell_contents
+
+
 class SettlementRecordConcurrencyTests(unittest.TestCase):
     def test_module_lock_rebind_cannot_split_record_from_settlement_commit(
         self,
     ) -> None:
-        book = PaperBook("100")
-        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
-        ticket = book.open_ticket(
-            [leg],
-            "10",
-            placed_at="2026-09-23T12:00:00+00:00",
+        engine = SettlementEngine()
+        serialization_lock = _closure_value(
+            SettlementEngine.record,
+            "serialization_lock",
         )
-        engine = SettlementEngine({leg.quote_key: "win"})
-        settle_entered = threading.Event()
-        release_settle = threading.Event()
-        record_started = threading.Event()
-        record_done = threading.Event()
-        real_settle = PaperBook.settle
-        results: dict[str, object] = {}
-        results_lock = threading.Lock()
+        self.assertIs(
+            serialization_lock,
+            _closure_value(
+                SettlementEngine.settle_ready,
+                "serialization_lock",
+            ),
+        )
 
-        def gated_settle(
-            target: PaperBook,
-            ticket_id: str,
-            winning_quote_keys: set[str],
-            void_quote_keys: set[str] | None = None,
-            *,
-            settled_at: str | None = None,
-        ):
-            settle_entered.set()
-            if not release_settle.wait(5):
-                raise AssertionError(
-                    "timed out waiting to release settlement commit"
-                )
-            return real_settle(
-                target,
-                ticket_id,
-                winning_quote_keys,
-                void_quote_keys,
-                settled_at=settled_at,
-            )
-
-        def settle() -> None:
-            try:
-                value: object = engine.settle_ready(book)
-            except BaseException as exc:
-                value = exc
-            with results_lock:
-                results["settle"] = value
+        started = threading.Event()
+        done = threading.Event()
+        result: list[BaseException] = []
 
         def record() -> None:
-            record_started.set()
+            started.set()
             try:
-                value: object = engine.record(
-                    {leg.quote_key: "loss"}
-                )
+                engine.record({"event-1|winner|alice": "win"})
             except BaseException as exc:
-                value = exc
-            with results_lock:
-                results["record"] = value
-            record_done.set()
+                result.append(exc)
+            finally:
+                done.set()
 
-        with patch.object(PaperBook, "settle", new=gated_settle):
-            first = threading.Thread(target=settle)
-            first.start()
-            self.assertTrue(settle_entered.wait(5))
-
+        serialization_lock.acquire()
+        try:
             with patch.object(
                 settlement_module,
                 "_SETTLEMENT_OUTCOME_LOCK",
                 threading.Lock(),
                 create=True,
             ):
-                second = threading.Thread(target=record)
-                second.start()
-                self.assertTrue(record_started.wait(5))
-                self.assertFalse(record_done.wait(0.2))
+                worker = threading.Thread(target=record)
+                worker.start()
+                self.assertTrue(started.wait(5))
+                self.assertFalse(done.wait(0.2))
+        finally:
+            serialization_lock.release()
 
-                release_settle.set()
-                first.join(5)
-                second.join(5)
-
-        self.assertFalse(first.is_alive())
-        self.assertFalse(second.is_alive())
-        self.assertEqual(results["settle"], [ticket.ticket_id])
-        self.assertIsInstance(results["record"], ValueError)
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [])
         self.assertEqual(
-            str(results["record"]),
-            f"conflicting settlement for {leg.quote_key}",
+            engine.outcomes,
+            {"event-1|winner|alice": "win"},
         )
-        self.assertEqual(engine.outcomes, {leg.quote_key: "win"})
-        self.assertIs(ticket.status, TicketStatus.WON)
-        self.assertEqual(book.balance, Decimal("110"))
-
 
     def test_concurrent_settle_ready_serializes_through_paperbook_commit(
         self,
@@ -114,75 +84,42 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
             placed_at="2026-09-23T12:00:00+00:00",
         )
         engine = SettlementEngine({leg.quote_key: "win"})
+        serialization_lock = _closure_value(
+            SettlementEngine.settle_ready,
+            "serialization_lock",
+        )
+        started = [threading.Event(), threading.Event()]
+        results: list[list[str] | BaseException | None] = [None, None]
 
-        first_settle_entered = threading.Event()
-        second_settle_entered = threading.Event()
-        second_started = threading.Event()
-        release_first_settle = threading.Event()
-        settle_count_lock = threading.Lock()
-        settle_count = 0
-        real_settle = PaperBook.settle
-        results: dict[str, list[str] | Exception] = {}
-        results_lock = threading.Lock()
-
-        def gated_settle(
-            target: PaperBook,
-            ticket_id: str,
-            winning_quote_keys: set[str],
-            void_quote_keys: set[str] | None = None,
-            *,
-            settled_at: str | None = None,
-        ):
-            nonlocal settle_count
-            with settle_count_lock:
-                settle_count += 1
-                call = settle_count
-            if call == 1:
-                first_settle_entered.set()
-                if not release_first_settle.wait(5):
-                    raise AssertionError(
-                        "timed out waiting to release first settlement"
-                    )
-            elif call == 2:
-                second_settle_entered.set()
-            return real_settle(
-                target,
-                ticket_id,
-                winning_quote_keys,
-                void_quote_keys,
-                settled_at=settled_at,
-            )
-
-        def settle(name: str) -> None:
-            if name == "second":
-                second_started.set()
+        def settle(index: int) -> None:
+            started[index].set()
             try:
-                value: list[str] | Exception = engine.settle_ready(book)
-            except Exception as exc:
-                value = exc
-            with results_lock:
-                results[name] = value
+                results[index] = engine.settle_ready(book)
+            except BaseException as exc:
+                results[index] = exc
 
-        with patch.object(PaperBook, "settle", new=gated_settle):
-            first = threading.Thread(target=settle, args=("first",))
-            first.start()
-            self.assertTrue(first_settle_entered.wait(5))
+        serialization_lock.acquire()
+        try:
+            workers = [
+                threading.Thread(target=settle, args=(index,))
+                for index in range(2)
+            ]
+            for worker in workers:
+                worker.start()
+            self.assertTrue(started[0].wait(5))
+            self.assertTrue(started[1].wait(5))
+            self.assertTrue(all(worker.is_alive() for worker in workers))
+        finally:
+            serialization_lock.release()
 
-            second = threading.Thread(target=settle, args=("second",))
-            second.start()
-            self.assertTrue(second_started.wait(5))
-            self.assertFalse(second_settle_entered.wait(0.2))
-            self.assertTrue(second.is_alive())
-
-            release_first_settle.set()
-            first.join(5)
-            second.join(5)
-
-        self.assertFalse(first.is_alive())
-        self.assertFalse(second.is_alive())
-        self.assertEqual(results["first"], [ticket.ticket_id])
-        self.assertEqual(results["second"], [])
-        self.assertEqual(settle_count, 1)
+        for worker in workers:
+            worker.join(5)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertIn([ticket.ticket_id], results)
+        self.assertIn([], results)
+        self.assertFalse(
+            any(isinstance(value, BaseException) for value in results)
+        )
         self.assertIs(ticket.status, TicketStatus.WON)
         self.assertEqual(ticket.payout, Decimal("20"))
         self.assertEqual(book.balance, Decimal("110"))
@@ -193,6 +130,46 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         ]
         self.assertEqual(len(settle_events), 1)
 
+    def test_paperbook_class_settle_rebind_fails_closed_before_positive_result(
+        self,
+    ) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-23T12:00:00+00:00",
+        )
+        engine = SettlementEngine({leg.quote_key: "win"})
+
+        def no_op_settle(
+            _book,
+            _ticket_id,
+            _winning_quote_keys,
+            _void_quote_keys=None,
+            *,
+            settled_at=None,
+        ):
+            return None
+
+        with patch.object(PaperBook, "settle", new=no_op_settle):
+            with self.assertRaisesRegex(
+                ValueError,
+                "PaperBook settlement authority dispatch changed",
+            ):
+                engine.settle_ready(book)
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(
+            [event[0] for event in book._lifecycle],
+            ["open"],
+        )
+
+        self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+        self.assertIs(ticket.status, TicketStatus.WON)
+        self.assertEqual(book.balance, Decimal("110"))
 
     def test_constructor_snapshots_caller_owned_outcomes_dict(self) -> None:
         caller_owned = {"event-1|winner|alice": "win"}

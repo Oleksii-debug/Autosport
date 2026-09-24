@@ -141,6 +141,19 @@ class BetdaqOrderSettlementObservation:
             "average_price",
         ):
             _finite_decimal(getattr(self, field), field)
+        if self.requested_stake <= 0:
+            raise BetdaqEconomicReadbackError(
+                "requested_stake must be a positive provider stake"
+            )
+        if self.requested_price <= 0:
+            raise BetdaqEconomicReadbackError(
+                "requested_price must be a positive provider price"
+            )
+        for field in ("total_stake", "unmatched_stake", "average_price"):
+            if getattr(self, field) < 0:
+                raise BetdaqEconomicReadbackError(
+                    f"{field} must be a non-negative provider economic value"
+                )
         for field in (
             "gross_settlement_amount",
             "order_commission",

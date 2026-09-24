@@ -417,6 +417,45 @@ class HistoricalSnapshotTests(unittest.TestCase):
         # before either fake primitive executes.
         self.assertEqual(forged_calls, [])
 
+    def test_product_owned_capture_rejects_tls_context_instance_wrap_socket_shadow(self) -> None:
+        original_add_handler = urllib_request.OpenerDirector.add_handler
+        shadow_calls: list[str] = []
+        forged_wrap_calls: list[str] = []
+
+        def forged_wrap_socket(*_args, **_kwargs):
+            forged_wrap_calls.append("wrap_socket")
+            raise AssertionError("forged TLS instance dispatch must not run")
+
+        def shadowing_add_handler(opener, handler):
+            result = original_add_handler(opener, handler)
+            if type(handler) is urllib_request.HTTPSHandler:
+                shadow_calls.append("https-handler")
+                handler._context.wrap_socket = forged_wrap_socket
+            return result
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            urllib_request.OpenerDirector,
+            "add_handler",
+            shadowing_add_handler,
+        ):
+            output_path = Path(temp) / "market.jsonl"
+            evidence_path = Path(temp) / "evidence.json"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "TLS verifier is invalid",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=output_path,
+                    evidence_path=evidence_path,
+                )
+            self.assertFalse(output_path.exists())
+            self.assertFalse(evidence_path.exists())
+
+        self.assertEqual(shadow_calls, ["https-handler"])
+        self.assertEqual(forged_wrap_calls, [])
+
     def test_product_owned_capture_rejects_https_connection_method_drift(self) -> None:
         forged_calls: list[str] = []
 

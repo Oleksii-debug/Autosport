@@ -410,6 +410,17 @@ class ProductGuiWorker:
             if not self._stop_event.is_set():
                 self._stop_reason = reason
                 self._stop_event.set()
+                # STOP acceptance is also the trust-revocation linearization point.
+                # Keep it serialized with profile issuance so a request that wins
+                # before issuance can never be followed by a positive profile, and a
+                # request that arrives later returns only after authority is revoked.
+                runtime_profile = self._trusted_runtime_profile
+                if runtime_profile is not None:
+                    revoke_trusted_runtime_code_profile(runtime_profile)
+                    self._trusted_runtime_profile = None
+                runtime_for_origin = self._runtime
+                if runtime_for_origin is not None:
+                    _clear_started_product_runtime_origin(runtime_for_origin)
             resolved_reason = self._stop_reason
             runtime = self._runtime
 
@@ -518,15 +529,20 @@ class ProductGuiWorker:
                 stopped_status = runtime.stop(stop_reason)
             else:
                 started_status = runtime.start()
-                if expected_source_id is not None and not self._stop_event.is_set():
-                    _register_started_product_runtime_origin(
-                        runtime,
-                        source_factory=source_factory,
-                        expected_provider_source_id=expected_source_id,
-                    )
-                    runtime_profile = issue_trusted_runtime_code_profile(runtime)
+                if expected_source_id is not None:
+                    # Serialize STOP acceptance and trusted-profile issuance through the
+                    # worker lifecycle lock. This gives the two operations one ordering:
+                    # STOP first => no profile; issuance first => request_stop() revokes
+                    # the profile before returning to its caller.
                     with self._lock:
-                        self._trusted_runtime_profile = runtime_profile
+                        if not self._stop_event.is_set():
+                            _register_started_product_runtime_origin(
+                                runtime,
+                                source_factory=source_factory,
+                                expected_provider_source_id=expected_source_id,
+                            )
+                            runtime_profile = issue_trusted_runtime_code_profile(runtime)
+                            self._trusted_runtime_profile = runtime_profile
                 self._messages.put(
                     ProductGuiMessage(kind="STARTED", status=started_status)
                 )

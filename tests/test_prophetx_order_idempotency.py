@@ -223,6 +223,37 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                 ProphetXReconciliationDisposition.CONFLICT,
             )
 
+    def test_provider_order_id_candidate_requires_canonical_durable_bind_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            matched = _evidence(
+                identity,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id="provider-order-shadowed",
+                effect_fingerprint=identity.effect_fingerprint,
+            )
+
+            # Reproduce the predecessor false-success: a caller-held exact ledger
+            # instance shadows only the top-level durable bind with an exact-looking
+            # return value but performs no append.
+            ledger.bind_provider_assigned_order_id = (
+                lambda **_kwargs: "provider-order-shadowed"
+            )
+
+            self.assertEqual(
+                reconciliation_disposition(identity, matched, ledger=ledger),
+                ProphetXReconciliationDisposition.CONFLICT,
+            )
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
     def test_economic_or_transport_conflict_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             identity = bind_before_effect(

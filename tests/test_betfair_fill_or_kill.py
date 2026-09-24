@@ -2,6 +2,7 @@ import unittest
 from decimal import Decimal, localcontext
 from unittest.mock import patch
 
+import autosport.betfair_fill_or_kill as fok_module
 from autosport.betfair_fill_or_kill import (
     BetfairFillOrKillError,
     BetfairFillOrKillImmediateReport,
@@ -309,16 +310,27 @@ class BetfairFillOrKillTests(unittest.TestCase):
             )
 
     def test_selection_length_fails_at_provider_bound_before_generic_text_path(self):
+        canonical_text = fok_module._text
+        selection_text_calls = []
+
+        def guarded_text(value, name):
+            if name == "selection_id":
+                selection_text_calls.append(value)
+                raise AssertionError(
+                    "selection generic text materialization must not execute"
+                )
+            return canonical_text(value, name)
+
         with patch(
             "autosport.betfair_fill_or_kill._text",
-            side_effect=AssertionError("generic text materialization must not execute"),
-        ) as text_parser:
+            side_effect=guarded_text,
+        ):
             with self.assertRaisesRegex(
                 BetfairFillOrKillError,
                 "signed-long domain",
             ):
                 self._request(selection_id="9" * 5000)
-        text_parser.assert_not_called()
+        self.assertEqual(selection_text_calls, [])
 
     def test_oversized_decimal_text_fails_before_decimal_parser(self):
         oversized = "1" * 513

@@ -1182,6 +1182,66 @@ def _install_execution_readback_authority() -> None:
     sealed_request_type = Request
     sealed_request_init = Request.__init__
     sealed_request_init_code = getattr(sealed_request_init, "__code__", None)
+
+    def request_member_state(value: object) -> tuple[object | None, ...]:
+        property_getter = value.fget if type(value) is property else None
+        property_setter = value.fset if type(value) is property else None
+        property_deleter = value.fdel if type(value) is property else None
+        descriptor_function = getattr(value, "__func__", None)
+        return (
+            getattr(value, "__code__", None),
+            property_getter,
+            getattr(property_getter, "__code__", None),
+            property_setter,
+            getattr(property_setter, "__code__", None),
+            property_deleter,
+            getattr(property_deleter, "__code__", None),
+            descriptor_function,
+            getattr(descriptor_function, "__code__", None),
+        )
+
+    sealed_request_class_graph = tuple(
+        (
+            name,
+            value,
+            request_member_state(value),
+        )
+        for name, value in sealed_request_type.__dict__.items()
+    )
+    request_global_bindings: dict[
+        tuple[int, str],
+        tuple[dict[str, object], str, object, object | None],
+    ] = {}
+    for _request_member_name, request_member, member_state in (
+        sealed_request_class_graph
+    ):
+        del _request_member_name
+        candidate_functions = (
+            request_member,
+            member_state[1],
+            member_state[3],
+            member_state[5],
+            member_state[7],
+        )
+        for candidate in candidate_functions:
+            code = getattr(candidate, "__code__", None)
+            global_map = getattr(candidate, "__globals__", None)
+            if code is None or type(global_map) is not dict:
+                continue
+            for dependency_name in code.co_names:
+                if dependency_name not in global_map:
+                    continue
+                dependency = global_map[dependency_name]
+                request_global_bindings[
+                    (id(global_map), dependency_name)
+                ] = (
+                    global_map,
+                    dependency_name,
+                    dependency,
+                    getattr(dependency, "__code__", None),
+                )
+    sealed_request_global_graph = tuple(request_global_bindings.values())
+
     sealed_request_structural_fields = (
         "_full_url",
         "fragment",
@@ -1556,12 +1616,36 @@ def _install_execution_readback_authority() -> None:
         return value
 
     def request_constructor_graph_matches() -> bool:
-        return bool(
+        live_class_graph = sealed_request_type.__dict__
+        if (
             getattr(sealed_request_type, "__init__", None)
-            is sealed_request_init
-            and getattr(sealed_request_init, "__code__", None)
-            is sealed_request_init_code
-        )
+            is not sealed_request_init
+            or getattr(sealed_request_init, "__code__", None)
+            is not sealed_request_init_code
+            or len(live_class_graph) != len(sealed_request_class_graph)
+        ):
+            return False
+        for name, expected_member, expected_state in sealed_request_class_graph:
+            live_member = live_class_graph.get(name)
+            if live_member is not expected_member:
+                return False
+            current_state = request_member_state(live_member)
+            if len(current_state) != len(expected_state) or any(
+                current is not expected
+                for current, expected in zip(current_state, expected_state)
+            ):
+                return False
+        for global_map, name, expected, expected_code in (
+            sealed_request_global_graph
+        ):
+            live_dependency = global_map.get(name)
+            if (
+                live_dependency is not expected
+                or getattr(live_dependency, "__code__", None)
+                is not expected_code
+            ):
+                return False
+        return True
 
     def canonical_request(
         url: str,
@@ -2310,6 +2394,13 @@ def _install_execution_readback_authority() -> None:
             headers=headers,
             body=body,
         )
+        if (
+            not request_constructor_graph_matches()
+            or not opener_graph_matches()
+        ):
+            raise sealed_error_type(
+                "canonical Betfair network authority changed"
+            )
         try:
             with private_opener_open(
                 private_opener,

@@ -224,6 +224,7 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         self.assertEqual(catalog.acquisitions[0].observed_at, "2026-09-22T18:00:00Z")
         self.assertIsNone(catalog.acquisitions[0].source_timestamp)
         self.assertIsNone(catalog.acquisitions[1].source_timestamp)
+        self.assertTrue(all(not item.observation_time_verified for item in catalog.acquisitions))
         self.assertNotEqual(catalog.acquisitions[0].observed_at, catalog.acquisitions[1].observed_at)
         self.assertFalse(catalog.atomic_snapshot)
 
@@ -342,6 +343,65 @@ class ProphetXFixtureDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(catalog.acquisitions), 1)
         self.assertFalse(catalog.acquisitions[0].provider_origin_verified)
+
+
+    @patch("autosport.prophetx_fixture_discovery.build_opener")
+    def test_canonical_transport_does_not_authorize_injected_observation_clock(self, build_opener):
+        raw = json.dumps(
+            _tournaments([]),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = build_opener.return_value.open.return_value.__enter__.return_value
+        response.headers.get.return_value = "application/json"
+        response.headers.items.return_value = []
+        response.read.return_value = raw
+        response.status = 200
+
+        discovery = ProphetXFixtureDiscovery(
+            "secret-token",
+            data_context_id="sandbox-aggregator-account-a",
+            transport=_default_transport,
+            clock=lambda: "2000-01-01T00:00:00Z",
+        )
+        catalog = discovery.discover()
+
+        self.assertEqual(len(catalog.acquisitions), 1)
+        acquisition = catalog.acquisitions[0]
+        self.assertTrue(acquisition.provider_origin_verified)
+        self.assertFalse(acquisition.observation_time_verified)
+        self.assertEqual(acquisition.observed_at, "2000-01-01T00:00:00Z")
+
+
+    @patch("autosport.prophetx_fixture_discovery.build_opener")
+    def test_canonical_transport_and_product_clock_have_separate_positive_authority(self, build_opener):
+        raw = json.dumps(
+            _tournaments([]),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = build_opener.return_value.open.return_value.__enter__.return_value
+        response.headers.get.return_value = "application/json"
+        response.headers.items.return_value = []
+        response.read.return_value = raw
+        response.status = 200
+
+        catalog = ProphetXFixtureDiscovery(
+            "secret-token",
+            data_context_id="sandbox-aggregator-account-a",
+            transport=_default_transport,
+        ).discover()
+
+        self.assertEqual(len(catalog.acquisitions), 1)
+        acquisition = catalog.acquisitions[0]
+        self.assertTrue(acquisition.provider_origin_verified)
+        self.assertTrue(acquisition.observation_time_verified)
+        self.assertRegex(
+            acquisition.observed_at,
+            r"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z$",
+        )
 
 
     def test_injected_unavailability_detail_is_sanitized_before_durable_failure(self):

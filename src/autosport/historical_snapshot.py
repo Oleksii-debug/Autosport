@@ -415,6 +415,9 @@ def _build_historical_snapshot_provider_origin_authority():
     http_client_module = http_client
     http_connection_type = http_client_module.HTTPConnection
     https_connection_type = http_client_module.HTTPSConnection
+    http_response_type = http_client_module.HTTPResponse
+    canonical_http_response_class = http_connection_type.response_class
+    canonical_https_response_class = https_connection_type.response_class
     connection_dispatch_names = (
         "__init__",
         "connect",
@@ -501,12 +504,20 @@ def _build_historical_snapshot_provider_origin_authority():
 
     def connection_dispatch_is_canonical() -> bool:
         if (
-            getattr(canonical_urllib_http_package, "client", None)
+            canonical_https_open.__globals__.get("http")
+            is not canonical_urllib_http_package
+            or getattr(canonical_urllib_http_package, "client", None)
             is not http_client_module
             or getattr(http_client_module, "HTTPConnection", None)
             is not http_connection_type
             or getattr(http_client_module, "HTTPSConnection", None)
             is not https_connection_type
+            or getattr(http_client_module, "HTTPResponse", None)
+            is not http_response_type
+            or http_connection_type.response_class is not canonical_http_response_class
+            or https_connection_type.response_class is not canonical_https_response_class
+            or canonical_http_response_class is not http_response_type
+            or canonical_https_response_class is not http_response_type
         ):
             return False
         for name in connection_dispatch_names:

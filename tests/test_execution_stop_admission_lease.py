@@ -292,6 +292,34 @@ def test_admission_lease_rejects_module_operation_lock_alias_rebind(
     assert forged_entries == []
 
 
+def test_admission_lease_rejects_module_file_lock_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority, _armed = _armed_authority(tmp_path)
+    forged_entries: list[str] = []
+
+    @contextmanager
+    def no_op_file_lock(_path, *, guard_path=None):
+        forged_entries.append("entered")
+        yield
+
+    monkeypatch.setattr(
+        stop_module,
+        "_exclusive_file_lock",
+        no_op_file_lock,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="module dependency graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("module file-lock rebind yielded an execution lease")
+
+    assert forged_entries == []
+
+
 def test_admission_lease_rejects_module_graph_verifier_rebind(
     tmp_path,
     monkeypatch,

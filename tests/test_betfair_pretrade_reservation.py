@@ -235,6 +235,7 @@ def test_understated_funds_precheck_cannot_underreserve_durable_action(
     "helper_name",
     (
         "_ledger_view",
+        "_LEDGER_SNAPSHOT",
         "worst_case_incremental_exposure",
         "require_authoritative_funds_precheck",
     ),

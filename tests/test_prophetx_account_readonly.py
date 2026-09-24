@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
-from http.client import HTTPException
+from http.client import HTTPException, HTTPSConnection
 import ssl
 from urllib.error import HTTPError
 from urllib.request import HTTPSHandler, OpenerDirector, ProxyHandler
@@ -83,55 +83,45 @@ def client_for(*responses: ProphetXHttpResponse):
     return client, transport
 
 
-def canonical_client_for(monkeypatch, *responses: ProphetXHttpResponse):
-    pending = list(responses)
-    calls: list[dict[str, object]] = []
+@pytest.mark.parametrize("mutation", ["open", "_open", "https_open"])
+def test_canonical_wallet_authority_rejects_preconstruction_stdlib_rebind(
+    monkeypatch,
+    mutation: str,
+):
+    forged_calls: list[str] = []
 
-    class FakeNetworkResponse:
-        def __init__(self, response: ProphetXHttpResponse) -> None:
-            self._response = response
-            self.headers = {
-                "Content-Type": response.content_type,
-            }
-            if response.content_encoding is not None:
-                self.headers["Content-Encoding"] = response.content_encoding
-            self.headers["Content-Length"] = str(len(response.body))
+    if mutation == "open":
+        def forged(self, request, timeout=None):
+            del self, timeout
+            forged_calls.append(request.full_url)
+            raise AssertionError("forged opener dispatch must not run")
 
-        def __enter__(self):
-            return self
+        monkeypatch.setattr(OpenerDirector, "open", forged)
+    elif mutation == "_open":
+        def forged(self, request, data=None):
+            del self, data
+            forged_calls.append(request.full_url)
+            raise AssertionError("forged internal opener dispatch must not run")
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        monkeypatch.setattr(OpenerDirector, "_open", forged)
+    else:
+        def forged(self, request):
+            del self
+            forged_calls.append(request.full_url)
+            raise AssertionError("forged HTTPS dispatch must not run")
 
-        def read(self, limit: int) -> bytes:
-            return self._response.body
+        monkeypatch.setattr(HTTPSHandler, "https_open", forged)
 
-        def getcode(self) -> int:
-            return self._response.status
-
-        def geturl(self) -> str:
-            return self._response.final_url
-
-    def open_response(self, request, timeout=None):
-        calls.append(
-            {
-                "url": request.full_url,
-                "timeout_seconds": timeout,
-            }
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="network dispatch changed before construction",
+    ):
+        ProphetXReadOnlyClient(
+            ProphetXSessionToken("session-secret"),
+            clock=lambda: FIXED_NOW,
         )
-        if not pending:
-            raise AssertionError("unexpected canonical transport call")
-        return FakeNetworkResponse(pending.pop(0))
 
-    # The positive-path fixture substitutes the stdlib network boundary before
-    # product construction; it does not replace product transport/get/fetch
-    # authority after construction.
-    monkeypatch.setattr(OpenerDirector, "open", open_response)
-    client = ProphetXReadOnlyClient(
-        ProphetXSessionToken("session-secret"),
-        clock=lambda: FIXED_NOW,
-    )
-    return client, calls
+    assert forged_calls == []
 
 
 def test_wallet_read_is_fixed_origin_get_and_preserves_exact_provider_money():
@@ -165,36 +155,20 @@ def test_wallet_read_is_fixed_origin_get_and_preserves_exact_provider_money():
     assert call["timeout_seconds"] == 10.0
 
 
-def test_snapshot_maps_only_cash_balance_and_does_not_promote_credit_or_locked_funds(
-    monkeypatch,
-):
-    client, _ = canonical_client_for(monkeypatch, http_response())
 
-    snapshot = client.read_account_snapshot(
-        frozenset({BookmakerCapability.BALANCE_READ})
-    )
+def test_wallet_projection_keeps_credit_and_locked_funds_distinct_from_cash():
+    client, _ = client_for(http_response())
 
-    assert snapshot.balance is not None
-    assert snapshot.balance.available_balance == Decimal("1000.00")
-    assert snapshot.balance.currency == PROVIDER_CURRENCY
-    assert snapshot.balance.total_balance is None
-    assert snapshot.balance.exposure is None
-    assert snapshot.balance.retained_commission is None
-    assert snapshot.balance.exposure_limit is None
-    assert snapshot.balance.adapter_id == ADAPTER_ID
-    assert snapshot.observed_capabilities == frozenset(
-        {BookmakerCapability.BALANCE_READ}
-    )
-    assert (
-        snapshot.profile.source_payload_sha256
-        == sha256(GOOD_BODY).hexdigest()
-    )
-    assert snapshot.profile.source_ref.startswith(
-        "prophetx://sandbox/wallet/"
-    )
-    assert snapshot.open_positions == ()
-    assert snapshot.settled_positions == ()
+    wallet = client.read_wallet()
+    profile = client._profile_for(wallet)
 
+    assert wallet.balance == Decimal("1000.00")
+    assert wallet.gec_balance == Decimal("500.00")
+    assert wallet.matched_order_balance == Decimal("200.00")
+    assert wallet.unmatched_order_balance == Decimal("50.00")
+    assert profile.facts[0].capability is BookmakerCapability.BALANCE_READ
+    assert profile.source_payload_sha256 == sha256(GOOD_BODY).hexdigest()
+    assert profile.source_ref.startswith("prophetx://sandbox/wallet/")
 
 def test_injected_transport_can_parse_wallet_but_cannot_mint_positive_authority():
     client, transport = client_for(
@@ -362,17 +336,28 @@ def test_canonical_wallet_authority_rejects_hidden_opener_handler_graph_mutation
 
 
 @pytest.mark.parametrize("mutation", ["replace", "weaken-in-place"])
+
 def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(
     monkeypatch,
     mutation: str,
 ):
-    client, calls = canonical_client_for(monkeypatch, http_response())
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
     opener = client._transport._opener  # type: ignore[attr-defined]
     https_handler = next(
         handler
         for handler in opener.handlers
         if type(handler) is HTTPSHandler
     )
+    network_calls: list[str] = []
+
+    def forbidden_connect(connection):
+        network_calls.append(type(connection).__name__)
+        raise AssertionError("network must not start after TLS authority drift")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", forbidden_connect)
 
     if mutation == "replace":
         insecure_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -392,8 +377,7 @@ def test_canonical_wallet_authority_rejects_tls_verifier_state_weakening(
             frozenset({BookmakerCapability.BALANCE_READ})
         )
 
-    assert calls == []
-
+    assert network_calls == []
 
 def test_default_transport_owns_explicit_secure_tls_context():
     transport = UrllibProphetXHttpTransport()
@@ -412,10 +396,14 @@ def test_default_transport_owns_explicit_secure_tls_context():
         assert https_handler._check_hostname is None
 
 
+
 def test_canonical_wallet_authority_rejects_legacy_hostname_override_before_network(
     monkeypatch,
 ):
-    client, calls = canonical_client_for(monkeypatch, http_response())
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        clock=lambda: FIXED_NOW,
+    )
     opener = client._transport._opener  # type: ignore[attr-defined]
     https_handler = next(
         handler
@@ -425,6 +413,13 @@ def test_canonical_wallet_authority_rejects_legacy_hostname_override_before_netw
     if not hasattr(https_handler, "_check_hostname"):
         pytest.skip("legacy HTTPSHandler hostname override is absent")
 
+    network_calls: list[str] = []
+
+    def forbidden_connect(connection):
+        network_calls.append(type(connection).__name__)
+        raise AssertionError("network must not start after hostname authority drift")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", forbidden_connect)
     https_handler._check_hostname = False
 
     with pytest.raises(
@@ -435,8 +430,7 @@ def test_canonical_wallet_authority_rejects_legacy_hostname_override_before_netw
             frozenset({BookmakerCapability.BALANCE_READ})
         )
 
-    assert calls == []
-
+    assert network_calls == []
 
 def test_failed_unmatched_balance_sync_is_preserved_but_cannot_mint_account_snapshot():
     failed = GOOD_BODY.replace(b'"succeed"', b'"failed"')
@@ -606,22 +600,19 @@ def test_wrong_capability_collection_type_is_rejected_before_network_call():
     assert transport.calls == []
 
 
-def test_secrets_are_redacted_from_reprs_and_not_persisted_in_snapshot(
-    monkeypatch,
-):
-    session = ProphetXSessionToken("session-secret")
-    client, _ = canonical_client_for(monkeypatch, http_response())
 
-    snapshot = client.read_account_snapshot(
-        frozenset({BookmakerCapability.BALANCE_READ})
-    )
-    persisted_text = repr(snapshot)
+def test_secrets_are_redacted_from_reprs_and_structural_wallet_evidence():
+    session = ProphetXSessionToken("session-secret")
+    client, _ = client_for(http_response())
+
+    wallet = client.read_wallet()
+    profile = client._profile_for(wallet)
 
     assert "session-secret" not in repr(session)
     assert "session-secret" not in repr(client)
-    assert "session-secret" not in persisted_text
-    assert "session-secret" not in snapshot.profile.source_ref
-
+    assert "session-secret" not in repr(wallet)
+    assert "session-secret" not in repr(profile)
+    assert "session-secret" not in profile.source_ref
 
 def test_product_observation_clock_is_not_read_until_payload_is_accepted():
     calls: list[str] = []

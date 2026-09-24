@@ -180,6 +180,71 @@ def test_process_environment_root_retarget_cannot_reauthorize_valid_old_armed(
     assert not caller_root_b.exists()
 
 
+@pytest.mark.skipif(
+    stop_module.os.name == "nt",
+    reason="POSIX regression exercises passwd-backed product-root resolution",
+)
+def test_posix_passwd_resolver_retarget_cannot_reauthorize_valid_old_armed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pwd
+
+    path = tmp_path / "workspace" / "execution-stop.jsonl"
+    product_root = stop_module._CANONICAL_ADMISSION_PRODUCT_MONOTONIC_ROOT
+    authority = _initialized(path)
+    assert authority._monotonic_authority().authority_root == product_root
+
+    armed = authority.arm(
+        operator_id="owner",
+        reason="supervised arm",
+        confirmation_id="confirm-r2-passwd-retarget",
+        expected_revision=1,
+        command_id="arm-r2-passwd-retarget",
+    )
+    assert armed.mode is ExecutionAuthorityMode.ARMED
+    valid_old_armed_journal = path.read_bytes()
+    valid_old_armed_anchor = authority.anchor_path.read_bytes()
+
+    stopped = authority.stop(
+        operator_id="owner",
+        reason="newer emergency stop",
+        expected_revision=2,
+        command_id="stop-r3-passwd-retarget",
+    )
+    assert stopped.mode is ExecutionAuthorityMode.STOPPED
+
+    path.write_bytes(valid_old_armed_journal)
+    authority.anchor_path.write_bytes(valid_old_armed_anchor)
+
+    forged_home = tmp_path / "forged-passwd-home"
+    forged_calls: list[int] = []
+
+    class ForgedPasswd:
+        pw_dir = str(forged_home)
+
+    def forged_getpwuid(uid: int) -> ForgedPasswd:
+        forged_calls.append(uid)
+        return ForgedPasswd()
+
+    monkeypatch.setattr(pwd, "getpwuid", forged_getpwuid)
+
+    restarted = ExecutionStopAuthority(path)
+
+    # The dynamic resolver is no longer an admission-time authority input.
+    # The process keeps the import-composed product root that already carries
+    # the newer STOP high-water mark.
+    assert restarted._monotonic_authority().authority_root == product_root
+    assert forged_calls == []
+
+    with pytest.raises(ExecutionStopAuthorityError):
+        with restarted.admission_lease():
+            pytest.fail("passwd retarget resurrected valid-old ARMED authority")
+
+    assert forged_calls == []
+    assert not forged_home.exists()
+
+
 def test_admission_lease_rejects_product_root_selector_class_rebind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

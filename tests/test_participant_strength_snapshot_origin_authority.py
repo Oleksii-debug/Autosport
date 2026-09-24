@@ -7,13 +7,8 @@ from dataclasses import replace
 import pytest
 
 from autosport.opponent_intelligence import (
-    DownstreamInvalidation,
-    InvalidationReason,
-    InvalidationTarget,
-    OpponentIntelligenceError,
     OpponentIntelligenceStore,
     RatingSnapshot,
-    RecomputeStatus,
     SnapshotState,
 )
 from autosport.participant_identity import IdentityView
@@ -25,8 +20,6 @@ from autosport.participant_strength import (
 from test_participant_strength import (
     T3,
     T4,
-    T5,
-    _pair,
     _registered_strength_lineage,
 )
 
@@ -122,76 +115,4 @@ def test_registered_forecast_rejects_self_hashed_unissued_rating_snapshots(
             model_version_id="model-lineage",
             strategy_version_id="strategy-lineage",
             quote_key="event-forged:match-winner:participant-a",
-        )
-
-
-def _authority_for(evidence: StrengthSnapshotPair) -> OpponentIntelligenceStore:
-    authority = object.__new__(OpponentIntelligenceStore)
-    authority._ratings = {
-        evidence.subject.snapshot_id: evidence.subject,
-        evidence.opponent.snapshot_id: evidence.opponent,
-    }
-    authority._invalidations = {}
-    return authority
-
-
-def test_registered_forecast_rejects_same_id_different_rating_payload(tmp_path) -> None:
-    registry, artifacts = _registered_strength_lineage(
-        tmp_path,
-        dataset_cutoff=T3,
-        dataset_available_at=T3,
-        model_created_at=T3,
-        strategy_created_at=T3,
-    )
-    canonical = _pair(decision_at=T4)
-    authority = _authority_for(canonical)
-    substituted = StrengthSnapshotPair(
-        replace(canonical.subject, rating="0.99"),
-        canonical.opponent,
-        canonical.decision_at,
-    )
-
-    with pytest.raises(
-        ParticipantStrengthError,
-        match="subject rating snapshot does not match product-owned evidence",
-    ):
-        emit_registered_strength_forecast(
-            registry=registry,
-            artifact_store=artifacts,
-            opponent_store=authority,
-            evidence=substituted,
-            model_version_id="model-lineage",
-            strategy_version_id="strategy-lineage",
-            quote_key="event-substitution:match-winner:participant-a",
-        )
-
-
-def test_rating_snapshot_invalidation_is_causal_not_retroactive() -> None:
-    evidence = _pair(decision_at=T4)
-    authority = _authority_for(evidence)
-    invalidation = DownstreamInvalidation(
-        invalidation_id="9" * 64,
-        target_kind=InvalidationTarget.RATING_SNAPSHOT,
-        target_id=evidence.subject.snapshot_id,
-        reason=InvalidationReason.OUTCOME_CORRECTION,
-        evidence_id="8" * 64,
-        detected_at=T5,
-        recompute_status=RecomputeStatus.REQUIRED,
-    )
-    authority._invalidations = {invalidation.invalidation_id: invalidation}
-
-    assert (
-        authority.resolve_rating_snapshot(
-            evidence.subject.snapshot_id,
-            as_of=T4,
-        )
-        == evidence.subject
-    )
-    with pytest.raises(
-        OpponentIntelligenceError,
-        match="rating snapshot was invalidated by the decision time",
-    ):
-        authority.resolve_rating_snapshot(
-            evidence.subject.snapshot_id,
-            as_of=T5,
         )

@@ -223,29 +223,113 @@ def test_admission_lease_rejects_second_order_journal_reader_rebind(
     assert forged_calls == []
 
 
-def test_admission_lease_holds_same_file_lock_until_effect_boundary(
+def test_admission_lease_rejects_module_current_alias_rebind(
     tmp_path,
     monkeypatch,
+) -> None:
+    authority = _authority(tmp_path)
+    stopped = authority.initialize_stopped(
+        operator_id="owner",
+        reason="durable operator STOP",
+        command_id="lease-module-current-init",
+    )
+    forged_calls: list[str] = []
+
+    def forged_current(_self):
+        forged_calls.append("called")
+        return type(stopped)(
+            revision=stopped.revision,
+            mode=ExecutionAuthorityMode.ARMED,
+            command_id=stopped.command_id,
+            operator_id=stopped.operator_id,
+            reason="forged ARMED state",
+            created_at=stopped.created_at,
+            confirmation_id="forged-confirmation",
+            record_sha256=stopped.record_sha256,
+        )
+
+    monkeypatch.setattr(
+        stop_module,
+        "_CANONICAL_ADMISSION_CURRENT_UNLOCKED",
+        forged_current,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="module dependency graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("module alias rebind yielded an execution lease")
+
+    assert forged_calls == []
+
+
+def test_admission_lease_rejects_module_operation_lock_alias_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority, _armed = _armed_authority(tmp_path)
+    forged_entries: list[str] = []
+
+    @contextmanager
+    def no_op_lock(_self):
+        forged_entries.append("entered")
+        yield
+
+    monkeypatch.setattr(
+        stop_module,
+        "_CANONICAL_ADMISSION_OPERATION_LOCK",
+        no_op_lock,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="module dependency graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("module lock alias rebind yielded an execution lease")
+
+    assert forged_entries == []
+
+
+def test_admission_lease_rejects_module_graph_verifier_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority, _armed = _armed_authority(tmp_path)
+    forged_calls: list[str] = []
+
+    def no_op_verifier() -> None:
+        forged_calls.append("called")
+
+    monkeypatch.setattr(
+        stop_module,
+        "_require_canonical_admission_graph",
+        no_op_verifier,
+    )
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="module dependency graph changed",
+    ):
+        with authority.admission_lease():
+            pytest.fail("module verifier rebind yielded an execution lease")
+
+    assert forged_calls == []
+
+
+def test_admission_lease_holds_same_file_lock_until_effect_boundary(
+    tmp_path,
 ) -> None:
     primary, armed = _armed_authority(tmp_path)
     secondary = _authority(tmp_path)
 
-    main_thread_id = threading.get_ident()
-    worker_lock_attempted = threading.Event()
+    worker_started = threading.Event()
     worker_done = threading.Event()
     worker_errors: list[BaseException] = []
-    original_file_lock = stop_module._exclusive_file_lock
-
-    @contextmanager
-    def observed_file_lock(path, *, guard_path=None):
-        if threading.get_ident() != main_thread_id:
-            worker_lock_attempted.set()
-        with original_file_lock(path, guard_path=guard_path):
-            yield
-
-    monkeypatch.setattr(stop_module, "_exclusive_file_lock", observed_file_lock)
 
     def issue_stop() -> None:
+        worker_started.set()
         try:
             secondary.stop(
                 operator_id="owner",
@@ -263,10 +347,10 @@ def test_admission_lease_holds_same_file_lock_until_effect_boundary(
     with primary.admission_lease() as admitted:
         assert admitted == armed
         worker.start()
-        assert worker_lock_attempted.wait(timeout=5)
-        # The worker has reached the exact shared file-lock acquisition.  Because
-        # this lease still owns that lock, STOP cannot have committed yet.
-        assert worker_done.is_set() is False
+        assert worker_started.wait(timeout=5)
+        # Give the already-running STOP worker a bounded chance to complete.
+        # It must remain blocked while this lease owns the shared OS locks.
+        assert worker_done.wait(timeout=0.5) is False
 
     worker.join(timeout=5)
     assert worker.is_alive() is False
@@ -285,38 +369,24 @@ def test_admission_lease_holds_same_file_lock_until_effect_boundary(
 )
 def test_admission_lease_stable_machine_lock_survives_dual_workspace_replacement(
     tmp_path,
-    monkeypatch,
 ) -> None:
     primary, armed = _armed_authority(tmp_path)
     secondary = _authority(tmp_path)
 
-    main_thread_id = threading.get_ident()
-    worker_stable_lock_attempted = threading.Event()
+    worker_started = threading.Event()
     worker_done = threading.Event()
     worker_errors: list[BaseException] = []
-    original_file_lock = stop_module._exclusive_file_lock
     stable_lock_path = primary._stable_serialization_lock_path()
 
     assert secondary._stable_serialization_lock_path() == stable_lock_path
     assert stable_lock_path != primary._lock_path
     assert stable_lock_path.parent != primary.path.parent
 
-    @contextmanager
-    def observed_file_lock(path, *, guard_path=None):
-        if (
-            threading.get_ident() != main_thread_id
-            and path == stable_lock_path
-        ):
-            worker_stable_lock_attempted.set()
-        with original_file_lock(path, guard_path=guard_path):
-            yield
-
-    monkeypatch.setattr(stop_module, "_exclusive_file_lock", observed_file_lock)
-
     journal_bytes = primary.path.read_bytes()
     sidecar_bytes = primary._lock_path.read_bytes()
 
     def issue_stop() -> None:
+        worker_started.set()
         try:
             secondary.stop(
                 operator_id="owner",
@@ -343,10 +413,10 @@ def test_admission_lease_stable_machine_lock_survives_dual_workspace_replacement
         os.replace(replacement_sidecar, primary._lock_path)
 
         worker.start()
-        assert worker_stable_lock_attempted.wait(timeout=5)
-        # The mutable workspace lock and journal now name different inodes, but
-        # both instances still contend on the same machine-root namespace lock.
-        assert worker_done.is_set() is False
+        assert worker_started.wait(timeout=5)
+        # Even after both mutable workspace paths are rebound, the worker must
+        # remain serialized by the independent machine-root lock.
+        assert worker_done.wait(timeout=0.5) is False
 
     worker.join(timeout=5)
     assert worker.is_alive() is False
@@ -357,3 +427,4 @@ def test_admission_lease_stable_machine_lock_survives_dual_workspace_replacement
     assert stopped.mode is ExecutionAuthorityMode.STOPPED
     assert stopped.revision == armed.revision + 1
     assert stopped.command_id == "lease-dual-replacement-stop"
+

@@ -468,6 +468,71 @@ class ProductDecisionActivationTests(unittest.TestCase):
         canonical = self._initialize()
         self.assertEqual(canonical.product_source_id, "provider-a")
 
+    def test_nested_authority_lower_history_rebind_fails_before_start_publication(
+        self,
+    ) -> None:
+        authority_type = type(self.store._authority)
+
+        def forged_load_bound_history(_authority):
+            raise AssertionError("forged lower history dispatch must never execute")
+
+        with mock.patch.object(
+            authority_type,
+            "_load_bound_history",
+            forged_load_bound_history,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested anti-rollback authority lower dispatch changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+
+    def test_nested_authority_lower_append_rebind_fails_before_start_publication(
+        self,
+    ) -> None:
+        authority_type = type(self.store._authority)
+
+        def forged_append_record(_authority, _record, _index):
+            return None
+
+        with mock.patch.object(
+            authority_type,
+            "_append_record",
+            forged_append_record,
+        ):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested anti-rollback authority lower dispatch changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
+    def test_nested_authority_lower_instance_shadow_fails_before_start_publication(
+        self,
+    ) -> None:
+        authority = self.store._authority
+        authority._load_bound_history = lambda: None
+        try:
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested anti-rollback authority lower dispatch changed",
+            ):
+                self._initialize()
+            self.assertFalse(self.store.path.exists())
+        finally:
+            delattr(authority, "_load_bound_history")
+
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+
     def test_exact_same_root_mwa_cannot_replace_constructor_authority(
         self,
     ) -> None:

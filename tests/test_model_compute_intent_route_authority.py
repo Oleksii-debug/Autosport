@@ -263,6 +263,156 @@ def test_authority_prepare_shadow_cannot_bypass_monotonic_dispatch(
         assert request.request_id == "intent-route-1"
 
 
+def test_observed_state_digest_shadow_cannot_mask_deleted_state(
+    monkeypatch,
+) -> None:
+    first_intent = _canonical_intent(suffix="state-read-observed-a")
+    second_intent = _canonical_intent(suffix="state-read-observed-b")
+    issued_at = max(
+        _proposal(first_intent),
+        _proposal(second_intent),
+    ) + timedelta(seconds=2)
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: _time_text(issued_at),
+    )
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        first = _issue(store, router, first_intent)
+        _route(router, first)
+        observed = subject.sha256_file(store.path)
+        assert observed is not None
+        store.path.unlink()
+
+        store._observed_sha256 = lambda: observed
+        try:
+            with pytest.raises(
+                subject.ModelComputeIntentRouteAuthorityError,
+                match="state-read dispatch changed",
+            ):
+                _issue(
+                    store,
+                    router,
+                    second_intent,
+                    request_id="intent-route-2",
+                )
+        finally:
+            del store._observed_sha256
+
+        assert not store.path.exists()
+        with pytest.raises(MonotonicAuthorityRollbackError):
+            subject.ModelComputeIntentRouteAuthorityStore(workspace)
+
+
+def test_loader_shadow_cannot_inject_preexisting_router_origin(
+    monkeypatch,
+) -> None:
+    caller_intent = _canonical_intent(suffix="state-read-load-caller")
+    issued_intent = _canonical_intent(suffix="state-read-load-issued")
+    issued_at = max(
+        _proposal(caller_intent),
+        _proposal(issued_intent),
+    ) + timedelta(seconds=2)
+    monkeypatch.setattr(
+        subject,
+        "_authority_now",
+        lambda: _time_text(issued_at),
+    )
+
+    temporary, workspace = _workspace()
+    with temporary:
+        router = ModelComputeRouterStore(workspace / "router.json")
+        caller_request = ComputeRouteRequest(
+            request_id="caller-preexisting-load",
+            created_at=_time_text(issued_at),
+            decision_deadline=_time_text(
+                issued_at + timedelta(seconds=5)
+            ),
+            required_capability="intent-economics",
+            data_classification=DataClassification.PUBLIC,
+            allow_cloud=False,
+            max_cost=Decimal("0"),
+            response_ttl_seconds=Decimal("5"),
+            baseline_candidate_id="local-deterministic",
+            decision_input_sha256=caller_intent.intent_sha256,
+            decision_evidence_sha256=(
+                caller_intent.evidence.evidence_sha256
+            ),
+        )
+        _route(router, caller_request)
+
+        store = subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        caller_identity = subject._intent_identity(caller_intent)
+        forged_record = subject.ModelComputeIntentRouteRecord(
+            router_store_relpath=store._router_relpath(router),
+            intent_id=caller_identity["intent_id"],
+            intent_sha256=caller_identity["intent_sha256"],
+            intent_audit_sha256=caller_identity["intent_audit_sha256"],
+            opportunity_id=caller_identity["opportunity_id"],
+            opportunity_evidence_sha256=caller_identity[
+                "opportunity_evidence_sha256"
+            ],
+            candidate_sha256=caller_identity["candidate_sha256"],
+            proposal_ts=caller_identity["proposal_ts"],
+            issued_at=caller_request.created_at,
+            request=caller_request.payload(),
+            request_sha256=subject._digest(
+                caller_request.payload()
+            ),
+        )
+
+        store._load = lambda: (forged_record,)
+        try:
+            with pytest.raises(
+                subject.ModelComputeIntentRouteAuthorityError,
+                match="state-read dispatch changed",
+            ):
+                _issue(
+                    store,
+                    router,
+                    issued_intent,
+                    request_id="intent-route-2",
+                )
+        finally:
+            del store._load
+
+        assert not store.path.exists()
+        issued = _issue(
+            store,
+            router,
+            issued_intent,
+            request_id="intent-route-2",
+        )
+        _route(router, issued)
+
+        reopened_router = ModelComputeRouterStore(
+            workspace / "router.json"
+        )
+        reopened_store = (
+            subject.ModelComputeIntentRouteAuthorityStore(workspace)
+        )
+        with pytest.raises(
+            subject.ModelComputeIntentRouteAuthorityError,
+            match="issuance is missing",
+        ):
+            reopened_store.resolve_current(
+                intent=caller_intent,
+                router_store=reopened_router,
+                request_id=caller_request.request_id,
+            )
+        resolved = reopened_store.resolve_current(
+            intent=issued_intent,
+            router_store=reopened_router,
+            request_id=issued.request_id,
+        )
+        assert resolved.request == issued.payload()
+
+
+
 def test_issue_route_restart_and_resolve_exact_origin(monkeypatch) -> None:
     intent = _canonical_intent(suffix="origin")
     issued_at = _proposal(intent) + timedelta(seconds=2)

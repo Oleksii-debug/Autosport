@@ -1074,25 +1074,65 @@ def _install_store_runtime_guards() -> None:
     recover = ModelComputeIntentRouteAuthorityStore._recover
     issue_request = ModelComputeIntentRouteAuthorityStore.issue_request
     resolve_current = ModelComputeIntentRouteAuthorityStore.resolve_current
+    error_type = ModelComputeIntentRouteAuthorityError
+    state_read_methods = (
+        (
+            "_observed_sha256",
+            ModelComputeIntentRouteAuthorityStore._observed_sha256,
+        ),
+        ("_load", ModelComputeIntentRouteAuthorityStore._load),
+    )
+    state_read_codes = tuple(
+        getattr(method, "__code__", None)
+        for _name, method in state_read_methods
+    )
+
+    def guard_state_read_dispatch(self) -> None:
+        try:
+            instance_state = vars(self)
+        except TypeError as exc:
+            raise error_type(
+                "intent-route authority state-read dispatch changed"
+            ) from exc
+        store_type = type(self)
+        for (name, expected), code in zip(
+            state_read_methods,
+            state_read_codes,
+        ):
+            live = getattr(store_type, name, None)
+            if (
+                name in instance_state
+                or live is not expected
+                or getattr(expected, "__code__", None) is not code
+            ):
+                raise error_type(
+                    "intent-route authority state-read dispatch changed"
+                )
 
     @wraps(recover)
     def guarded_recover(self) -> None:
+        guard_state_read_dispatch(self)
         guard(self)
         recover(self)
         guard(self)
+        guard_state_read_dispatch(self)
 
     @wraps(issue_request)
     def guarded_issue_request(self, *args, **kwargs):
+        guard_state_read_dispatch(self)
         guard(self)
         result = issue_request(self, *args, **kwargs)
         guard(self)
+        guard_state_read_dispatch(self)
         return result
 
     @wraps(resolve_current)
     def guarded_resolve_current(self, *args, **kwargs):
+        guard_state_read_dispatch(self)
         guard(self)
         result = resolve_current(self, *args, **kwargs)
         guard(self)
+        guard_state_read_dispatch(self)
         return result
 
     ModelComputeIntentRouteAuthorityStore._recover = guarded_recover

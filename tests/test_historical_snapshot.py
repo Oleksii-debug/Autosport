@@ -261,6 +261,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
         class ForgedResponse:
             def __init__(self) -> None:
                 self.status = 200
+                self.code = 200
                 self.reason = "OK"
                 self.headers = ForgedHeaders()
                 self.url = None
@@ -276,6 +277,9 @@ class HistoricalSnapshotTests(unittest.TestCase):
 
             def geturl(self):
                 return self.url
+
+            def info(self):
+                return self.headers
 
             def close(self) -> None:
                 return None

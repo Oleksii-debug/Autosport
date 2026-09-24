@@ -75,7 +75,7 @@ def historical_match_request_url(
         "pricedOnly": "true" if priced_only else "false",
     }
     return (
-        f"{base_url}/v1/historical/sports/{"table_tennis"}/matches?"
+        f"{base_url}/v1/historical/sports/table_tennis/matches?"
         + urlencode(query_values)
     )
 

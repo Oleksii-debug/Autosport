@@ -275,6 +275,101 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
+    def test_worker_partial_thread_start_failure_cancels_task_before_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        task_ran = threading.Event()
+
+        def task():
+            task_ran.set()
+            return expected
+
+        original_start = threading.Thread.start
+
+        def start_then_fail(thread):
+            original_start(thread)
+            raise OSError("late thread start failure")
+
+        with patch.object(threading.Thread, "start", new=start_then_fail):
+            self.assertTrue(worker.start(task))
+
+        self.assertFalse(task_ran.is_set())
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertFalse(worker.start(task))
+        failed = worker.poll()
+        self.assertIsNotNone(failed)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "OSError: late thread start failure")
+        self.assertFalse(worker.busy)
+
+        self.assertTrue(worker.start(task))
+        completed = self._wait_for_message(worker)
+        self.assertTrue(task_ran.is_set())
+        self.assertIs(completed.result, expected)
+        self.assertIsNone(completed.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_partial_thread_start_baseexception_cleans_up_before_reraise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        task_ran = threading.Event()
+        original_start = threading.Thread.start
+
+        def task():
+            task_ran.set()
+            return expected
+
+        def start_then_interrupt(thread):
+            original_start(thread)
+            raise KeyboardInterrupt("late thread start interrupt")
+
+        with patch.object(threading.Thread, "start", new=start_then_interrupt):
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "late thread start interrupt",
+            ):
+                worker.start(task)
+
+        self.assertFalse(task_ran.is_set())
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
+        self.assertTrue(worker.start(task))
+        completed = self._wait_for_message(worker)
+        self.assertTrue(task_ran.is_set())
+        self.assertIs(completed.result, expected)
+        self.assertIsNone(completed.error)
+
+    def test_worker_start_gate_allocation_failure_is_terminal_and_retryable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+
+        worker = OneShotObservationWorker()
+        with patch(
+            "autosport.live_observation.threading.Event",
+            side_effect=OSError("start gate allocation failed"),
+        ):
+            self.assertTrue(worker.start(lambda: expected))
+
+        self.assertTrue(worker.busy)
+        self.assertIsNone(worker._thread)
+        failed = worker.poll()
+        self.assertIsNotNone(failed)
+        self.assertIsNone(failed.result)
+        self.assertEqual(failed.error, "OSError: start gate allocation failed")
+        self.assertFalse(worker.busy)
+
+        self.assertTrue(worker.start(lambda: expected))
+        completed = self._wait_for_message(worker)
+        self.assertIs(completed.result, expected)
+        self.assertIsNone(completed.error)
+
     def test_worker_converts_exception_to_terminal_error_message(self):
         worker = OneShotObservationWorker()
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("network-test"))))

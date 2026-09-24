@@ -58,26 +58,74 @@ class OneShotObservationWorker:
             if self._busy:
                 return False
             self._busy = True
+
         try:
+            # The observation task mutates durable market/source-health state.
+            # Keep it behind a commit gate until Thread.start() has returned so
+            # a partial OS-thread start followed by an exception cannot run the
+            # task and then let the caller retry the same single-flight request.
+            start_gate = threading.Event()
+            cancelled = threading.Event()
             thread = threading.Thread(
-                target=self._run,
-                args=(task,),
+                target=self._run_when_committed,
+                args=(task, start_gate, cancelled),
                 name="autosport-live-observation",
                 daemon=False,
             )
-            self._thread = thread
-            thread.start()
-        except Exception as exc:
-            # The live-observation caller reserves False for a genuinely busy
-            # worker and schedules terminal polling whenever start() returns True.
-            # Preserve that contract for any ordinary Thread construction/start
-            # failure: publish one terminal error and let poll() restore idle state.
+        except BaseException as exc:
             self._thread = None
-            self._messages.put(
-                ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
-            )
-            return True
+            if isinstance(exc, Exception):
+                self._messages.put(
+                    ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+                )
+                return True
+            with self._lock:
+                self._busy = False
+            raise
+
+        self._thread = thread
+        task_committed = False
+        try:
+            thread.start()
+            task_committed = True
+            start_gate.set()
+        except BaseException as exc:
+            if task_committed:
+                # The task was already authorized. Preserve single-flight ownership
+                # rather than pretending this request never started.
+                start_gate.set()
+                if isinstance(exc, Exception):
+                    return True
+                raise
+
+            cancelled.set()
+            start_gate.set()
+            # Thread.start() is permitted to fail after the OS thread exists.
+            # Wait for that cancelled wrapper to exit before exposing a terminal
+            # start failure; this keeps the resource lifecycle deterministic.
+            if thread.ident is not None:
+                thread.join()
+            self._thread = None
+            if isinstance(exc, Exception):
+                self._messages.put(
+                    ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+                )
+                return True
+            with self._lock:
+                self._busy = False
+            raise
         return True
+
+    def _run_when_committed(
+        self,
+        task: ObservationTask,
+        start_gate: threading.Event,
+        cancelled: threading.Event,
+    ) -> None:
+        start_gate.wait()
+        if cancelled.is_set():
+            return
+        self._run(task)
 
     def _run(self, task: ObservationTask) -> None:
         try:

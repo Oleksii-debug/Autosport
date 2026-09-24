@@ -64,28 +64,24 @@ def _bind_canonical_settlement_engine(method):
     return guarded
 
 
-class _SettlementConsumerEntry:
-    """Data-descriptor seal for one trusted settlement consumer entry."""
-
-    __slots__ = ("_method",)
-
-    def __init__(self, method) -> None:
-        self._method = method
-
-    def __get__(self, instance, owner=None):
-        if instance is None:
-            return self._method
-        return self._method.__get__(instance, owner)
-
-    def __set__(self, _instance, _value) -> None:
-        raise TypeError("canonical settlement consumer entry binding is immutable")
-
-    def __delete__(self, _instance) -> None:
-        raise TypeError("canonical settlement consumer entry binding is immutable")
-
-
 def _seal_settlement_consumer_entry(method):
-    return _SettlementConsumerEntry(method)
+    """Return a state-free descriptor whose dispatch target is closure-owned."""
+
+    class SettlementConsumerEntry:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return method
+            return method.__get__(instance, owner)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    return SettlementConsumerEntry()
 
 
 def _build_settlement_consumer_class_guard(name: str):

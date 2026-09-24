@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
@@ -387,7 +388,7 @@ class PaperRiskPolicyStore:
                 )
             ).encode("utf-8")
             semantic_binding = hashlib.sha256(semantic_material).hexdigest()
-            tx_id = f"paper-risk-policy-{intended}"
+            tx_id = f"paper-risk-policy-{uuid.uuid4().hex}"
 
             try:
                 self._authority.prepare(

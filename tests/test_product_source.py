@@ -444,6 +444,13 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                     "ParlayApiProductSource",
                     AttackerSource,
                 ),
+                patch.object(
+                    product_source_module,
+                    "_required_env",
+                    lambda _name: (_ for _ in ()).throw(
+                        AssertionError("rebound environment resolver must not run")
+                    ),
+                ),
                 patch.dict(
                     "os.environ",
                     {

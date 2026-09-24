@@ -1040,3 +1040,57 @@ def test_positive_continuity_rejects_slot_field_descriptor_rebind_before_provide
 
     assert descriptor_calls == []
     assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    "equality_class_name",
+    ("BookmakerAccountSnapshot", "BookmakerCapabilityProfile"),
+)
+def test_issued_evidence_nested_equality_rebind_cannot_mask_payload_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    equality_class_name: str,
+) -> None:
+    current, _ = acquire_balance(
+        monkeypatch,
+        BetdaqCredentials("alice", "password", "application"),
+        clock=at(0, 1),
+    )
+    if equality_class_name == "BookmakerAccountSnapshot":
+        assert current.snapshot.balance is not None
+        forged_balance = replace(
+            current.snapshot.balance,
+            available_balance=Decimal("999.99"),
+        )
+        object.__setattr__(
+            current,
+            "snapshot",
+            replace(current.snapshot, balance=forged_balance),
+        )
+    else:
+        forged_profile = replace(
+            current.snapshot.profile,
+            source_ref="caller-mutated-after-issuance",
+        )
+        object.__setattr__(current.snapshot, "profile", forged_profile)
+
+    equality_class = getattr(continuity_module, equality_class_name)
+    monkeypatch.setattr(
+        equality_class,
+        "__eq__",
+        lambda _left, _right: True,
+    )
+    store_path = tmp_path / "workspace" / "betdaq-account.json"
+    store = BookmakerAccountReconciliationStore(
+        store_path,
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        BetdaqAccountContinuityError,
+        match="continuity class dispatch changed",
+    ):
+        append_to_reconciliation(store, current)
+
+    assert store.latest_snapshot() is None
+    assert not store_path.exists()

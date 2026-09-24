@@ -865,16 +865,9 @@ def _build_allocation_basis_store_runtime():
 
     json_dumps = json.dumps
     sha256 = hashlib.sha256
-    object_new = object.__new__
-    object_setattr = object.__setattr__
-    path_read_bytes = path_type.read_bytes
-    path_read_bytes_code = getattr(path_read_bytes, "__code__", None)
-
-    class GoalStoreReader:
-        __slots__ = ("path",)
-
-    goal_store_reader_type = GoalStoreReader
+    open_file = open
     sealed_state = weakref.WeakKeyDictionary()
+    sealed_goal_file = weakref.WeakKeyDictionary()
     authority_operations = {
         "read_history": authority_type.read_history,
         "recover": authority_type.recover,
@@ -1114,8 +1107,6 @@ def _build_allocation_basis_store_runtime():
             or getattr(live_parser, "__code__", None) is not goal_parser_code
             or getattr(goal_to_payload, "__code__", None)
             is not goal_to_payload_code
-            or getattr(path_read_bytes, "__code__", None)
-            is not path_read_bytes_code
         ):
             raise error_type(
                 "current EconomicGoal parser authority changed"
@@ -1148,18 +1139,22 @@ def _build_allocation_basis_store_runtime():
         require_state(self)
         require_goal_parser_authority()
         try:
-            frozen_workspace, _path, _authority, _root = sealed_state[self]
-            goal_path = frozen_workspace / goal_store_file_name
-            goal_store = object_new(goal_store_reader_type)
-            object_setattr(goal_store, "path", goal_path)
-            goal = goal_store_load(goal_store)
+            _frozen_workspace, _path, _authority, _root = sealed_state[self]
+            goal_path_text = sealed_goal_file[self]
+            with open_file(goal_path_text, "rb") as handle:
+                durable_bytes = handle.read()
+            if type(durable_bytes) is not bytes:
+                raise error_type(
+                    "current EconomicGoal durable read is not exact bytes"
+                )
+            goal_text = durable_bytes.decode("utf-8", errors="strict")
+            goal = goal_parser(goal_text)
             require_goal_parser_authority()
             if type(goal) is not goal_contract_type:
                 raise error_type(
                     "current EconomicGoal value must have exact canonical type"
                 )
             payload = goal_to_payload(goal)
-            durable_bytes = path_read_bytes(goal_path)
             expected_bytes = (
                 json_dumps(
                     payload,
@@ -1298,6 +1293,11 @@ def _build_allocation_basis_store_runtime():
         )
         workspace_path.mkdir(parents=True, exist_ok=True)
         state_path = workspace_path / file_name
+        goal_path_text = str(workspace_path / goal_store_file_name)
+        if not goal_path_text or "\x00" in goal_path_text:
+            raise error_type(
+                "canonical EconomicGoal path is invalid"
+            )
         authority = authority_type(
             workspace=workspace_path,
             domain=authority_domain,
@@ -1319,6 +1319,7 @@ def _build_allocation_basis_store_runtime():
             authority,
             authority_root,
         )
+        sealed_goal_file[self] = goal_path_text
         sealed_binding[self] = (
             binding,
             binding.workspace,

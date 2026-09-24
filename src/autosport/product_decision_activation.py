@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+import weakref
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -937,7 +938,7 @@ class ProductDecisionActivationBinding:
 class ProductDecisionActivationStore:
     """Creation-only supported-START binding; it grants no execution authority."""
 
-    __slots__ = ("workspace", "path", "_authority")
+    __slots__ = ("workspace", "path", "_authority", "__weakref__")
     FILE_NAME: Final = "product_decision_activation.json"
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1425,6 +1426,11 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
 
     canonical_authority_root = _product_activation_authority_root
     canonical_authority_root_code = getattr(canonical_authority_root, "__code__", None)
+    canonical_init = store_class.__dict__.get("__init__")
+    canonical_init_code = getattr(canonical_init, "__code__", None)
+    constructor_authorities: weakref.WeakKeyDictionary[
+        ProductDecisionActivationStore, MonotonicWorkspaceAuthority
+    ] = weakref.WeakKeyDictionary()
 
     canonical_derive = store_class.__dict__.get("_derive")
     canonical_derive_code = getattr(canonical_derive, "__code__", None)
@@ -1446,6 +1452,8 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
 
     if (
         canonical_authority_root_code is None
+        or canonical_init is None
+        or canonical_init_code is None
         or canonical_derive is None
         or canonical_derive_code is None
         or canonical_load_local is None
@@ -1505,10 +1513,15 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             workspace = store.workspace
             path = store.path
             authority = store._authority
-        except AttributeError as exc:
+            constructor_authority = constructor_authorities.get(store)
+        except (AttributeError, TypeError) as exc:
             raise ProductDecisionActivationError(
                 "product decision activation store construction state changed"
             ) from exc
+        if constructor_authority is None or authority is not constructor_authority:
+            raise ProductDecisionActivationError(
+                "product decision activation constructor authority identity changed"
+            )
 
         try:
             expected_root = canonical_authority_root()
@@ -1833,6 +1846,21 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
             recover_authority_canonically(self)
             return load_local_canonically(self)
 
+    def init(
+        self: ProductDecisionActivationStore,
+        workspace: str | Path,
+    ) -> None:
+        """Construct one store and bind its exact nested authority in closure state."""
+
+        live_init = canonical_init
+        if getattr(live_init, "__code__", None) is not canonical_init_code:
+            raise ProductDecisionActivationError(
+                "canonical product decision activation constructor authority changed"
+            )
+        canonical_init(self, workspace)
+        constructor_authorities[self] = self._authority
+
+    setattr(store_class, "__init__", init)
     setattr(store_class, "initialize_owner", initialize_owner)
     setattr(store_class, "verify", verify)
     setattr(store_class, "load", load)

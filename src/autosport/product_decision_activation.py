@@ -1476,6 +1476,74 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         canonical_observed_state, "__code__", None
     )
 
+    # The exact store methods above still resolve this defining module at call time.
+    # Snapshot first-order product bindings so a caller cannot keep _derive's code
+    # object unchanged while replacing one of its authority-bearing helpers.
+    # Exclude only globals with dedicated, more specific trust checks and the one-shot
+    # seal symbol deleted after composition.
+    canonical_product_module_globals = getattr(
+        canonical_derive,
+        "__globals__",
+        None,
+    )
+    product_global_exclusions = frozenset(
+        {
+            "_seal_product_decision_activation_derive_dispatch",
+            "_product_machine_state_base",
+            "_PRODUCT_AUTHORITY_ROOT_NAME",
+            "_product_activation_authority_root",
+            "EconomicGoalStore",
+            "PaperRiskPolicy",
+            "PaperExecutionModelConfig",
+            "BuiltInIntentProducer",
+        }
+    )
+    canonical_product_module_bindings = (
+        tuple(
+            (
+                name,
+                value,
+                getattr(value, "__code__", None),
+            )
+            for name, value in sorted(canonical_product_module_globals.items())
+            if not name.startswith("__") and name not in product_global_exclusions
+        )
+        if isinstance(canonical_product_module_globals, dict)
+        else ()
+    )
+
+    # pathlib.Path is a mutable Python class. Freezing only the Path class object
+    # does not freeze inherited member dispatch such as read_bytes/exists/resolve.
+    # These members are reached by the product, nested MWA and workspace-binding
+    # trust graph before positive START can be returned.
+    canonical_path_member_names = (
+        "__truediv__",
+        "absolute",
+        "resolve",
+        "is_absolute",
+        "is_symlink",
+        "is_file",
+        "exists",
+        "read_bytes",
+        "read_text",
+        "lstat",
+        "iterdir",
+        "is_dir",
+        "is_relative_to",
+        "mkdir",
+        "unlink",
+        "parent",
+        "name",
+    )
+    canonical_path_members = {
+        name: getattr(path_type, name, None)
+        for name in canonical_path_member_names
+    }
+    canonical_path_member_codes = {
+        name: getattr(member, "__code__", None)
+        for name, member in canonical_path_members.items()
+    }
+
     canonical_authority_methods = {
         name: authority_type.__dict__.get(name)
         for name in ("read_history", "recover", "prepare", "commit")
@@ -1662,6 +1730,9 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         or canonical_load_local_code is None
         or canonical_observed_state is None
         or canonical_observed_state_code is None
+        or not isinstance(canonical_product_module_globals, dict)
+        or not canonical_product_module_bindings
+        or any(member is None for member in canonical_path_members.values())
         or any(method is None for method in canonical_authority_methods.values())
         or any(code is None for code in canonical_authority_codes.values())
         or any(method is None for method in canonical_authority_helpers.values())
@@ -1692,6 +1763,39 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         raise RuntimeError(
             "canonical product decision activation authority composition is unavailable"
         )
+
+    def require_product_module_globals() -> None:
+        if not isinstance(canonical_product_module_globals, dict):
+            raise ProductDecisionActivationError(
+                "product decision activation defining globals unavailable"
+            )
+        for name, canonical, canonical_code in canonical_product_module_bindings:
+            live = canonical_product_module_globals.get(name)
+            if (
+                live is not canonical
+                or (
+                    canonical_code is not None
+                    and getattr(live, "__code__", None) is not canonical_code
+                )
+            ):
+                raise ProductDecisionActivationError(
+                    "product decision activation defining globals changed"
+                )
+
+    def require_path_dispatch() -> None:
+        for name, canonical in canonical_path_members.items():
+            live = getattr(path_type, name, None)
+            canonical_code = canonical_path_member_codes[name]
+            if (
+                live is not canonical
+                or (
+                    canonical_code is not None
+                    and getattr(live, "__code__", None) is not canonical_code
+                )
+            ):
+                raise ProductDecisionActivationError(
+                    "product decision activation path dispatch changed"
+                )
 
     def require_authority_root_composition() -> None:
         if (
@@ -1829,6 +1933,8 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 "product decision activation store must be the exact canonical class"
             )
         require_authority_root_composition()
+        require_product_module_globals()
+        require_path_dispatch()
         try:
             workspace = store.workspace
             path = store.path
@@ -2215,6 +2321,8 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
                 "canonical product decision activation constructor authority changed"
             )
         require_authority_root_composition()
+        require_product_module_globals()
+        require_path_dispatch()
         if type(self) is not store_class:
             raise ProductDecisionActivationError(
                 "product decision activation store must be the exact canonical class"

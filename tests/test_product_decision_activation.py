@@ -183,6 +183,42 @@ class ProductDecisionActivationTests(unittest.TestCase):
             pretty=pretty,
         )
 
+    def _stage_activation_prepare(self, *, publish: bool):
+        expected = self.store._derive(
+            scientific_registry=self.registry,
+            strategy_version_id=self.STRATEGY_ID,
+            economic_goal=self.goal,
+            risk_policy=self.risk,
+            execution_config=self.execution,
+            intent_producer=BuiltInIntentProducer.REGISTERED_STRATEGY,
+        )
+        root = self.store._root(expected)
+        intended = hashlib.sha256(
+            activation_module._durable_json_bytes(root)
+        ).hexdigest()
+        semantic_binding = activation_module._digest(
+            {
+                "kind": "PRODUCT_DECISION_ACTIVATION_CREATE",
+                "activation_filename": "product_decision_activation.json",
+                "binding_sha256": expected.binding_sha256,
+                "intended_state_sha256": intended,
+            }
+        )
+        tx_id = "activation-test-crash-prefix"
+        self.store._authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=intended,
+            semantic_binding_sha256=semantic_binding,
+        )
+        if publish:
+            activation_module.atomic_write_json(self.store.path, root)
+            self.assertEqual(
+                hashlib.sha256(self.store.path.read_bytes()).hexdigest(),
+                intended,
+            )
+        return expected
+
     def _initialize(self):
         return self.store.initialize_owner(
             scientific_registry=self.registry,
@@ -763,7 +799,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(
                 ProductDecisionActivationError,
-                "construction state changed",
+                "constructor authority identity changed",
             ):
                 self._initialize()
             self.assertFalse(self.store.path.exists())
@@ -783,7 +819,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(
                 ProductDecisionActivationError,
-                "nested anti-rollback authority construction state changed",
+                "nested workspace identity binding construction state changed",
             ):
                 self._initialize()
             self.assertFalse(self.store.path.exists())
@@ -1050,7 +1086,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertEqual(forged_calls, [])
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
-            "no longer matches durable authority",
+            "no longer matches exact durable authority owner bytes",
         ):
             self._verify()
 
@@ -1235,28 +1271,30 @@ class ProductDecisionActivationTests(unittest.TestCase):
             self.store.load()
 
     def test_prepare_without_publish_recovers_then_creates_once(self) -> None:
-        with mock.patch(
-            "autosport.product_decision_activation.atomic_write_json",
-            side_effect=RuntimeError("synthetic pre-publish crash"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "pre-publish"):
-                self._initialize()
+        expected = self._stage_activation_prepare(publish=False)
 
         self.assertFalse(self.store.path.exists())
+        self.assertEqual(
+            self.store._authority.read_history()[-1].phase.value,
+            "PREPARE",
+        )
         recovered = self._initialize()
+        self.assertEqual(recovered, expected)
         self.assertEqual(recovered.strategy_version_id, self.STRATEGY_ID)
         self.assertEqual(self.store.load(), recovered)
+        self.assertEqual(
+            self.store._authority.read_history()[-1].phase.value,
+            "COMMIT",
+        )
 
     def test_publish_without_commit_recovers_exact_prepared_activation(self) -> None:
-        with mock.patch.object(
-            self.store._authority,
-            "commit",
-            side_effect=RuntimeError("synthetic post-publish crash"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "post-publish"):
-                self._initialize()
+        expected = self._stage_activation_prepare(publish=True)
 
         self.assertTrue(self.store.path.exists())
+        self.assertEqual(
+            self.store._authority.read_history()[-1].phase.value,
+            "PREPARE",
+        )
         reopened = ProductDecisionActivationStore(self.workspace)
         recovered = reopened.initialize_owner(
             scientific_registry=self.registry,
@@ -1265,7 +1303,12 @@ class ProductDecisionActivationTests(unittest.TestCase):
             risk_policy=self.risk,
             execution_config=self.execution,
         )
+        self.assertEqual(recovered, expected)
         self.assertEqual(reopened.load(), recovered)
+        self.assertEqual(
+            reopened._authority.read_history()[-1].phase.value,
+            "COMMIT",
+        )
 
     def test_registry_append_after_strategy_keeps_frozen_prefix_valid(self) -> None:
         frozen = self._initialize()
@@ -1418,7 +1461,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
-            "durable authority owner EconomicGoalContract",
+            "exact durable authority owner bytes",
         ):
             self.store.initialize_owner(
                 scientific_registry=self.registry,

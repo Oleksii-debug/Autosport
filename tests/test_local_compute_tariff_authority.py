@@ -87,11 +87,8 @@ def _resolve_current(
 
 def test_owner_tariff_resolves_current_exact_amount_and_identity(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
 
     record = _publish(store)
     resolved = _resolve_current(store)
@@ -124,11 +121,8 @@ def test_owner_tariff_resolves_current_exact_amount_and_identity(tmp_path):
 
 def test_timestamp_only_historical_resolution_fails_closed(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     _publish(store)
 
     with pytest.raises(
@@ -147,11 +141,8 @@ def test_timestamp_only_historical_resolution_fails_closed(tmp_path):
 
 def test_opaque_hash_and_invented_historical_time_cannot_mint_tariff(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
 
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         store.publish_owner_tariff(
@@ -185,11 +176,8 @@ def test_opaque_hash_and_invented_historical_time_cannot_mint_tariff(tmp_path):
 
 def test_substituted_basis_authority_cannot_mint_tariff(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
 
     class ForgedBasisAuthority:
         resolve_called = False
@@ -217,11 +205,8 @@ def test_substituted_basis_authority_cannot_mint_tariff(tmp_path):
 
 def test_same_tariff_id_is_idempotent_but_conflict_rejects(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     first = _publish(store)
     assert _publish(store) == first
 
@@ -235,11 +220,8 @@ def test_same_tariff_id_is_idempotent_but_conflict_rejects(tmp_path):
 
 def test_overlapping_same_compute_tariffs_reject(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     _publish(store)
 
     with pytest.raises(subject.LocalComputeTariffError, match="overlapping"):
@@ -253,11 +235,8 @@ def test_overlapping_same_compute_tariffs_reject(tmp_path):
 
 def test_exact_compute_identity_and_owner_currency_are_required(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     _publish(store)
 
     assert _resolve_current(store, backend_id="other-backend") is None
@@ -267,11 +246,8 @@ def test_exact_compute_identity_and_owner_currency_are_required(tmp_path):
 
 def test_owner_goal_revision_change_invalidates_old_tariff(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     goal_store = _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     _publish(store)
     assert _resolve_current(store) is not None
 
@@ -285,11 +261,8 @@ def test_owner_goal_revision_change_invalidates_old_tariff(tmp_path):
 
 def test_current_resolution_honors_effective_window(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
 
     _publish(
         store,
@@ -309,11 +282,8 @@ def test_current_resolution_honors_effective_window(tmp_path):
 
 def test_workspace_state_rollback_is_detected_by_independent_authority(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     _publish(store)
     old_bytes = store.path.read_bytes()
     _publish(
@@ -325,18 +295,13 @@ def test_workspace_state_rollback_is_detected_by_independent_authority(tmp_path)
 
     store.path.write_bytes(old_bytes)
     with pytest.raises(MonotonicWorkspaceAuthorityError):
-        subject.LocalComputeTariffAuthorityStore(
-            workspace, authority_root=authority
-        )
+        subject.LocalComputeTariffAuthorityStore(workspace)
 
 
 def test_duplicate_json_keys_fail_closed_on_restart(tmp_path):
     workspace = tmp_path / "workspace"
-    authority = tmp_path / "authority"
     _owner_goal(workspace)
-    store = subject.LocalComputeTariffAuthorityStore(
-        workspace, authority_root=authority
-    )
+    store = subject.LocalComputeTariffAuthorityStore(workspace)
     _publish(store)
 
     raw = store.path.read_text(encoding="utf-8")
@@ -345,6 +310,4 @@ def test_duplicate_json_keys_fail_closed_on_restart(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(MonotonicWorkspaceAuthorityError):
-        subject.LocalComputeTariffAuthorityStore(
-            workspace, authority_root=authority
-        )
+        subject.LocalComputeTariffAuthorityStore(workspace)

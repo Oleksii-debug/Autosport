@@ -411,6 +411,77 @@ def _build_historical_snapshot_provider_origin_authority():
     ssl_context_type = ssl.SSLContext
     ssl_cert_required = ssl.CERT_REQUIRED
     ssl_error_type = ssl.SSLError
+
+    # Freeze the private network dispatch before any product-owned capture can be
+    # called. Capturing these descriptors inside build_product_owned_transport()
+    # would let a caller install a replacement first and have that replacement
+    # promoted to positive provider-origin authority for the current acquisition.
+    canonical_build_opener_code = getattr(build_opener_fn, "__code__", None)
+    canonical_opener_open = opener_type.open
+    canonical_opener_open_code = getattr(canonical_opener_open, "__code__", None)
+    canonical_opener_internal_open = opener_type._open
+    canonical_opener_internal_open_code = getattr(
+        canonical_opener_internal_open, "__code__", None
+    )
+    canonical_opener_call_chain = opener_type._call_chain
+    canonical_opener_call_chain_code = getattr(
+        canonical_opener_call_chain, "__code__", None
+    )
+    canonical_opener_error = opener_type.error
+    canonical_opener_error_code = getattr(canonical_opener_error, "__code__", None)
+    canonical_https_open = https_handler_type.https_open
+    canonical_https_open_code = getattr(canonical_https_open, "__code__", None)
+    canonical_https_request = https_handler_type.https_request
+    canonical_https_request_code = getattr(canonical_https_request, "__code__", None)
+    canonical_do_open = abstract_http_handler_type.do_open
+    canonical_do_open_code = getattr(canonical_do_open, "__code__", None)
+    canonical_https_response = http_error_processor_type.https_response
+    canonical_https_response_code = getattr(
+        canonical_https_response, "__code__", None
+    )
+    if (
+        canonical_build_opener_code is None
+        or canonical_opener_open_code is None
+        or canonical_opener_internal_open_code is None
+        or canonical_opener_call_chain_code is None
+        or canonical_opener_error_code is None
+        or canonical_https_open_code is None
+        or canonical_https_request_code is None
+        or canonical_do_open_code is None
+        or canonical_https_response_code is None
+    ):
+        raise RuntimeError("canonical Parlay historical network dispatch is unavailable")
+
+    def stdlib_dispatch_is_canonical() -> bool:
+        return (
+            getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
+            and opener_type.open is canonical_opener_open
+            and getattr(canonical_opener_open, "__code__", None)
+            is canonical_opener_open_code
+            and opener_type._open is canonical_opener_internal_open
+            and getattr(canonical_opener_internal_open, "__code__", None)
+            is canonical_opener_internal_open_code
+            and opener_type._call_chain is canonical_opener_call_chain
+            and getattr(canonical_opener_call_chain, "__code__", None)
+            is canonical_opener_call_chain_code
+            and opener_type.error is canonical_opener_error
+            and getattr(canonical_opener_error, "__code__", None)
+            is canonical_opener_error_code
+            and https_handler_type.https_open is canonical_https_open
+            and getattr(canonical_https_open, "__code__", None)
+            is canonical_https_open_code
+            and https_handler_type.https_request is canonical_https_request
+            and getattr(canonical_https_request, "__code__", None)
+            is canonical_https_request_code
+            and abstract_http_handler_type.do_open is canonical_do_open
+            and getattr(canonical_do_open, "__code__", None)
+            is canonical_do_open_code
+            and http_error_processor_type.https_response
+            is canonical_https_response
+            and getattr(canonical_https_response, "__code__", None)
+            is canonical_https_response_code
+        )
+
     if not callable(decode_provider_json) or not callable(parse_retry_after):
         raise RuntimeError("canonical Parlay provider transport parser is unavailable")
 
@@ -505,6 +576,11 @@ def _build_historical_snapshot_provider_origin_authority():
         return True
 
     def build_product_owned_transport():
+        if not stdlib_dispatch_is_canonical():
+            raise ProviderPayloadError(
+                "canonical Parlay historical network dispatch changed before construction"
+            )
+
         class RejectRedirectHandler(http_redirect_handler_type):
             def redirect_request(
                 self,
@@ -530,15 +606,7 @@ def _build_historical_snapshot_provider_origin_authority():
             )
 
         open_response = opener.open
-        canonical_opener_open = opener_type.open
-        canonical_opener_internal_open = opener_type._open
-        canonical_opener_call_chain = opener_type._call_chain
-        canonical_opener_error = opener_type.error
         canonical_redirect_request = RejectRedirectHandler.redirect_request
-        canonical_https_open = https_handler_type.https_open
-        canonical_https_request = https_handler_type.https_request
-        canonical_do_open = abstract_http_handler_type.do_open
-        canonical_https_response = http_error_processor_type.https_response
 
         expected_handlers_raw = getattr(opener, "handlers", None)
         expected_dispatch = dispatch_snapshot(opener)
@@ -602,18 +670,10 @@ def _build_historical_snapshot_provider_origin_authority():
 
         def authority_is_current() -> bool:
             if (
-                type(opener) is not opener_type
-                or opener_type.open is not canonical_opener_open
-                or opener_type._open is not canonical_opener_internal_open
-                or opener_type._call_chain is not canonical_opener_call_chain
-                or opener_type.error is not canonical_opener_error
+                not stdlib_dispatch_is_canonical()
+                or type(opener) is not opener_type
                 or RejectRedirectHandler.redirect_request
                 is not canonical_redirect_request
-                or https_handler_type.https_open is not canonical_https_open
-                or https_handler_type.https_request is not canonical_https_request
-                or abstract_http_handler_type.do_open is not canonical_do_open
-                or http_error_processor_type.https_response
-                is not canonical_https_response
             ):
                 return False
 
@@ -723,7 +783,9 @@ def _build_historical_snapshot_provider_origin_authority():
             require_authority()
             request = request_type(url, headers=dict(headers), method="GET")
             try:
-                with open_response(request, timeout=timeout) as response:
+                with canonical_opener_open(
+                    opener, request, timeout=timeout
+                ) as response:
                     final_url = str(response.geturl())
                     if final_url != url:
                         raise transport_error_type(

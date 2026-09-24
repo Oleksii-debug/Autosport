@@ -112,6 +112,16 @@ _KEY_ESCAPE_RE = re.compile(
     r"\\(?:(?P<u16>u[0-9A-Fa-f]{4})|"
     r"(?P<u32>U[0-9A-Fa-f]{8})|(?P<x8>x[0-9A-Fa-f]{2}))"
 )
+_KEY_SIMPLE_ESCAPE_RE = re.compile(r"\\(?P<simple>[abfnrtv])")
+_KEY_SIMPLE_ESCAPES = {
+    "a": "\\a",
+    "b": "\\b",
+    "f": "\\f",
+    "n": "\\n",
+    "r": "\\r",
+    "t": "\\t",
+    "v": "\\v",
+}
 
 
 def _decode_escaped_key_for_classification(value: str) -> str:
@@ -128,7 +138,11 @@ def _decode_escaped_key_for_classification(value: str) -> str:
         except ValueError:
             return match.group(0)
 
-    return _KEY_ESCAPE_RE.sub(replace, value)
+    decoded = _KEY_ESCAPE_RE.sub(replace, value)
+    return _KEY_SIMPLE_ESCAPE_RE.sub(
+        lambda match: _KEY_SIMPLE_ESCAPES[match.group("simple")],
+        decoded,
+    )
 
 
 def _normalized_key(value: str) -> str:

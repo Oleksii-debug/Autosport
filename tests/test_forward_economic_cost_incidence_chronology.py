@@ -22,6 +22,7 @@ UTC = timezone.utc
 T0 = datetime(2026, 9, 23, 0, 0, tzinfo=UTC)
 UNIVERSE_SHA = "e" * 64
 AUTHORITY_SHA = "f" * 64
+ALLOCATION_SHA = "a" * 64
 
 
 def _sha(n: int) -> str:
@@ -170,7 +171,7 @@ def test_predecision_incurred_cost_can_be_proven_later_without_retimestamping() 
         cost_available_at=available_at,
         cost_causality=EconomicCostCausality.PREEXISTING_SHARED,
         cost_class_id="campaign-shared-cost",
-        cost_allocation_authority_sha256=_sha(30),
+        cost_allocation_authority_sha256=ALLOCATION_SHA,
     )
 
     # The economic debit belongs to the frozen campaign/member at its canonical
@@ -179,6 +180,7 @@ def test_predecision_incurred_cost_can_be_proven_later_without_retimestamping() 
     assert outcome.economic_cost_incurred_at == incurred_at
     assert outcome.economic_cost_available_at == available_at
     assert outcome.economic_cost_incurred_at < outcome.decision_committed_at
+    assert outcome.economic_cost_causality is EconomicCostCausality.PREEXISTING_SHARED
 
 
 
@@ -220,9 +222,6 @@ def test_realized_drawdown_uses_cost_incidence_not_late_evidence_availability() 
         cost="60",
         cost_incurred_at=T0 + timedelta(hours=2),
         cost_available_at=T0 + timedelta(hours=5),
-        cost_causality=EconomicCostCausality.PREEXISTING_SHARED,
-        cost_class_id="campaign-shared-cost",
-        cost_allocation_authority_sha256=_sha(30),
     )
     mapping[(2, "challenger")] = _executed(
         "challenger",

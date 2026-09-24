@@ -472,8 +472,9 @@ def assess_campaign_qualification(
             if item.execution_disposition not in {
                 ExecutionDisposition.ACCEPTED,
                 ExecutionDisposition.PARTIAL,
+                ExecutionDisposition.REJECTED,
             }:
-                blockers.append(prefix + "BET execution is not accepted/partial")
+                blockers.append(prefix + "BET execution is not accepted/partial/rejected")
             if item.terminal_resolution is None:
                 blockers.append(prefix + "BET requires authoritative settlement evidence")
             if item.paper_action is not None:

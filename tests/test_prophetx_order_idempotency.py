@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import autosport.prophetx_order_idempotency as prophetx_module
 from autosport.prophetx_order_idempotency import (
     FIX_ORDER_ENTRY_CAPABILITIES,
     PROPHETX_PRODUCTION_REST_PROFILE,
@@ -252,6 +254,88 @@ class ProphetXOrderIdempotencyTests(unittest.TestCase):
                     attempt_id="try-1",
                     provider_id="prophetx",
                 )
+            )
+
+    def test_provider_order_correlation_ignores_rebound_identity_resolver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            genuine = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            forged = type(genuine)(
+                attempt_id=genuine.attempt_id,
+                environment=genuine.environment,
+                transport=genuine.transport,
+                client_order_id="forged-client-order",
+                effect_fingerprint="f" * 64,
+                production_write_qualified=genuine.production_write_qualified,
+            )
+            matched = _evidence(
+                forged,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id="provider-order-forged",
+                effect_fingerprint=forged.effect_fingerprint,
+            )
+            attacker_calls = []
+
+            def forged_identity_resolver(*_args, **_kwargs):
+                attacker_calls.append("load_identity")
+                return forged
+
+            with patch.object(
+                prophetx_module,
+                "load_identity",
+                forged_identity_resolver,
+            ):
+                self.assertEqual(
+                    reconciliation_disposition(forged, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.CONFLICT,
+                )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertIsNone(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                )
+            )
+
+    def test_positive_provider_order_consumer_ignores_reexposed_binder_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "execution.jsonl"
+            ledger = _ledger(path)
+            identity = bind_before_effect(ledger, attempt_id="try-1")
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+            matched = _evidence(
+                identity,
+                ProphetXEvidenceKind.ORDER_STATE,
+                provider_order_id="provider-order-captured",
+                effect_fingerprint=identity.effect_fingerprint,
+            )
+            attacker_calls = []
+
+            def forged_binder(*_args, **_kwargs):
+                attacker_calls.append("binder")
+                return True
+
+            with patch.object(
+                prophetx_module,
+                "_bind_provider_assigned_order_id",
+                forged_binder,
+                create=True,
+            ):
+                self.assertEqual(
+                    reconciliation_disposition(identity, matched, ledger=ledger),
+                    ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE,
+                )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertEqual(
+                RealExecutionLedger(path).provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                ),
+                "provider-order-captured",
             )
 
     def test_economic_or_transport_conflict_fails_closed(self):

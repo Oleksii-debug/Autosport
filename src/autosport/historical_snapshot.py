@@ -7,6 +7,7 @@ import http.client as http_client
 import json
 import os
 import ssl
+import socket
 import tempfile
 import weakref
 from dataclasses import dataclass, replace
@@ -410,8 +411,68 @@ def _build_historical_snapshot_provider_origin_authority():
     urlsplit_fn = urlsplit
     sha256_fn = hashlib.sha256
     ssl_context_type = ssl.SSLContext
+    ssl_socket_type = ssl.SSLSocket
     ssl_cert_required = ssl.CERT_REQUIRED
     ssl_error_type = ssl.SSLError
+    socket_module = socket
+    socket_type = socket_module.socket
+    canonical_socket_create_connection = socket_module.create_connection
+    canonical_socket_create_connection_code = getattr(
+        canonical_socket_create_connection,
+        "__code__",
+        None,
+    )
+    canonical_socket_getaddrinfo = socket_module.getaddrinfo
+    socket_dispatch_names = (
+        "__init__",
+        "settimeout",
+        "bind",
+        "connect",
+        "setsockopt",
+        "close",
+    )
+    canonical_socket_dispatch = {
+        name: getattr(socket_type, name)
+        for name in socket_dispatch_names
+    }
+    canonical_socket_dispatch_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_socket_dispatch.items()
+    }
+    canonical_ssl_context_wrap_socket = ssl_context_type.wrap_socket
+    canonical_ssl_context_wrap_socket_code = getattr(
+        canonical_ssl_context_wrap_socket,
+        "__code__",
+        None,
+    )
+    canonical_ssl_context_raw_wrap_socket = ssl_context_type._wrap_socket
+    canonical_ssl_context_sslsocket_class = ssl_context_type.sslsocket_class
+    canonical_ssl_socket_create_descriptor = ssl_socket_type.__dict__.get("_create")
+    canonical_ssl_socket_create = getattr(
+        canonical_ssl_socket_create_descriptor,
+        "__func__",
+        None,
+    )
+    canonical_ssl_socket_create_code = getattr(
+        canonical_ssl_socket_create,
+        "__code__",
+        None,
+    )
+    tls_socket_dispatch_names = (
+        "sendall",
+        "makefile",
+        "recv",
+        "recv_into",
+        "close",
+    )
+    canonical_tls_socket_dispatch = {
+        name: getattr(ssl_socket_type, name)
+        for name in tls_socket_dispatch_names
+    }
+    canonical_tls_socket_dispatch_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_tls_socket_dispatch.items()
+    }
     http_client_module = http_client
     http_connection_type = http_client_module.HTTPConnection
     https_connection_type = http_client_module.HTTPSConnection
@@ -481,6 +542,9 @@ def _build_historical_snapshot_provider_origin_authority():
         name: getattr(method, "__code__", None)
         for name, method in canonical_http_connection_dispatch.items()
     }
+    canonical_http_socket_module = canonical_http_connection_dispatch[
+        "__init__"
+    ].__globals__.get("socket")
     canonical_https_connection_dispatch = {
         name: getattr(https_connection_type, name)
         for name in connection_dispatch_names
@@ -531,6 +595,13 @@ def _build_historical_snapshot_provider_origin_authority():
         or canonical_urllib_http_package is None
         or getattr(canonical_urllib_http_package, "client", None)
         is not http_client_module
+        or canonical_http_socket_module is not socket_module
+        or canonical_socket_create_connection_code is None
+        or canonical_ssl_context_wrap_socket_code is None
+        or canonical_ssl_context_sslsocket_class is not ssl_socket_type
+        or canonical_ssl_socket_create_descriptor is None
+        or canonical_ssl_socket_create is None
+        or canonical_ssl_socket_create_code is None
         or any(
             code is None
             for code in canonical_request_dispatch_codes.values()
@@ -582,6 +653,63 @@ def _build_historical_snapshot_provider_origin_authority():
                     return False
         return True
 
+    def socket_tls_dispatch_is_canonical() -> bool:
+        if (
+            canonical_http_connection_dispatch["__init__"].__globals__.get("socket")
+            is not socket_module
+            or getattr(socket_module, "socket", None) is not socket_type
+            or getattr(socket_module, "create_connection", None)
+            is not canonical_socket_create_connection
+            or getattr(canonical_socket_create_connection, "__code__", None)
+            is not canonical_socket_create_connection_code
+            or canonical_socket_create_connection.__globals__.get("socket")
+            is not socket_type
+            or canonical_socket_create_connection.__globals__.get("getaddrinfo")
+            is not canonical_socket_getaddrinfo
+            or getattr(socket_module, "getaddrinfo", None)
+            is not canonical_socket_getaddrinfo
+            or ssl_context_type.wrap_socket is not canonical_ssl_context_wrap_socket
+            or getattr(canonical_ssl_context_wrap_socket, "__code__", None)
+            is not canonical_ssl_context_wrap_socket_code
+            or ssl_context_type._wrap_socket
+            is not canonical_ssl_context_raw_wrap_socket
+            or ssl_context_type.sslsocket_class is not ssl_socket_type
+            or ssl_socket_type.__dict__.get("_create")
+            is not canonical_ssl_socket_create_descriptor
+            or getattr(
+                ssl_socket_type.__dict__.get("_create"),
+                "__func__",
+                None,
+            )
+            is not canonical_ssl_socket_create
+            or getattr(canonical_ssl_socket_create, "__code__", None)
+            is not canonical_ssl_socket_create_code
+        ):
+            return False
+        for name in socket_dispatch_names:
+            current = getattr(socket_type, name, None)
+            expected = canonical_socket_dispatch[name]
+            if current is not expected:
+                return False
+            expected_code = canonical_socket_dispatch_codes[name]
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                return False
+        for name in tls_socket_dispatch_names:
+            current = getattr(ssl_socket_type, name, None)
+            expected = canonical_tls_socket_dispatch[name]
+            if current is not expected:
+                return False
+            expected_code = canonical_tls_socket_dispatch_codes[name]
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                return False
+        return True
+
     def connection_dispatch_is_canonical() -> bool:
         if (
             canonical_https_open.__globals__.get("http")
@@ -622,6 +750,7 @@ def _build_historical_snapshot_provider_origin_authority():
     def stdlib_dispatch_is_canonical() -> bool:
         return (
             request_dispatch_is_canonical()
+            and socket_tls_dispatch_is_canonical()
             and connection_dispatch_is_canonical()
             and getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
             and opener_type.open is canonical_opener_open
@@ -850,6 +979,7 @@ def _build_historical_snapshot_provider_origin_authority():
             current_tls_context = getattr(expected_https_handler, "_context", None)
             if (
                 current_tls_context is not expected_tls_context
+                or current_tls_context.sslsocket_class is not ssl_socket_type
                 or tls_context_snapshot(current_tls_context) != expected_tls_state
             ):
                 return False

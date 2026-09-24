@@ -566,11 +566,16 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
         raise ValueError(
             "research candidate event_id, market_id, and selection_id must be provided together"
         )
+    sport = _canonical_identity_field(raw, "sport") if "sport" in raw else None
+    if sport is not None and not all(present):
+        raise ValueError(
+            "research candidate sport-qualified identity requires structured event_id, market_id, and selection_id"
+        )
     if all(present):
         event_id = _canonical_identity_field(raw, "event_id")
         market_id = _canonical_identity_field(raw, "market_id")
         selection_id = _canonical_identity_field(raw, "selection_id")
-        if quote_key != f"{event_id}|{market_id}|{selection_id}":
+        if sport is None and quote_key != f"{event_id}|{market_id}|{selection_id}":
             raise ValueError(
                 "research candidate structured event/market/selection identity does not match quote_key"
             )
@@ -584,14 +589,18 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
 
     odds = Decimal(str(raw["decimal_odds"]))
     probability = Decimal(str(raw["probability"]))
-    return CandidateLeg(
+    leg = CandidateLeg(
         quote_key,
         event_id,
         odds,
         probability,
         market_id,
         selection_id,
+        sport=sport,
     )
+    if sport is not None:
+        leg.ticket_identity()
+    return leg
 
 
 def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:

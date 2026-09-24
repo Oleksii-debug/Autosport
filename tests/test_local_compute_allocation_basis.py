@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.economic_goal_store as economic_goal_store_module
 import autosport.local_compute_allocation_basis as subject
 from autosport.economic_goal_store import EconomicGoalStore, economic_goal_to_payload
 from autosport.monotonic_workspace_authority import (
@@ -226,6 +227,43 @@ def test_goal_store_construction_cannot_retarget_current_goal_authority(
     assert forged_init_calls == []
     assert record.owner_goal_revision == durable_goal.revision
     assert record.owner_goal_sha256 == expected_goal_sha256
+    assert _resolve(store) == record
+
+
+def test_dependency_goal_parser_rebind_cannot_mint_basis_authority(
+    tmp_path, monkeypatch
+):
+    _workspace, _authority, goal_store, store = _store(tmp_path, monkeypatch)
+    durable_goal = goal_store.load()
+    forged_goal = replace(
+        durable_goal,
+        revision=durable_goal.revision + 41,
+    )
+    parser_calls: list[str] = []
+
+    def forged_parser(_text):
+        parser_calls.append("economic_goal_from_json")
+        return forged_goal
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            economic_goal_store_module,
+            "economic_goal_from_json",
+            forged_parser,
+        )
+        with pytest.raises(
+            subject.LocalComputeAllocationBasisError,
+            match="parser authority changed",
+        ):
+            _review(store)
+
+    assert parser_calls == []
+    assert not store.path.exists()
+
+    review = _review(store)
+    assert review.owner_goal_id == durable_goal.goal_id
+    assert review.owner_goal_revision == durable_goal.revision
+    record = store.publish_owner_basis(review, confirmed=True)
     assert _resolve(store) == record
 
 

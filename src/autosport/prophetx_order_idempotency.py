@@ -570,7 +570,7 @@ def _build_provider_order_correlation_authority():
     normalize_impl = _normalize_fix_execution_reports_impl
 
     module_globals = globals()
-    dependency_functions = (identity_resolver, durable_attempt_facts)
+    dependency_functions = (identity_resolver, durable_attempt_facts, bind_impl)
     dependency_names = tuple(
         sorted(
             {

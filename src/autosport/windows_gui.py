@@ -399,7 +399,14 @@ class WindowsAutosportApp(AutosportApp):
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             if message.error is not None:
-                replay_error = text("ui.error.replay.worker", detail=message.error)
+                # ReplayWorkerMessage.error is internal diagnostic evidence, not
+                # operator-facing presentation authority. Never derive operator copy,
+                # identifiers, hashes, lengths or partial tokens from the raw value.
+                safe_detail = text(
+                    "ui.error.exception.message_unavailable",
+                    exception_type="REPLAY_WORKER_FAILURE",
+                )
+                replay_error = text("ui.error.replay.worker", detail=safe_detail)
                 self._append_log(replay_error)
                 self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
                 self.status.set(text("ui.status.replay.failed_recovery"))

@@ -48,6 +48,19 @@ def test_external_uia_audit_covers_packaged_readonly_surfaces() -> None:
     assert audit.count("require_value_read_only = $true") == 4
 
 
+def test_external_uia_audit_covers_export_evidence_control() -> None:
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+
+    expected_export = (
+        "[ordered]@{ key = 'export_evidence'; automation_id = '109'; "
+        "name = 'Експортувати канонічні докази'; required_pattern = 'Invoke'; "
+        "require_external_focus = $true; expected_control_type = 'ControlType.Button'; "
+        "require_named_rows = $false }"
+    )
+    assert expected_export in audit
+    assert audit.count("automation_id = '109'") == 1
+
+
 def test_external_uia_audit_requires_semantic_control_type_for_every_critical_control() -> None:
     audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
     expected_types = {
@@ -59,6 +72,7 @@ def test_external_uia_audit_requires_semantic_control_type_for_every_critical_co
         "106": "ControlType.ComboBox",
         "107": "ControlType.Button",
         "108": "ControlType.Button",
+        "109": "ControlType.Button",
         "201": "ControlType.List",
         "202": "ControlType.Edit",
         "203": "ControlType.List",

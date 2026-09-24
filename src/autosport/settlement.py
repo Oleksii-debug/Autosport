@@ -141,6 +141,127 @@ def _build_serialized_settlement_operations():
         for name, (value, code) in sorted(paper_global_seal.items())
     )
 
+    # PaperBook's imported domain DTO classes are mutable class objects too.
+    # Seal the exact field/property descriptors consumed by validation and
+    # settlement so class-level retargeting cannot reinterpret an exact ticket.
+    paper_ticket_type = paper_module_globals["PaperTicket"]
+    ticket_leg_type = paper_module_globals["TicketLeg"]
+    domain_dto_descriptor_names = (
+        (
+            paper_ticket_type,
+            (
+                "ticket_id",
+                "stake",
+                "legs",
+                "placed_at",
+                "status",
+                "payout",
+                "strategy_reason",
+                "provider_source_ids",
+                "provider_accounts",
+                "bankroll_id",
+                "currency",
+                "settled_at",
+            ),
+        ),
+        (
+            ticket_leg_type,
+            (
+                "event_id",
+                "market_id",
+                "selection_id",
+                "locked_odds",
+                "sport",
+                "exchange_side",
+                "quote_key",
+            ),
+        ),
+    )
+    domain_dto_dispatch_seal = tuple(
+        (
+            dto_type,
+            name,
+            dto_type.__dict__[name],
+            (
+                descriptor_function(dto_type.__dict__[name]).__code__
+                if hasattr(
+                    descriptor_function(dto_type.__dict__[name]),
+                    "__code__",
+                )
+                else None
+            ),
+        )
+        for dto_type, names in domain_dto_descriptor_names
+        for name in names
+    )
+
+    quote_key_descriptor = ticket_leg_type.__dict__["quote_key"]
+    if not isinstance(quote_key_descriptor, property) or quote_key_descriptor.fget is None:
+        raise RuntimeError("TicketLeg.quote_key must be the canonical property")
+    quote_key_function = quote_key_descriptor.fget
+    domain_module_globals = quote_key_function.__globals__
+    domain_global_seal: dict[str, tuple[object, object | None]] = {}
+    pending_domain_functions = [quote_key_function]
+    seen_domain_function_ids: set[int] = set()
+    while pending_domain_functions:
+        function = pending_domain_functions.pop()
+        function_id = id(function)
+        if function_id in seen_domain_function_ids:
+            continue
+        seen_domain_function_ids.add(function_id)
+        if getattr(function, "__globals__", None) is not domain_module_globals:
+            continue
+        for global_name in function.__code__.co_names:
+            if global_name not in domain_module_globals:
+                continue
+            value = domain_module_globals[global_name]
+            code = getattr(value, "__code__", None)
+            existing = domain_global_seal.get(global_name)
+            if existing is not None and (
+                existing[0] is not value or existing[1] is not code
+            ):
+                raise RuntimeError(
+                    "TicketLeg quote identity dependency is inconsistent"
+                )
+            domain_global_seal[global_name] = (value, code)
+            if (
+                code is not None
+                and getattr(value, "__globals__", None) is domain_module_globals
+            ):
+                pending_domain_functions.append(value)
+    frozen_domain_globals = tuple(
+        (name, value, code)
+        for name, (value, code) in sorted(domain_global_seal.items())
+    )
+
+    def require_domain_dto_dispatch() -> None:
+        for dto_type, name, descriptor, code in domain_dto_dispatch_seal:
+            current = dto_type.__dict__.get(name)
+            if current is not descriptor:
+                raise ValueError(
+                    "settlement domain DTO authority dispatch changed"
+                )
+            current_function = descriptor_function(current)
+            if code is not None and (
+                not hasattr(current_function, "__code__")
+                or current_function.__code__ is not code
+            ):
+                raise ValueError(
+                    "settlement domain DTO authority code changed"
+                )
+        for name, value, code in frozen_domain_globals:
+            if (
+                name not in domain_module_globals
+                or domain_module_globals[name] is not value
+            ):
+                raise ValueError(
+                    "settlement quote identity authority globals changed"
+                )
+            if code is not None and getattr(value, "__code__", None) is not code:
+                raise ValueError(
+                    "settlement quote identity authority code changed"
+                )
+
     def require_paper_module_globals() -> None:
         for name, value, code in frozen_paper_globals:
             if (
@@ -157,6 +278,7 @@ def _build_serialized_settlement_operations():
 
     def require_paper_book_dispatch(book: PaperBook) -> None:
         require_paper_module_globals()
+        require_domain_dto_dispatch()
         if type(book) is not paper_book_type:
             raise ValueError("settlement book must be an exact PaperBook")
         instance_state = vars(book)

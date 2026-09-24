@@ -1476,10 +1476,44 @@ def _build_sealed_admission_lease():
     # Positive admission is rare and security-critical. Freeze every module
     # binding that existed when the canonical lease was built, rather than
     # maintaining a hand-written allowlist that can miss a deeper helper
-    # constant or callable. New unrelated globals are harmless because the
-    # frozen code cannot resolve names that did not exist in its code objects.
+    # constant or callable. For callable bindings, identity alone is
+    # insufficient: Python permits in-place __code__ / contextmanager
+    # __wrapped__ mutation without rebinding the module name.
+    empty_cell = object()
+
+    def callable_state(value: object) -> tuple[
+        object | None,
+        object | None,
+        object | None,
+        tuple[object, ...] | None,
+    ]:
+        wrapped = getattr(value, "__wrapped__", None)
+        closure = getattr(value, "__closure__", None)
+        closure_state: tuple[object, ...] | None
+        if closure is None:
+            closure_state = None
+        else:
+            captured: list[object] = []
+            for cell in closure:
+                try:
+                    captured.append(cell.cell_contents)
+                except ValueError:
+                    captured.append(empty_cell)
+            closure_state = tuple(captured)
+        return (
+            getattr(value, "__code__", None),
+            wrapped,
+            getattr(wrapped, "__code__", None),
+            closure_state,
+        )
+
     sealed_bindings = tuple(
-        (name, module_globals[name]) for name in sorted(module_globals)
+        (
+            name,
+            module_globals[name],
+            callable_state(module_globals[name]),
+        )
+        for name in sorted(module_globals)
     )
     authority_mode = ExecutionAuthorityMode
     stopped_error = ExecutionStoppedError
@@ -1489,10 +1523,42 @@ def _build_sealed_admission_lease():
     current_unlocked = _CANONICAL_ADMISSION_CURRENT_UNLOCKED
 
     def require_sealed_module_graph() -> None:
-        for name, expected in sealed_bindings:
+        for name, expected, expected_state in sealed_bindings:
             if module_globals.get(name) is not expected:
                 raise integrity_error(
                     "canonical execution admission module dependency graph changed"
+                )
+            current_state = callable_state(expected)
+            current_code, current_wrapped, current_wrapped_code, current_closure = (
+                current_state
+            )
+            expected_code, expected_wrapped, expected_wrapped_code, expected_closure = (
+                expected_state
+            )
+            if (
+                current_code is not expected_code
+                or current_wrapped is not expected_wrapped
+                or current_wrapped_code is not expected_wrapped_code
+                or (
+                    (current_closure is None) != (expected_closure is None)
+                )
+                or (
+                    current_closure is not None
+                    and expected_closure is not None
+                    and (
+                        len(current_closure) != len(expected_closure)
+                        or any(
+                            current is not frozen
+                            for current, frozen in zip(
+                                current_closure,
+                                expected_closure,
+                            )
+                        )
+                    )
+                )
+            ):
+                raise integrity_error(
+                    "canonical execution admission callable state changed"
                 )
         require_graph()
 

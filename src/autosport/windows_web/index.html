@@ -72,6 +72,11 @@
     <section id="paper-runtime" aria-labelledby="paper-runtime-heading">
       <h2 id="paper-runtime-heading">Тривала симуляційна робота</h2>
       <p>Ця оболонка лише керує канонічним середовищем виконання застосунку. Реальні грошові ставки не виконуються.</p>
+      <label for="product-source-select">Джерело даних для тривалої симуляційної роботи</label>
+      <select id="product-source-select" aria-describedby="product-source-status"></select>
+      <button id="product-source-save" type="button" aria-describedby="product-source-status">Зберегти джерело даних</button>
+      <label for="product-source-status">Стан налаштування джерела даних</label>
+      <input id="product-source-status" type="text" readonly aria-label="Стан налаштування джерела даних">
       <div class="button-row">
         <button id="product-runtime-start" type="button">Запустити симуляційну роботу</button>
         <button id="product-runtime-stop" type="button" disabled>Зупинити симуляційну роботу</button>

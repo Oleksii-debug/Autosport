@@ -37,6 +37,10 @@ class _FakeWebview:
         self.window = _FakeWindow()
         self.requested_gui: str | None = None
         self.create_calls = 0
+        self.settings = {
+            "WEBVIEW2_RUNTIME_PATH": None,
+            "REMOTE_DEBUGGING_PORT": None,
+        }
 
     def create_window(self, *args, **kwargs):
         self.create_calls += 1

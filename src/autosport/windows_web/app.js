@@ -13,6 +13,7 @@
   let ownerReviewEpoch = 0;
   let refreshInFlight = null;
   let refreshPending = false;
+  let refreshClosed = false;
   let stateProjectionEpoch = 0;
 
   function setTextIfChanged(node, value) {
@@ -83,10 +84,10 @@
     const focused = document.activeElement;
     startButton.disabled = canStart !== true;
     stopButton.disabled = canStop !== true;
-    if (focused === startButton && startButton.disabled && !stopButton.disabled) {
-      stopButton.focus();
-    } else if (focused === stopButton && stopButton.disabled && !startButton.disabled) {
-      startButton.focus();
+    if (focused === startButton && startButton.disabled) {
+      focusOperatorTarget(stopButton);
+    } else if (focused === stopButton && stopButton.disabled) {
+      focusOperatorTarget(startButton);
     }
   }
 
@@ -261,7 +262,9 @@
     return response.state;
   }
 
-  async function dispatch(actionId, payload = {}) {
+  async function dispatch(actionId, payload = {}, options = {}) {
+    const useGlobalAnnouncement = options.globalAnnouncement !== false;
+    const useResultFocus = options.resultFocus !== false;
     // A state read that began before this command is not allowed to overwrite
     // the operator-visible result after the command crosses the backend bridge.
     invalidateStateProjection();
@@ -275,13 +278,20 @@
       // shared refresh loop will skip them and obtain one post-command snapshot.
       invalidateStateProjection();
       const rejected = !result || result.status !== "completed";
-      announce(result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."), rejected);
-      focusResult(result);
+      if (useGlobalAnnouncement) {
+        announce(
+          result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."),
+          rejected,
+        );
+      }
+      if (useResultFocus) focusResult(result);
       await refreshState();
       return result;
     } catch (_error) {
       invalidateStateProjection();
-      announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
+      if (useGlobalAnnouncement) {
+        announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
+      }
       return null;
     }
   }
@@ -352,6 +362,25 @@
     setTextIfChanged(byId("manual-status"), state.manual.status || "");
     setValueIfChanged(byId(334), state.manual.result || "");
 
+    const productSource = state.product_source || {};
+    const sourceSelect = byId("product-source-select");
+    setSelectOptions(sourceSelect, productSource.choices || []);
+    if (document.activeElement !== sourceSelect && productSource.selected_id) {
+      sourceSelect.value = productSource.selected_id;
+    }
+    setValueIfChanged(
+      byId("product-source-status"),
+      productSource.status || "Стан джерела даних недоступний.",
+    );
+    setDisabledWithFocusFallback(
+      sourceSelect,
+      productSource.can_configure !== true,
+    );
+    setDisabledWithFocusFallback(
+      byId("product-source-save"),
+      productSource.can_configure !== true,
+    );
+
     const productRuntime = state.product_runtime || {};
     setValueIfChanged(
       byId("product-runtime-status"),
@@ -374,6 +403,7 @@
   }
 
   async function refreshState() {
+    if (refreshClosed) return;
     if (refreshInFlight !== null) {
       refreshPending = true;
       await refreshInFlight;
@@ -382,10 +412,15 @@
 
     refreshInFlight = (async () => {
       do {
+        if (refreshClosed) {
+          refreshPending = false;
+          break;
+        }
         refreshPending = false;
         const requestEpoch = stateProjectionEpoch;
         try {
           const state = await apiState();
+          if (refreshClosed) break;
           if (requestEpoch === stateProjectionEpoch) {
             renderState(state);
           } else {
@@ -394,6 +429,7 @@
             refreshPending = true;
           }
         } catch (_error) {
+          if (refreshClosed) break;
           if (requestEpoch === stateProjectionEpoch) {
             announce("Не вдалося оновити стан застосунку.", true);
           } else {
@@ -402,7 +438,7 @@
             refreshPending = true;
           }
         }
-      } while (refreshPending);
+      } while (refreshPending && !refreshClosed);
     })();
 
     try {
@@ -457,6 +493,11 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("product-source-save").addEventListener("click", () => {
+    dispatch("product_source.configure", {
+      source_id: byId("product-source-select").value,
+    });
   });
   byId("product-runtime-start").addEventListener("click", () => {
     dispatch("product_runtime.start");
@@ -539,7 +580,17 @@
     byId(332).focus();
   });
 
+  function hasShortcutModifier(event) {
+    return (
+      event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+    );
+  }
+
   document.addEventListener("keydown", (event) => {
+    if (hasShortcutModifier(event)) return;
     if (event.key === "F2") {
       event.preventDefault();
       byId(301).focus();
@@ -558,6 +609,8 @@
   });
 
   window.addEventListener("beforeunload", () => {
+    refreshClosed = true;
+    refreshPending = false;
     if (pollHandle !== null) window.clearInterval(pollHandle);
   });
 })();

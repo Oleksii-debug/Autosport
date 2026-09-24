@@ -58,12 +58,23 @@ _REQUIRED_CONTROLS = {
     "334": "textarea",
     "335": "button",
     "336": "button",
+    "product-source-select": "select",
+    "product-source-save": "button",
+    "product-source-status": "input",
     "product-runtime-start": "button",
     "product-runtime-stop": "button",
     "product-runtime-status": "input",
     "emergency-stop-action": "button",
 }
-_READONLY_CONTROLS = {"202", "205", "302", "306", "334", "product-runtime-status"}
+_READONLY_CONTROLS = {
+    "202",
+    "205",
+    "302",
+    "306",
+    "334",
+    "product-source-status",
+    "product-runtime-status",
+}
 _LIST_CONTROLS = {"203", "204", "304", "307"}
 _TABLE_CONTROLS = {"201"}
 _DYNAMICALLY_DISABLED_CONTROLS = {"product-runtime-stop"}
@@ -71,6 +82,11 @@ _REQUIRED_LANDMARKS = {"header", "nav", "main"}
 _REQUIRED_SHORTCUT_MARKERS = (
     'event.key === "F2"',
     'event.key === "F8"',
+    "event.altKey",
+    "event.ctrlKey",
+    "event.metaKey",
+    "event.shiftKey",
+    "if (hasShortcutModifier(event)) return;",
 )
 _FORBIDDEN_SHORTCUT_MARKERS = (
     'event.ctrlKey && event.altKey',
@@ -264,10 +280,11 @@ def inspect_semantic_shell() -> dict[str, Any]:
     if "String(error)" in javascript:
         failures.append("raw JavaScript bridge exception text must not reach accessible output")
     if (
-        'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true'
-        not in javascript
+        "syncRuntimeActionAvailability(" not in javascript
+        or 'byId("product-runtime-start")' not in javascript
+        or 'byId("product-runtime-stop")' not in javascript
     ):
-        failures.append("runtime STOP dynamic enabled-state projection is missing")
+        failures.append("runtime START/STOP dynamic enabled-state projection is missing")
     if (
         'setTextIfChanged(byId("manual-status"), state.manual.status || "")'
         not in javascript
@@ -317,6 +334,18 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     for marker in _FORBIDDEN_SHORTCUT_MARKERS:
         if marker in javascript:
             failures.append(f"screen-reader/browser shortcut collision remains: {marker}")
+    modifier_guard = "if (hasShortcutModifier(event)) return;"
+    modifier_guard_index = javascript.find(modifier_guard)
+    for shortcut_marker in ('event.key === "F2"', 'event.key === "F8"'):
+        shortcut_index = javascript.find(shortcut_marker)
+        if (
+            modifier_guard_index < 0
+            or shortcut_index < 0
+            or modifier_guard_index > shortcut_index
+        ):
+            failures.append(
+                f"{shortcut_marker}: modifier fence must run before preventDefault handling"
+            )
     if "replaceChildren()" in javascript:
         failures.append("poll projection must preserve semantic descendants when state is unchanged")
     for marker in (
@@ -357,10 +386,11 @@ def inspect_keyboard_contract() -> dict[str, Any]:
                 f"id={automation_id}: expected initial disabled native button state"
             )
     if (
-        'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true'
-        not in javascript
+        "syncRuntimeActionAvailability(" not in javascript
+        or 'byId("product-runtime-start")' not in javascript
+        or 'byId("product-runtime-stop")' not in javascript
     ):
-        failures.append("runtime STOP cannot be proven keyboard-actionable when running")
+        failures.append("runtime START/STOP keyboard actionability projection is missing")
     if parser.positive_tabindex:
         failures.append("positive tabindex would override native DOM order")
 

@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from autosport.continuous_session import SessionStoppedError
+from autosport.operator_source_store import OperatorSourceConfigStore
 from autosport.product_gui_worker import ProductGuiWorker
 from autosport.windows_webview_shell import AutosportWebController, _safe_exception_text
 
@@ -124,10 +125,12 @@ def _bare_controller(tmp_path: Path) -> AutosportWebController:
 
 
 def test_webview_runtime_start_stop_delegates_to_canonical_worker(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     controller = _bare_controller(tmp_path)
-    monkeypatch.setenv("AUTOSPORT_PRODUCT_SOURCE_FACTORY", "provider.module:factory")
+    OperatorSourceConfigStore(tmp_path / "operator-source.json").write_source_id(
+        "parlayapi-table-tennis"
+    )
 
     started = controller._action_product_runtime_start({})
     assert started["status"] == "completed"
@@ -136,7 +139,8 @@ def test_webview_runtime_start_stop_delegates_to_canonical_worker(
     assert worker.start_calls == [
         {
             "workspace": tmp_path,
-            "source_factory": "provider.module:factory",
+            "source_factory": "autosport.product_source:create_parlay_product_source",
+            "expected_source_id": "parlayapi:table_tennis",
             "initial_bankroll": "10000",
             "poll_seconds": 30.0,
         }

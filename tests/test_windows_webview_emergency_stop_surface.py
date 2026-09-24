@@ -148,7 +148,8 @@ def test_emergency_stop_frontend_reuses_shared_ordered_dispatch():
 
     assert "globalThis.autosportDispatch = dispatch;" in app_script
     assert "const dispatch = globalThis.autosportDispatch;" in script
-    assert 'await dispatch("emergency_stop.activate", {});' in script
+    assert '"emergency_stop.activate",' in script
+    assert "{ globalAnnouncement: false, resultFocus: false }" in script
     assert 'getElementById("emergency-stop-action")' in script
     assert 'getElementById("emergency-stop-status")' in script
     assert "globalThis.pywebview.api.dispatch" not in script
@@ -190,3 +191,36 @@ def test_main_poll_projects_durable_emergency_stop_state_without_stealing_focus(
     assert "setTextIfChanged(node, value);" in projection
     assert ".focus(" not in projection
     assert "dispatch(" not in projection
+
+
+def test_emergency_stop_uses_one_live_region_announcement_authority():
+    app_script = _asset("app.js")
+    emergency_script = _asset("emergency_stop.js")
+
+    assert "async function dispatch(actionId, payload = {}, options = {})" in app_script
+    assert "const useGlobalAnnouncement = options.globalAnnouncement !== false;" in app_script
+    assert "const useResultFocus = options.resultFocus !== false;" in app_script
+    assert "if (useResultFocus) focusResult(result);" in app_script
+    assert app_script.count("if (useGlobalAnnouncement) {") == 2
+
+    assert '"emergency_stop.activate",' in emergency_script
+    assert "{ globalAnnouncement: false, resultFocus: false }" in emergency_script
+    assert 'result.status !== "completed"' in emergency_script
+    assert "result.message" in emergency_script
+    assert 'getElementById("emergency-stop-status")' in emergency_script
+
+    # Emergency outcome text belongs to the dedicated assertive STOP status.
+    # The emergency asset must not write either global action live region.
+    assert "app-status" not in emergency_script
+    assert "error-status" not in emergency_script
+    assert "globalThis.pywebview.api.dispatch" not in emergency_script
+
+
+def test_emergency_stop_local_failure_keeps_dedicated_accessible_readback():
+    script = _asset("emergency_stop.js")
+
+    assert 'typeof dispatch !== "function"' in script
+    assert script.count("setStatus(") >= 4
+    assert "focusStatus();" in script
+    assert "Канал застосунку недоступний." in script
+    assert "перевірте журнал STOP." in script

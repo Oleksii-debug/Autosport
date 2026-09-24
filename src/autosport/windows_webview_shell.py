@@ -13,6 +13,14 @@ from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
+from .operator_source_config import OperatorSourceSelection, OperatorSourceSelectionState
+from .operator_source_registry import (
+    OperatorSourceRegistryError,
+    ProductSourceRegistryEntry,
+    list_product_source_entries,
+    resolve_product_source_entry,
+)
+from .operator_source_store import OperatorSourceConfigStore, OperatorSourceStoreError
 from .owner_economic_authority import (
     INITIAL_OWNER_FORM_DEFAULTS,
     OWNER_ECONOMIC_FORM_FIELDS,
@@ -50,9 +58,32 @@ WEB_SHELL_INDEX = "index.html"
 _ALLOWED_SPEEDS = {0.0, 1.0, 10.0, 100.0, 1000.0}
 _ALLOWED_LIVE_MODES = {"public_preview", "api_key"}
 _PRODUCT_SOURCE_FACTORY_ENV = "AUTOSPORT_PRODUCT_SOURCE_FACTORY"
+_PRODUCT_SOURCE_CONFIG_FILENAME = "operator-source.json"
+_PRODUCT_SOURCE_LABELS_UK = {
+    "parlayapi-table-tennis": "ParlayAPI — настільний теніс",
+}
 _PRODUCT_POLL_SECONDS = 30.0
 _REQUEST_REPLAY_LIMIT = 256
-_WEBVIEW2_USER_DATA_FOLDER_ENV = "WEBVIEW2_USER_DATA_FOLDER"
+_WEBVIEW2_ENVIRONMENT_OVERRIDES = (
+    "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+    "WEBVIEW2_USER_DATA_FOLDER",
+    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+    "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE",
+    "WEBVIEW2_CHANNEL_SEARCH_KIND",
+    "WEBVIEW2_RELEASE_CHANNELS",
+    "WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER",
+    "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER",
+)
+_PYWEBVIEW_RELEASE_SETTINGS = (
+    "WEBVIEW2_RUNTIME_PATH",
+    "REMOTE_DEBUGGING_PORT",
+)
+
+if set(_PRODUCT_SOURCE_LABELS_UK) != {
+    entry.source_id for entry in list_product_source_entries()
+}:
+    raise RuntimeError("operator source registry is missing a Ukrainian product label")
+
 _MANUAL_OPERATION_KEYS = {
     "odds_conversion": "ui.windows.manual_calculation.operation.odds_conversion",
     "implied_probability": "ui.windows.manual_calculation.operation.implied_probability",
@@ -87,6 +118,46 @@ class WindowsWebViewUnavailable(RuntimeError):
 
 class WindowsWebBridgeTrustError(RuntimeError):
     pass
+
+
+def _reject_webview2_environment_overrides() -> None:
+    active = [
+        name
+        for name in _WEBVIEW2_ENVIRONMENT_OVERRIDES
+        if (value := os.environ.get(name)) is not None and value.strip()
+    ]
+    if active:
+        raise WindowsWebViewUnavailable(
+            "Автоспорт заблокував зовнішнє перевизначення WebView2: "
+            + ", ".join(active)
+            + "."
+        )
+
+
+def _reject_pywebview_release_settings(webview: object) -> None:
+    settings = getattr(webview, "settings", None)
+    if not isinstance(settings, Mapping):
+        raise WindowsWebViewUnavailable(
+            "Автоспорт не може підтвердити безпечні параметри pywebview."
+        )
+    missing = [name for name in _PYWEBVIEW_RELEASE_SETTINGS if name not in settings]
+    if missing:
+        raise WindowsWebViewUnavailable(
+            "Автоспорт не може підтвердити параметри pywebview: "
+            + ", ".join(missing)
+            + "."
+        )
+    active = [
+        name
+        for name in _PYWEBVIEW_RELEASE_SETTINGS
+        if settings[name] not in (None, "")
+    ]
+    if active:
+        raise WindowsWebViewUnavailable(
+            "Автоспорт заблокував некваліфікований параметр pywebview: "
+            + ", ".join(active)
+            + "."
+        )
 
 
 def web_shell_index_path() -> Path:
@@ -324,6 +395,104 @@ class AutosportWebController:
             )
         )
 
+    def _operator_source_store(self) -> OperatorSourceConfigStore:
+        return OperatorSourceConfigStore(self.workspace / _PRODUCT_SOURCE_CONFIG_FILENAME)
+
+    def _operator_source_admin_override_id(self) -> str | None:
+        source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
+        if source_factory is None or source_factory == "":
+            return None
+        if source_factory.strip() != source_factory:
+            raise OperatorSourceRegistryError("admin source override format is invalid")
+        matches = [
+            entry.source_id
+            for entry in list_product_source_entries()
+            if entry.factory_spec == source_factory
+        ]
+        if len(matches) != 1:
+            raise OperatorSourceRegistryError(
+                "admin source override is not registered by this product build"
+            )
+        return matches[0]
+
+    def _resolve_operator_source(
+        self,
+    ) -> tuple[OperatorSourceSelection, ProductSourceRegistryEntry | None]:
+        try:
+            admin_source_id = self._operator_source_admin_override_id()
+        except OperatorSourceRegistryError:
+            return (
+                OperatorSourceSelection(
+                    OperatorSourceSelectionState.INVALID,
+                    None,
+                    "admin_override_invalid",
+                ),
+                None,
+            )
+
+        selection = self._operator_source_store().resolve(
+            admin_override_source_id=admin_source_id
+        )
+        if selection.source_id is None:
+            return selection, None
+        try:
+            entry = resolve_product_source_entry(selection.source_id)
+        except OperatorSourceRegistryError:
+            return (
+                OperatorSourceSelection(
+                    OperatorSourceSelectionState.INVALID,
+                    None,
+                    "source_not_registered",
+                ),
+                None,
+            )
+        return selection, entry
+
+    def _product_source_status(
+        self,
+        selection: OperatorSourceSelection,
+        entry: ProductSourceRegistryEntry | None,
+    ) -> str:
+        if entry is not None:
+            label = _PRODUCT_SOURCE_LABELS_UK[entry.source_id]
+            if selection.state is OperatorSourceSelectionState.ADMIN_OVERRIDE:
+                return f"Джерело даних задано адміністратором: {label}."
+            if selection.state is OperatorSourceSelectionState.CONFIGURED:
+                return f"Джерело даних збережено: {label}."
+        if selection.state is OperatorSourceSelectionState.CONFIGURATION_REQUIRED:
+            return (
+                "Джерело даних не налаштовано. "
+                "Виберіть підтримуване джерело та збережіть його."
+            )
+        if selection.state is OperatorSourceSelectionState.CONFLICT:
+            return (
+                "Збережене джерело даних конфліктує з адміністративним "
+                "налаштуванням. Запуск заблоковано."
+            )
+        return (
+            "Налаштування джерела даних недійсне або пошкоджене. "
+            "Виберіть підтримуване джерело та збережіть його повторно."
+        )
+
+    def _product_source_projection(
+        self,
+        selection: OperatorSourceSelection,
+        entry: ProductSourceRegistryEntry | None,
+    ) -> dict[str, Any]:
+        return {
+            "state": selection.state.value,
+            "selected_id": "" if entry is None else entry.source_id,
+            "status": self._product_source_status(selection, entry),
+            "choices": [
+                {
+                    "id": candidate.source_id,
+                    "label": _PRODUCT_SOURCE_LABELS_UK[candidate.source_id],
+                }
+                for candidate in list_product_source_entries()
+            ],
+            "can_configure": not self._busy(),
+        }
+
     def _selected_configuration(self) -> tuple[str, ResearchStrategyPlan | None]:
         validate_strategy_configuration(self.strategy_id, self.research_plan)
         return self.strategy_id, self.research_plan
@@ -332,8 +501,13 @@ class AutosportWebController:
         strategy_id, plan = self._selected_configuration()
         return Path(workspace_for_strategy(self.workspace, strategy_id, plan))
 
-    def _product_runtime_can_start(self) -> bool:
+    def _product_runtime_can_start(self, *, source_ready: bool | None = None) -> bool:
         if self._busy():
+            return False
+        if source_ready is None:
+            _selection, entry = self._resolve_operator_source()
+            source_ready = entry is not None
+        if not source_ready:
             return False
         try:
             workspace = self._product_runtime_target_workspace()
@@ -586,6 +760,11 @@ class AutosportWebController:
                 for item in SURFACES
             ]
             surface = SURFACE_BY_KEY[self.surface_key]
+            source_selection, source_entry = self._resolve_operator_source()
+            source_projection = self._product_source_projection(
+                source_selection,
+                source_entry,
+            )
             return {
                 "status": self.status,
                 "last_error": self._bridge_validation_error or self.last_error,
@@ -635,10 +814,13 @@ class AutosportWebController:
                     "evidence_export": self.evidence_export_worker.busy,
                     "product_runtime": self.product_worker.busy,
                 },
+                "product_source": source_projection,
                 "product_runtime": {
                     "status": self.product_runtime_status,
                     "running": self.product_worker.busy,
-                    "can_start": self._product_runtime_can_start(),
+                    "can_start": self._product_runtime_can_start(
+                        source_ready=source_entry is not None
+                    ),
                     "can_stop": self.product_worker.busy,
                 },
                 "surface_key": self.surface_key,
@@ -912,6 +1094,49 @@ class AutosportWebController:
             focus_id="202",
         )
 
+    def _action_product_source_configure(
+        self,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(
+                "Зміну джерела даних заблоковано, доки поточна операція не завершиться."
+            )
+        source_id = payload.get("source_id")
+        try:
+            entry = resolve_product_source_entry(source_id)
+        except (OperatorSourceRegistryError, TypeError):
+            return self._fail("Виберіть джерело даних зі списку підтримуваних.")
+
+        try:
+            admin_source_id = self._operator_source_admin_override_id()
+        except OperatorSourceRegistryError:
+            return self._fail(
+                "Адміністративне налаштування джерела недійсне. "
+                "Збереження та запуск заблоковано."
+            )
+        if admin_source_id is not None and admin_source_id != entry.source_id:
+            return self._fail(
+                "Вибране джерело конфліктує з адміністративним налаштуванням. "
+                "Збереження та запуск заблоковано."
+            )
+
+        try:
+            self._operator_source_store().write_source_id(entry.source_id)
+        except (OperatorSourceStoreError, OSError, TypeError, ValueError):
+            return self._fail("Не вдалося безпечно зберегти вибране джерело даних.")
+
+        _selection, resolved_entry = self._resolve_operator_source()
+        if resolved_entry is None or resolved_entry.source_id != entry.source_id:
+            return self._fail(
+                "Джерело даних збережено, але повторна перевірка конфігурації "
+                "не підтвердила його. Запуск заблоковано."
+            )
+        return self._ok(
+            f"Джерело даних збережено: {_PRODUCT_SOURCE_LABELS_UK[entry.source_id]}.",
+            focus_id="product-source-status",
+        )
+
     def _action_product_runtime_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():
             return self._fail("Спочатку завершіть поточну операцію.")
@@ -926,21 +1151,20 @@ class AutosportWebController:
             return self._fail(
                 "Тривалий імітаційний режим заблоковано: спочатку відновіть робочу область."
             )
-        source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
-        if source_factory is None or not source_factory:
+
+        source_selection, source_entry = self._resolve_operator_source()
+        if source_entry is None:
             return self._fail(
                 "Тривалий імітаційний режим не запущено: "
-                "AUTOSPORT_PRODUCT_SOURCE_FACTORY не задано."
+                + self._product_source_status(source_selection, source_entry)
             )
-        if source_factory.strip() != source_factory:
-            return self._fail(
-                "Тривалий імітаційний режим не запущено: "
-                "AUTOSPORT_PRODUCT_SOURCE_FACTORY має неоднозначний формат."
-            )
+        source_factory = source_entry.factory_spec
+
         try:
             started = self.product_worker.start(
                 workspace=workspace,
                 source_factory=source_factory,
+                expected_source_id=source_entry.expected_provider_source_id,
                 initial_bankroll="10000",
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )
@@ -1159,6 +1383,7 @@ class AutosportWebController:
             "live.refresh": self._action_live_refresh,
             "recovery.run": self._action_recovery_run,
             "evidence.export": self._action_evidence_export,
+            "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,
             "surface.select": self._action_surface_select,
@@ -1370,11 +1595,7 @@ def launch_windows_shell(
     *,
     title: str | None = None,
 ) -> int:
-    override = os.environ.get(_WEBVIEW2_USER_DATA_FOLDER_ENV)
-    if override is not None and override.strip():
-        raise WindowsWebViewUnavailable(
-            "Autosport refused an external WebView2 user-data-folder override"
-        )
+    _reject_webview2_environment_overrides()
 
     try:
         storage_path = default_webview_storage_path()
@@ -1393,6 +1614,7 @@ def launch_windows_shell(
         raise WindowsWebViewUnavailable(
             "pywebview is unavailable; the Windows semantic shell cannot start"
         ) from exc
+    _reject_pywebview_release_settings(webview)
 
     asset = web_shell_index_path()
     if not asset.is_file():

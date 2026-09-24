@@ -8,9 +8,6 @@ from .paper import PaperBook
 
 
 VALID_OUTCOMES = {"win", "loss", "void"}
-_SETTLEMENT_OUTCOME_LOCK = Lock()
-
-
 @dataclass(slots=True)
 class SettlementEngine:
     """Version-1 deterministic settlement state. Strategy code never receives this state during replay."""
@@ -45,75 +42,76 @@ class SettlementEngine:
                 or quote_key.strip() != quote_key
             ):
                 raise ValueError("settlement quote key must be a non-empty trimmed string")
-            if type(outcome) is not str or outcome not in VALID_OUTCOMES:
+            if type(outcome) is not str or outcome not in ("win", "loss", "void"):
                 if type(outcome) is str:
                     raise ValueError(f"unsupported outcome: {outcome}")
                 raise ValueError("unsupported outcome type")
         return snapshot
 
+
+def _build_serialized_settlement_operations():
+    """Build one non-retargetable in-process settlement serialization domain."""
+
+    serialization_lock = Lock()
+    engine_type = SettlementEngine
+    validate_outcomes = engine_type._validated_outcomes_snapshot
+    paper_book_type = PaperBook
+    open_status = TicketStatus.OPEN
+
     def record(self, quote_outcomes: dict[str, str]) -> None:
         # Conflict detection and publication are one serialized transition.
-        # Without this boundary, two record() calls can both snapshot the same
-        # pre-update state and silently collapse conflicting terminal outcomes
-        # into last-writer-wins truth.
-        with _SETTLEMENT_OUTCOME_LOCK:
-            current = self._validated_outcomes_snapshot(self.outcomes)
-            incoming = self._validated_outcomes_snapshot(quote_outcomes)
+        # The lock is closure-owned so a module-global rebind cannot split
+        # concurrent official operations into different serialization domains.
+        with serialization_lock:
+            current = validate_outcomes(self.outcomes)
+            incoming = validate_outcomes(quote_outcomes)
             for quote_key, outcome in incoming.items():
                 previous = current.get(quote_key)
                 if previous is not None and previous != outcome:
-                    raise ValueError(f"conflicting settlement for {quote_key}")
+                    raise ValueError(
+                        f"conflicting settlement for {quote_key}"
+                    )
             self.outcomes.update(incoming)
 
     def settle_ready(self, book: PaperBook) -> list[str]:
-        # Snapshot and revalidate public mutable settlement state. Callers can
-        # construct SettlementEngine with invalid runtime values or mutate outcomes
-        # directly, so record() is not the only ingress to this economic truth boundary.
-        # Serialize this official reader with record() so it cannot observe an
-        # in-progress multi-key publication from another official engine call.
-        # Keep the same serialization boundary through canonical PaperBook
-        # preflight and the complete economic commit. PaperBook.settle() is a
-        # multi-step mutable transition, so releasing after the outcomes snapshot
-        # would let two settle_ready() calls both pass the OPEN-ticket check.
-        with _SETTLEMENT_OUTCOME_LOCK:
-            outcomes = self._validated_outcomes_snapshot(self.outcomes)
+        # Keep one exact lock from outcome snapshot through the entire canonical
+        # PaperBook economic commit. record() consumes this same closure-owned
+        # lock, so neither operation can be retargeted at runtime.
+        with serialization_lock:
+            outcomes = validate_outcomes(self.outcomes)
 
-            # The commit phase must not dispatch through caller-overridable PaperBook
-            # mutation behavior after a successful canonical preflight. A subclass can
-            # otherwise apply an earlier ticket and fail a later settle() call, recreating
-            # the partial-batch state this boundary exists to prevent.
-            if type(book) is not PaperBook:
-                raise ValueError("settlement book must be an exact PaperBook")
+            if type(book) is not paper_book_type:
+                raise ValueError(
+                    "settlement book must be an exact PaperBook"
+                )
 
-            # PaperBook instances have an instance dictionary even when their runtime
-            # type is exact. PaperBook.settle() dynamically resolves these two helpers,
-            # so instance-level shadows could succeed for an earlier ticket and fail a
-            # later one after the batch preflight. Reject that caller-controlled apply
-            # dispatch before any economic mutation.
             if any(
                 helper in vars(book)
-                for helper in ("_normalize_resolution_keys", "_settlement_result")
+                for helper in (
+                    "_normalize_resolution_keys",
+                    "_settlement_result",
+                )
             ):
-                raise ValueError("settlement book mutation helpers must not be shadowed")
+                raise ValueError(
+                    "settlement book mutation helpers must not be shadowed"
+                )
 
-            # The commit phase below relies on stable canonical ticket identity and
-            # lifecycle state. Reject caller-mutated PaperBook state before any
-            # settlement mutation instead of discovering it after an earlier ticket
-            # has already been applied.
-            PaperBook._validate_loaded_state(book)
+            paper_book_type._validate_loaded_state(book)
 
-            # Build and economically preflight the complete ready batch before
-            # mutating the PaperBook. A later ticket can fail deterministic payout
-            # validation even when an earlier ticket is valid; applying tickets as
-            # they are discovered would leave a partially settled book.
             plan: list[tuple[str, set[str], set[str]]] = []
             simulated_balance = book.balance
 
             for ticket in list(book.tickets.values()):
-                if ticket.status is not TicketStatus.OPEN:
+                if ticket.status is not open_status:
                     continue
-                states = [outcomes.get(leg.quote_key) for leg in ticket.legs]
-                if "loss" not in states and any(state is None for state in states):
+                states = [
+                    outcomes.get(leg.quote_key)
+                    for leg in ticket.legs
+                ]
+                if (
+                    "loss" not in states
+                    and any(state is None for state in states)
+                ):
                     continue
                 winning = {
                     leg.quote_key
@@ -125,19 +123,35 @@ class SettlementEngine:
                     for leg in ticket.legs
                     if outcomes.get(leg.quote_key) == "void"
                 }
-                _, _, simulated_balance = PaperBook._settlement_result(
-                    ticket,
-                    simulated_balance,
-                    winning,
-                    voids,
+                _, _, simulated_balance = (
+                    paper_book_type._settlement_result(
+                        ticket,
+                        simulated_balance,
+                        winning,
+                        voids,
+                    )
                 )
                 plan.append((ticket.ticket_id, winning, voids))
 
             settled: list[str] = []
             for ticket_id, winning, voids in plan:
-                # Dispatch through the canonical class boundary so an exact PaperBook
-                # instance cannot shadow ``settle`` in ``__dict__`` after preflight and
-                # reintroduce a partial batch during apply.
-                PaperBook.settle(book, ticket_id, winning, voids)
+                paper_book_type.settle(
+                    book,
+                    ticket_id,
+                    winning,
+                    voids,
+                )
                 settled.append(ticket_id)
             return settled
+
+    record.__name__ = "record"
+    record.__qualname__ = "SettlementEngine.record"
+    settle_ready.__name__ = "settle_ready"
+    settle_ready.__qualname__ = "SettlementEngine.settle_ready"
+    return record, settle_ready
+
+
+SettlementEngine.record, SettlementEngine.settle_ready = (
+    _build_serialized_settlement_operations()
+)
+del _build_serialized_settlement_operations

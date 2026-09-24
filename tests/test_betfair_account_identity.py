@@ -290,6 +290,62 @@ def test_module_helper_rebinding_cannot_weaken_k07_identity_integrity(
     assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
+def test_public_identity_projection_no_longer_depends_on_public_json_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    original_identity_id = value.identity_id
+
+    monkeypatch.setattr(_identity, "_canonical_json", lambda _value: b"forged")
+
+    assert value.identity_id == original_identity_id
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_projection_material_rebind_revokes_public_k07_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    original_identity_id = value.identity_id
+
+    monkeypatch.setattr(
+        _identity,
+        "_identity_projection_material",
+        lambda *_args, **_kwargs: b"attacker-selected-projection",
+    )
+
+    assert value.identity_id != original_identity_id
+    assert not is_authoritative_betfair_account_identity(value, client=client)
+    with pytest.raises(BetfairAccountIdentityError, match="lacks current"):
+        require_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_json_dumps_code_mutation_cannot_mask_issued_field_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    original_dumps_code = json.dumps.__code__
+
+    def forged_dumps(*_args, **_kwargs):
+        return "{}"
+
+    try:
+        json.dumps.__code__ = forged_dumps.__code__
+        object.__setattr__(value, "currency_code", "GBP")
+
+        assert not is_authoritative_betfair_account_identity(value, client=client)
+        with pytest.raises(BetfairAccountIdentityError, match="lacks current"):
+            require_authoritative_betfair_account_identity(value, client=client)
+    finally:
+        json.dumps.__code__ = original_dumps_code
+
+
 def test_identity_class_post_init_rebinding_cannot_mint_altered_k07_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

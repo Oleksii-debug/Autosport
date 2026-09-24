@@ -122,7 +122,23 @@ class BetfairDecisionQuoteAssessment:
     market_version_price_lock_proven: bool = False
     execution_fill_proven: bool = False
     realized_price_proven: bool = False
+    server_current_provider_authority_proven: bool = False
+    provider_write_authorized: bool = False
     real_money_authorized: bool = False
+
+    def __post_init__(self) -> None:
+        # This evidence may prove provider origin at capture plus unchanged local
+        # credential/network context. It never proves the provider still authorizes
+        # the session/App Key on the server at a later use-time, and it never grants
+        # provider-write authority.
+        if self.server_current_provider_authority_proven is not False:
+            raise BetfairDecisionQuoteError(
+                "decision assessment cannot claim server-current provider authority"
+            )
+        if self.provider_write_authorized is not False:
+            raise BetfairDecisionQuoteError(
+                "decision assessment cannot grant provider-write authority"
+            )
 
     @property
     def assessment_id(self) -> str:
@@ -145,6 +161,10 @@ class BetfairDecisionQuoteAssessment:
                 "price_lock": self.market_version_price_lock_proven,
                 "fill_proven": self.execution_fill_proven,
                 "realized_price_proven": self.realized_price_proven,
+                "server_current_provider_authority_proven": (
+                    self.server_current_provider_authority_proven
+                ),
+                "provider_write_authorized": self.provider_write_authorized,
                 "real_money_authorized": self.real_money_authorized,
             }
         )
@@ -265,6 +285,16 @@ class BetfairDecisionQuoteEvidence:
 
     @property
     def realized_price_proven(self) -> bool:
+        return False
+
+    @property
+    def server_current_provider_authority_proven(self) -> bool:
+        # Provider metadata was authoritative at capture. No provider read occurs
+        # merely by consulting this immutable evidence later.
+        return False
+
+    @property
+    def provider_write_authorized(self) -> bool:
         return False
 
     @property
@@ -553,7 +583,12 @@ def _install_authority() -> None:
         )
         return evidence
 
-    def provider_record(self: BetfairDecisionQuoteEvidence):
+    def capture_provider_record(self: BetfairDecisionQuoteEvidence):
+        """Verify product-issued capture origin plus unchanged local context.
+
+        This deliberately performs no new provider metadata read. It therefore cannot
+        prove server-current session/App-Key authorization at assessment use-time.
+        """
         validate(self)
         record = evidence_registry.get(id(self))
         if record is None or record[0]() is not self or record[1] != self.evidence_id:
@@ -569,11 +604,14 @@ def _install_authority() -> None:
             or client._credentials is not credentials
             or not _canonical_network_transport(client)
         ):
-            raise BetfairDecisionQuoteError("decision quote lacks current live App Key authority")
+            raise BetfairDecisionQuoteError(
+                "decision quote lacks capture-time live App Key evidence "
+                "or unchanged local provider context"
+            )
         return record
 
     def assert_provider_authoritative(self: BetfairDecisionQuoteEvidence) -> None:
-        provider_record(self)
+        capture_provider_record(self)
 
     def assess(
         self: BetfairDecisionQuoteEvidence,
@@ -582,7 +620,7 @@ def _install_authority() -> None:
         now_monotonic_ns: int,
         max_age_seconds: Decimal,
     ) -> BetfairDecisionQuoteAssessment:
-        provider_record(self)
+        capture_provider_record(self)
         if (
             not isinstance(now_utc, datetime)
             or now_utc.tzinfo is None
@@ -685,10 +723,13 @@ def _install_authority() -> None:
             raise BetfairDecisionQuoteError(
                 "positive assessment lost its exact decision-quote evidence binding"
             )
-        # Positive decision authority is use-time authority, not a historical fact.
-        # Revalidate the exact source evidence so credential/session/network/App-Key
-        # drift after assessment issuance cannot keep a once-valid permission alive.
-        provider_record(evidence)
+        # Positive quote-assessment authority rechecks freshness and the exact
+        # product-issued capture binding. capture_provider_record() proves only
+        # capture-time live App-Key/provider origin plus unchanged local
+        # credential/network context; it performs no server read and therefore does
+        # not prove server-current provider authorization. Any later provider write
+        # or execution boundary must obtain its own current provider/session authority.
+        capture_provider_record(evidence)
         current_ns = _integer(
             production_monotonic_ns(),
             "product use-time monotonic_ns",

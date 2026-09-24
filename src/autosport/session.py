@@ -64,6 +64,71 @@ def _bind_canonical_settlement_engine(method):
     return guarded
 
 
+class _SettlementConsumerEntry:
+    """Data-descriptor seal for one trusted settlement consumer entry."""
+
+    __slots__ = ("_method",)
+
+    def __init__(self, method) -> None:
+        self._method = method
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self._method
+        return self._method.__get__(instance, owner)
+
+    def __set__(self, _instance, _value) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    def __delete__(self, _instance) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
+
+
+def _seal_settlement_consumer_entry(method):
+    return _SettlementConsumerEntry(method)
+
+
+def _build_settlement_consumer_class_guard(name: str):
+    """Keep type-level replacement from bypassing the installed data descriptor."""
+
+    class SettlementConsumerClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            binding = instance.__dict__[name]
+            return binding.__get__(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    return SettlementConsumerClassGuard()
+
+
+class _AutosportSessionMeta(type):
+    """Seal the trusted settlement consumer entry inside the process TCB."""
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if (
+            cls.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            and name in {"_run_dataset_locked", "_settlement_consumer_bindings_sealed"}
+        ):
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if (
+            cls.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            and name in {"_run_dataset_locked", "_settlement_consumer_bindings_sealed"}
+        ):
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        super().__delattr__(name)
+
+
 @dataclass(frozen=True, slots=True)
 class SessionResult:
     replay: ReplayRun
@@ -82,8 +147,10 @@ class ObservationResult:
     current_quotes: tuple[MarketEvent, ...]
 
 
-class AutosportSession:
+class AutosportSession(metaclass=_AutosportSessionMeta):
     """V1 runtime for causal replay, paper simulation and read-only market observation."""
+
+    _settlement_consumer_bindings_sealed = False
 
     def __init__(
         self,
@@ -248,6 +315,7 @@ class AutosportSession:
                 runtime_strategy_id=runtime_strategy_id,
             )
 
+    @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_engine
     def _run_dataset_locked(
         self,
@@ -608,3 +676,10 @@ class AutosportSession:
         # this session may have been constructed before another process committed a
         # newer canonical book, and saving here would silently roll that commit back.
         self.store.close()
+
+# Seal the consumer entry after class creation. The metaclass data descriptor also
+# makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.
+_AutosportSessionMeta._run_dataset_locked = _build_settlement_consumer_class_guard(
+    "_run_dataset_locked"
+)
+AutosportSession._settlement_consumer_bindings_sealed = True

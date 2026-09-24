@@ -425,6 +425,69 @@ class ProductDecisionActivationTests(unittest.TestCase):
         object.__setattr__(self.store, "workspace", self.workspace)
         self.assertEqual(self.store.load(), canonical)
 
+    def test_nested_authority_instance_dispatch_shadow_fails_before_start_publication(
+        self,
+    ) -> None:
+        authority = self.store._authority
+
+        authority.read_history = lambda: ()
+        authority.recover = lambda **_kwargs: None
+        authority.prepare = lambda **_kwargs: None
+        authority.commit = lambda **_kwargs: None
+        try:
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested anti-rollback authority dispatch changed",
+            ):
+                self._initialize()
+            self.assertFalse(self.store.path.exists())
+        finally:
+            for name in ("read_history", "recover", "prepare", "commit"):
+                delattr(authority, name)
+
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
+    def test_nested_authority_class_dispatch_rebind_fails_before_start_publication(
+        self,
+    ) -> None:
+        authority_type = type(self.store._authority)
+
+        def forged_prepare(_authority, **_kwargs):
+            return None
+
+        with mock.patch.object(authority_type, "prepare", forged_prepare):
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested anti-rollback authority dispatch changed",
+            ):
+                self._initialize()
+
+        self.assertFalse(self.store.path.exists())
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+
+    def test_nested_authority_records_path_redirect_fails_before_start_publication(
+        self,
+    ) -> None:
+        authority = self.store._authority
+        original_records_dir = authority.records_dir
+        authority.records_dir = self.test_root / "caller-selected-records"
+        try:
+            with self.assertRaisesRegex(
+                ProductDecisionActivationError,
+                "nested anti-rollback authority construction state changed",
+            ):
+                self._initialize()
+            self.assertFalse(self.store.path.exists())
+        finally:
+            authority.records_dir = original_records_dir
+
+        canonical = self._initialize()
+        self.assertEqual(canonical.product_source_id, "provider-a")
+        self.assertEqual(self.store.load(), canonical)
+
     def test_activation_filename_rebind_cannot_create_second_namespace(self) -> None:
         committed = self._initialize()
         canonical_path = self.store.path

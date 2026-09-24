@@ -455,7 +455,7 @@ def _reconciliation_disposition_impl(
     if evidence.kind is ProphetXEvidenceKind.FIX_EXECUTION_REPORT:
         if not evidence.provider_order_id:
             return ProphetXReconciliationDisposition.CONFLICT
-        if ledger is None or not _bind_provider_assigned_order_id(
+        if ledger is None or not bind_provider_order_id(
             ledger, identity, evidence.provider_order_id
         ):
             return ProphetXReconciliationDisposition.CONFLICT
@@ -535,6 +535,7 @@ def _normalize_fix_execution_reports_impl(
             key=lambda report: (_time(report.transact_time, "transact_time"), report.exec_id),
         )
     )
+
 
 def _build_provider_order_correlation_authority():
     """Closure-own durable identity resolution and positive provider-OrderID admission."""

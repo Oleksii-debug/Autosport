@@ -127,12 +127,7 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
             )
         )
         bad_time = self.event(selection_id="bad-time", source_ts=None)
-        bad_time = MarketEvent.from_dict(
-            {
-                **bad_time.to_dict(),
-                "observed_ts": "not-a-timestamp",
-            }
-        )
+        object.__setattr__(bad_time, "observed_ts", "not-a-timestamp")
         mirror.apply(bad_time)
 
         audit = mirror.view(source_ids="provider-a")

@@ -116,6 +116,26 @@ def test_tick_failure_remains_primary_when_close_raises_baseexception(
     assert runtime.close_calls == 1
 
 
+def test_successful_product_body_reraises_close_baseexception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _Runtime(close_failure=CloseInterrupt("close interrupt"))
+    _install_runtime(monkeypatch, runtime)
+
+    with pytest.raises(CloseInterrupt):
+        entrypoint.run_product(
+            workspace=tmp_path,
+            source_factory="ignored:factory",
+            max_cycles=1,
+            install_signal_handlers=False,
+        )
+
+    assert runtime.start_calls == 1
+    assert runtime.stop_calls == 1
+    assert runtime.close_calls == 1
+
+
 def test_partial_signal_install_failure_closes_and_restores_installed_handler(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -1048,6 +1048,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[], None] | None = None,
         _transport_post: Callable[..., bytes] | None = None,
         _response_parser: Callable[..., BetfairPlaceExecutionReport] | None = None,
         _observation_clock: Callable[[], str] | None = None,
@@ -1123,6 +1124,8 @@ class BetfairSupervisedPlaceOrdersClient:
         )
         try:
             with _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE(stop_authority):
+                if _before_transport is not None:
+                    _before_transport()
                 try:
                     if _transport_post is None:
                         payload = self._transport.post(
@@ -1869,10 +1872,13 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
+
+        def mark_submitted_after_stop_admission() -> None:
+            ledger.mark_submitted(
+                attempt_id,
+                submitted_at=now(),
+            )
+
         try:
             report = _CANONICAL_BETFAIR_PLACE_ACTION(
                 client,
@@ -1881,14 +1887,12 @@ def execute_betfair_supervised_action(
                 bound=bound,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
+                _before_transport=mark_submitted_after_stop_admission,
                 _transport_post=_CANONICAL_PROVIDER_HTTP_POST,
                 _response_parser=_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE,
                 _observation_clock=_CANONICAL_PROVIDER_OBSERVATION_CLOCK,
             )
-        except (
-            BetfairPlaceOrdersAmbiguous,
-            BetfairSupervisedExecutionError,
-        ):
+        except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(
                 attempt_id,
                 reason=(

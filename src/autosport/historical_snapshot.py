@@ -418,6 +418,46 @@ def _build_historical_snapshot_provider_origin_authority():
     http_response_type = http_client_module.HTTPResponse
     canonical_http_response_class = http_connection_type.response_class
     canonical_https_response_class = https_connection_type.response_class
+    request_dispatch_names = (
+        "__init__",
+        "_parse",
+        "get_method",
+        "get_full_url",
+        "set_proxy",
+        "has_proxy",
+        "add_header",
+        "add_unredirected_header",
+        "has_header",
+        "get_header",
+        "remove_header",
+        "header_items",
+    )
+    canonical_request_dispatch = {
+        name: getattr(request_type, name)
+        for name in request_dispatch_names
+    }
+    canonical_request_dispatch_codes = {
+        name: getattr(method, "__code__", None)
+        for name, method in canonical_request_dispatch.items()
+    }
+    request_property_names = ("full_url", "data")
+    canonical_request_properties = {
+        name: getattr(request_type, name)
+        for name in request_property_names
+    }
+    canonical_request_property_accessors = {
+        (name, accessor): getattr(descriptor, accessor)
+        for name, descriptor in canonical_request_properties.items()
+        for accessor in ("fget", "fset", "fdel")
+    }
+    canonical_request_property_codes = {
+        key: (
+            getattr(accessor, "__code__", None)
+            if accessor is not None
+            else None
+        )
+        for key, accessor in canonical_request_property_accessors.items()
+    }
     connection_dispatch_names = (
         "__init__",
         "connect",
@@ -493,6 +533,14 @@ def _build_historical_snapshot_provider_origin_authority():
         is not http_client_module
         or any(
             code is None
+            for code in canonical_request_dispatch_codes.values()
+        )
+        or any(
+            accessor is not None and canonical_request_property_codes[key] is None
+            for key, accessor in canonical_request_property_accessors.items()
+        )
+        or any(
+            code is None
             for code in canonical_http_connection_dispatch_codes.values()
         )
         or any(
@@ -501,6 +549,38 @@ def _build_historical_snapshot_provider_origin_authority():
         )
     ):
         raise RuntimeError("canonical Parlay historical network dispatch is unavailable")
+
+    def request_dispatch_is_canonical() -> bool:
+        for name in request_dispatch_names:
+            current = getattr(request_type, name, None)
+            expected = canonical_request_dispatch[name]
+            if (
+                current is not expected
+                or getattr(current, "__code__", None)
+                is not canonical_request_dispatch_codes[name]
+            ):
+                return False
+        for name in request_property_names:
+            current_descriptor = getattr(request_type, name, None)
+            expected_descriptor = canonical_request_properties[name]
+            if (
+                current_descriptor is not expected_descriptor
+                or type(current_descriptor) is not property
+            ):
+                return False
+            for accessor_name in ("fget", "fset", "fdel"):
+                key = (name, accessor_name)
+                current_accessor = getattr(current_descriptor, accessor_name)
+                expected_accessor = canonical_request_property_accessors[key]
+                if current_accessor is not expected_accessor:
+                    return False
+                if (
+                    expected_accessor is not None
+                    and getattr(current_accessor, "__code__", None)
+                    is not canonical_request_property_codes[key]
+                ):
+                    return False
+        return True
 
     def connection_dispatch_is_canonical() -> bool:
         if (
@@ -541,7 +621,8 @@ def _build_historical_snapshot_provider_origin_authority():
 
     def stdlib_dispatch_is_canonical() -> bool:
         return (
-            connection_dispatch_is_canonical()
+            request_dispatch_is_canonical()
+            and connection_dispatch_is_canonical()
             and getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
             and opener_type.open is canonical_opener_open
             and getattr(canonical_opener_open, "__code__", None)
@@ -871,6 +952,11 @@ def _build_historical_snapshot_provider_origin_authority():
                 )
             require_authority()
             request = request_type(url, headers=dict(headers), method="GET")
+            # Request construction and its header/property helpers are mutable
+            # Python dispatch. Revalidate the complete frozen network authority
+            # after construction so it cannot smuggle a transient lower
+            # connection replacement past the pre-I/O fence.
+            require_authority()
             try:
                 with canonical_opener_open(
                     opener, request, timeout=timeout

@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import signal
+import sys
 import time
 import unicodedata
 from dataclasses import asdict
@@ -317,16 +318,18 @@ def run_product(
     )
     stop_request = _SignalStopRequest()
     previous_handlers: dict[signal.Signals, object] = {}
-    if install_signal_handlers:
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM)
-        }
-        for signum in previous_handlers:
-            signal.signal(signum, stop_request.handle)
-
+    installed_handlers: list[signal.Signals] = []
     started = False
     try:
+        if install_signal_handlers:
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in (signal.SIGINT, signal.SIGTERM)
+            }
+            for signum in previous_handlers:
+                signal.signal(signum, stop_request.handle)
+                installed_handlers.append(signum)
+
         start_status = runtime.start()
         started = True
         _print_record(
@@ -380,15 +383,32 @@ def run_product(
             raise ProductRuntimeError(type(exc).__name__) from exc
         raise
     finally:
+        # Cleanup is secondary to an exception already propagating out of the
+        # product path. Close and signal restoration are both attempted, but neither
+        # may replace the causal start/tick/STOP/setup failure. If the product body
+        # succeeded, preserve the first cleanup failure instead of allowing a later
+        # cleanup symptom to overwrite it.
+        primary_failure_active = sys.exc_info()[0] is not None
+        cleanup_failure: Exception | None = None
         try:
             runtime.close()
         except Exception as exc:
+            if not primary_failure_active:
+                cleanup_failure = exc
+
+        for signum in reversed(installed_handlers):
+            try:
+                signal.signal(signum, previous_handlers[signum])
+            except Exception as exc:
+                if not primary_failure_active and cleanup_failure is None:
+                    cleanup_failure = exc
+
+        if cleanup_failure is not None:
             if started:
-                raise ProductRuntimeError(type(exc).__name__) from exc
-            raise
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+                raise ProductRuntimeError(
+                    type(cleanup_failure).__name__
+                ) from cleanup_failure
+            raise cleanup_failure
 
 
 def run_product_command(

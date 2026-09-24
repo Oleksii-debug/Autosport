@@ -796,6 +796,8 @@ def _build_allocation_basis_store_runtime():
         name: getattr(method, "__code__", None)
         for name, method in authority_methods.items()
     }
+    sha256_file_fn = sha256_file
+    object_getattribute = object.__getattribute__
 
     def canonical_root() -> Path:
         if getattr(root_resolver, "__code__", None) is not root_code:
@@ -923,6 +925,68 @@ def _build_allocation_basis_store_runtime():
                 "allocation basis authority coordinates changed"
             )
 
+    def authority_call(self, name: str, **kwargs):
+        require_state(self)
+        try:
+            _workspace, _path, authority, _root = sealed_state[self]
+            method = authority_methods[name]
+        except (KeyError, TypeError) as exc:
+            raise error_type(
+                "allocation basis authority operation is not sealed"
+            ) from exc
+        return method(authority, **kwargs)
+
+    def sealed_recover(self) -> None:
+        require_state(self)
+        try:
+            _workspace, frozen_path, authority, _root = sealed_state[self]
+        except (KeyError, TypeError) as exc:
+            raise error_type(
+                "allocation basis authority state is not sealed"
+            ) from exc
+        observed = (
+            sha256_file_fn(frozen_path)
+            if frozen_path.exists()
+            else None
+        )
+        history = authority_methods["read_history"](authority)
+        if history and history[-1].phase is AuthorityPhase.PREPARE:
+            pending = history[-1]
+            authority_methods["recover"](
+                authority,
+                observed_state_sha256=observed,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
+            return
+        authority_methods["recover"](
+            authority,
+            observed_state_sha256=observed,
+        )
+
+    def sealed_getattribute(self, name: str):
+        if name == "_recover":
+            return lambda: sealed_recover(self)
+        if name == "_authority_prepare":
+            return lambda **kwargs: authority_call(
+                self,
+                "prepare",
+                **kwargs,
+            )
+        if name == "_authority_abort":
+            return lambda **kwargs: authority_call(
+                self,
+                "abort",
+                **kwargs,
+            )
+        if name == "_authority_commit":
+            return lambda **kwargs: authority_call(
+                self,
+                "commit",
+                **kwargs,
+            )
+        return object_getattribute(self, name)
+
     def sealed_init(self, workspace: str | Path) -> None:
         authority_root = canonical_root()
         workspace_path = (
@@ -947,19 +1011,25 @@ def _build_allocation_basis_store_runtime():
         )
         require_state(self)
         with lock_type(workspace_path):
-            self._recover()
+            sealed_recover(self)
             self._records = self._load()
 
-    return sealed_init, require_state
+    return sealed_init, require_state, sealed_recover, sealed_getattribute
 
 
-_STORE_INIT, _STORE_STATE_GUARD = _build_allocation_basis_store_runtime()
+(
+    _STORE_INIT,
+    _STORE_STATE_GUARD,
+    _STORE_RECOVER,
+    _STORE_GETATTRIBUTE,
+) = _build_allocation_basis_store_runtime()
 
 class LocalComputeAllocationBasisAuthorityStore:
     """Creation-only owner-reviewed basis store with rollback fencing."""
 
     __slots__ = ("workspace", "path", "_authority", "_records", "__weakref__")
     __init__ = _STORE_INIT
+    __getattribute__ = _STORE_GETATTRIBUTE
 
     def _observed_sha256(self) -> str | None:
         return sha256_file(self.path) if self.path.exists() else None
@@ -1204,7 +1274,7 @@ class LocalComputeAllocationBasisAuthorityStore:
                 }
             )
             tx_id = f"local-compute-allocation-{record.basis_sha256}"
-            self._authority.prepare(
+            self._authority_prepare(
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 intended_state_sha256=intended,
@@ -1213,7 +1283,7 @@ class LocalComputeAllocationBasisAuthorityStore:
             try:
                 atomic_write_json(self.path, payload)
             except Exception:
-                self._authority.abort(
+                self._authority_abort(
                     tx_id=tx_id,
                     observed_state_sha256=observed,
                     semantic_binding_sha256=binding,
@@ -1224,7 +1294,7 @@ class LocalComputeAllocationBasisAuthorityStore:
                 raise LocalComputeAllocationBasisError(
                     "published basis bytes do not match prepared monotonic state"
                 )
-            self._authority.commit(
+            self._authority_commit(
                 tx_id=tx_id,
                 observed_state_sha256=published,
                 semantic_binding_sha256=binding,
@@ -1321,7 +1391,7 @@ class LocalComputeAllocationBasisAuthorityStore:
         )
 
 
-del _STORE_INIT, _STORE_STATE_GUARD
+del _STORE_INIT, _STORE_STATE_GUARD, _STORE_RECOVER, _STORE_GETATTRIBUTE
 __all__ = [
     "LocalComputeAllocationBasisAuthorityStore",
     "LocalComputeAllocationBasisError",

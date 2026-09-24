@@ -315,7 +315,7 @@ class CampaignQualificationTests(unittest.TestCase):
         )
         self.assert_blocked(self.rebind_bundle(changed), "STOP predates")
 
-    def test_campaign_must_span_at_least_24_hours(self):
+    def test_campaign_start_must_not_follow_first_observation(self):
         evidence = self.complete()
         identity = replace(
             evidence.identity,
@@ -333,7 +333,7 @@ class CampaignQualificationTests(unittest.TestCase):
         )
         self.assert_blocked(
             self.rebind_bundle(changed),
-            "minimum 24-hour",
+            "observation predates campaign start",
         )
 
     def test_terminal_bundle_must_bind_exact_episode_chain(self):

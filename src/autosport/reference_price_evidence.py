@@ -678,6 +678,19 @@ class ReferencePriceDecisionResolution:
                         "candidate event price_semantics does not match frozen protocol"
                     )
 
+        transport_event_bytes: set[str] = set()
+        price_source_event_bytes: set[str] = set()
+        for candidate in ordered:
+            event_bytes = set(candidate.event_canonical_jsons)
+            if candidate.namespace is ReferenceCandidateNamespace.TRANSPORT_SOURCE:
+                transport_event_bytes.update(event_bytes)
+            else:
+                price_source_event_bytes.update(event_bytes)
+        if transport_event_bytes != price_source_event_bytes:
+            raise ReferencePriceEvidenceError(
+                "candidate namespace projections must contain identical observation bytes"
+            )
+
         missing = tuple(
             candidate
             for candidate in ordered

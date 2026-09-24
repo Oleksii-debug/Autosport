@@ -396,6 +396,12 @@ def _build_historical_snapshot_provider_origin_authority():
     proxy_handler_type = ProxyHandler
     http_redirect_handler_type = HTTPRedirectHandler
     https_handler_type = HTTPSHandler
+    canonical_https_handler_init = https_handler_type.__init__
+    canonical_https_handler_init_code = getattr(
+        canonical_https_handler_init,
+        "__code__",
+        None,
+    )
     abstract_http_handler_type = AbstractHTTPHandler
     http_error_processor_type = HTTPErrorProcessor
     http_error_type = HTTPError
@@ -482,6 +488,32 @@ def _build_historical_snapshot_provider_origin_authority():
         "cert_store_stats",
     )
     http_client_module = http_client
+    ssl_module = ssl
+    canonical_http_create_https_context = getattr(
+        http_client_module,
+        "_create_https_context",
+        None,
+    )
+    canonical_http_create_https_context_code = getattr(
+        canonical_http_create_https_context,
+        "__code__",
+        None,
+    )
+    canonical_ssl_default_https_context = getattr(
+        ssl_module,
+        "_create_default_https_context",
+        None,
+    )
+    canonical_ssl_default_https_context_code = getattr(
+        canonical_ssl_default_https_context,
+        "__code__",
+        None,
+    )
+    canonical_https_handler_http_package = getattr(
+        canonical_https_handler_init,
+        "__globals__",
+        {},
+    ).get("http")
     http_connection_type = http_client_module.HTTPConnection
     https_connection_type = http_client_module.HTTPSConnection
     http_response_type = http_client_module.HTTPResponse
@@ -592,6 +624,18 @@ def _build_historical_snapshot_provider_origin_authority():
     canonical_urllib_http_package = canonical_https_open.__globals__.get("http")
     if (
         canonical_build_opener_code is None
+        or canonical_https_handler_init_code is None
+        or canonical_http_create_https_context_code is None
+        or canonical_ssl_default_https_context_code is None
+        or canonical_https_handler_http_package is None
+        or getattr(canonical_https_handler_http_package, "client", None)
+        is not http_client_module
+        or getattr(
+            canonical_http_create_https_context,
+            "__globals__",
+            {},
+        ).get("ssl")
+        is not ssl_module
         or canonical_opener_open_code is None
         or canonical_opener_internal_open_code is None
         or canonical_opener_call_chain_code is None
@@ -771,7 +815,33 @@ def _build_historical_snapshot_provider_origin_authority():
             request_dispatch_is_canonical()
             and socket_tls_dispatch_is_canonical()
             and connection_dispatch_is_canonical()
-            and getattr(build_opener_fn, "__code__", None) is canonical_build_opener_code
+            and https_handler_type.__init__ is canonical_https_handler_init
+            and getattr(canonical_https_handler_init, "__code__", None)
+            is canonical_https_handler_init_code
+            and getattr(
+                canonical_https_handler_init,
+                "__globals__",
+                {},
+            ).get("http")
+            is canonical_https_handler_http_package
+            and getattr(canonical_https_handler_http_package, "client", None)
+            is http_client_module
+            and getattr(http_client_module, "_create_https_context", None)
+            is canonical_http_create_https_context
+            and getattr(canonical_http_create_https_context, "__code__", None)
+            is canonical_http_create_https_context_code
+            and getattr(
+                canonical_http_create_https_context,
+                "__globals__",
+                {},
+            ).get("ssl")
+            is ssl_module
+            and getattr(ssl_module, "_create_default_https_context", None)
+            is canonical_ssl_default_https_context
+            and getattr(canonical_ssl_default_https_context, "__code__", None)
+            is canonical_ssl_default_https_context_code
+            and getattr(build_opener_fn, "__code__", None)
+            is canonical_build_opener_code
             and opener_type.open is canonical_opener_open
             and getattr(canonical_opener_open, "__code__", None)
             is canonical_opener_open_code

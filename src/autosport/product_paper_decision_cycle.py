@@ -359,21 +359,32 @@ class ProductPaperDecisionCycle:
                 "PAPER decision composition already has a product cycle in progress"
             )
         try:
-            self._require_running_runtime()
-            product_tick = self.runtime.tick()
-            status = self.runtime.status()
-            skip_reason = self._decision_skip_reason(product_tick, status)
-            if skip_reason is not None:
+            try:
+                operation_fence = self.runtime._operation_fence
+            except AttributeError as exc:
+                raise ProductPaperDecisionCycleError(
+                    "canonical product runtime lacks lifecycle serialization authority"
+                ) from exc
+            if operation_fence is None:
+                raise ProductPaperDecisionCycleError(
+                    "canonical product runtime lifecycle serialization is unavailable"
+                )
+            with operation_fence:
+                self._require_running_runtime()
+                product_tick = self.runtime.tick()
+                status = self.runtime.status()
+                skip_reason = self._decision_skip_reason(product_tick, status)
+                if skip_reason is not None:
+                    return ProductPaperDecisionTickResult(
+                        product_tick=product_tick,
+                        decision=None,
+                        skipped_reason=skip_reason,
+                    )
+                decision = self._run_decision_cycle()
                 return ProductPaperDecisionTickResult(
                     product_tick=product_tick,
-                    decision=None,
-                    skipped_reason=skip_reason,
+                    decision=decision,
+                    skipped_reason=None,
                 )
-            decision = self._run_decision_cycle()
-            return ProductPaperDecisionTickResult(
-                product_tick=product_tick,
-                decision=decision,
-                skipped_reason=None,
-            )
         finally:
             self._cycle_lock.release()

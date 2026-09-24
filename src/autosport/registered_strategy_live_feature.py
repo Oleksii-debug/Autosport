@@ -20,11 +20,13 @@ from .scientific_registry import FeatureSet, ModelVersion, ScientificRegistry
 
 LIVE_FEATURE_SET_ID = "autosport-live-implied-probability-v1"
 LIVE_FEATURE_SET_VERSION = "1"
+LIVE_FEATURE_FRESHNESS_POLICY_ID = "market-mirror-source-ts-preferred-v1"
 LIVE_FEATURE_DEFINITION_JSON = (
-    '{"availability":"max(observed_ts,ingest_ts); source_ts<=decision_at when present",'
+    '{"availability":"max(observed_ts,ingest_ts)<=decision_at; freshness_timestamp=source_ts when present else observed_ts; 0<=decision_at-freshness_timestamp<=freshness_max_age_seconds",'
     '"feature":"implied_probability_binary64_v1",'
     '"feature_set_id":"autosport-live-implied-probability-v1",'
     '"formula":"1.0 / float(decimal_odds)",'
+    f'"freshness_policy":"{LIVE_FEATURE_FRESHNESS_POLICY_ID}",'
     '"input":"canonical MarketEvent.decimal_odds",'
     '"schema":"autosport.live_feature_definition","schema_version":1,'
     '"semantics":"market-price feature only; not a calibrated outcome probability",'
@@ -36,8 +38,10 @@ LIVE_FEATURE_DEFINITION_SHA256 = hashlib.sha256(
 ).hexdigest()
 LIVE_FEATURE_SOURCE_CONTRACT_JSON = (
     '{"callable":"observe_registered_strategy_live_features",'
+    '"decision_boundary":"normalized decision_at + exact non-negative freshness_max_age_seconds are required and evidence-bound",'
     '"event_authority":"autosport.domain.MarketEvent.from_dict/to_dict",'
     f'"feature_definition_sha256":"{LIVE_FEATURE_DEFINITION_SHA256}",'
+    f'"freshness_policy":"{LIVE_FEATURE_FRESHNESS_POLICY_ID}",'
     '"module":"autosport.registered_strategy_live_feature",'
     '"numeric_contract":"Python binary64 reciprocal; evidence binds float.hex",'
     '"schema":"autosport.live_feature_source_contract","schema_version":1}'
@@ -47,6 +51,14 @@ LIVE_FEATURE_SOURCE_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 _SHA256_HEX = frozenset("0123456789abcdef")
+_CANONICAL_REGISTRY_GET = ScientificRegistry.get
+_CANONICAL_REGISTRY_GET_CODE = getattr(_CANONICAL_REGISTRY_GET, "__code__", None)
+_CANONICAL_REGISTRY_CAUSAL_PRECEDES = ScientificRegistry.causal_precedes
+_CANONICAL_REGISTRY_CAUSAL_PRECEDES_CODE = getattr(
+    _CANONICAL_REGISTRY_CAUSAL_PRECEDES,
+    "__code__",
+    None,
+)
 
 
 class RegisteredStrategyLiveFeatureError(ValueError):
@@ -93,6 +105,14 @@ def _instant(name: str, value: object) -> datetime:
             f"{name} must be timezone-aware"
         )
     return parsed.astimezone(timezone.utc)
+
+
+def _nonnegative_seconds(name: str, value: object) -> int:
+    if type(value) is not int or value < 0:
+        raise RegisteredStrategyLiveFeatureError(
+            f"{name} must be a non-negative integer number of seconds"
+        )
+    return value
 
 
 def _canonical_json_sha256(payload: object) -> str:
@@ -167,6 +187,10 @@ class LiveFeatureObservation:
     quote_key: str
     feature: float
     available_at: str
+    decision_at: str
+    freshness_policy_id: str
+    freshness_max_age_seconds: int
+    freshness_timestamp: str
     market_event_sha256: str
     market_snapshot_sha256: str
     authority_sha256: str
@@ -183,7 +207,26 @@ class LiveFeatureObservation:
             raise RegisteredStrategyLiveFeatureError(
                 "feature must be a finite binary64 value strictly between 0 and 1"
             )
-        _instant("available_at", self.available_at)
+        available = _instant("available_at", self.available_at)
+        decision = _instant("decision_at", self.decision_at)
+        if self.freshness_policy_id != LIVE_FEATURE_FRESHNESS_POLICY_ID:
+            raise RegisteredStrategyLiveFeatureError(
+                "freshness_policy_id does not match the supported live feature contract"
+            )
+        max_age_seconds = _nonnegative_seconds(
+            "freshness_max_age_seconds",
+            self.freshness_max_age_seconds,
+        )
+        freshness = _instant("freshness_timestamp", self.freshness_timestamp)
+        if available > decision:
+            raise RegisteredStrategyLiveFeatureError(
+                "feature availability is after decision time"
+            )
+        freshness_age_seconds = (decision - freshness).total_seconds()
+        if freshness_age_seconds < 0 or freshness_age_seconds > max_age_seconds:
+            raise RegisteredStrategyLiveFeatureError(
+                "feature freshness timestamp is outside the bound decision window"
+            )
         _sha256("market_event_sha256", self.market_event_sha256)
         _sha256("market_snapshot_sha256", self.market_snapshot_sha256)
         _sha256("authority_sha256", self.authority_sha256)
@@ -209,7 +252,30 @@ def resolve_registered_live_feature_authority(
     wanted_model = _canonical_text("model_version_id", model_version_id)
     decision = _instant("decision_at", decision_at)
 
-    model_entry = registry.get("ModelVersion", wanted_model)
+    if (
+        ScientificRegistry.get is not _CANONICAL_REGISTRY_GET
+        or getattr(ScientificRegistry.get, "__code__", None)
+        is not _CANONICAL_REGISTRY_GET_CODE
+        or ScientificRegistry.causal_precedes
+        is not _CANONICAL_REGISTRY_CAUSAL_PRECEDES
+        or getattr(ScientificRegistry.causal_precedes, "__code__", None)
+        is not _CANONICAL_REGISTRY_CAUSAL_PRECEDES_CODE
+    ):
+        raise RegisteredStrategyLiveFeatureError(
+            "canonical ScientificRegistry read/causal authority changed"
+        )
+    try:
+        durable_registry = ScientificRegistry(registry.path)
+    except (OSError, ValueError) as exc:
+        raise RegisteredStrategyLiveFeatureError(
+            "durable ScientificRegistry cannot be reopened canonically"
+        ) from exc
+
+    model_entry = _CANONICAL_REGISTRY_GET(
+        durable_registry,
+        "ModelVersion",
+        wanted_model,
+    )
     if model_entry is None:
         raise RegisteredStrategyLiveFeatureError(
             "registered ModelVersion is missing"
@@ -238,7 +304,11 @@ def resolve_registered_live_feature_authority(
         raise RegisteredStrategyLiveFeatureError(
             "ModelVersion is not bound to the supported live feature set"
         )
-    feature_entry = registry.get("FeatureSet", model.feature_set_id)
+    feature_entry = _CANONICAL_REGISTRY_GET(
+        durable_registry,
+        "FeatureSet",
+        model.feature_set_id,
+    )
     if feature_entry is None:
         raise RegisteredStrategyLiveFeatureError(
             "registered FeatureSet is missing"
@@ -275,6 +345,16 @@ def resolve_registered_live_feature_authority(
     ):
         raise RegisteredStrategyLiveFeatureError(
             "registered FeatureSet does not match the supported live feature contract"
+        )
+    if not _CANONICAL_REGISTRY_CAUSAL_PRECEDES(
+        durable_registry,
+        "FeatureSet",
+        feature.feature_set_id,
+        "ModelVersion",
+        model.model_version_id,
+    ):
+        raise RegisteredStrategyLiveFeatureError(
+            "FeatureSet does not durably precede ModelVersion in ScientificRegistry"
         )
 
     return RegisteredLiveFeatureAuthority(
@@ -361,6 +441,7 @@ def observe_registered_strategy_live_features(
     snapshot: MirrorSnapshot,
     *,
     decision_at: str,
+    freshness_max_age_seconds: int,
     registry: ScientificRegistry,
     model_version_id: str,
 ) -> tuple[LiveFeatureObservation, ...]:
@@ -368,6 +449,11 @@ def observe_registered_strategy_live_features(
 
     wanted_input = _canonical_text("input_id", input_id)
     decision = _instant("decision_at", decision_at)
+    decision_text = decision.isoformat().replace("+00:00", "Z")
+    max_age_seconds = _nonnegative_seconds(
+        "freshness_max_age_seconds",
+        freshness_max_age_seconds,
+    )
     authority = resolve_registered_live_feature_authority(
         registry,
         model_version_id,
@@ -387,11 +473,22 @@ def observe_registered_strategy_live_features(
             raise RegisteredStrategyLiveFeatureError(
                 "market evidence was not causally available at decision time"
             )
-        if event.source_ts is not None and _instant(
-            "MarketEvent.source_ts", event.source_ts
-        ) > decision:
+        if event.source_ts is not None:
+            source_timestamp = _instant("MarketEvent.source_ts", event.source_ts)
+            if source_timestamp > decision:
+                raise RegisteredStrategyLiveFeatureError(
+                    "provider source timestamp is after decision time"
+                )
+            freshness_timestamp = source_timestamp
+        else:
+            freshness_timestamp = observed
+        freshness_age_seconds = (decision - freshness_timestamp).total_seconds()
+        if (
+            freshness_age_seconds < 0
+            or freshness_age_seconds > max_age_seconds
+        ):
             raise RegisteredStrategyLiveFeatureError(
-                "provider source timestamp is after decision time"
+                "market evidence is outside the live freshness boundary"
             )
 
         try:
@@ -408,6 +505,7 @@ def observe_registered_strategy_live_features(
 
         event_sha256 = _canonical_json_sha256(event.to_dict())
         available_text = available.isoformat().replace("+00:00", "Z")
+        freshness_text = freshness_timestamp.isoformat().replace("+00:00", "Z")
         evidence_payload = {
             "schema": "autosport.registered_strategy_live_feature_observation",
             "schema_version": 1,
@@ -423,6 +521,10 @@ def observe_registered_strategy_live_features(
             "authority_sha256": authority.authority_sha256,
             "feature_hex": feature.hex(),
             "available_at": available_text,
+            "decision_at": decision_text,
+            "freshness_policy_id": LIVE_FEATURE_FRESHNESS_POLICY_ID,
+            "freshness_max_age_seconds": max_age_seconds,
+            "freshness_timestamp": freshness_text,
             "market_event_sha256": event_sha256,
             "market_snapshot_sha256": snapshot_sha256,
         }
@@ -432,6 +534,10 @@ def observe_registered_strategy_live_features(
                 quote_key=event.quote_key,
                 feature=feature,
                 available_at=available_text,
+                decision_at=decision_text,
+                freshness_policy_id=LIVE_FEATURE_FRESHNESS_POLICY_ID,
+                freshness_max_age_seconds=max_age_seconds,
+                freshness_timestamp=freshness_text,
                 market_event_sha256=event_sha256,
                 market_snapshot_sha256=snapshot_sha256,
                 authority_sha256=authority.authority_sha256,
@@ -445,6 +551,7 @@ def observe_registered_strategy_live_features(
 __all__ = [
     "LIVE_FEATURE_DEFINITION_JSON",
     "LIVE_FEATURE_DEFINITION_SHA256",
+    "LIVE_FEATURE_FRESHNESS_POLICY_ID",
     "LIVE_FEATURE_SET_ID",
     "LIVE_FEATURE_SET_VERSION",
     "LIVE_FEATURE_SOURCE_CONTRACT_JSON",

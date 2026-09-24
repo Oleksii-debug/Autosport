@@ -14,9 +14,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
+import http.client as http_client
 import json
 from secrets import token_bytes
 import ssl
+import urllib.request as urllib_request
 from threading import RLock
 from types import MappingProxyType
 from typing import Mapping
@@ -207,6 +209,14 @@ class UrllibBetfairKeepAliveTransport:
         _positive_timeout(timeout_seconds)
 
         context = ssl.create_default_context()
+        if (
+            type(context) is not ssl.SSLContext
+            or context.verify_mode != ssl.CERT_REQUIRED
+            or context.check_hostname is not True
+        ):
+            raise BetfairSessionKeepAliveError(
+                "canonical Betfair keepAlive TLS verification is unavailable"
+            )
         request = Request(
             endpoint,
             data=b"",
@@ -398,12 +408,92 @@ def _build_keepalive_authority_runtime():
     canonical_observation_init = observation_type.__init__
     canonical_observation_post_init = observation_type.__post_init__
     canonical_build_opener = build_opener
+    canonical_build_opener_code = getattr(canonical_build_opener, "__code__", None)
     canonical_https_handler = HTTPSHandler
     canonical_redirect_handler = HTTPRedirectHandler
     canonical_ssl_context_factory = ssl.create_default_context
+    canonical_ssl_context_factory_code = getattr(
+        canonical_ssl_context_factory, "__code__", None
+    )
     canonical_request = Request
     redirect_handler_type = _NoRedirectHandler
     canonical_redirect_request = redirect_handler_type.redirect_request
+    canonical_redirect_request_code = getattr(
+        canonical_redirect_request, "__code__", None
+    )
+    urllib_request_module = urllib_request
+    http_client_module = http_client
+    ssl_module = ssl
+    canonical_ssl_context_type = ssl.SSLContext
+    canonical_cert_required = ssl.CERT_REQUIRED
+    canonical_tls_client_protocol = ssl.PROTOCOL_TLS_CLIENT
+    canonical_https_connection = http_client.HTTPSConnection
+    canonical_http_response = http_client.HTTPResponse
+    canonical_socket_module = http_client.socket
+    canonical_socket_create_connection = canonical_socket_module.create_connection
+    canonical_socket_create_connection_code = getattr(
+        canonical_socket_create_connection, "__code__", None
+    )
+
+    # build_opener() and HTTPSHandler dispatch through mutable Python class
+    # descriptors. Seal the bounded runtime graph that can change request
+    # destination, TLS verification, redirect behavior, or provider bytes while
+    # the top-level transport method itself remains byte-identical.
+    transport_root_types = (
+        canonical_request,
+        canonical_https_handler,
+        canonical_redirect_handler,
+        redirect_handler_type,
+        urllib_request_module.OpenerDirector,
+        urllib_request_module.ProxyHandler,
+        urllib_request_module.HTTPErrorProcessor,
+        canonical_https_connection,
+        canonical_http_response,
+        canonical_ssl_context_type,
+    )
+
+    def descriptor_snapshot(value):
+        if type(value) is property:
+            return (
+                "property",
+                value,
+                value.fget,
+                getattr(value.fget, "__code__", None),
+                value.fset,
+                getattr(value.fset, "__code__", None),
+                value.fdel,
+                getattr(value.fdel, "__code__", None),
+            )
+        if type(value) in (classmethod, staticmethod):
+            function = value.__func__
+            return (
+                type(value).__name__,
+                value,
+                function,
+                getattr(function, "__code__", None),
+            )
+        return ("plain", value, getattr(value, "__code__", None))
+
+    def capture_type_state(root_type):
+        return (
+            root_type,
+            root_type.__mro__,
+            tuple(
+                (
+                    cls,
+                    tuple(
+                        (name, descriptor_snapshot(value))
+                        for name, value in cls.__dict__.items()
+                    ),
+                )
+                for cls in root_type.__mro__
+                if cls is not object
+            ),
+        )
+
+    transport_type_states = tuple(
+        capture_type_state(root_type) for root_type in transport_root_types
+    )
     json_module = json
     json_loads = json.loads
     json_loads_code = getattr(json_loads, "__code__", None)
@@ -483,9 +573,87 @@ def _build_keepalive_authority_runtime():
             is json_decoder_raw_decode_code
         )
 
+    def descriptor_matches(current, snapshot) -> bool:
+        kind = snapshot[0]
+        if current is not snapshot[1]:
+            return False
+        if kind == "property":
+            return (
+                current.fget is snapshot[2]
+                and getattr(current.fget, "__code__", None) is snapshot[3]
+                and current.fset is snapshot[4]
+                and getattr(current.fset, "__code__", None) is snapshot[5]
+                and current.fdel is snapshot[6]
+                and getattr(current.fdel, "__code__", None) is snapshot[7]
+            )
+        if kind in {"classmethod", "staticmethod"}:
+            return (
+                current.__func__ is snapshot[2]
+                and getattr(current.__func__, "__code__", None) is snapshot[3]
+            )
+        return getattr(current, "__code__", None) is snapshot[2]
+
+    def type_state_matches(state) -> bool:
+        root_type, canonical_mro, class_states = state
+        if root_type.__mro__ != canonical_mro:
+            return False
+        for cls, descriptors in class_states:
+            current = cls.__dict__
+            if tuple(current) != tuple(name for name, _ in descriptors):
+                return False
+            for name, snapshot in descriptors:
+                if not descriptor_matches(current[name], snapshot):
+                    return False
+        return True
+
+    def transport_executable_graph_matches() -> bool:
+        request_http = getattr(urllib_request_module, "http", None)
+        return bool(
+            urllib_request is urllib_request_module
+            and http_client is http_client_module
+            and ssl is ssl_module
+            and build_opener is canonical_build_opener
+            and getattr(canonical_build_opener, "__code__", None)
+            is canonical_build_opener_code
+            and getattr(urllib_request_module, "build_opener", None)
+            is canonical_build_opener
+            and HTTPSHandler is canonical_https_handler
+            and getattr(urllib_request_module, "HTTPSHandler", None)
+            is canonical_https_handler
+            and HTTPRedirectHandler is canonical_redirect_handler
+            and getattr(urllib_request_module, "HTTPRedirectHandler", None)
+            is canonical_redirect_handler
+            and Request is canonical_request
+            and getattr(urllib_request_module, "Request", None)
+            is canonical_request
+            and ssl_module.create_default_context
+            is canonical_ssl_context_factory
+            and getattr(canonical_ssl_context_factory, "__code__", None)
+            is canonical_ssl_context_factory_code
+            and ssl_module.SSLContext is canonical_ssl_context_type
+            and ssl_module.CERT_REQUIRED == canonical_cert_required
+            and ssl_module.PROTOCOL_TLS_CLIENT == canonical_tls_client_protocol
+            and getattr(getattr(request_http, "client", None), "HTTPSConnection", None)
+            is canonical_https_connection
+            and http_client_module.HTTPSConnection
+            is canonical_https_connection
+            and http_client_module.HTTPResponse is canonical_http_response
+            and http_client_module.socket is canonical_socket_module
+            and canonical_socket_module.create_connection
+            is canonical_socket_create_connection
+            and getattr(canonical_socket_create_connection, "__code__", None)
+            is canonical_socket_create_connection_code
+            and redirect_handler_type.redirect_request
+            is canonical_redirect_request
+            and getattr(canonical_redirect_request, "__code__", None)
+            is canonical_redirect_request_code
+            and all(type_state_matches(state) for state in transport_type_states)
+        )
+
     def implementation_is_current() -> bool:
         return (
             json_executable_graph_matches()
+            and transport_executable_graph_matches()
             and BetfairReadOnlyClient is client_type
             and BetfairSessionCredentials is credentials_type
             and BetfairAuthenticatedJurisdiction is jurisdiction_type
@@ -507,6 +675,8 @@ def _build_keepalive_authority_runtime():
         )
 
     def canonical_network_transport(transport: object) -> bool:
+        if not transport_executable_graph_matches():
+            return False
         if type(transport) is not transport_type:
             return False
         if type(transport).post_keep_alive is not canonical_transport_post:

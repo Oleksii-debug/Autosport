@@ -8,6 +8,7 @@ import threading
 
 import pytest
 
+import autosport.product_entrypoint as product_entrypoint_module
 import autosport.product_gui_worker as worker_module
 import autosport.product_source as product_source_module
 import autosport.trusted_runtime_code_profile as profile_module
@@ -338,9 +339,11 @@ def test_profiled_worker_root_captures_transitive_dependencies_once(
     assert captured is worker_module._PROFILED_RUNTIME_BUILDER
 
     closure = inspect.getclosurevars(captured).nonlocals
-    validated_source = closure["validated_source"]
+    captured_bindings = closure["captured_bindings"]
     runtime_factory = closure["runtime_factory"]
-    source_identity_check = closure["source_identity_check"]
+    runtime_type = closure["runtime_type"]
+    canonical_workspace = closure["canonical_workspace"]
+    path_type = inspect.getclosurevars(canonical_workspace).nonlocals["path_type"]
 
     def attacker(*_args, **_kwargs):
         raise AssertionError("mutable module binding must not redirect profiled root")
@@ -348,23 +351,151 @@ def test_profiled_worker_root_captures_transitive_dependencies_once(
     monkeypatch.setattr(worker_module, "_validated_source", attacker)
     monkeypatch.setattr(worker_module, "build_autonomous_product_runtime", attacker)
     monkeypatch.setattr(
-        worker_module,
-        "require_product_owned_source_factory_identity",
+        product_entrypoint_module,
+        "_load_source_factory",
         attacker,
     )
     monkeypatch.setattr(worker_module, "_PROFILED_RUNTIME_BUILDER", attacker)
     monkeypatch.setattr(worker_module, "_CANONICAL_RUNTIME_BUILDER", attacker)
 
-    after = inspect.getclosurevars(
-        ProductGuiWorker._run.__kwdefaults__["_profiled_runtime_builder"]
-    ).nonlocals
-    assert ProductGuiWorker._run.__kwdefaults__["_profiled_runtime_builder"] is captured
-    assert after["validated_source"] is validated_source
+    after_builder = ProductGuiWorker._run.__kwdefaults__["_profiled_runtime_builder"]
+    after = inspect.getclosurevars(after_builder).nonlocals
+    after_workspace = inspect.getclosurevars(after["canonical_workspace"]).nonlocals
+
+    assert after_builder is captured
+    assert after["captured_bindings"] is captured_bindings
     assert after["runtime_factory"] is runtime_factory
-    assert after["source_identity_check"] is source_identity_check
-    assert after["validated_source"] is not attacker
+    assert after["runtime_type"] is runtime_type
+    assert after_workspace["path_type"] is path_type
     assert after["runtime_factory"] is not attacker
-    assert after["source_identity_check"] is not attacker
+
+
+def test_profiled_builder_uses_exact_captured_factory_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = SimpleNamespace(
+        source_id=_PROVIDER_SOURCE_ID,
+        stream_epoch="test-stream",
+        workspace=tmp_path,
+        fetch_catalog_page=lambda *_args, **_kwargs: None,
+        fetch_deltas=lambda *_args, **_kwargs: (),
+        resolve_event=lambda *_args, **_kwargs: None,
+    )
+    factory_calls = 0
+
+    def canonical_factory() -> object:
+        nonlocal factory_calls
+        factory_calls += 1
+        return source
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.workspace = tmp_path
+            self.manifest = SimpleNamespace(source_id=_PROVIDER_SOURCE_ID)
+            self.collector = SimpleNamespace(source=source)
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    runtime = _Runtime()
+    runtime_calls = 0
+
+    def runtime_factory(**kwargs) -> _Runtime:
+        nonlocal runtime_calls
+        runtime_calls += 1
+        assert kwargs["workspace"] == tmp_path
+        assert kwargs["source"] is source
+        assert kwargs["initial_bankroll"] == "10000"
+        return runtime
+
+    binding = worker_module._ProfiledSourceBinding(
+        factory_spec=_FACTORY_SPEC,
+        provider_source_id=_PROVIDER_SOURCE_ID,
+        factory=canonical_factory,
+    )
+    builder = worker_module._capture_profiled_runtime_builder(
+        source_bindings=(binding,),
+        runtime_factory=runtime_factory,
+        runtime_type=_Runtime,
+        path_type=Path,
+    )
+
+    def dynamic_loader_must_not_run(*_args, **_kwargs):
+        raise AssertionError("profiled path must not use the dynamic source loader")
+
+    monkeypatch.setattr(
+        product_entrypoint_module,
+        "_load_source_factory",
+        dynamic_loader_must_not_run,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_validated_source",
+        dynamic_loader_must_not_run,
+    )
+
+    assert (
+        builder(
+            tmp_path,
+            _FACTORY_SPEC,
+            "10000",
+            expected_source_id=_PROVIDER_SOURCE_ID,
+        )
+        is runtime
+    )
+    assert factory_calls == 1
+    assert runtime_calls == 1
+
+
+def test_profiled_builder_rejects_runtime_that_drops_exact_source_identity(
+    tmp_path: Path,
+) -> None:
+    source = SimpleNamespace(
+        source_id=_PROVIDER_SOURCE_ID,
+        stream_epoch="test-stream",
+        workspace=tmp_path,
+        fetch_catalog_page=lambda *_args, **_kwargs: None,
+        fetch_deltas=lambda *_args, **_kwargs: (),
+        resolve_event=lambda *_args, **_kwargs: None,
+    )
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.workspace = tmp_path
+            self.manifest = SimpleNamespace(source_id=_PROVIDER_SOURCE_ID)
+            self.collector = SimpleNamespace(source=object())
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    runtime = _Runtime()
+    binding = worker_module._ProfiledSourceBinding(
+        factory_spec=_FACTORY_SPEC,
+        provider_source_id=_PROVIDER_SOURCE_ID,
+        factory=lambda: source,
+    )
+    builder = worker_module._capture_profiled_runtime_builder(
+        source_bindings=(binding,),
+        runtime_factory=lambda **_kwargs: runtime,
+        runtime_type=_Runtime,
+        path_type=Path,
+    )
+
+    with pytest.raises(
+        ProductEntrypointError,
+        match="does not retain the exact closed-registry source",
+    ):
+        builder(
+            tmp_path,
+            _FACTORY_SPEC,
+            "10000",
+            expected_source_id=_PROVIDER_SOURCE_ID,
+        )
+
+    assert runtime.closed is True
 
 
 def test_arbitrary_headless_builder_never_enters_trusted_profile_path(
@@ -400,6 +531,7 @@ def test_arbitrary_headless_builder_never_enters_trusted_profile_path(
     runtime.release_tick.set()
     assert worker.join(2.0)
     assert worker.trusted_runtime_profile is None
+
 
 
 def test_injected_builder_without_expected_identity_remains_unprofiled(

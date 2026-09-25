@@ -537,7 +537,10 @@ def test_factory_rejects_class_level_transport_method_replacement(
 
     monkeypatch.setattr(UrllibBetfairHttpTransport, "post", replacement)
 
-    with pytest.raises(BetfairAccountIdentityError, match="invalid origin"):
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match="canonical Betfair client/network implementation changed",
+    ):
         _client()
 
 

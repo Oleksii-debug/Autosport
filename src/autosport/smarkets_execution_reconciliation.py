@@ -109,7 +109,13 @@ def _nonnegative_decimal(value: object, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
+    """Serialize a finite Decimal canonically without ambient-context rounding."""
+
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise SmarketsReconciliationError(
+            "canonical decimal text requires a finite Decimal"
+        )
+    text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 

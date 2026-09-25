@@ -7,11 +7,11 @@ Two independent properties matter here:
 * a positive ``first_available_at`` must be sampled only after the exact new
   revision identity is already durably observable by the product.
 
-The guard reuses the canonical re-entrant/cross-process ``durable_path_lock``.  New
+The guard reuses the canonical re-entrant/cross-process ``durable_path_lock``. New
 lineage identity is first published with an UNKNOWN (``None``) availability suffix,
-then exact-reread, then the product clock is sampled and the positive availability
-plus run admission are published.  A crash between phases therefore leaves durable
-identity but no favorable timestamp and no in-progress run.
+then exact-reread, then the sealed product clock is sampled and the positive
+availability plus run admission are published. A crash between phases therefore
+leaves durable identity but no favorable timestamp and no in-progress run.
 """
 
 from __future__ import annotations
@@ -26,15 +26,24 @@ from . import run_registry as _run_registry
 _F = TypeVar("_F", bound=Callable[..., object])
 _ORIGINAL_BINDING_FROM_PAYLOAD = _outcome_trust.outcome_lineage_binding_from_payload
 _ORIGINAL_BEGIN = _run_registry.RunRegistry.begin
+
+# Capture the product wall-clock dependency exactly once when this guard is
+# installed. A later monkeypatch/rebind of module globals must never be able to
+# mint favorable historical product availability.
 _PRODUCT_UTC_NOW: Final = _run_registry._utc_now
 
 
-def _product_utc_now() -> str:
-    if _run_registry._utc_now is not _PRODUCT_UTC_NOW:
+def _sealed_product_utc_now(
+    _product_clock: Callable[[], str] = _PRODUCT_UTC_NOW,
+    _run_registry_module=_run_registry,
+) -> str:
+    """Sample only the product clock captured when the authority was installed."""
+
+    if _run_registry_module._utc_now is not _product_clock:
         raise _outcome_trust.OutcomeLineageTrustError(
             "product UTC clock authority was rebound"
         )
-    return _PRODUCT_UTC_NOW()
+    return _product_clock()
 
 
 def _binding_from_payload_with_unknown_suffix(
@@ -397,7 +406,7 @@ def _begin_with_causal_outcome_publication(
             ]
             if established:
                 probe = _outcome_trust._canonical_timestamp(
-                    _product_utc_now(),
+                    _sealed_product_utc_now(),
                     field="outcome lineage product acceptance time",
                 )
                 if _outcome_trust._parse_timestamp(probe) < _outcome_trust._parse_timestamp(
@@ -427,7 +436,7 @@ def _begin_with_causal_outcome_publication(
         if needs_availability:
             product_bound = _bind_availability_with_unknown_suffix(
                 outcome_lineage,
-                accepted_at=_product_utc_now(),
+                accepted_at=_sealed_product_utc_now(),
                 trusted=persisted,
             )
             _store_trust_binding(state, product_bound)
@@ -469,7 +478,7 @@ def _begin_with_causal_outcome_publication(
 
 
 # Make partial UNKNOWN suffixes first-class durable fail-closed state for the
-# two-phase transition.  RunRegistry imported these functions by value, so patch
+# two-phase transition. RunRegistry imported these functions by value, so patch
 # both the source module and its local references.
 _outcome_trust.outcome_lineage_binding_from_payload = _binding_from_payload_with_unknown_suffix
 _outcome_trust.bind_outcome_lineage_availability = _bind_availability_with_unknown_suffix
@@ -480,6 +489,7 @@ _run_registry.resolve_outcome_revision_as_of = _resolve_with_unknown_suffix
 
 _begin_with_causal_outcome_publication._autosport_registry_rmw_serialized = True
 _begin_with_causal_outcome_publication._autosport_outcome_two_phase = True
+_begin_with_causal_outcome_publication._autosport_product_clock_sealed = True
 _run_registry.RunRegistry.begin = _begin_with_causal_outcome_publication
 
 for _method_name in (

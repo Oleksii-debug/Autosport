@@ -508,18 +508,51 @@ class ModelComputeRouterTests(unittest.TestCase):
         value,
         observation,
         *,
+        policy_value=None,
+        candidate_values=None,
         context_overrides=None,
         publish=True,
     ):
+        active_policy = policy() if policy_value is None else policy_value
+        active_candidates = (
+            self.candidates
+            if candidate_values is None
+            else tuple(candidate_values)
+        )
+        cloud_backend_id = next(
+            (
+                item.backend_id
+                for item in active_candidates
+                if item.candidate_id == value.cloud_candidate_id
+                and item.tier is ComputeTier.CLOUD
+            ),
+            "NONE",
+        )
         context = {
             "request_id": value.request_id,
             "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
             "regime_id": value.voc_regime_id,
             "urgency_id": value.voc_urgency_id,
             "contradiction_state": value.voc_contradiction_state,
+            "routing_policy_id": active_policy.policy_id,
+            "routing_policy_version": str(active_policy.policy_version),
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    active_policy.payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "cloud_permission": (
+                "ALLOW" if active_policy.cloud_enabled else "DENY"
+            ),
+            "cloud_backend_id": cloud_backend_id,
         }
         if context_overrides:
             context.update(context_overrides)
@@ -546,7 +579,19 @@ class ModelComputeRouterTests(unittest.TestCase):
                 and value.decision_evidence_sha256 is not None
                 and isinstance(observation, SportDomainFitnessObservation)
             ):
-                value = self.canonical_request(value, observation)
+                value = self.canonical_request(
+                    value,
+                    observation,
+                    policy_value=(
+                        args[2]
+                        if len(args) > 2
+                        and isinstance(args[2], ComputeRoutingPolicy)
+                        else None
+                    ),
+                    candidate_values=(
+                        args[1] if len(args) > 1 else None
+                    ),
+                )
                 args = (value, *args[1:])
         return route_compute(*args, **kwargs)
 
@@ -558,7 +603,12 @@ class ModelComputeRouterTests(unittest.TestCase):
             and value.decision_evidence_sha256 is not None
             and isinstance(observation, SportDomainFitnessObservation)
         ):
-            value = self.canonical_request(value, observation)
+            value = self.canonical_request(
+                value,
+                observation,
+                policy_value=policy_value,
+                candidate_values=candidates,
+            )
         return store.route(value, candidates, policy_value, **kwargs)
 
     def router_store(self, path):
@@ -595,6 +645,189 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("non-public", decision.reason)
+
+    def test_cloud_requires_product_owned_matching_data_classification(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-data-classification")
+
+        mismatched_request = request(request_id="req-classification-mismatch")
+        mismatched_request = self.canonical_request(
+            mismatched_request,
+            observation,
+            context_overrides={
+                "data_classification": DataClassification.PRIVATE.value,
+            },
+        )
+        mismatched = self.route_compute(
+            mismatched_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(mismatched.tier, ComputeTier.LOCAL)
+        self.assertIn("data classification does not match", mismatched.reason)
+
+        legacy_request = request(request_id="req-classification-legacy")
+        legacy_context = {
+            "request_id": legacy_request.request_id,
+            "decision_input_sha256": legacy_request.decision_input_sha256,
+            "task_class": legacy_request.required_capability,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": legacy_request.voc_regime_id,
+            "urgency_id": legacy_request.voc_urgency_id,
+            "contradiction_state": legacy_request.voc_contradiction_state,
+        }
+        legacy_digest = hashlib.sha256(
+            json.dumps(
+                legacy_context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._canonical_voc.publish_context(legacy_digest, legacy_context)
+        legacy_request = replace(
+            legacy_request,
+            decision_evidence_sha256=legacy_digest,
+        )
+        legacy = self.route_compute(
+            legacy_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(legacy.tier, ComputeTier.LOCAL)
+        self.assertIn("lacks data classification", legacy.reason)
+
+    def test_cloud_requires_product_owned_permission_scope(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-cloud-permission-scope")
+
+        denied_request = request(request_id="req-cloud-permission-deny")
+        denied_request = self.canonical_request(
+            denied_request,
+            observation,
+            context_overrides={"cloud_permission": "DENY"},
+        )
+        denied = self.route_compute(
+            denied_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(denied.tier, ComputeTier.LOCAL)
+        self.assertIn("does not allow cloud", denied.reason)
+
+        wrong_backend_request = request(
+            request_id="req-cloud-permission-wrong-backend"
+        )
+        wrong_backend_request = self.canonical_request(
+            wrong_backend_request,
+            observation,
+            context_overrides={"cloud_backend_id": "other-cloud"},
+        )
+        wrong_backend = self.route_compute(
+            wrong_backend_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(wrong_backend.tier, ComputeTier.LOCAL)
+        self.assertIn("cloud backend", wrong_backend.reason)
+
+        wrong_policy_request = request(
+            request_id="req-cloud-permission-wrong-policy"
+        )
+        wrong_policy_request = self.canonical_request(
+            wrong_policy_request,
+            observation,
+            context_overrides={"routing_policy_version": "999"},
+        )
+        wrong_policy = self.route_compute(
+            wrong_policy_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(wrong_policy.tier, ComputeTier.LOCAL)
+        self.assertIn("routing policy", wrong_policy.reason)
+
+        canonical_policy = policy()
+        altered_policy = policy(max_cloud_cost=Decimal("999"))
+        digest_request = request(
+            request_id="req-cloud-permission-policy-digest"
+        )
+        digest_request = self.canonical_request(
+            digest_request,
+            observation,
+            policy_value=canonical_policy,
+        )
+        digest_mismatch = self.route_compute(
+            digest_request,
+            self.candidates,
+            altered_policy,
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(digest_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("routing policy", digest_mismatch.reason)
+
+    def test_v2_context_is_readable_but_cannot_mint_cloud_permission(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-v2-permission")
+        value = request(request_id="req-v2-permission")
+        context = {
+            "request_id": value.request_id,
+            "decision_input_sha256": value.decision_input_sha256,
+            "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": value.voc_regime_id,
+            "urgency_id": value.voc_urgency_id,
+            "contradiction_state": value.voc_contradiction_state,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._canonical_voc.publish_context(digest, context)
+        value = replace(value, decision_evidence_sha256=digest)
+
+        decision = self.route_compute(
+            value,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("lacks product cloud permission", decision.reason)
 
     def test_cloud_requires_positive_fresh_measured_paired_voc(self):
         decision = self.route_compute(
@@ -917,6 +1150,43 @@ class ModelComputeRouterTests(unittest.TestCase):
             as_of=T2,
         )
         self.assertEqual(deadline.tier, ComputeTier.WAIT)
+
+        exact_deadline = self.route_compute(
+            request(
+                request_id="req-deadline-exact",
+                decision_deadline=T1,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+        )
+        self.assertEqual(exact_deadline.tier, ComputeTier.WAIT)
+        self.assertIn("deadline", exact_deadline.reason)
+
+        boundary_candidate = candidate(
+            "deadline-boundary-local",
+            backend_id="local-cpu",
+            model_id="baseline-v1",
+            config_sha256=SHA_A,
+            cost="0",
+            latency="10",
+        )
+        exact_estimated_completion = self.route_compute(
+            request(
+                request_id="req-deadline-estimate-exact",
+                decision_deadline=T1,
+                max_cost=Decimal("1"),
+                baseline_candidate_id="deadline-boundary-local",
+                cloud_candidate_id=None,
+            ),
+            (boundary_candidate,),
+            policy(),
+            as_of=T0,
+        )
+        self.assertEqual(
+            exact_estimated_completion.tier,
+            ComputeTier.WAIT,
+        )
 
         over_budget_baseline = self.route_compute(
             request(
@@ -2099,6 +2369,24 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 availability_late.disposition,
+                ExecutionDisposition.REJECTED_LATE,
+            )
+
+            exact_deadline = store.record_execution(
+                execution_id="exec-deadline-exact",
+                request_id="req-exec",
+                completed_at=T2,
+                available_at=T3,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0"),
+                actual_latency_seconds=Decimal("10"),
+                evidence_sha256=SHA_C,
+                as_of=T3,
+            )
+            self.assertEqual(
+                exact_deadline.disposition,
                 ExecutionDisposition.REJECTED_LATE,
             )
 

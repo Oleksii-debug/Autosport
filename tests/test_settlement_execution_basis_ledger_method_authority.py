@@ -1,7 +1,11 @@
+import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import autosport.settlement_execution_basis as settlement_basis_module
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
@@ -158,5 +162,79 @@ def test_runtime_ledger_class_read_rebind_is_rejected_before_fake_read(
         match="executable read authority was rebound",
     ):
         derive_settlement_execution_basis(target, attempt_id="attempt-1")
+
+    assert calls == []
+
+
+def test_consumer_json_rebind_cannot_forge_verified_ledger_events(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _donor_ledger(tmp_path / "ledger.jsonl")
+    genuine = derive_settlement_execution_basis(ledger, attempt_id="attempt-1")
+    calls: list[str] = []
+    canonical_loads = json.loads
+
+    def forged_loads(raw: str):
+        calls.append("forged-loads")
+        envelope = canonical_loads(raw)
+        event = envelope.get("event")
+        if type(event) is dict and event.get("event_type") == "EXTERNAL_ACKNOWLEDGEMENT":
+            forged_event = dict(event)
+            payload = dict(forged_event["payload"])
+            payload["accepted_odds"] = "99.00"
+            payload["accepted_stake"] = "10"
+            forged_event["payload"] = payload
+            forged = dict(envelope)
+            forged["event"] = forged_event
+            forged["sha256"] = "f" * 64
+            return forged
+        return envelope
+
+    forged_json = SimpleNamespace(
+        loads=forged_loads,
+        dumps=json.dumps,
+        JSONDecodeError=json.JSONDecodeError,
+    )
+    monkeypatch.setattr(settlement_basis_module, "json", forged_json)
+
+    with pytest.raises(
+        SettlementExecutionBasisError,
+        match="codec authority was rebound",
+    ):
+        derive_settlement_execution_basis(ledger, attempt_id="attempt-1")
+
+    with pytest.raises(
+        SettlementExecutionBasisError,
+        match="codec authority was rebound",
+    ):
+        verify_settlement_execution_basis(ledger, genuine)
+
+    # The forged parser must not receive even genuine verified ledger bytes.
+    assert calls == []
+
+
+def test_consumer_sha256_rebind_cannot_forge_snapshot_or_basis_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _donor_ledger(tmp_path / "ledger.jsonl")
+    calls: list[bytes] = []
+
+    def forged_sha256(payload: bytes = b""):
+        calls.append(payload)
+        return hashlib.sha256(payload)
+
+    monkeypatch.setattr(
+        settlement_basis_module,
+        "hashlib",
+        SimpleNamespace(sha256=forged_sha256),
+    )
+
+    with pytest.raises(
+        SettlementExecutionBasisError,
+        match="codec authority was rebound",
+    ):
+        derive_settlement_execution_basis(ledger, attempt_id="attempt-1")
 
     assert calls == []

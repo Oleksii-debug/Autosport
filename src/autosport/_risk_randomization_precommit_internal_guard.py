@@ -1,13 +1,13 @@
-"""Seal the product-owned risk-randomization issuer against mutable dispatch.
+"""Seal product-owned risk-randomization authority against mutable dispatch.
 
 The public issuer captures product entropy, but its implementation and helper
 functions originally still resolved cryptographic/serialization helpers through
-the mutable module globals dictionary.  Rebinding ``hashlib`` (or a helper that
-uses it) could therefore steer the persisted randomization root or its durable
-binding without changing the public issuer function identity.
+the mutable module globals dictionary. Rebinding those helpers, the upstream
+membership resolver, or the public receipt resolver could otherwise steer or
+relabel durable randomization authority without changing persisted truth.
 
 A copied ``FunctionType.__globals__`` dictionary is also directly inspectable and
-mutable.  Reuse the monotonic-root dispatch-sealing pattern: every authority-bearing
+mutable. Reuse the monotonic-root dispatch-sealing pattern: every authority-bearing
 clone is invoked only through a wrapper that checks an exact globals snapshot, while
 private facades are checked for exact captured callable attributes before use.
 No estimator, membership, persistence schema, or money authority is added here.
@@ -45,9 +45,6 @@ def _clone_function(
 
 
 def _install_guard() -> None:
-    # Keep the target module itself in this installation frame so every runtime
-    # wrapper below closes over the exact object.  The guard module's public/global
-    # ``_precommit`` binding is deleted after installation and cannot redirect checks.
     precommit_module = _precommit
     implementation_name = "_issue_risk_randomization_precommit"
     implementation = getattr(precommit_module, implementation_name, None)
@@ -55,11 +52,15 @@ def _install_guard() -> None:
         return
 
     public_issuer = precommit_module.issue_risk_randomization_precommit
+    public_resolver = precommit_module.resolve_risk_randomization_precommit
+    membership_resolution = precommit_module.resolve_fixed_n_membership_publication
     closure = getattr(public_issuer, "__closure__", None)
     if not closure or not any(cell.cell_contents is implementation for cell in closure):
         raise RuntimeError(
             "risk randomization public issuer is not bound to the canonical implementation"
         )
+    if type(public_resolver) is not FunctionType or type(membership_resolution) is not FunctionType:
+        raise RuntimeError("risk randomization resolver dispatch is not canonical")
 
     canonical_error = precommit_module.RiskRandomizationPrecommitError
     canonical_hashlib = precommit_module.hashlib
@@ -77,9 +78,6 @@ def _install_guard() -> None:
     canonical_token_bytes = canonical_secrets.token_bytes
     canonical_root_bytes = precommit_module._ROOT_BYTES
 
-    # Private facades hold exact callable objects rather than mutable public module
-    # dispatch. They remain introspectable Python objects, so their attributes are
-    # also verified immediately before every sealed clone executes.
     frozen_hashlib = SimpleNamespace(sha256=canonical_sha256)
     frozen_json = SimpleNamespace(dumps=canonical_json_dumps)
     frozen_os = SimpleNamespace(stat=canonical_os_stat, fstat=canonical_os_fstat)
@@ -119,6 +117,10 @@ def _install_guard() -> None:
             raise canonical_error("frozen randomization transaction-id dispatch was rebound")
         if frozen_secrets.token_bytes is not canonical_token_bytes:
             raise canonical_error("frozen randomization entropy dispatch was rebound")
+
+    def require_membership_resolver() -> None:
+        if precommit_module.resolve_fixed_n_membership_publication is not membership_resolution:
+            raise canonical_error("randomization membership resolver was rebound")
 
     def sealed_clone(function: FunctionType, label: str):
         snapshot = snapshot_globals(function)
@@ -184,6 +186,12 @@ def _install_guard() -> None:
         "randomization workspace resolver",
     )
 
+    frozen_state_path_impl = _clone_function(precommit_module._state_path)
+    sealed_state_path = sealed_clone(
+        frozen_state_path_impl,
+        "randomization state-path resolver",
+    )
+
     frozen_read_regular_bytes_impl = _clone_function(
         precommit_module._read_regular_bytes,
         globals_overrides={"os": frozen_os, "stat": frozen_stat},
@@ -247,33 +255,50 @@ def _install_guard() -> None:
         "randomization receipt builder",
     )
 
-    # Keep the existing upstream membership-publication seam unchanged in this
-    # bounded repair. The receipt still passes exact-type/content checks; sealing
-    # upstream membership issuance remains owned by that authority family.
     def membership_resolver(*args, **kwargs):
-        return precommit_module.resolve_fixed_n_membership_publication(*args, **kwargs)
+        require_membership_resolver()
+        return membership_resolution(*args, **kwargs)
+
+    common_overrides = {
+        "_text": sealed_text,
+        "_workspace_path": sealed_workspace_path,
+        "resolve_fixed_n_membership_publication": membership_resolver,
+        "_membership_binding": sealed_membership_binding,
+        "_experiment_key": sealed_experiment_key,
+        "_state_path": sealed_state_path,
+        "_decode_state": sealed_decode_state,
+        "_semantic_binding_sha256": sealed_semantic_binding,
+        "_sha256_bytes": sealed_sha256_bytes,
+        "_receipt": sealed_receipt,
+    }
 
     frozen_implementation = _clone_function(
         implementation,
         globals_overrides={
+            **common_overrides,
             "hashlib": frozen_hashlib,
             "json": frozen_json,
             "secrets": frozen_secrets,
             "uuid": frozen_uuid,
             "_ROOT_BYTES": canonical_root_bytes,
-            "_text": sealed_text,
-            "_workspace_path": sealed_workspace_path,
-            "resolve_fixed_n_membership_publication": membership_resolver,
-            "_membership_binding": sealed_membership_binding,
-            "_experiment_key": sealed_experiment_key,
-            "_decode_state": sealed_decode_state,
-            "_semantic_binding_sha256": sealed_semantic_binding,
-            "_sha256_bytes": sealed_sha256_bytes,
             "_pretty_bytes": sealed_pretty_bytes,
-            "_receipt": sealed_receipt,
         },
     )
     implementation_snapshot = snapshot_globals(frozen_implementation)
+
+    frozen_resolver = _clone_function(
+        public_resolver,
+        globals_overrides=common_overrides,
+    )
+    resolver_snapshot = snapshot_globals(frozen_resolver)
+
+    def require_public_crypto_dispatch() -> None:
+        if precommit_module.hashlib is not canonical_hashlib or canonical_hashlib.sha256 is not canonical_sha256:
+            raise canonical_error("randomization cryptographic digest dispatch was rebound")
+        if precommit_module.secrets is not canonical_secrets or canonical_secrets.token_bytes is not canonical_token_bytes:
+            raise canonical_error("randomization entropy source was rebound")
+        if type(precommit_module._ROOT_BYTES) is not int or precommit_module._ROOT_BYTES != canonical_root_bytes:
+            raise canonical_error("randomization root size authority was rebound")
 
     def sealed_issue_risk_randomization_precommit(
         registry_path,
@@ -286,12 +311,8 @@ def _install_guard() -> None:
     ):
         if precommit_module.issue_risk_randomization_precommit is not sealed_issue_risk_randomization_precommit:
             raise canonical_error("risk randomization public issuer was rebound")
-        if precommit_module.hashlib is not canonical_hashlib or canonical_hashlib.sha256 is not canonical_sha256:
-            raise canonical_error("randomization cryptographic digest dispatch was rebound")
-        if precommit_module.secrets is not canonical_secrets or canonical_secrets.token_bytes is not canonical_token_bytes:
-            raise canonical_error("randomization entropy source was rebound")
-        if type(precommit_module._ROOT_BYTES) is not int or precommit_module._ROOT_BYTES != canonical_root_bytes:
-            raise canonical_error("randomization root size authority was rebound")
+        require_membership_resolver()
+        require_public_crypto_dispatch()
         require_private_facades()
         require_snapshot(
             frozen_implementation,
@@ -307,10 +328,39 @@ def _install_guard() -> None:
             authority_root=authority_root,
         )
 
-    sealed_issue_risk_randomization_precommit._autosport_randomization_dispatch_sealed = True
-    precommit_module.issue_risk_randomization_precommit = sealed_issue_risk_randomization_precommit
+    def sealed_resolve_risk_randomization_precommit(
+        registry_path,
+        *,
+        workspace,
+        research_protocol_id,
+        dataset_snapshot_id,
+        experiment_id,
+        authority_root=None,
+    ):
+        if precommit_module.resolve_risk_randomization_precommit is not sealed_resolve_risk_randomization_precommit:
+            raise canonical_error("risk randomization public resolver was rebound")
+        require_membership_resolver()
+        require_public_crypto_dispatch()
+        require_private_facades()
+        require_snapshot(
+            frozen_resolver,
+            resolver_snapshot,
+            "randomization resolver",
+        )
+        return frozen_resolver(
+            registry_path,
+            workspace=workspace,
+            research_protocol_id=research_protocol_id,
+            dataset_snapshot_id=dataset_snapshot_id,
+            experiment_id=experiment_id,
+            authority_root=authority_root,
+        )
 
-    # The injectable implementation must not remain an ordinary module capability.
+    sealed_issue_risk_randomization_precommit._autosport_randomization_dispatch_sealed = True
+    sealed_resolve_risk_randomization_precommit._autosport_randomization_dispatch_sealed = True
+    precommit_module.issue_risk_randomization_precommit = sealed_issue_risk_randomization_precommit
+    precommit_module.resolve_risk_randomization_precommit = sealed_resolve_risk_randomization_precommit
+
     delattr(precommit_module, implementation_name)
 
 

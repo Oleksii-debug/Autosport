@@ -319,6 +319,7 @@ def test_subscription_provider_failure_never_issues_authority_and_closes(
         {"errorCode": "INVALID_INPUT"},
         {"errorMessage": "invalid market subscription"},
         {"error": True},
+        {"error": 0},
         {"error": "INVALID_INPUT"},
     ],
 )

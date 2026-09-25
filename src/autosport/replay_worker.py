@@ -32,17 +32,17 @@ def _terminal_error(exc: BaseException) -> str:
         # Bypass a custom metaclass __getattribute__: even exception type-name
         # lookup must not be able to defeat terminal publication after the
         # single-flight slot has been acquired.
-        exception_type = str.__str__(type.__getattribute__(type(exc), "__name__"))
+        exception_type = type.__getattribute__(type(exc), "__name__")
     except BaseException:
-        exception_type = "BaseException"
-    try:
-        # ``str(exc)`` may legally return a str subclass with hostile overridden
-        # methods such as __format__. Detach through the trusted base str method
-        # before any formatting/concatenation touches the rendered detail.
-        detail = str.__str__(str(exc))
-    except BaseException:
-        return exception_type + ": exception details unavailable"
-    return exception_type + ": " + detail
+        return "BaseException"
+    if (
+        not isinstance(exception_type, str)
+        or not exception_type.isascii()
+        or not exception_type.isidentifier()
+        or len(exception_type) > 80
+    ):
+        return "BaseException"
+    return exception_type
 
 
 class OneShotReplayWorker:

@@ -8,8 +8,9 @@ private seam must not be caller authority.
 This composition guard therefore keeps the already-qualified canonical private
 primitive untouched. A caller-code-sensitive descriptor returns that primitive only
 to the exact canonical high-level execution code object. Every ordinary class or
-instance access receives a genuinely narrow public function whose Python signature
-contains only product inputs and whose transport/parser/clock are product-owned.
+instance access receives a genuinely narrow public function that is incapable of
+creating a provider effect. Provider writes are available only through the canonical
+approval + ledger lifecycle owned by ``execute_betfair_supervised_action``.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def _public_place_action(
     provider_order_ref: str,
     execution_workspace: Path,
 ) -> _impl.BetfairPlaceExecutionReport:
-    """Place one bounded action through product-owned provider truth only."""
+    """Fail closed: irreversible writes require approval + ledger orchestration."""
 
     if type(self) is not _CLIENT_TYPE:
         raise _impl.BetfairSupervisedExecutionError(
@@ -95,16 +96,9 @@ def _public_place_action(
         raise _impl.BetfairSupervisedExecutionError(
             "canonical Betfair public provider-write authority changed"
         )
-    return _PRIVATE_PLACE_ACTION(
-        self,
-        action,
-        profile=profile,
-        bound=bound,
-        provider_order_ref=provider_order_ref,
-        execution_workspace=execution_workspace,
-        _transport_post=_PROVIDER_HTTP_POST,
-        _response_parser=_RESPONSE_PARSER,
-        _observation_clock=_OBSERVATION_CLOCK,
+    raise _impl.BetfairSupervisedExecutionError(
+        "direct public Betfair provider write is disabled; "
+        "use execute_betfair_supervised_action"
     )
 
 

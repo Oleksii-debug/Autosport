@@ -41,7 +41,7 @@ _HEX: Final = frozenset("0123456789abcdef")
 
 
 class PredictiveTargetSemanticsError(ValueError):
-    """Raised when predictive target semantics cannot be proven."""
+    """Raised when a predictive-target provenance contract cannot be proven."""
 
 
 def _text(value: object, name: str) -> str:
@@ -169,12 +169,15 @@ class PredictiveTargetContract:
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedBinaryTargetSemantics:
-    """Audit evidence for a preregistered binary training population.
+class PreregisteredBinaryTargetPopulation:
+    """Audit evidence for a preregistered binary-valued training population.
 
-    This evidence proves target-population meaning only.  It explicitly does
-    not prove that a model output is calibrated probability, mint a Forecast,
-    or authorize promotion/allocation/execution.
+    This evidence proves that one exact binary-valued population and its
+    evidence digests were precommitted by the frozen ResearchProtocol.  It
+    does *not* prove that those evidence digests correctly classify the
+    external-world outcome under the referenced definitions.  It also does
+    not prove model-output probability semantics, calibration, Forecast
+    authority, promotion, allocation, or execution.
     """
 
     contract_id: str
@@ -194,7 +197,7 @@ class ResolvedBinaryTargetSemantics:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": 1,
-            "kind": "autosport-resolved-binary-target-semantics-v1",
+            "kind": "autosport-preregistered-binary-target-population-v1",
             "contract_id": self.contract_id,
             "contract_sha256": self.contract_sha256,
             "target_semantics_id": self.target_semantics_id,
@@ -215,7 +218,10 @@ class ResolvedBinaryTargetSemantics:
             "negative_count": self.negative_count,
             "resolved_at": self.resolved_at,
             "truth": {
-                "binary_target_semantics_resolved": True,
+                "target_contract_preregistered": True,
+                "binary_value_domain_verified": True,
+                "training_population_hash_bound": True,
+                "outcome_label_semantics_verified": False,
                 "model_output_probability_authority": False,
                 "calibration_authority": False,
                 "forecast_authority": False,
@@ -280,20 +286,22 @@ def _target_population_digest(
     )
 
 
-def resolve_binary_predictive_target(
+def resolve_preregistered_binary_target_population(
     registry: ScientificRegistry,
     manifest: FactoryReproducibilityManifest,
     contract: PredictiveTargetContract,
     points: Sequence[TrainingPoint],
     *,
     as_of: str,
-) -> ResolvedBinaryTargetSemantics:
-    """Resolve exact binary target semantics from existing durable authorities.
+) -> PreregisteredBinaryTargetPopulation:
+    """Resolve a precommitted binary-valued target population.
 
     Positive resolution requires the contract digest to have been frozen into
     the exact ResearchProtocol's ``expected_artifacts`` before the governed
     training population begins.  Every target must be exactly 0/1 and must
-    carry at least one causal evidence digest.
+    carry at least one causal evidence digest.  This function intentionally
+    does not verify the external semantic correctness of those label-evidence
+    digests and therefore cannot authorize a probability forecast by itself.
     """
 
     if type(registry) is not ScientificRegistry:
@@ -448,7 +456,7 @@ def resolve_binary_predictive_target(
         training_manifest_sha256=actual_manifest,
         ordered_points=ordered,
     )
-    return ResolvedBinaryTargetSemantics(
+    return PreregisteredBinaryTargetPopulation(
         contract_id=contract.contract_id,
         contract_sha256=contract.contract_sha256,
         target_semantics_id=contract.target_semantics_id,

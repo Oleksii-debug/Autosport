@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from threading import Event, Thread
+from types import FunctionType
 import urllib.request as _urllib_request
 
 import pytest
@@ -18,6 +19,42 @@ from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     BetfairSessionCredentials,
 )
+
+
+def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
+    pending: list[object] = [root]
+    seen: set[int] = set()
+    found: list[FunctionType] = []
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, FunctionType) or id(value) in seen:
+            continue
+        seen.add(id(value))
+        found.append(value)
+        if value.__defaults__:
+            pending.extend(value.__defaults__)
+        if value.__kwdefaults__:
+            pending.extend(value.__kwdefaults__.values())
+        wrapped = getattr(value, "__wrapped__", None)
+        if wrapped is not None:
+            pending.append(wrapped)
+        if value.__closure__:
+            for cell in value.__closure__:
+                try:
+                    pending.append(cell.cell_contents)
+                except ValueError:
+                    pass
+    return tuple(found)
+
+
+def _reachable_named(root: FunctionType, name: str) -> FunctionType:
+    matches = [
+        function
+        for function in _reachable_functions(root)
+        if function is not root and function.__name__ == name
+    ]
+    assert len(matches) == 1, [function.__name__ for function in matches]
+    return matches[0]
 
 
 def test_transient_clock_substitution_during_provider_io_cannot_backdate_identity(
@@ -95,10 +132,6 @@ def test_transient_clock_substitution_during_provider_io_cannot_backdate_identit
     worker.start()
     assert read_entered.wait(timeout=5)
 
-    # The old implementation dereferenced the mutable live clock after provider
-    # I/O. Keep the forged clock installed through the sealed RPC evidence sample,
-    # then pause in the still-live parser and restore it before K07's after-
-    # acquisition context check.
     client._clock = lambda: datetime(1900, 1, 1, tzinfo=timezone.utc)
     monkeypatch.setattr(_readonly, "_provider_text", fenced_provider_text)
     release_payload.set()
@@ -194,8 +227,6 @@ def test_transient_parser_currency_substitution_cannot_launder_k07_identity(
     release_payload.set()
     assert forged_parser_entered.wait(timeout=5)
 
-    # Restore the public parser before the original K07 post-acquisition checks.
-    # The executing forged helper still returns GBP, reproducing the old TOCTOU.
     monkeypatch.setattr(_readonly, "_provider_text", original_provider_text)
     release_forged_parser.set()
     worker.join(timeout=5)
@@ -283,6 +314,50 @@ def test_json_codec_rebinding_cannot_redirect_or_forge_k07_rpc(monkeypatch) -> N
     assert observed_methods == ["AccountAPING/v1.0/getAccountDetails"]
     assert value.currency_code == "EUR"
     assert is_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_private_json_facade_mutation_fails_closed_before_build(monkeypatch) -> None:
+    sealed_rpc = _reachable_named(build_betfair_authenticated_client, "_rpc")
+    private_json = sealed_rpc.__globals__["json"]
+    monkeypatch.setattr(private_json, "loads", lambda *_args, **_kwargs: {"forged": True})
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match="frozen K07 JSON decode dispatch was rebound",
+    ):
+        build_betfair_authenticated_client(
+            BetfairSessionCredentials("app-key", "session-token")
+        )
+
+
+def test_private_rpc_clone_global_mutation_fails_closed_before_build(monkeypatch) -> None:
+    sealed_rpc = _reachable_named(build_betfair_authenticated_client, "_rpc")
+    monkeypatch.setitem(
+        sealed_rpc.__globals__,
+        "_decode_json",
+        lambda _payload: {"forged": True},
+    )
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match=r"frozen K07 Betfair RPC global '_decode_json' was rebound",
+    ):
+        build_betfair_authenticated_client(
+            BetfairSessionCredentials("app-key", "session-token")
+        )
+
+
+def test_private_decode_clone_global_mutation_fails_closed_before_build(monkeypatch) -> None:
+    sealed_decode = _reachable_named(build_betfair_authenticated_client, "_decode_json")
+    monkeypatch.setitem(sealed_decode.__globals__, "json", object())
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match=r"frozen K07 Betfair JSON decoder global 'json' was rebound",
+    ):
+        build_betfair_authenticated_client(
+            BetfairSessionCredentials("app-key", "session-token")
+        )
 
 
 def test_k07_public_entrypoints_report_io_snapshot_seal() -> None:

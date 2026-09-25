@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import unittest
+from types import FunctionType
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -397,6 +398,48 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             at_r2 = self._resolve(registry, revisions[1]["first_available_at"])
             self.assertIsNotNone(at_r2)
             self.assertEqual(at_r2.revision, 2)
+
+    def test_serialized_rmw_metadata_does_not_expose_unlocked_predecessors(self) -> None:
+        for method_name in (
+            "complete",
+            "abort_uncommitted",
+            "reconcile_completed_summary",
+        ):
+            method = getattr(RunRegistry, method_name)
+            self.assertTrue(
+                getattr(method, "_autosport_registry_rmw_serialized", False),
+                method_name,
+            )
+            self.assertTrue(
+                getattr(method, "_autosport_predecessor_unreachable", False),
+                method_name,
+            )
+            self.assertIsNone(getattr(method, "__wrapped__", None), method_name)
+
+            pending: list[object] = [method]
+            seen: set[int] = set()
+            reachable: list[FunctionType] = []
+            while pending:
+                value = pending.pop()
+                if not isinstance(value, FunctionType) or id(value) in seen:
+                    continue
+                seen.add(id(value))
+                reachable.append(value)
+                if value.__defaults__:
+                    pending.extend(value.__defaults__)
+                if value.__kwdefaults__:
+                    pending.extend(value.__kwdefaults__.values())
+                wrapped = getattr(value, "__wrapped__", None)
+                if wrapped is not None:
+                    pending.append(wrapped)
+                if value.__closure__:
+                    for cell in value.__closure__:
+                        try:
+                            pending.append(cell.cell_contents)
+                        except ValueError:
+                            pass
+
+            self.assertEqual(reachable, [method], method_name)
 
     def test_all_run_registry_read_modify_write_methods_are_serialized(self) -> None:
         for method_name in (

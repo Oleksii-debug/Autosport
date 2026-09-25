@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from contextvars import ContextVar
+import sys
 from functools import wraps
+from types import CodeType
 from typing import Any
 
+from . import _paper_execution_reality_legacy as _ledger_impl
 from .paper_execution_adoption import (
     PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
@@ -21,7 +23,7 @@ _RESERVED_SCHEMA_VERSION = 1
 
 
 def _install_guard() -> None:
-    """Reserve exposure-scope publication without leaving a caller-visible bypass."""
+    """Reserve exposure-scope publication without retaining a generic bypass callable."""
 
     ledger_type = PaperExecutionLedger
     runtime_type = PaperExecutionAdoptionRuntime
@@ -64,12 +66,11 @@ def _install_guard() -> None:
     if current_append is not current_lower_append:
         raise RuntimeError("PAPER public/lower ledger append dispatch is inconsistent")
 
-    # All authority-bearing bypass callables stay closure-hidden. In particular,
-    # never publish the original ledger append/mint methods back onto a public class
-    # or module global: doing so would recreate the exact capability this guard is
-    # meant to remove.
-    original_append = current_lower_append
-    original_mint = current_mint
+    # Do not retain current_lower_append/current_mint in any installed function state.
+    # Python closures/defaults/__wrapped__ are inspectable, so hiding a generic bypass
+    # there is not an authority boundary.  Generic append is reproduced below with the
+    # existing canonical ledger primitives, while minting performs the tiny canonical
+    # registry update inline only from the two exact preparation code paths.
     original_prepare = current_prepare
     original_prepare_paper_value = current_prepare_paper_value
     original_require_minted = runtime_type._require_minted
@@ -77,13 +78,18 @@ def _install_guard() -> None:
     if not isinstance(scope_descriptor, classmethod):
         raise RuntimeError("canonical PAPER exposure-scope payload dispatch is unavailable")
     original_scope_payload = scope_descriptor.__func__
-    mint_authority: ContextVar[PaperExecutionAdoptionRuntime | None] = ContextVar(
-        "autosport_paper_exposure_scope_mint_authority",
-        default=None,
+
+    prepare_codes: tuple[CodeType, CodeType] = (
+        original_prepare.__code__,
+        original_prepare_paper_value.__code__,
     )
+    getframe = sys._getframe
+    canonical_json = _ledger_impl._canonical
+    fsync = _ledger_impl.os.fsync
     reserved_event_type = _RESERVED_EVENT_TYPE
     reserved_schema = _RESERVED_SCHEMA
     reserved_schema_version = _RESERVED_SCHEMA_VERSION
+    publisher_code: CodeType | None = None
 
     def validate_owned_scope_payload(payload: object) -> dict[str, Any]:
         expected = {
@@ -143,29 +149,76 @@ def _install_guard() -> None:
         key: str,
         payload: dict[str, Any],
     ) -> None:
-        if event_type == reserved_event_type:
+        if event_type == reserved_event_type and getframe(1).f_code is not publisher_code:
             raise integrity_error(
                 "PAPER_EXPOSURE_SCOPE_BOUND is reserved for canonical adoption authority"
             )
-        return original_append(
-            self,
-            event_type=event_type,
-            run_id=run_id,
-            key=key,
-            payload=payload,
-        )
+
+        # Inline the canonical legacy append algorithm rather than retaining the old
+        # generic append function as an inspectable closure/default/wrapped callable.
+        # The existing ledger owns locking, chain validation and durability barriers.
+        def mutate() -> None:
+            self._ensure_existing_path_durable()
+            events = self._load_unlocked()
+            by_key = {item["event_key"]: item for item in events}
+            prior = by_key.get(key)
+            sequence = len(events)
+            previous_sha256 = None if not events else events[-1]["event_sha256"]
+            event = self._event(
+                event_type=event_type,
+                run_id=run_id,
+                key=key,
+                payload=payload,
+                sequence=sequence,
+                previous_sha256=previous_sha256,
+            )
+            if prior is not None:
+                comparable = dict(prior)
+                comparable.pop("sequence", None)
+                comparable.pop("previous_sha256", None)
+                comparable.pop("event_sha256", None)
+                proposed = dict(event)
+                proposed.pop("sequence", None)
+                proposed.pop("previous_sha256", None)
+                proposed.pop("event_sha256", None)
+                if comparable != proposed:
+                    raise integrity_error("event_key already has different payload")
+                return
+            encoded = canonical_json(event) + "\n"
+            path_existed_before = self.path.exists()
+            try:
+                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    fsync(handle.fileno())
+                if not path_existed_before or not self._path_durable:
+                    self._sync_parent_directory()
+                self._write_anchor_unlocked(events + [event])
+            except OSError as exc:
+                self._path_durable = False
+                raise integrity_error(
+                    "PAPER execution ledger durability barrier failed"
+                ) from exc
+            self._path_durable = True
+
+        self._with_writer_lock(mutate)
 
     def guarded_mint_prepared(
         self: PaperExecutionAdoptionRuntime,
         prepared: PreparedPaperExecution,
     ) -> PreparedPaperExecution:
-        if mint_authority.get() is not self:
+        if type(self) is not runtime_type:
+            raise adoption_error("canonical PAPER preparation requires exact runtime")
+        if runtime_type._mint_prepared is not guarded_mint_prepared:
+            raise adoption_error("canonical prepared-execution mint dispatch was rebound")
+        if getframe(1).f_code not in prepare_codes:
             raise adoption_error(
                 "prepared execution mint is reserved for canonical preparation authority"
             )
-        if runtime_type._mint_prepared is not guarded_mint_prepared:
-            raise adoption_error("canonical prepared-execution mint dispatch was rebound")
-        return original_mint(self, prepared)
+        if type(prepared) is not PreparedPaperExecution:
+            raise TypeError("prepared must be exact PreparedPaperExecution")
+        self._prepared_authorities[id(prepared)] = prepared
+        return prepared
 
     def with_mint_authority(method: Any) -> Any:
         @wraps(method)
@@ -174,11 +227,7 @@ def _install_guard() -> None:
                 raise adoption_error("canonical PAPER preparation requires exact runtime")
             if runtime_type._mint_prepared is not guarded_mint_prepared:
                 raise adoption_error("canonical prepared-execution mint dispatch was rebound")
-            token = mint_authority.set(self)
-            try:
-                return method(self, *args, **kwargs)
-            finally:
-                mint_authority.reset(token)
+            return method(self, *args, **kwargs)
 
         return owned
 
@@ -221,13 +270,15 @@ def _install_guard() -> None:
         payload = validate_owned_scope_payload(
             original_scope_payload(runtime_type, prepared)
         )
-        original_append(
+        guarded_append_event(
             self.ledger,
             event_type=reserved_event_type,
             run_id=run_id,
             key=f"{run_id}:exposure-scope",
             payload=payload,
         )
+
+    publisher_code = publish_owned_exposure_scope.__code__
 
     for method in (
         guarded_append_event,

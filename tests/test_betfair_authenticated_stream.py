@@ -87,7 +87,12 @@ def _subscription_status(*, request_id: int = 7, success: bool = True) -> bytes:
     ).encode("utf-8")
 
 
-def _mcm(*, request_id: int = 7, pt: int = 1000, price: float = 2.0) -> bytes:
+def _mcm(
+    *,
+    request_id: int = 7,
+    pt: int = 1000,
+    runners: list[dict[str, object]] | None = None,
+) -> bytes:
     payload = {
         "op": "mcm",
         "id": request_id,
@@ -102,7 +107,8 @@ def _mcm(*, request_id: int = 7, pt: int = 1000, price: float = 2.0) -> bytes:
                 "id": "1.A",
                 "img": True,
                 "con": False,
-                "rc": [{"id": 1, "hc": 0, "ltp": price}],
+                "rc": runners
+                or [{"id": 1, "hc": 0, "ltp": 2.0}],
             }
         ],
     }
@@ -146,11 +152,11 @@ def _open(
     )
 
 
-def _identity() -> BetfairQuoteIdentity:
+def _identity(selection_id: int = 1) -> BetfairQuoteIdentity:
     return BetfairQuoteIdentity(
         BETFAIR_STREAM_SOURCE_ID,
         "1.A",
-        1,
+        selection_id,
         Decimal("0"),
         BetfairQuoteSide.LAST_TRADED,
         None,
@@ -201,20 +207,38 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert not subscription.real_money_authorized
 
 
-def test_subscription_requires_exact_provider_success_id(
+def test_subscription_requires_exact_provider_success_id_and_closes_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport, _ = _transport(monkeypatch, _subscription_status(request_id=8))
+    transport, fake = _transport(monkeypatch, _subscription_status(request_id=8))
     with pytest.raises(BetfairAuthenticatedStreamError, match="id mismatch"):
         _open(transport)
+    assert fake.closed
+    assert not transport.is_authenticated
 
 
-def test_subscription_provider_failure_never_issues_authority(
+def test_subscription_provider_failure_never_issues_authority_and_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport, _ = _transport(monkeypatch, _subscription_status(success=False))
+    transport, fake = _transport(monkeypatch, _subscription_status(success=False))
     with pytest.raises(BetfairAuthenticatedStreamError, match="not acknowledged SUCCESS"):
         _open(transport)
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
+def test_prior_post_auth_frame_prevents_subscription_relabeling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, fake = _transport(
+        monkeypatch,
+        _mcm(request_id=99) + _subscription_status(),
+    )
+    prior = transport.read_authenticated_frame()
+    prior.assert_transport_issued()
+    with pytest.raises(BetfairAuthenticatedStreamError, match="not the first post-auth frame"):
+        _open(transport)
+    assert fake.closed
 
 
 def test_old_subscription_message_is_rejected_before_freshness_state_mutation(
@@ -297,18 +321,61 @@ def test_credential_like_market_filter_is_rejected_before_network_write(
     assert fake.sent == sent_before
 
 
+def test_market_filter_resource_bound_fails_before_network_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, fake = _transport(monkeypatch, _subscription_status())
+    sent_before = list(fake.sent)
+
+    with pytest.raises(ValueError, match="too many items"):
+        open_authenticated_market_subscription(
+            transport,
+            provider_request_id=7,
+            market_filter={"marketIds": [str(i) for i in range(1025)]},
+            market_data_fields=("EX_LTP",),
+            ladder_levels=None,
+            heartbeat_ms=5000,
+            conflate_ms=0,
+        )
+    assert fake.sent == sent_before
+
+
+def test_transport_origin_tracking_is_bounded_and_overflow_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+    monkeypatch.setattr(auth, "_MAX_TRACKED_AUTHORITATIVE_QUOTES", 1)
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            runners=[
+                {"id": 1, "hc": 0, "ltp": 2.0},
+                {"id": 2, "hc": 0, "ltp": 2.1},
+            ]
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(BetfairAuthenticatedStreamError, match="exceeded its bound"):
+        runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(1),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+    )
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert not decision.decision_eligible
+
+
 def test_noncanonical_transport_subclass_cannot_issue_subscription(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class ShadowTransport(stream.BetfairStreamTlsTransport):
         pass
 
-    fake = FakeSocket([])
-    monkeypatch.setattr(
-        stream,
-        "_open_verified_tls_socket",
-        lambda _timeout, _cancel=None: fake,
-    )
     shadow = ShadowTransport(
         identity=stream.BetfairStreamSessionIdentity(
             account_id="acct-1",

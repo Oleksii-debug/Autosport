@@ -28,13 +28,26 @@ def _install_guard() -> None:
     integrity_error = PaperExecutionIntegrityError
     adoption_error = PaperExecutionAdoptionError
 
+    append_owner = next(
+        (
+            base
+            for base in ledger_type.__mro__[1:]
+            if "_append_event" in base.__dict__
+        ),
+        None,
+    )
+    if append_owner is None:
+        raise RuntimeError("canonical PAPER lower ledger append is unavailable")
+
     current_append = ledger_type._append_event
+    current_lower_append = append_owner.__dict__["_append_event"]
     current_mint = runtime_type._mint_prepared
     current_prepare = runtime_type.prepare
     current_prepare_paper_value = runtime_type.prepare_paper_value_action
     current_publish = runtime_type._publish_exposure_scope
     guarded = (
         current_append,
+        current_lower_append,
         current_mint,
         current_prepare,
         current_prepare_paper_value,
@@ -48,17 +61,22 @@ def _install_guard() -> None:
         return
     if any(installed):
         raise RuntimeError("PAPER exposure-scope guard installation is inconsistent")
+    if current_append is not current_lower_append:
+        raise RuntimeError("PAPER public/lower ledger append dispatch is inconsistent")
 
-    # All authority-bearing bypass callables stay closure-hidden.  In particular,
+    # All authority-bearing bypass callables stay closure-hidden. In particular,
     # never publish the original ledger append/mint methods back onto a public class
     # or module global: doing so would recreate the exact capability this guard is
     # meant to remove.
-    original_append = current_append
+    original_append = current_lower_append
     original_mint = current_mint
     original_prepare = current_prepare
     original_prepare_paper_value = current_prepare_paper_value
     original_require_minted = runtime_type._require_minted
-    original_scope_payload = runtime_type._exposure_scope_payload
+    scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
+    if not isinstance(scope_descriptor, classmethod):
+        raise RuntimeError("canonical PAPER exposure-scope payload dispatch is unavailable")
+    original_scope_payload = scope_descriptor.__func__
     mint_authority: ContextVar[PaperExecutionAdoptionRuntime | None] = ContextVar(
         "autosport_paper_exposure_scope_mint_authority",
         default=None,
@@ -177,7 +195,10 @@ def _install_guard() -> None:
             raise integrity_error(
                 "canonical PAPER exposure scope requires exact adoption runtime and ledger"
             )
-        if ledger_type._append_event is not guarded_append_event:
+        if (
+            ledger_type._append_event is not guarded_append_event
+            or append_owner.__dict__.get("_append_event") is not guarded_append_event
+        ):
             raise integrity_error("canonical PAPER exposure-scope ledger dispatch was rebound")
         if runtime_type._publish_exposure_scope is not publish_owned_exposure_scope:
             raise integrity_error("canonical PAPER exposure-scope publisher dispatch was rebound")
@@ -189,11 +210,17 @@ def _install_guard() -> None:
             raise integrity_error("canonical PAPER value preparation dispatch was rebound")
         if runtime_type._require_minted is not original_require_minted:
             raise integrity_error("canonical prepared-execution verification was rebound")
-        if runtime_type._exposure_scope_payload is not original_scope_payload:
+        live_scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
+        if (
+            not isinstance(live_scope_descriptor, classmethod)
+            or live_scope_descriptor.__func__ is not original_scope_payload
+        ):
             raise integrity_error("canonical PAPER exposure-scope payload authority was rebound")
 
         original_require_minted(self, prepared)
-        payload = validate_owned_scope_payload(original_scope_payload(self, prepared))
+        payload = validate_owned_scope_payload(
+            original_scope_payload(runtime_type, prepared)
+        )
         original_append(
             self.ledger,
             event_type=reserved_event_type,
@@ -211,6 +238,9 @@ def _install_guard() -> None:
     ):
         method._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
 
+    # Fence the actual lower owner as well as the public subclass. Otherwise a
+    # caller can bypass the reservation by invoking the inherited owner directly.
+    append_owner._append_event = guarded_append_event
     ledger_type._append_event = guarded_append_event
     runtime_type._mint_prepared = guarded_mint_prepared
     runtime_type.prepare = owned_prepare

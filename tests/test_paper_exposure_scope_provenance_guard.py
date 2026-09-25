@@ -135,6 +135,27 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 )
             self.assertEqual(ledger.events(), ())
 
+    def test_inherited_lower_append_cannot_bypass_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            append_owner = next(
+                base
+                for base in PaperExecutionLedger.__mro__[1:]
+                if "_append_event" in base.__dict__
+            )
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical adoption authority",
+            ):
+                append_owner._append_event(
+                    ledger,
+                    event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                    run_id="forged-lower-run",
+                    key="forged-lower-run:exposure-scope",
+                    payload={"forged": True},
+                )
+            self.assertEqual(ledger.events(), ())
+
     def test_public_ledger_dispatch_rebind_fails_before_reserved_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
@@ -154,6 +175,36 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
             finally:
                 PaperExecutionLedger._append_event = guarded_append  # type: ignore[method-assign]
+            self.assertEqual(ledger.events(), ())
+
+    def test_payload_classmethod_rebind_fails_before_forged_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+            run_id = runtime.expected_run_id(prepared, "scope-trigger")
+            original_descriptor = PaperExecutionAdoptionRuntime.__dict__[
+                "_exposure_scope_payload"
+            ]
+            forged_calls: list[str] = []
+
+            def forged_scope(
+                _cls: type[PaperExecutionAdoptionRuntime],
+                _prepared: PreparedPaperExecution,
+            ) -> dict[str, object]:
+                forged_calls.append("scope")
+                return {"forged": True}
+
+            PaperExecutionAdoptionRuntime._exposure_scope_payload = classmethod(forged_scope)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "payload authority was rebound",
+                ):
+                    runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+            finally:
+                PaperExecutionAdoptionRuntime._exposure_scope_payload = original_descriptor
+
+            self.assertEqual(forged_calls, [])
             self.assertEqual(ledger.events(), ())
 
     def test_canonical_runtime_can_publish_reserved_scope_idempotently(self) -> None:

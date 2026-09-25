@@ -94,10 +94,12 @@ def _decimal_text(value: Decimal) -> str:
 
     value = _finite_decimal(value, "decimal")
     sign, digits, exponent = value.as_tuple()
+    exponent = int(exponent)
+    if len(digits) > 4096 or abs(exponent) > 4096:
+        raise ValueError("decimal coefficient/exponent exceeds resource bounds")
     if not digits or all(digit == 0 for digit in digits):
         return "0"
     coefficient = "".join(str(digit) for digit in digits)
-    exponent = int(exponent)
     if exponent >= 0:
         body = coefficient + ("0" * exponent)
     else:
@@ -808,4 +810,3 @@ def evaluate_joint_stress(
         worst_observed_profit=min(profits),
         best_observed_profit=max(profits),
     )
-

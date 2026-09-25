@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -648,6 +649,40 @@ def test_journal_rejects_symlink_alias(tmp_path: Path) -> None:
         match="regular non-symlink file",
     ):
         SmarketsReconciliationJournal(path).verify()
+
+
+def test_journal_rejects_path_replacement_during_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    journal.append(_verify(_action(), _profile(), _authority(), _readback()))
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(path.read_bytes())
+    real_open = Path.open
+    swapped = False
+
+    def replacing_open(self: Path, *args, **kwargs):
+        nonlocal swapped
+        handle = real_open(self, *args, **kwargs)
+        if self == path and args and args[0] == "rb" and not swapped:
+            try:
+                os.replace(replacement, path)
+            except OSError:
+                handle.close()
+                pytest.skip("host filesystem does not permit replacing an open file")
+            swapped = True
+        return handle
+
+    monkeypatch.setattr(Path, "open", replacing_open)
+
+    with pytest.raises(
+        SmarketsReconciliationError,
+        match="changed during bounded read",
+    ):
+        journal.verify()
+    assert swapped
 
 
 def test_journal_invalid_utf8_fails_closed(tmp_path: Path) -> None:

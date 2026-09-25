@@ -24,10 +24,13 @@ from .betfair_account_readonly import (
 
 
 SCHEMA_VERSION = 1
+_MAX_DECIMAL_TEXT_LENGTH = 4096
 _TERMINAL_STATUS_ORDER = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 _TERMINAL_STATUS_RANK = {
     status: index for index, status in enumerate(_TERMINAL_STATUS_ORDER)
 }
+_READBACK_ASSERT_AUTHORITATIVE = BetfairExecutionReadbackEnvelope.assert_authoritative
+_READBACK_AUTHORITY_FINGERPRINT = BetfairExecutionReadbackEnvelope._authority_fingerprint
 
 
 class BetfairClearedSettlementEvidenceError(RuntimeError):
@@ -74,12 +77,20 @@ def _decimal_text(value: Decimal) -> str:
         coefficient = coefficient[:-1]
         exponent += 1
     if exponent >= 0:
+        if len(coefficient) + exponent > _MAX_DECIMAL_TEXT_LENGTH:
+            raise BetfairClearedSettlementEvidenceError(
+                "provider decimal text is too large"
+            )
         text = coefficient + ("0" * exponent)
     else:
         point = len(coefficient) + exponent
         if point > 0:
             text = f"{coefficient[:point]}.{coefficient[point:]}"
         else:
+            if 2 + (-point) + len(coefficient) > _MAX_DECIMAL_TEXT_LENGTH:
+                raise BetfairClearedSettlementEvidenceError(
+                    "provider decimal text is too large"
+                )
             text = f"0.{('0' * -point)}{coefficient}"
     return f"-{text}" if sign else text
 
@@ -299,12 +310,36 @@ def _resolve_betfair_cleared_bet_settlement(
         raise TypeError(
             "readback must be an exact BetfairExecutionReadbackEnvelope"
         )
+    if (
+        BetfairExecutionReadbackEnvelope.assert_authoritative
+        is not _READBACK_ASSERT_AUTHORITATIVE
+        or BetfairExecutionReadbackEnvelope._authority_fingerprint
+        is not _READBACK_AUTHORITY_FINGERPRINT
+    ):
+        raise BetfairClearedSettlementEvidenceError(
+            "canonical execution readback authority changed"
+        )
     try:
-        readback.assert_authoritative()
+        before_fingerprint = _READBACK_AUTHORITY_FINGERPRINT(readback)
+        _READBACK_ASSERT_AUTHORITATIVE(readback)
+        after_fingerprint = _READBACK_AUTHORITY_FINGERPRINT(readback)
     except BetfairReadOnlyError as exc:
         raise BetfairClearedSettlementEvidenceError(
             "execution readback is not canonical provider evidence"
         ) from exc
+    if before_fingerprint != after_fingerprint:
+        raise BetfairClearedSettlementEvidenceError(
+            "execution readback changed during authority verification"
+        )
+    if (
+        BetfairExecutionReadbackEnvelope.assert_authoritative
+        is not _READBACK_ASSERT_AUTHORITATIVE
+        or BetfairExecutionReadbackEnvelope._authority_fingerprint
+        is not _READBACK_AUTHORITY_FINGERPRINT
+    ):
+        raise BetfairClearedSettlementEvidenceError(
+            "canonical execution readback authority changed during verification"
+        )
 
     provider_order_ref = readback.provider_order_ref
     if provider_order_ref is None:
@@ -407,7 +442,7 @@ def resolve_betfair_cleared_bet_settlement(
 
 def _install_cleared_settlement_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
-    raw_resolve = resolve_betfair_cleared_bet_settlement
+    raw_resolve = _resolve_betfair_cleared_bet_settlement
     validate_integrity = BetfairClearedBetSettlementEvidence._validate_integrity
 
     def authoritative_resolve(

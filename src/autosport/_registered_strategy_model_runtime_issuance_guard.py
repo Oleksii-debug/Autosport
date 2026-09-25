@@ -65,7 +65,21 @@ def _install_guard() -> None:
         for name in ("__init__", "read", "publication_receipt")
     )
     evaluation_config_type = _runtime.WalkForwardEvaluationConfig
-    evaluation_from_frozen_text = evaluation_config_type.from_frozen_text
+    evaluation_from_frozen_text_descriptor = evaluation_config_type.__dict__.get(
+        "from_frozen_text"
+    )
+    if type(evaluation_from_frozen_text_descriptor) is not classmethod:
+        raise error_type(
+            "registered-strategy evaluation-config classmethod authority is unavailable"
+        )
+    evaluation_from_frozen_text_function = (
+        evaluation_from_frozen_text_descriptor.__func__
+    )
+    evaluation_from_frozen_text_code = getattr(
+        evaluation_from_frozen_text_function,
+        "__code__",
+        None,
+    )
 
     def require_canonical_dispatch() -> None:
         if (
@@ -98,7 +112,16 @@ def _install_guard() -> None:
                 raise error_type(
                     f"registered-strategy artifact-store dispatch {name!r} changed"
                 )
-        if evaluation_config_type.from_frozen_text is not evaluation_from_frozen_text:
+        current_evaluation_descriptor = evaluation_config_type.__dict__.get(
+            "from_frozen_text"
+        )
+        if (
+            current_evaluation_descriptor is not evaluation_from_frozen_text_descriptor
+            or getattr(current_evaluation_descriptor, "__func__", None)
+            is not evaluation_from_frozen_text_function
+            or getattr(evaluation_from_frozen_text_function, "__code__", None)
+            is not evaluation_from_frozen_text_code
+        ):
             raise error_type(
                 "registered-strategy evaluation-config dispatch changed"
             )

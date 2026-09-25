@@ -22,7 +22,9 @@ def test_promotion_effective_sample_requires_dependence_evidence_authority(tmp_p
     particular clustering estimator or a second registry.
     """
 
-    registry = ScientificRegistry(tmp_path / "scientific-registry.json")
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
 
     def persist_ungrounded_effective_sample() -> None:
         bundle = EvaluationBundleRef(

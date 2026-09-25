@@ -63,8 +63,13 @@ if not callable(_CANONICAL_REGISTRY_VALIDATE_ENTRY):
     raise RuntimeError("canonical ScientificRegistry validation dispatch is unavailable")
 _CANONICAL_REGISTRY_GET_CODE = getattr(_CANONICAL_REGISTRY_GET, "__code__", None)
 _CANONICAL_REGISTRY_READ_CODE = getattr(_CANONICAL_REGISTRY_READ, "__code__", None)
-_CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE = getattr(
+_CANONICAL_REGISTRY_VALIDATE_ENTRY_FUNC = getattr(
     _CANONICAL_REGISTRY_VALIDATE_ENTRY,
+    "__func__",
+    _CANONICAL_REGISTRY_VALIDATE_ENTRY,
+)
+_CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE = getattr(
+    _CANONICAL_REGISTRY_VALIDATE_ENTRY_FUNC,
     "__code__",
     None,
 )
@@ -88,13 +93,14 @@ def _require_canonical_registry_dispatch(registry: object) -> None:
     current_get = vars(_CANONICAL_REGISTRY_TYPE).get("get")
     current_read = vars(_CANONICAL_REGISTRY_TYPE).get("_read")
     current_validate = vars(_CANONICAL_REGISTRY_TYPE).get("_validate_entry")
+    current_validate_func = getattr(current_validate, "__func__", current_validate)
     if (
         current_get is not _CANONICAL_REGISTRY_GET
         or getattr(current_get, "__code__", None) is not _CANONICAL_REGISTRY_GET_CODE
         or current_read is not _CANONICAL_REGISTRY_READ
         or getattr(current_read, "__code__", None) is not _CANONICAL_REGISTRY_READ_CODE
         or current_validate is not _CANONICAL_REGISTRY_VALIDATE_ENTRY
-        or getattr(current_validate, "__code__", None)
+        or getattr(current_validate_func, "__code__", None)
         is not _CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE
         or _CANONICAL_REGISTRY_TYPE.SCHEMA_VERSION
         != _CANONICAL_REGISTRY_SCHEMA_VERSION

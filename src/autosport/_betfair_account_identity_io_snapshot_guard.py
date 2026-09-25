@@ -16,15 +16,16 @@ access cannot redirect the accepted provider observation to a sibling snapshot.
 
 RPC/parser/transport clones are retained only as verified import-time templates.
 Each authority-bearing read copies them into fresh per-call functions before
-provider I/O and verifies the copies against the frozen template identities.
-Consequently a transient mutation of an inspectable template while network I/O
-is in flight cannot redirect response parsing and then disappear before the
-post-acquisition checks.
+provider I/O and verifies the copies against frozen template metadata and global
+bindings.  Frozen code/default/closure metadata is supplied explicitly to the
+copy operation, so replacing an inspectable template's ``__code__`` between a
+pre-check and cloning cannot become authority-bearing code.
 
 All persistent authority-bearing cloned functions carry an identity snapshot of
-every directly-read global binding plus ``__builtins__``.  The private JSON
-facade is also checked before build/read/resolve.  No stable account identity,
-provider write, funds, execution, or real-money authority is introduced.
+their executable metadata, every directly-read global binding and
+``__builtins__``.  The private JSON facade is also checked before
+build/read/resolve.  No stable account identity, provider write, funds,
+execution, or real-money authority is introduced.
 """
 from __future__ import annotations
 
@@ -64,26 +65,127 @@ def _install_guard() -> None:
 
     missing = object()
 
+    def cell_for(value: object):
+        def capture():
+            return value
+
+        closure = capture.__closure__
+        if closure is None:  # pragma: no cover - Python closure invariant
+            raise identity_error("cannot construct frozen K07 closure cell")
+        return closure[0]
+
+    def snapshot_metadata(function: FunctionType, label: str) -> tuple[object, ...]:
+        if type(function) is not FunctionType:
+            raise identity_error(f"canonical {label} is not a plain product function")
+        defaults = function.__defaults__
+        default_values = None if defaults is None else tuple(defaults)
+        kwdefaults = function.__kwdefaults__
+        kwdefault_values = (
+            None
+            if kwdefaults is None
+            else tuple(sorted(kwdefaults.items(), key=lambda item: item[0]))
+        )
+        closure = function.__closure__
+        closure_values: tuple[object, ...] | None
+        if closure is None:
+            closure_values = None
+        else:
+            values: list[object] = []
+            for cell in closure:
+                try:
+                    values.append(cell.cell_contents)
+                except ValueError as exc:
+                    raise identity_error(
+                        f"canonical {label} has an empty closure cell"
+                    ) from exc
+            closure_values = tuple(values)
+        return (
+            function.__code__,
+            function.__name__,
+            default_values,
+            kwdefault_values,
+            closure_values,
+        )
+
+    def metadata_matches(
+        function: FunctionType,
+        metadata: tuple[object, ...],
+        label: str,
+    ) -> None:
+        code, _name, expected_defaults, expected_kwdefaults, expected_closure = metadata
+        if function.__code__ is not code:
+            raise identity_error(f"frozen {label} code was rebound")
+
+        live_defaults = function.__defaults__
+        if expected_defaults is None:
+            if live_defaults is not None:
+                raise identity_error(f"frozen {label} defaults were rebound")
+        elif live_defaults is None or len(live_defaults) != len(expected_defaults):
+            raise identity_error(f"frozen {label} defaults were rebound")
+        elif any(
+            live is not expected
+            for live, expected in zip(live_defaults, expected_defaults, strict=True)
+        ):
+            raise identity_error(f"frozen {label} defaults were rebound")
+
+        live_kwdefaults = function.__kwdefaults__
+        if expected_kwdefaults is None:
+            if live_kwdefaults is not None:
+                raise identity_error(f"frozen {label} kwdefaults were rebound")
+        else:
+            expected_kw_map = dict(expected_kwdefaults)
+            if live_kwdefaults is None or set(live_kwdefaults) != set(expected_kw_map):
+                raise identity_error(f"frozen {label} kwdefaults were rebound")
+            if any(
+                live_kwdefaults[key] is not expected
+                for key, expected in expected_kw_map.items()
+            ):
+                raise identity_error(f"frozen {label} kwdefaults were rebound")
+
+        live_closure = function.__closure__
+        if expected_closure is None:
+            if live_closure is not None:
+                raise identity_error(f"frozen {label} closure was rebound")
+        elif live_closure is None or len(live_closure) != len(expected_closure):
+            raise identity_error(f"frozen {label} closure was rebound")
+        else:
+            for cell, expected in zip(live_closure, expected_closure, strict=True):
+                try:
+                    live = cell.cell_contents
+                except ValueError as exc:
+                    raise identity_error(f"frozen {label} closure was rebound") from exc
+                if live is not expected:
+                    raise identity_error(f"frozen {label} closure was rebound")
+
     def clone_function(
         function: object,
         *,
         label: str,
         globals_overrides: dict[str, object] | None = None,
+        metadata: tuple[object, ...] | None = None,
     ) -> FunctionType:
         if type(function) is not FunctionType:
             raise identity_error(f"canonical {label} is not a plain product function")
+        frozen_metadata = snapshot_metadata(function, label) if metadata is None else metadata
+        code, name, default_values, kwdefault_values, closure_values = frozen_metadata
         globals_snapshot = dict(function.__globals__)
         if globals_overrides:
             globals_snapshot.update(globals_overrides)
+        closure = (
+            None
+            if closure_values is None
+            else tuple(cell_for(value) for value in closure_values)
+        )
+        defaults = None if default_values is None else tuple(default_values)
         cloned = FunctionType(
-            function.__code__,
+            code,
             globals_snapshot,
-            function.__name__,
-            function.__defaults__,
-            function.__closure__,
+            name,
+            defaults,
+            closure,
         )
         cloned.__kwdefaults__ = (
-            None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+            None if kwdefault_values is None else dict(kwdefault_values)
         )
         return cloned
 
@@ -95,15 +197,23 @@ def _install_guard() -> None:
             names.append("__builtins__")
         return tuple((name, function.__globals__[name]) for name in names)
 
+    def snapshot_function(
+        function: FunctionType,
+        label: str,
+    ) -> tuple[tuple[object, ...], tuple[tuple[str, object], ...]]:
+        return snapshot_metadata(function, label), snapshot_globals(function)
+
     def require_snapshot(
         function: FunctionType,
-        snapshot: tuple[tuple[str, object], ...],
+        snapshot: tuple[tuple[object, ...], tuple[tuple[str, object], ...]],
         label: str,
         *,
         overrides: dict[str, object] | None = None,
     ) -> None:
+        metadata, globals_snapshot = snapshot
+        metadata_matches(function, metadata, label)
         expected_overrides = overrides or {}
-        for name, expected in snapshot:
+        for name, expected in globals_snapshot:
             required = expected_overrides.get(name, expected)
             if function.__globals__.get(name, missing) is not required:
                 raise identity_error(f"frozen {label} global {name!r} was rebound")
@@ -118,7 +228,7 @@ def _install_guard() -> None:
         label="Betfair JSON decoder",
         globals_overrides={"json": sealed_json},
     )
-    decode_snapshot = snapshot_globals(sealed_decode_json)
+    decode_snapshot = snapshot_function(sealed_decode_json, "Betfair JSON decoder")
     sealed_rpc = clone_function(
         canonical_rpc,
         label="Betfair RPC",
@@ -127,22 +237,31 @@ def _install_guard() -> None:
             "_decode_json": sealed_decode_json,
         },
     )
-    rpc_snapshot = snapshot_globals(sealed_rpc)
+    rpc_snapshot = snapshot_function(sealed_rpc, "Betfair RPC")
     sealed_next_request_id = clone_function(
         canonical_next_request_id,
         label="Betfair request-id allocator",
     )
-    request_id_snapshot = snapshot_globals(sealed_next_request_id)
+    request_id_snapshot = snapshot_function(
+        sealed_next_request_id,
+        "Betfair request-id allocator",
+    )
     sealed_observed_at = clone_function(
         canonical_observed_at,
         label="Betfair observation clock adapter",
     )
-    observed_at_snapshot = snapshot_globals(sealed_observed_at)
+    observed_at_snapshot = snapshot_function(
+        sealed_observed_at,
+        "Betfair observation clock adapter",
+    )
     sealed_transport_post = clone_function(
         canonical_transport_post,
         label="Betfair HTTP transport",
     )
-    transport_snapshot = snapshot_globals(sealed_transport_post)
+    transport_snapshot = snapshot_function(
+        sealed_transport_post,
+        "Betfair HTTP transport",
+    )
 
     def require_static_snapshot() -> None:
         if sealed_json.dumps is not canonical_json_dumps:
@@ -231,11 +350,21 @@ def _install_guard() -> None:
 
     def sealed_product_clock(clock: object) -> FunctionType:
         clock_clone = clone_function(clock, label="Betfair product clock")
-        clock_snapshot = snapshot_globals(clock_clone)
+        clock_snapshot = snapshot_function(clock_clone, "Betfair product clock")
 
         def product_clock():
             require_snapshot(clock_clone, clock_snapshot, "K07 Betfair product clock")
-            return clock_clone()
+            invocation_clock = clone_function(
+                clock_clone,
+                label="per-call K07 Betfair product clock",
+                metadata=clock_snapshot[0],
+            )
+            require_snapshot(
+                invocation_clock,
+                clock_snapshot,
+                "per-call K07 Betfair product clock",
+            )
+            return invocation_clock()
 
         product_clock._autosport_k07_clock_sealed = True
         return product_clock
@@ -253,6 +382,7 @@ def _install_guard() -> None:
             sealed_decode_json,
             label="per-call Betfair JSON decoder",
             globals_overrides={"json": local_json},
+            metadata=decode_snapshot[0],
         )
         local_rpc = clone_function(
             sealed_rpc,
@@ -261,23 +391,27 @@ def _install_guard() -> None:
                 "json": local_json,
                 "_decode_json": local_decode,
             },
+            metadata=rpc_snapshot[0],
         )
         local_next_request_id = clone_function(
             sealed_next_request_id,
             label="per-call Betfair request-id allocator",
+            metadata=request_id_snapshot[0],
         )
         local_observed_at = clone_function(
             sealed_observed_at,
             label="per-call Betfair observation clock adapter",
+            metadata=observed_at_snapshot[0],
         )
         local_transport_post = clone_function(
             sealed_transport_post,
             label="per-call Betfair HTTP transport",
+            metadata=transport_snapshot[0],
         )
 
-        # Validate what was copied, not only the persistent templates.  A transient
-        # rebind between the pre-copy check and FunctionType construction therefore
-        # cannot be captured and then restored before the next public check.
+        # Validate what was copied, not only the persistent templates. Transient
+        # global rebinding is caught in the local copy, while executable metadata
+        # comes from the frozen snapshot rather than a late source-function read.
         require_snapshot(
             local_decode,
             decode_snapshot,
@@ -321,7 +455,7 @@ def _install_guard() -> None:
         require_static_snapshot()
 
         # Identity issuance creates/validates this context immediately before the
-        # canonical read.  Ordinary direct read-only clients have no such record and
+        # canonical read. Ordinary direct read-only clients have no such record and
         # continue through the unmodified adapter path.
         context = client_contexts.get(id(client))
         if (
@@ -440,9 +574,9 @@ def _install_guard() -> None:
             )
         return details
 
-    # Install at the owning read seam first.  Then retarget the existing K07
+    # Install at the owning read seam first. Then retarget the existing K07
     # factory's captured canonical cells so its own dispatch verifier sees these
-    # exact guards as canonical.  Because those outer cells are shared, the
+    # exact guards as canonical. Because those outer cells are shared, the
     # predecessor resolver itself now invokes guarded_read_account_details.
     client_type.__init__ = guarded_client_init
     client_type.read_account_details = guarded_read_account_details
@@ -454,7 +588,7 @@ def _install_guard() -> None:
         guarded_read_account_details,
     )
 
-    # Prove the resolver shares the retargeted read cell.  If the implementation
+    # Prove the resolver shares the retargeted read cell. If the implementation
     # topology changes, fail closed at import rather than silently reinstalling a
     # wrapper that leaves a predecessor bypass reachable.
     resolve_freevars = original_resolve.__code__.co_freevars
@@ -493,7 +627,7 @@ def _install_guard() -> None:
             raise identity_error("canonical K07 builder lost its registered origin")
 
         # Seal the exact clock before the client escapes to callers, then update the
-        # existing K07 origin to that same object.  This is not a sibling registry:
+        # existing K07 origin to that same object. This is not a sibling registry:
         # context_for() and the read guard consume this one canonical origin.
         clock = sealed_product_clock(origin.clock)
         client._clock = clock

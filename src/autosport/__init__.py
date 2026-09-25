@@ -157,3 +157,6 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # RunRegistry availability and run-state updates are whole-image authority
 # transitions. Serialize the entire read/modify/write cycle, not only final replace.
 from . import _outcome_availability_registry_serialization as _outcome_availability_registry_serialization  # noqa: F401,E402
+# Seal the two-phase availability clock against mutable function defaults, module
+# dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
+from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402

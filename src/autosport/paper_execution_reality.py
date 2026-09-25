@@ -546,7 +546,9 @@ def _validate_lay_execution_surface(
     plan: ExecutionPlan,
     observations: Mapping[str, ObservedPaperExecution],
 ) -> None:
-    lay_actions = tuple(action for action in plan.actions if action.side == "LAY")
+    lay_actions = tuple(
+        action for action in plan.actions if action.side.strip().upper() == "LAY"
+    )
     if not lay_actions:
         return
     if len(plan.actions) != 1 or len(lay_actions) != 1:

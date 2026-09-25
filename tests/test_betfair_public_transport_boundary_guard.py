@@ -60,12 +60,36 @@ def test_direct_class_call_cannot_inject_pre_transport_callback() -> None:
     assert callback_calls == []
 
 
-def test_direct_public_call_cannot_create_provider_effect_without_ledger_path() -> None:
+def test_direct_public_call_enters_canonical_action_validation() -> None:
+    """The narrow public surface delegates; it is not an unconditional deny shim."""
+
     client = _client()
 
     with pytest.raises(
         BetfairSupervisedExecutionError,
-        match="direct public Betfair provider write is disabled",
+        match="action must be canonical ExecutionAction",
+    ):
+        client.place_action(
+            object(),
+            profile=object(),
+            bound=object(),
+            provider_order_ref="0" * 32,
+            execution_workspace=Path("."),
+        )
+
+
+def test_public_write_rejects_caller_transport_instance() -> None:
+    class ForgedTransport:
+        pass
+
+    client = BetfairSupervisedPlaceOrdersClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=ForgedTransport(),
+    )
+
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="requires canonical HTTPS transport state",
     ):
         client.place_action(
             object(),

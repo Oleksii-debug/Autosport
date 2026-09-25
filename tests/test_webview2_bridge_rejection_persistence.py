@@ -10,6 +10,8 @@ from autosport.windows_webview_shell import AutosportWebController
 def _bare_controller() -> AutosportWebController:
     controller = AutosportWebController.__new__(AutosportWebController)
     controller._lock = threading.RLock()
+    controller._request_replay_lock = threading.RLock()
+    controller._request_identities = {}
     controller._request_results = {}
     controller._closing = False
     controller.status = "stable product status"

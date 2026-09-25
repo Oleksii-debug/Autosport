@@ -73,3 +73,8 @@ def _open_with_sealed_market_filter(
 
 _open_with_sealed_market_filter._autosport_market_filter_snapshot_guard = True
 _stream.open_authenticated_market_subscription = _open_with_sealed_market_filter
+
+# The same authenticated freshness authority also owns receive/evaluate timing. Load
+# its narrow clock-binding guard after the canonical composition and filter snapshot
+# are installed so late module rebinding cannot change an admitted runtime's clock.
+from . import _betfair_authenticated_stream_clock_binding as _clock_binding  # noqa: E402,F401

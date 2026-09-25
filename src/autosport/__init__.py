@@ -153,3 +153,7 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # A supported START is not caller-visible until the exact durable activation bytes
 # have been re-read against the already-committed monotonic witness.
 from . import _product_decision_activation_commit_return_guard as _product_decision_activation_commit_return_guard  # noqa: F401,E402
+
+# The supported PAPER tick must consume the exact durable decision-authority resolver;
+# caller/instance/class rebinding of that private seam cannot mint START authority.
+from . import _product_paper_decision_authority_dispatch_guard as _product_paper_decision_authority_dispatch_guard  # noqa: F401,E402

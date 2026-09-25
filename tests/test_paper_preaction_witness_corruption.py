@@ -73,10 +73,13 @@ class PaperPreActionWitnessCorruptionTests(unittest.TestCase):
             expected = PaperBook("100.00")
             expected.save(path)
             canonical = path.read_text(encoding="utf-8")
-            path.write_text(
-                canonical.replace('"balance":"100.00"', '"balance":NaN', 1),
-                encoding="utf-8",
+            mutated = canonical.replace(
+                '"balance": "100.00"',
+                '"balance": NaN',
+                1,
             )
+            self.assertNotEqual(mutated, canonical)
+            path.write_text(mutated, encoding="utf-8")
 
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,

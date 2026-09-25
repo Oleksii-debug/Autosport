@@ -231,6 +231,7 @@ def test_primary_tick_failure_survives_close_and_restore_failures(
 
     assert raised.value.error_type == "TickFailure"
     assert isinstance(raised.value.__cause__, TickFailure)
+    assert runtime.stop_calls == ["runtime_error"]
     assert runtime.close_calls == 1
 
 
@@ -267,4 +268,63 @@ def test_default_idle_wait_is_preempted_into_signal_stop_without_second_tick(
     assert code == 128 + int(signal.SIGTERM)
     assert runtime.tick_calls == 1
     assert runtime.stop_calls == ["signal:SIGTERM"]
+    assert runtime.close_calls == 1
+
+
+def test_start_status_output_failure_terminalizes_runtime_before_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime()
+    _install_runtime(monkeypatch, runtime)
+
+    def fail_output(*_args: object, **_kwargs: object) -> None:
+        raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(entrypoint, "_print_record", fail_output)
+
+    with pytest.raises(entrypoint.ProductRuntimeError) as raised:
+        entrypoint.run_product(
+            workspace="unused",
+            source_factory="unused:factory",
+            max_cycles=1,
+            poll_seconds=0,
+            install_signal_handlers=False,
+        )
+
+    assert raised.value.error_type == "BrokenPipeError"
+    assert isinstance(raised.value.__cause__, BrokenPipeError)
+    assert runtime.start_calls == 1
+    assert runtime.tick_calls == 0
+    assert runtime.stop_calls == ["runtime_error"]
+    assert runtime.close_calls == 1
+
+
+def test_output_failure_after_successful_stop_does_not_issue_second_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime()
+    _install_runtime(monkeypatch, runtime)
+    print_calls = 0
+
+    def fail_terminal_output(*_args: object, **_kwargs: object) -> None:
+        nonlocal print_calls
+        print_calls += 1
+        if print_calls == 3:
+            raise BrokenPipeError("stdout closed after stop")
+
+    monkeypatch.setattr(entrypoint, "_print_record", fail_terminal_output)
+
+    with pytest.raises(entrypoint.ProductRuntimeError) as raised:
+        entrypoint.run_product(
+            workspace="unused",
+            source_factory="unused:factory",
+            max_cycles=1,
+            poll_seconds=0,
+            install_signal_handlers=False,
+        )
+
+    assert raised.value.error_type == "BrokenPipeError"
+    assert runtime.start_calls == 1
+    assert runtime.tick_calls == 1
+    assert runtime.stop_calls == ["max_cycles_reached"]
     assert runtime.close_calls == 1

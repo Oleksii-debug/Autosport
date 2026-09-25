@@ -30,6 +30,44 @@ class SettlementExecutionBasisError(RuntimeError):
     """Raised when durable execution truth cannot support a settlement fill basis."""
 
 
+def _canonical_codec_authority(
+    *,
+    _json_module=json,
+    _hashlib_module=hashlib,
+    _loads=json.loads,
+    _dumps=json.dumps,
+    _decode_error=json.JSONDecodeError,
+    _sha256=hashlib.sha256,
+):
+    """Return the import-captured JSON/SHA primitives only if dispatch is intact.
+
+    ``verified_snapshot()`` authenticates the durable byte sequence, but reparsing
+    those bytes through a mutable consumer-module ``json`` global would let a
+    caller replace the semantic events *after* the ledger proof.  Basis identity
+    has the same problem if its JSON serializer or SHA implementation is retargeted.
+
+    Keep the exact import-time stdlib modules/functions in function defaults and
+    verify the public dispatch before every authority-bearing parse/hash.  Ordinary
+    module rebinding therefore fails closed instead of becoming a second parser or
+    digest authority.
+    """
+
+    if json is not _json_module or hashlib is not _hashlib_module:
+        raise SettlementExecutionBasisError(
+            "settlement execution codec authority was rebound"
+        )
+    if (
+        _json_module.loads is not _loads
+        or _json_module.dumps is not _dumps
+        or _json_module.JSONDecodeError is not _decode_error
+        or _hashlib_module.sha256 is not _sha256
+    ):
+        raise SettlementExecutionBasisError(
+            "settlement execution codec authority was rebound"
+        )
+    return _loads, _dumps, _decode_error, _sha256
+
+
 def _canonical_verified_snapshot(
     ledger: RealExecutionLedger,
 ) -> VerifiedExecutionLedgerSnapshot:
@@ -58,12 +96,13 @@ def _canonical_verified_snapshot(
             "execution ledger executable read authority was rebound"
         )
 
+    _, _, _, sha256 = _canonical_codec_authority()
     snapshot = _REAL_EXECUTION_LEDGER_VERIFIED_SNAPSHOT(ledger)
     if type(snapshot) is not VerifiedExecutionLedgerSnapshot:
         raise SettlementExecutionBasisError(
             "canonical execution ledger returned unexpected snapshot type"
         )
-    if snapshot.sha256 != hashlib.sha256(snapshot.payload).hexdigest():
+    if snapshot.sha256 != sha256(snapshot.payload).hexdigest():
         raise SettlementExecutionBasisError(
             "canonical execution ledger snapshot digest mismatch"
         )
@@ -98,14 +137,15 @@ def _canonical_decimal(value: Decimal) -> str:
 
 
 def _basis_id(payload: dict[str, object]) -> str:
-    encoded = json.dumps(
+    _, dumps, _, sha256 = _canonical_codec_authority()
+    encoded = dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,12 +225,13 @@ def derive_settlement_execution_basis(
         raise TypeError("ledger must be exact RealExecutionLedger")
     target_attempt = _text(attempt_id, "attempt_id")
 
+    loads, _, decode_error, _ = _canonical_codec_authority()
     snapshot = _canonical_verified_snapshot(ledger)
     records: list[tuple[str, dict[str, object]]] = []
     for raw_line in snapshot.payload.splitlines():
         try:
-            envelope = json.loads(raw_line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover
+            envelope = loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, decode_error) as exc:  # pragma: no cover
             raise SettlementExecutionBasisError(
                 "verified execution snapshot could not be decoded"
             ) from exc

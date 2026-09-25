@@ -145,6 +145,15 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
 
+# Product PolicyEvaluation issuance already exact-fences the FactoryArtifactStore
+# surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
+# so a class/module rebind cannot inject forged bytes beneath that trusted surface.
+from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
+
+# Robust portfolio stakes are monetary grid values, not Decimal exponent values.
+# Install the exact arbitrary-quantum floor after the owning proposal implementation.
+from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
 # Smarkets reconciliation journals must serialize provider-derived Decimals exactly;
 # Decimal.normalize() is ambient-context-sensitive and can break durable replay.
 from . import _smarkets_decimal_serialization_guard as _smarkets_decimal_serialization_guard  # noqa: F401,E402

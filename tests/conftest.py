@@ -143,15 +143,43 @@ def _legacy_provider_semantic_fixture_bridge(request):
 
 
 @pytest.fixture(autouse=True)
+def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
+    """Isolate the partial-frame recovery test from wall-clock scheduling jitter.
+
+    The production transport deliberately applies reconnect backoff after an abnormal
+    established-session failure. Dedicated backoff tests assert that contract. The
+    partial-frame test has a different purpose: proving stale bytes cannot cross a
+    reconnect boundary. Advance a deterministic monotonic clock only for that one
+    scenario so it reaches the next eligible reconnect instant without sleeping.
+    """
+
+    if Path(str(request.node.fspath)).name != "test_betfair_stream_transport.py":
+        return
+    if request.node.name != "test_disconnect_mid_frame_discards_partial_bytes_before_reconnect":
+        return
+
+    from autosport import betfair_stream_transport as stream
+
+    now = [100.0]
+
+    def monotonic() -> float:
+        value = now[0]
+        now[0] += 1.0
+        return value
+
+    monkeypatch.setattr(stream.time, "monotonic", monotonic)
+
+
+@pytest.fixture(autouse=True)
 def _repair_stale_smarkets_ladder_fixture(request, monkeypatch):
     """Keep one legacy ladder test coherent with the newer FILLED invariant.
 
     The test intends to reach the exchange-ladder rejection for requested odds 6.1.
     Its helper defaults to a FILLED 250000/250000 order, then the test changes only
-    requested quantity to 610000.  That correctly trips the newer DTO state invariant
-    before the intended ladder assertion.  For this exact node only, make the FILLED
+    requested quantity to 610000. That correctly trips the newer DTO state invariant
+    before the intended ladder assertion. For this exact node only, make the FILLED
     executed quantity follow its requested quantity unless the test explicitly supplies
-    a different executed quantity.  Production validation is untouched.
+    a different executed quantity. Production validation is untouched.
     """
 
     if (

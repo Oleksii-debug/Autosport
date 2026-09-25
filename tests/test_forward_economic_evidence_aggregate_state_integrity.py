@@ -5,11 +5,13 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.forward_economic_evidence as evidence_module
 from autosport.forward_economic_evidence import (
     AlphaAllocation,
     FamilywiseAlphaRegistry,
     ForwardEconomicEvidenceAccumulator,
     ForwardEconomicEvidenceError,
+    ForwardEconomicEvidenceSummary,
     ForwardEconomicProtocol,
 )
 
@@ -85,3 +87,55 @@ def test_cached_aggregate_mutation_cannot_change_summary_under_same_evidence(
     assert after.conditional_eprocess_verified is False
     assert after.scientific_promotion_gate_passed is False
     assert after.promotion_authority is False
+
+
+def test_summary_type_rebind_cannot_mint_positive_scientific_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accumulator = ForwardEconomicEvidenceAccumulator(_protocol())
+    forged_called = False
+
+    def forged_summary(*args, **kwargs):
+        nonlocal forged_called
+        forged_called = True
+        raise AssertionError("forged summary constructor must not run")
+
+    monkeypatch.setattr(
+        evidence_module,
+        "ForwardEconomicEvidenceSummary",
+        forged_summary,
+    )
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        accumulator.summary()
+
+    assert forged_called is False
+
+
+def test_summary_constructor_rebind_cannot_mint_positive_scientific_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accumulator = ForwardEconomicEvidenceAccumulator(_protocol())
+    forged_called = False
+
+    def forged_init(self, *args, **kwargs) -> None:
+        nonlocal forged_called
+        forged_called = True
+        object.__setattr__(self, "evidence_sha256", kwargs.get("evidence_sha256", "0" * 64))
+        object.__setattr__(self, "positive_authority_verified", True)
+        object.__setattr__(self, "conditional_eprocess_verified", True)
+        object.__setattr__(self, "scientific_promotion_gate_passed", True)
+        object.__setattr__(self, "promotion_authority", True)
+
+    monkeypatch.setattr(ForwardEconomicEvidenceSummary, "__init__", forged_init)
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="internal recorded step identity executable integrity drift",
+    ):
+        accumulator.summary()
+
+    assert forged_called is False

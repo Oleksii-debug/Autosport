@@ -99,5 +99,86 @@ def test_resolver_rejects_runtime_post_init_rebind_before_resolution(
     assert replacement_called is False
 
 
+def test_resolver_rejects_scientific_registry_rebind_before_forged_read(
+    tmp_path, monkeypatch
+) -> None:
+    forged_called = False
+
+    class ForgedRegistry:
+        SCHEMA_VERSION = 1
+
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal forged_called
+            forged_called = True
+
+    monkeypatch.setattr(runtime_module, "ScientificRegistry", ForgedRegistry)
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="dependency 'ScientificRegistry' changed",
+    ):
+        runtime_module.resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-02T00:00:00Z",
+        )
+
+    assert forged_called is False
+
+
+def test_resolver_rejects_decoder_rebind_before_forged_decoder_runs(
+    tmp_path, monkeypatch
+) -> None:
+    forged_called = False
+
+    def forged_decoder(*args, **kwargs):
+        nonlocal forged_called
+        forged_called = True
+        raise AssertionError("forged decoder must not run")
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_decode_mean_baseline_artifact",
+        forged_decoder,
+    )
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="dependency '_decode_mean_baseline_artifact' changed",
+    ):
+        runtime_module.resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-02T00:00:00Z",
+        )
+
+    assert forged_called is False
+
+
+def test_resolver_rejects_artifact_store_method_rebind_before_forged_read(
+    tmp_path, monkeypatch
+) -> None:
+    forged_called = False
+
+    def forged_read(self, *args, **kwargs):
+        nonlocal forged_called
+        forged_called = True
+        raise AssertionError("forged artifact read must not run")
+
+    monkeypatch.setattr(runtime_module.FactoryArtifactStore, "read", forged_read)
+
+    with pytest.raises(
+        RegisteredStrategyModelRuntimeError,
+        match="artifact-store dispatch 'read' changed",
+    ):
+        runtime_module.resolve_registered_strategy_model(
+            tmp_path.resolve(),
+            strategy_version_id="strategy-v1",
+            as_of="2026-01-02T00:00:00Z",
+        )
+
+    assert forged_called is False
+
+
 def test_installed_resolver_does_not_expose_pre_guard_unwrap_target() -> None:
     assert not hasattr(runtime_module.resolve_registered_strategy_model, "__wrapped__")

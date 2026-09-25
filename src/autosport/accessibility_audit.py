@@ -9,7 +9,7 @@ import tk_uia
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
-from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from .windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 
 
@@ -17,6 +17,7 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["choose_dataset"]: {"INVOKE"},
     AUTOMATION_IDS["run_replay"]: {"INVOKE"},
     AUTOMATION_IDS["repair_workspace"]: {"INVOKE"},
+    AUTOMATION_IDS["export_evidence"]: {"INVOKE"},
     AUTOMATION_IDS["replay_speed"]: {"VALUE"},
     AUTOMATION_IDS["live_mode"]: {"VALUE"},
     AUTOMATION_IDS["live_refresh"]: {"INVOKE"},
@@ -34,6 +35,8 @@ _REQUIRED_PATTERNS = {
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"]: {"INVOKE"},
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"]: set(),
+    OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"]: set(),
+    OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"]: {"INVOKE"},
     WORKBENCH_AUTOMATION_IDS["open"]: {"INVOKE"},
     WORKBENCH_AUTOMATION_IDS["operation"]: {"VALUE"},
     WORKBENCH_AUTOMATION_IDS["input"]: {"VALUE"},
@@ -47,6 +50,7 @@ _EXPECTED_ROLES = {
     AUTOMATION_IDS["choose_dataset"]: "PUSH_BUTTON",
     AUTOMATION_IDS["run_replay"]: "PUSH_BUTTON",
     AUTOMATION_IDS["repair_workspace"]: "PUSH_BUTTON",
+    AUTOMATION_IDS["export_evidence"]: "PUSH_BUTTON",
     AUTOMATION_IDS["replay_speed"]: "COMBO_BOX",
     AUTOMATION_IDS["live_mode"]: "COMBO_BOX",
     AUTOMATION_IDS["live_refresh"]: "PUSH_BUTTON",
@@ -64,6 +68,8 @@ _EXPECTED_ROLES = {
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_open"]: "PUSH_BUTTON",
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_status"]: "TEXT",
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"]: "LIST",
+    OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"]: "LIST",
+    OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"]: "PUSH_BUTTON",
     WORKBENCH_AUTOMATION_IDS["open"]: "PUSH_BUTTON",
     WORKBENCH_AUTOMATION_IDS["operation"]: "COMBO_BOX",
     WORKBENCH_AUTOMATION_IDS["input"]: "TEXT",
@@ -79,6 +85,7 @@ _ROW_CONTROLS = {
     AUTOMATION_IDS["evaluation"],
     WINDOWS_SHELL_AUTOMATION_IDS["details"],
     WINDOWS_SHELL_AUTOMATION_IDS["owner_economic_readback"],
+    OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"],
 }
 
 _BLOCKING_GAPS = {
@@ -141,15 +148,43 @@ def _disabled_text_is_readonly(widget: Any) -> bool:
     return str(widget.cget("state")) == "disabled"
 
 
-def _combined_description(root: Any, dialog: Any) -> Any:
+def _combined_description(*descriptions: Any) -> Any:
+    if not descriptions:
+        raise ValueError("at least one UIA description is required")
+    first = descriptions[0]
     return SimpleNamespace(
-        strategy=root.strategy,
-        widgets=tuple(root.widgets) + tuple(dialog.widgets),
-        provider_trouble=tuple(root.provider_trouble) + tuple(dialog.provider_trouble),
-        providers_stood_down_because=(
-            root.providers_stood_down_because or dialog.providers_stood_down_because
+        strategy=first.strategy,
+        widgets=tuple(widget for description in descriptions for widget in description.widgets),
+        provider_trouble=tuple(
+            item for description in descriptions for item in description.provider_trouble
+        ),
+        providers_stood_down_because=next(
+            (
+                description.providers_stood_down_because
+                for description in descriptions
+                if description.providers_stood_down_because
+            ),
+            None,
         ),
     )
+
+
+def _open_owner_economic_dialog_for_audit(app: WindowsAutosportApp) -> Any:
+    """Open the real owner-authority dialog without creating or changing economic state."""
+    before = set(app.winfo_children())
+    app.owner_economic_authority_button.invoke()
+    app.update_idletasks()
+    app.update()
+    created = [
+        child
+        for child in app.winfo_children()
+        if child not in before and child.winfo_toplevel() is child
+    ]
+    if len(created) != 1:
+        raise RuntimeError(
+            f"owner economic dialog open created {len(created)} top-level windows; expected 1"
+        )
+    return created[0]
 
 
 def summarize_description(
@@ -168,47 +203,50 @@ def summarize_description(
         automation_id = widget.automation_id
         if automation_id not in expected_ids:
             continue
-        automation_id = int(automation_id)
-        if automation_id in controls:
-            first_path = controls[automation_id]["path"]
-            duplicate_path = getattr(widget, "path", None)
+        normalized_automation_id = int(automation_id)
+        if normalized_automation_id in controls:
             failures.append(
-                f"automation_id={automation_id}: duplicate critical control "
-                f"paths={first_path},{duplicate_path}"
+                f"automation_id={normalized_automation_id}: duplicate critical control identity "
+                f"first_path={controls[normalized_automation_id]['path']} "
+                f"duplicate_path={widget.path}"
             )
             continue
         gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
         pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
         role_name = _enum_name(widget.role)
-        controls[automation_id] = {
+        controls[normalized_automation_id] = {
             "path": widget.path,
             "tk_class": widget.tk_class,
             "role": role_name,
             "name": widget.name,
-            "automation_id": automation_id,
+            "automation_id": normalized_automation_id,
             "patterns": pattern_names,
             "answers_rows": bool(widget.answers_rows),
             "gaps": gap_names,
         }
         if not widget.name:
-            failures.append(f"automation_id={automation_id}: missing accessible name")
-        expected_role = _EXPECTED_ROLES[automation_id]
+            failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
+        expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:
             actual_role = role_name if role_name is not None else "NONE"
             failures.append(
-                f"automation_id={automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
+                f"automation_id={normalized_automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
             )
         blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
         if blockers:
-            failures.append(f"automation_id={automation_id}: blocking gaps={','.join(blockers)}")
-        required = _REQUIRED_PATTERNS[automation_id]
+            failures.append(
+                f"automation_id={normalized_automation_id}: blocking gaps={','.join(blockers)}"
+            )
+        required = _REQUIRED_PATTERNS[normalized_automation_id]
         missing_patterns = sorted(required - set(pattern_names))
         if missing_patterns:
             failures.append(
-                f"automation_id={automation_id}: missing UIA patterns={','.join(missing_patterns)}"
+                f"automation_id={normalized_automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
-        if automation_id in _ROW_CONTROLS and not widget.answers_rows:
-            failures.append(f"automation_id={automation_id}: list rows are not exposed through UIA")
+        if normalized_automation_id in _ROW_CONTROLS and not widget.answers_rows:
+            failures.append(
+                f"automation_id={normalized_automation_id}: list rows are not exposed through UIA"
+            )
 
     missing_ids = sorted(expected_ids - set(controls))
     for automation_id in missing_ids:
@@ -258,8 +296,9 @@ def summarize_description(
         "providers_stood_down_because": description.providers_stood_down_because,
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
-            "of the packaged Windows GUI and canonical product-shell controls; not external UIA "
-            "client or NVDA speech proof"
+            "of the packaged Windows GUI and canonical product-shell controls, including the "
+            "always-present owner-economic dialog readback/close shell; not external UIA client "
+            "or NVDA speech proof"
         ),
         "human_tested": False,
         "nvda_verified": False,
@@ -271,22 +310,33 @@ def run_accessibility_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     app: WindowsAutosportApp | None = None
+    owner_dialog: Any | None = None
     dialog: Any | None = None
     try:
         app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
-        # Snapshot the already-enabled main window before opening a new Toplevel.
+        # Snapshot the already-enabled main window before opening later Toplevels.
         # tk-uia 0.8.0 covers later windows from the original enable(root), while
         # keeping the main-window description independent of Toplevel handle churn.
         root_description = tk_uia.describe(app)
+        owner_dialog = _open_owner_economic_dialog_for_audit(app)
+        owner_dialog_description = tk_uia.describe(owner_dialog)
+        owner_dialog.destroy()
+        owner_dialog = None
+        app.update_idletasks()
+        app.update()
         dialog = show_manual_calculation_workbench(app)
         app.update_idletasks()
         app.update()
         controls = getattr(dialog, "_autosport_workbench_controls", {})
         dialog_description = tk_uia.describe(dialog)
         report = summarize_description(
-            _combined_description(root_description, dialog_description),
+            _combined_description(
+                root_description,
+                owner_dialog_description,
+                dialog_description,
+            ),
             bankroll_readonly=_bankroll_summary_is_readonly(app),
             shell_state_readonly=_shell_state_is_readonly(app),
             owner_economic_state_readonly=_owner_economic_state_is_readonly(app),
@@ -302,6 +352,11 @@ def run_accessibility_audit(output_path: str | Path) -> int:
             "real_money_execution": False,
         }
     finally:
+        if owner_dialog is not None:
+            try:
+                owner_dialog.destroy()
+            except Exception:
+                pass
         if dialog is not None:
             try:
                 dialog.destroy()

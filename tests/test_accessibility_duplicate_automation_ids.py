@@ -62,8 +62,9 @@ def test_duplicate_critical_automation_id_fails_closed_without_overwrite():
     assert any(
         failure
         == (
-            f"automation_id={duplicate_id}: duplicate critical control "
-            f"paths=.!control{duplicate_id},.!duplicate-dataset-control"
+            f"automation_id={duplicate_id}: duplicate critical control identity "
+            f"first_path=.!control{duplicate_id} "
+            "duplicate_path=.!duplicate-dataset-control"
         )
         for failure in report["failures"]
     )

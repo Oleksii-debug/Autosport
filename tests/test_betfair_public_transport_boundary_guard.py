@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from autosport.betfair_account_readonly import BetfairSessionCredentials
-from autosport.betfair_supervised_execution import BetfairSupervisedPlaceOrdersClient
+from autosport.betfair_supervised_execution import (
+    BetfairSupervisedExecutionError,
+    BetfairSupervisedPlaceOrdersClient,
+)
 
 
 def _client() -> BetfairSupervisedPlaceOrdersClient:
@@ -55,3 +58,19 @@ def test_direct_class_call_cannot_inject_pre_transport_callback() -> None:
         )
 
     assert callback_calls == []
+
+
+def test_direct_public_call_cannot_create_provider_effect_without_ledger_path() -> None:
+    client = _client()
+
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="direct public Betfair provider write is disabled",
+    ):
+        client.place_action(
+            object(),
+            profile=object(),
+            bound=object(),
+            provider_order_ref="0" * 32,
+            execution_workspace=Path("."),
+        )

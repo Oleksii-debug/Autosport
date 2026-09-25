@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
-from threading import Lock
 from types import SimpleNamespace
 
 import pytest
@@ -35,7 +34,7 @@ class _IntentFactory:
         return ()
 
 
-def _resolver_cycle(tmp_path: Path, authority: _Authority) -> ProductPaperDecisionCycle:
+def _resolver_cycle(tmp_path: Path, authority) -> ProductPaperDecisionCycle:
     cycle = object.__new__(ProductPaperDecisionCycle)
     cycle.runtime = SimpleNamespace(workspace=tmp_path)
     cycle.authority = authority
@@ -93,31 +92,41 @@ def _install_durable_authority_fakes(monkeypatch, tmp_path: Path):
             calls["risk_load"] = kwargs
             return risk_policy
 
+    def _fake_provenance(value):
+        return SimpleNamespace(
+            contract_sha256="a" * 64 if value is goal else "f" * 64
+        )
+
     monkeypatch.setattr(cycle_module, "ProductDecisionActivationStore", _ActivationStore)
     monkeypatch.setattr(cycle_module, "EconomicGoalStore", _GoalStore)
     monkeypatch.setattr(cycle_module, "PaperRiskPolicyStore", _RiskStore)
     monkeypatch.setattr(cycle_module, "EconomicDecisionAuthority", _Authority)
-    monkeypatch.setattr(
-        cycle_module,
-        "provenance_for",
-        lambda value: SimpleNamespace(
-            contract_sha256="a" * 64 if value is goal else "f" * 64
-        ),
+    monkeypatch.setattr(cycle_module, "provenance_for", _fake_provenance)
+
+    resolver = cycle_module._make_product_authority_resolver(
+        activation_store_class=_ActivationStore,
+        economic_goal_store_class=_GoalStore,
+        risk_policy_store_class=_RiskStore,
+        authority_class=_Authority,
+        provenance_resolver=_fake_provenance,
+        intent_producer_class=cycle_module.BuiltInIntentProducer,
+        path_class=Path,
+        decimal_class=Decimal,
     )
-    return goal, risk_policy, activation, calls
+    return goal, risk_policy, activation, calls, resolver
 
 
 def test_resolver_reconstructs_fresh_authority_from_durable_start(
     tmp_path,
     monkeypatch,
 ) -> None:
-    goal, risk_policy, _activation, calls = _install_durable_authority_fakes(
-        monkeypatch, tmp_path
+    goal, risk_policy, _activation, calls, resolver = (
+        _install_durable_authority_fakes(monkeypatch, tmp_path)
     )
     supplied = _Authority(goal, risk_policy)
     cycle = _resolver_cycle(tmp_path, supplied)
 
-    resolved = cycle._resolve_product_authority()
+    resolved = resolver(cycle)
 
     assert resolved == supplied
     assert resolved is not supplied
@@ -140,8 +149,8 @@ def test_resolver_rejects_caller_authority_that_differs_from_durable_start(
     tmp_path,
     monkeypatch,
 ) -> None:
-    goal, risk_policy, _activation, _calls = _install_durable_authority_fakes(
-        monkeypatch, tmp_path
+    goal, risk_policy, _activation, _calls, resolver = (
+        _install_durable_authority_fakes(monkeypatch, tmp_path)
     )
     supplied = _Authority(
         SimpleNamespace(max_quote_age_seconds=Decimal("5")),
@@ -153,37 +162,52 @@ def test_resolver_rejects_caller_authority_that_differs_from_durable_start(
         ProductPaperDecisionCycleError,
         match="caller-supplied decision authority does not match durable supported START authority",
     ):
-        cycle._resolve_product_authority()
+        resolver(cycle)
 
     assert supplied.contract is not goal
     assert supplied.risk_policy is not risk_policy
 
 
-def test_supported_tick_passes_only_reresolved_authority_to_decision_cycle() -> None:
-    cycle = object.__new__(ProductPaperDecisionCycle)
-    cycle._cycle_lock = Lock()
-    product_tick = SimpleNamespace()
-    status = SimpleNamespace(state=cycle_module.SessionState.RUNNING)
-    cycle.runtime = SimpleNamespace(
-        tick=lambda: product_tick,
-        status=lambda: status,
+def test_production_resolver_rejects_module_store_substitution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class _ForgedActivationStore:
+        pass
+
+    cycle = _resolver_cycle(
+        tmp_path,
+        SimpleNamespace(contract=SimpleNamespace(max_quote_age_seconds=Decimal("5"))),
     )
-    durable_authority = object()
-    decision = SimpleNamespace(status="NO_CHANGE")
-    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cycle_module,
+        "ProductDecisionActivationStore",
+        _ForgedActivationStore,
+    )
 
-    cycle._require_running_runtime = lambda: None
-    cycle._resolve_product_authority = lambda: durable_authority
+    with pytest.raises(
+        ProductPaperDecisionCycleError,
+        match="canonical supported START decision-authority dispatch changed",
+    ):
+        cycle._resolve_product_authority()
 
-    def _run_decision_cycle(*, authority=None):
-        captured["authority"] = authority
-        return decision
 
-    cycle._run_decision_cycle = _run_decision_cycle
+def test_production_resolver_rejects_provenance_function_substitution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cycle = _resolver_cycle(
+        tmp_path,
+        SimpleNamespace(contract=SimpleNamespace(max_quote_age_seconds=Decimal("5"))),
+    )
+    monkeypatch.setattr(
+        cycle_module,
+        "provenance_for",
+        lambda _goal: SimpleNamespace(contract_sha256="0" * 64),
+    )
 
-    result = cycle.tick()
-
-    assert captured["authority"] is durable_authority
-    assert result.product_tick is product_tick
-    assert result.decision is decision
-    assert result.skipped_reason is None
+    with pytest.raises(
+        ProductPaperDecisionCycleError,
+        match="canonical supported START decision-authority dispatch changed",
+    ):
+        cycle._resolve_product_authority()

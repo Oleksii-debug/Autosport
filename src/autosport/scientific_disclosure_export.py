@@ -3,10 +3,14 @@
 ``ScientificRegistry.reproducibility_bundle`` contains the durable Experiment outcome.
 That makes its file-export path an adaptive disclosure boundary, even though the
 bundle otherwise contains references and hashes.  This module binds that outward
-projection to the exact durable Experiment/EvaluationBundle/PromotionEvidence/
-PromotionDecision lineage, derives the physical holdout identity from canonical
-registry truth, consumes it through the existing HoldoutDisclosureGate, and only
-then publishes the JSON file.
+projection to the exact durable Experiment/EvaluationBundle lineage, derives the
+physical holdout identity from canonical registry truth, consumes it through the
+existing HoldoutDisclosureGate, and only then publishes the JSON file.
+
+PromotionEvidence/PromotionDecision are additional lineage when present, not a
+precondition for disclosing a negative, null, harmful, inconclusive, or otherwise
+non-promoted Experiment.  Requiring promotion would make the safety boundary
+silently suppress the negative-result retention required by the scientific policy.
 
 No second holdout store, scientific registry, or promotion authority is introduced.
 The legacy direct ``ScientificRegistry.export_reproducibility_bundle`` entrypoint is
@@ -54,8 +58,8 @@ class ScientificDisclosureExportError(RuntimeError):
 class ScientificDisclosureExportResult:
     bundle_sha256: str
     experiment_id: str
-    promotion_evidence_id: str
-    promotion_decision_id: str
+    promotion_evidence_id: str | None
+    promotion_decision_id: str | None
     holdout_consumption_id: str
 
 
@@ -121,21 +125,33 @@ def _entry(registry: ScientificRegistry, record_type: str, record_id: str):
     return value
 
 
-def _exact_single(values: list, name: str):
-    if len(values) != 1:
+def _optional_single(values: list, name: str):
+    if len(values) > 1:
         raise ScientificDisclosureExportError(
-            f"scientific disclosure requires exactly one canonical {name}; found {len(values)}"
+            f"scientific disclosure has ambiguous canonical {name}; found {len(values)}"
         )
-    return values[0]
+    return values[0] if values else None
+
+
+def _confirmation_trial_family_id(research_protocol_id: str) -> str:
+    """Return the product-owned confirmation family used by registry promotion law."""
+
+    if type(research_protocol_id) is not str or not research_protocol_id:
+        raise ScientificDisclosureExportError(
+            "research_protocol_id must be canonical before deriving trial family"
+        )
+    return f"{research_protocol_id}:confirmation-trial-family"
 
 
 class ScientificDisclosureExporter:
     """Publish one outcome-bearing reproducibility bundle after durable consumption.
 
     The caller supplies no dataset, protocol, trial-family, evidence, or decision
-    identity.  Those are re-resolved from the exact ScientificRegistry bound to the
-    gate's canonical DatasetSnapshotLineageAuthority.  This prevents a caller from
-    disclosing holdout A while consuming unrelated holdout B.
+    identity.  Dataset/protocol/evaluation truth is re-resolved from the exact
+    ScientificRegistry bound to the gate's canonical DatasetSnapshotLineageAuthority.
+    The confirmation family is the same deterministic product convention enforced
+    by ScientificRegistry promotion validation.  Promotion records, when present,
+    are verified as additional lineage but cannot become an export prerequisite.
     """
 
     def __init__(self, gate: HoldoutDisclosureGate) -> None:
@@ -222,6 +238,19 @@ class ScientificDisclosureExporter:
                 "EvaluationBundle model does not match disclosed Experiment"
             )
 
+        evaluation_sha = _text(evaluation.payload, "bundle_sha256")
+        trial_family_id = _confirmation_trial_family_id(protocol_id)
+        expected_holdout_id = promotion_holdout_access_id(
+            research_protocol_id=protocol_id,
+            dataset_manifest_sha256=_text(dataset.payload, "manifest_sha256"),
+            source_identity=_text(dataset.payload, "source_identity"),
+            license_identity=_text(dataset.payload, "license_identity"),
+            confirmation_trial_family_id=trial_family_id,
+        )
+
+        # Promotion is not required to publish a scientific result.  When typed
+        # PromotionEvidence exists for this exact Experiment, it must agree with
+        # the same physical confirmation family/holdout identity used by export.
         evidence_candidates = [
             entry
             for entry in _CANONICAL_CAUSAL_RECORDS(
@@ -236,48 +265,46 @@ class ScientificDisclosureExporter:
             and entry.payload.get("candidate_strategy_version_id") == strategy_id
             and entry.payload.get("candidate_model_version_id") == model_id
         ]
-        evidence = _exact_single(evidence_candidates, "PromotionEvidence")
-        ev = evidence.payload
-        evaluation_sha = _text(evaluation.payload, "bundle_sha256")
-        if ev.get("evaluation_bundle_sha256") != evaluation_sha:
-            raise ScientificDisclosureExportError(
-                "PromotionEvidence bundle digest does not match disclosed EvaluationBundle"
-            )
-        trial_family_id = _text(ev, "confirmation_trial_family_id")
-        expected_holdout_id = promotion_holdout_access_id(
-            research_protocol_id=protocol_id,
-            dataset_manifest_sha256=_text(dataset.payload, "manifest_sha256"),
-            source_identity=_text(dataset.payload, "source_identity"),
-            license_identity=_text(dataset.payload, "license_identity"),
-            confirmation_trial_family_id=trial_family_id,
-        )
-        if ev.get("holdout_access_id") != expected_holdout_id:
-            raise ScientificDisclosureExportError(
-                "PromotionEvidence holdout identity does not match canonical physical lineage"
-            )
+        evidence = _optional_single(evidence_candidates, "PromotionEvidence")
+        decision = None
+        if evidence is not None:
+            ev = evidence.payload
+            if ev.get("evaluation_bundle_sha256") != evaluation_sha:
+                raise ScientificDisclosureExportError(
+                    "PromotionEvidence bundle digest does not match disclosed EvaluationBundle"
+                )
+            if ev.get("confirmation_trial_family_id") != trial_family_id:
+                raise ScientificDisclosureExportError(
+                    "PromotionEvidence trial family does not match canonical protocol family"
+                )
+            if ev.get("holdout_access_id") != expected_holdout_id:
+                raise ScientificDisclosureExportError(
+                    "PromotionEvidence holdout identity does not match canonical physical lineage"
+                )
 
-        decision_candidates = [
-            entry
-            for entry in _CANONICAL_CAUSAL_RECORDS(
-                self._registry,
-                "PromotionDecision",
-                as_of=_MAX_AS_OF,
-            )
-            if entry.payload.get("promotion_evidence_id") == evidence.record_id
-            and entry.payload.get("research_protocol_id") == protocol_id
-            and entry.payload.get("evaluation_bundle_id") == evaluation_id
-            and entry.payload.get("candidate_strategy_version_id") == strategy_id
-            and entry.payload.get("candidate_model_version_id") == model_id
-        ]
-        decision = _exact_single(decision_candidates, "PromotionDecision")
-        if decision.payload.get("evaluation_bundle_sha256") != evaluation_sha:
-            raise ScientificDisclosureExportError(
-                "PromotionDecision bundle digest does not match disclosed EvaluationBundle"
-            )
-        if decision.payload.get("protocol_sha256") != protocol_sha:
-            raise ScientificDisclosureExportError(
-                "PromotionDecision protocol digest does not match disclosed ResearchProtocol"
-            )
+            decision_candidates = [
+                entry
+                for entry in _CANONICAL_CAUSAL_RECORDS(
+                    self._registry,
+                    "PromotionDecision",
+                    as_of=_MAX_AS_OF,
+                )
+                if entry.payload.get("promotion_evidence_id") == evidence.record_id
+                and entry.payload.get("research_protocol_id") == protocol_id
+                and entry.payload.get("evaluation_bundle_id") == evaluation_id
+                and entry.payload.get("candidate_strategy_version_id") == strategy_id
+                and entry.payload.get("candidate_model_version_id") == model_id
+            ]
+            decision = _optional_single(decision_candidates, "PromotionDecision")
+            if decision is not None:
+                if decision.payload.get("evaluation_bundle_sha256") != evaluation_sha:
+                    raise ScientificDisclosureExportError(
+                        "PromotionDecision bundle digest does not match disclosed EvaluationBundle"
+                    )
+                if decision.payload.get("protocol_sha256") != protocol_sha:
+                    raise ScientificDisclosureExportError(
+                        "PromotionDecision protocol digest does not match disclosed ResearchProtocol"
+                    )
 
         canonical_snapshot = DatasetSnapshot(
             dataset_snapshot_id=dataset.record_id,
@@ -339,8 +366,8 @@ class ScientificDisclosureExporter:
         return ScientificDisclosureExportResult(
             bundle_sha256=bundle_sha,
             experiment_id=experiment.record_id,
-            promotion_evidence_id=evidence.record_id,
-            promotion_decision_id=decision.record_id,
+            promotion_evidence_id=(None if evidence is None else evidence.record_id),
+            promotion_decision_id=(None if decision is None else decision.record_id),
             holdout_consumption_id=disclosure.consumption.consumption_id,
         )
 

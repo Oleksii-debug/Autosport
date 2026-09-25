@@ -11,6 +11,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import re
 from typing import Any
 
@@ -158,6 +159,52 @@ def _require_git_commit_sha(name: str, value: object) -> str:
             f"{name} must be exactly 40 lowercase hexadecimal Git commit characters"
         )
     return value
+
+
+def _snapshot_json_tree(value: object, *, name: str) -> Any:
+    """Take one detached exact-container JSON snapshot before structural validation.
+
+    Transcript dict/list containers are caller-owned and mutable.  Validation must
+    never inspect one version and later hash another.  This copier intentionally
+    rejects tuple/custom-container/coercible objects instead of normalizing them.
+    If a concurrent mutation makes iteration inconsistent, the resulting detached
+    snapshot still has to pass the complete schema below before any authority is
+    issued.
+    """
+
+    if type(value) is dict:
+        snapshot: dict[str, Any] = {}
+        try:
+            items = tuple(value.items())
+        except RuntimeError as exc:
+            raise NvdaHumanAcceptanceError(
+                f"{name} changed while the transcript snapshot was captured"
+            ) from exc
+        for key, item in items:
+            if type(key) is not str:
+                raise NvdaHumanAcceptanceError(f"{name} object keys must be strings")
+            snapshot[key] = _snapshot_json_tree(item, name=f"{name}.{key}")
+        return snapshot
+    if type(value) is list:
+        try:
+            items = tuple(value)
+        except RuntimeError as exc:
+            raise NvdaHumanAcceptanceError(
+                f"{name} changed while the transcript snapshot was captured"
+            ) from exc
+        return [
+            _snapshot_json_tree(item, name=f"{name}[{index}]")
+            for index, item in enumerate(items)
+        ]
+    if type(value) in (str, int, bool) or value is None:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise NvdaHumanAcceptanceError(f"{name} must not contain NaN or Infinity")
+        return value
+    raise NvdaHumanAcceptanceError(
+        f"{name} must contain only exact JSON dict/list/scalar values"
+    )
 
 
 def _canonical_sha256(value: dict[str, Any]) -> str:
@@ -320,13 +367,16 @@ def validate_human_nvda_acceptance_transcript(
     expected_artifact_sha256: str,
     expected_source_sha: str,
 ) -> NvdaHumanAcceptanceStructuralResult:
-    """Validate transcript structure without promoting human/NVDA product truth."""
+    """Validate one detached transcript snapshot without promoting human/NVDA truth."""
 
     expected_artifact = _require_sha256(
         "expected_artifact_sha256", expected_artifact_sha256
     )
     expected_source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
-    frozen = _require_exact_dict("transcript", transcript)
+    if type(transcript) is not dict:
+        raise NvdaHumanAcceptanceError("transcript must be an exact dict")
+    frozen = _snapshot_json_tree(transcript, name="transcript")
+    frozen = _require_exact_dict("transcript", frozen)
     _require_exact_keys("transcript", frozen, _TOP_LEVEL_KEYS)
 
     if type(frozen["schema_version"]) is not int or frozen["schema_version"] != SCHEMA_VERSION:

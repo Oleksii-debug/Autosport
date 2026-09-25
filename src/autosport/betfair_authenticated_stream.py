@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import json
+import math
 import time
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -35,6 +36,11 @@ from .betfair_stream_transport import (
 
 _SCHEMA = "autosport.betfair_authenticated_stream_subscription.v1"
 _MAX_SUBSCRIPTION_BYTES = 64 * 1024
+_MAX_FILTER_DEPTH = 8
+_MAX_FILTER_NODES = 2_048
+_MAX_FILTER_COLLECTION_ITEMS = 1_024
+_MAX_FILTER_STRING_BYTES = 4_096
+_MAX_TRACKED_AUTHORITATIVE_QUOTES = 100_000
 _SECRET_KEY_FRAGMENTS = (
     "password",
     "secret",
@@ -143,7 +149,14 @@ def open_authenticated_market_subscription(
     heartbeat_ms: int,
     conflate_ms: int,
 ) -> BetfairAuthenticatedMarketSubscription:
-    """Send and positively acknowledge one read-only Market Stream subscription."""
+    """Send and positively acknowledge one read-only Market Stream subscription.
+
+    This intentionally supports the first subscription on one authenticated connection.
+    Replacement/resubscribe is a separate recovery authority because Betfair clock
+    continuation has materially different truth semantics.  Requiring acknowledgement
+    frame sequence 1 means prior post-auth reads cannot be silently relabelled as this
+    subscription's provider acknowledgement.
+    """
 
     if type(transport) is not BetfairStreamTlsTransport:
         raise TypeError("transport must be canonical BetfairStreamTlsTransport")
@@ -155,6 +168,7 @@ def open_authenticated_market_subscription(
         raise ValueError("provider_request_id must be an integer in 2..2147483647")
     if type(market_filter) is not dict or not market_filter:
         raise ValueError("market_filter must be a non-empty exact dict")
+    _validate_json_bounds(market_filter)
     _reject_secret_keys(market_filter)
 
     market_filter_bytes = _canonical_json_bytes(market_filter)
@@ -209,24 +223,37 @@ def open_authenticated_market_subscription(
         try:
             stream.sendall(request_payload)
         except Exception as exc:
+            transport.close()
             raise BetfairAuthenticatedStreamError(
-                "Betfair market subscription send failed"
+                "Betfair market subscription send failed; connection closed"
             ) from exc
 
-    acknowledgement = transport.read_authenticated_frame()
-    acknowledgement.assert_transport_issued()
-    _require_same_connection(acknowledgement, connection_id, connection_generation)
-    raw_status = _decode_exact_transport_frame(acknowledgement)
-    if raw_status.get("op") != "status":
-        raise BetfairAuthenticatedStreamError(
-            "first frame after marketSubscription must be provider status acknowledgement"
-        )
-    if raw_status.get("id") != provider_request_id:
-        raise BetfairAuthenticatedStreamError("provider status acknowledgement id mismatch")
-    if raw_status.get("statusCode") != "SUCCESS" or raw_status.get("error") is not False:
-        raise BetfairAuthenticatedStreamError(
-            "Betfair market subscription was not acknowledged SUCCESS"
-        )
+    try:
+        acknowledgement = transport.read_authenticated_frame()
+        acknowledgement.assert_transport_issued()
+        _require_same_connection(acknowledgement, connection_id, connection_generation)
+        if acknowledgement.frame_sequence != 1:
+            raise BetfairAuthenticatedStreamError(
+                "marketSubscription acknowledgement was not the first post-auth frame"
+            )
+        raw_status = _decode_exact_transport_frame(acknowledgement)
+        if raw_status.get("op") != "status":
+            raise BetfairAuthenticatedStreamError(
+                "first frame after marketSubscription must be provider status acknowledgement"
+            )
+        if raw_status.get("id") != provider_request_id:
+            raise BetfairAuthenticatedStreamError("provider status acknowledgement id mismatch")
+        if (
+            raw_status.get("statusCode") != "SUCCESS"
+            or raw_status.get("error") is not False
+            or raw_status.get("connectionClosed") is True
+        ):
+            raise BetfairAuthenticatedStreamError(
+                "Betfair market subscription was not acknowledged SUCCESS"
+            )
+    except Exception:
+        transport.close()
+        raise
 
     subscription_id = sha256(
         _canonical_json_bytes(
@@ -270,7 +297,13 @@ def open_authenticated_market_subscription(
 
 
 class BetfairAuthenticatedStreamFreshnessRuntime:
-    """Authenticated-frame -> canonical codec/freshness composition."""
+    """Authenticated-frame -> canonical codec/freshness composition.
+
+    Public callers never supply receive, ingest, or decision timestamps. The local wall
+    time used here is captured only after the canonical transport has returned an issued
+    authenticated frame, making it a conservative product availability boundary rather
+    than a claim about the exact kernel socket-receive instant.
+    """
 
     def __init__(
         self,
@@ -300,7 +333,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             requested_conflate_ms=subscription.requested_conflate_ms,
         )
         self._freshness = BetfairStreamPublishFreshnessRuntime(context)
-        self._transport_by_evidence: dict[str, str] = {}
+        self._transport_by_identity: dict[BetfairQuoteIdentity, tuple[str, str]] = {}
 
     @property
     def subscription(self) -> BetfairAuthenticatedMarketSubscription:
@@ -327,7 +360,23 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             ingested_time_ms=accepted_ms,
         )
         for evidence in issued:
-            self._transport_by_evidence[evidence.evidence_id] = frame.payload_sha256
+            identity = evidence.quote.identity
+            if (
+                identity not in self._transport_by_identity
+                and len(self._transport_by_identity)
+                >= _MAX_TRACKED_AUTHORITATIVE_QUOTES
+            ):
+                # Structural freshness may already have accepted the frame. Clearing
+                # this separate transport-origin map makes the overflow fail closed:
+                # no existing or new structural evidence can be promoted afterward.
+                self._transport_by_identity.clear()
+                raise BetfairAuthenticatedStreamError(
+                    "authenticated freshness transport-origin map exceeded its bound"
+                )
+            self._transport_by_identity[identity] = (
+                evidence.evidence_id,
+                frame.payload_sha256,
+            )
         return issued
 
     def evaluate(
@@ -343,11 +392,19 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             as_of_ms=evaluated_at_ms,
             policy=policy,
         )
-        frame_sha = (
-            None
-            if structural.evidence_id is None
-            else self._transport_by_evidence.get(structural.evidence_id)
-        )
+        binding = self._transport_by_identity.get(identity)
+        frame_sha: str | None = None
+        if structural.evidence_id is not None and binding is not None:
+            bound_evidence_id, bound_frame_sha = binding
+            if bound_evidence_id == structural.evidence_id:
+                frame_sha = bound_frame_sha
+            else:
+                # A replaced structural record must never inherit transport origin
+                # from a prior evidence id for the same quote identity.
+                self._transport_by_identity.pop(identity, None)
+        elif structural.evidence_id is None:
+            self._transport_by_identity.pop(identity, None)
+
         if (
             structural.verdict is not BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
             or structural.evidence_id is None
@@ -446,17 +503,60 @@ def _canonical_json_bytes(value: Any) -> bytes:
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
         raise ValueError("value is not bounded canonical JSON") from exc
+
+
+def _validate_json_bounds(value: Any) -> None:
+    nodes = 0
+
+    def visit(item: Any, depth: int) -> None:
+        nonlocal nodes
+        nodes += 1
+        if nodes > _MAX_FILTER_NODES:
+            raise ValueError("market_filter exceeds bounded JSON node count")
+        if depth > _MAX_FILTER_DEPTH:
+            raise ValueError("market_filter exceeds bounded JSON nesting depth")
+        if type(item) is dict:
+            if len(item) > _MAX_FILTER_COLLECTION_ITEMS:
+                raise ValueError("market_filter object has too many members")
+            for key, child in item.items():
+                if type(key) is not str or not key or key.strip() != key:
+                    raise ValueError(
+                        "market_filter keys must be non-empty trimmed strings"
+                    )
+                if len(key.encode("utf-8")) > _MAX_FILTER_STRING_BYTES:
+                    raise ValueError("market_filter key exceeds bounded UTF-8 size")
+                visit(child, depth + 1)
+            return
+        if type(item) is list:
+            if len(item) > _MAX_FILTER_COLLECTION_ITEMS:
+                raise ValueError("market_filter list has too many items")
+            for child in item:
+                visit(child, depth + 1)
+            return
+        if type(item) is str:
+            if len(item.encode("utf-8")) > _MAX_FILTER_STRING_BYTES:
+                raise ValueError("market_filter string exceeds bounded UTF-8 size")
+            return
+        if type(item) is bool or item is None:
+            return
+        if type(item) is int:
+            if item < -(2**63) or item > 2**63 - 1:
+                raise ValueError("market_filter integer exceeds bounded 64-bit range")
+            return
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("market_filter float must be finite")
+            return
+        raise ValueError("market_filter contains unsupported JSON value type")
+
+    visit(value, 0)
 
 
 def _reject_secret_keys(value: Any) -> None:
     if type(value) is dict:
         for key, item in value.items():
-            if type(key) is not str or not key or key.strip() != key:
-                raise ValueError(
-                    "market_filter keys must be non-empty trimmed strings"
-                )
             normalized = key.lower().replace("-", "").replace(" ", "")
             if any(
                 fragment.replace("_", "") in normalized
@@ -467,10 +567,6 @@ def _reject_secret_keys(value: Any) -> None:
     elif type(value) is list:
         for item in value:
             _reject_secret_keys(item)
-    elif type(value) in {str, int, bool, type(None), float}:
-        return
-    else:
-        raise ValueError("market_filter contains unsupported JSON value type")
 
 
 def _subscription_fingerprint(

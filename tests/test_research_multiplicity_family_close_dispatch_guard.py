@@ -76,3 +76,26 @@ def test_family_close_rejects_lock_rebind_before_forged_lock(
         close_module.derive_multiplicity_family_close(None)
 
     assert forged_called is False
+
+
+def test_family_close_rejects_store_constructor_rebind_before_forged_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forged_called = False
+    store_type = close_module._CANONICAL_STORE_TYPE
+
+    def forged_init(self, path, *, workspace_root=None) -> None:
+        nonlocal forged_called
+        forged_called = True
+        self.path = path
+        self.workspace_root = workspace_root
+
+    monkeypatch.setattr(store_type, "__init__", forged_init)
+
+    with pytest.raises(
+        close_module.MultiplicityFamilyCloseError,
+        match="store constructor dispatch changed",
+    ):
+        close_module.derive_multiplicity_family_close(None)
+
+    assert forged_called is False

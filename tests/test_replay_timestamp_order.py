@@ -208,15 +208,16 @@ class ReplayTimestampOrderTests(unittest.TestCase):
             "naive-ingest",
             "2026-01-01T00:00:00+00:00",
             1,
-            ingest_ts="2026-01-01T00:01:00",
+            ingest_ts="2026-01-01T00:01:00+00:00",
         )
-        with self.assertRaisesRegex(ValueError, "ingest_ts must include timezone"):
+        object.__setattr__(event, "ingest_ts", "2026-01-01T00:01:00")
+        with self.assertRaisesRegex(ValueError, "replay event must be canonical"):
             ReplayEngine([event])
 
     def test_replay_rejects_naive_observed_timestamp_fail_closed(self):
         event = self._event("naive", "2026-01-01T00:00:00+00:00", 1)
         object.__setattr__(event, "observed_ts", "2026-01-01T00:00:00")
-        with self.assertRaisesRegex(ValueError, "must include timezone"):
+        with self.assertRaisesRegex(ValueError, "replay event must be canonical"):
             ReplayEngine([event])
 
 

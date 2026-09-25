@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote_from_bytes
@@ -11,6 +13,7 @@ from urllib.parse import quote_from_bytes
 _STATUS_CLEAN = "CLEAN"
 _STATUS_LEAK = "LEAK"
 _STATUS_INCOMPLETE = "INCOMPLETE"
+_REPARSE_POINT_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,12 +94,16 @@ def _percent_decode_bytes(value: bytes) -> bytes:
 def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
     raw = canary.encode("utf-8")
     percent_encoded = quote_from_bytes(raw, safe="")
+    json_utf8 = json.dumps(canary, ensure_ascii=False)[1:-1].encode("utf-8")
+    json_ascii = json.dumps(canary, ensure_ascii=True)[1:-1].encode("ascii")
     variants = (
         ("utf-8", raw),
         ("utf-16le", canary.encode("utf-16le")),
         ("utf-16be", canary.encode("utf-16be")),
         ("url-percent-utf8-upper", percent_encoded.encode("ascii")),
         ("url-percent-utf8-lower", _lower_percent_hex(percent_encoded).encode("ascii")),
+        ("json-string-utf8", json_utf8),
+        ("json-string-ascii", json_ascii),
     )
     by_bytes: dict[bytes, list[str]] = {}
     for label, needle in variants:
@@ -120,9 +127,7 @@ def _scan_file(
         len(semantic_utf8) * 3,
     )
     overlap = max(0, max_needle - 1)
-    required_labels = {
-        label for _needle, labels in needles for label in labels
-    }
+    required_labels = {label for _needle, labels in needles for label in labels}
     found: set[str] = set()
     tail = b""
     with path.open("rb") as handle:
@@ -170,6 +175,18 @@ def _lexical_under(root: Path, candidate: Path) -> bool:
     return True
 
 
+def _path_is_reparse_point(path: Path) -> bool:
+    """Return whether the final path entry is a Windows reparse point.
+
+    ``Path.is_symlink()`` does not cover every Windows link-like object (notably
+    directory junctions). Python 3.11 exposes the file-attribute bit through
+    ``lstat`` on Windows, while other platforms simply lack that attribute.
+    """
+
+    attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    return bool(attributes & _REPARSE_POINT_FLAG)
+
+
 def _has_symlink_component(root: Path, candidate: Path) -> bool:
     relative = candidate.relative_to(root)
     current = root
@@ -178,6 +195,18 @@ def _has_symlink_component(root: Path, candidate: Path) -> bool:
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
+            return True
+    return False
+
+
+def _has_reparse_component(root: Path, candidate: Path) -> bool:
+    relative = candidate.relative_to(root)
+    current = root
+    if _path_is_reparse_point(root):
+        return True
+    for part in relative.parts:
+        current = current / part
+        if _path_is_reparse_point(current):
             return True
     return False
 
@@ -195,6 +224,8 @@ def _validate_fixture_input(
     try:
         if _has_symlink_component(root, candidate):
             return None, "FixtureSymlink"
+        if _has_reparse_component(root, candidate):
+            return None, "FixtureReparsePoint"
         if not candidate.is_file():
             return None, "FixtureNotRegularFile"
     except OSError as exc:
@@ -211,10 +242,10 @@ def scan_secret_canary(
 ) -> SecretCanaryScanReport:
     """Scan a writable artifact tree for a planted secret without echoing the secret.
 
-    The scan is fail-closed. Symlinks, unreadable entries, unsupported filesystem
-    entries, and invalid fixture exclusions produce INCOMPLETE rather than CLEAN.
-    Only an exact existing regular file below ``root`` may be excluded as the
-    planted fixture input.
+    The scan is fail-closed. Symlinks, reparse points, unreadable entries,
+    unsupported filesystem entries, and invalid fixture exclusions produce
+    INCOMPLETE rather than CLEAN. Only an exact existing regular file below
+    ``root`` may be excluded as the planted fixture input.
     """
 
     if not isinstance(canary, str) or not canary:
@@ -234,6 +265,13 @@ def scan_secret_canary(
         if root_path.is_symlink():
             errors.append(
                 SecretCanaryScanError(_path_digest(root_path, root_path), "RootSymlink")
+            )
+        elif _path_is_reparse_point(root_path):
+            errors.append(
+                SecretCanaryScanError(
+                    _path_digest(root_path, root_path),
+                    "RootReparsePoint",
+                )
             )
         elif not root_path.is_dir():
             errors.append(
@@ -302,6 +340,14 @@ def scan_secret_canary(
                         SecretCanaryScanError(
                             _path_digest(root_path, path),
                             "SymlinkRejected",
+                        )
+                    )
+                    continue
+                if _path_is_reparse_point(path):
+                    errors.append(
+                        SecretCanaryScanError(
+                            _path_digest(root_path, path),
+                            "ReparsePointRejected",
                         )
                     )
                     continue

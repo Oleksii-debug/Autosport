@@ -28,6 +28,7 @@ def _install_guard() -> None:
 
     ledger_type = PaperExecutionLedger
     runtime_type = PaperExecutionAdoptionRuntime
+    prepared_type = PreparedPaperExecution
     integrity_error = PaperExecutionIntegrityError
     adoption_error = PaperExecutionAdoptionError
 
@@ -76,7 +77,7 @@ def _install_guard() -> None:
 
     # Do not retain current_lower_append/current_mint in any installed function state.
     # Python closures/defaults/__wrapped__ are inspectable, so hiding a generic bypass
-    # there is not an authority boundary.  Generic append is reproduced below with the
+    # there is not an authority boundary. Generic append is reproduced below with the
     # existing canonical ledger primitives, while minting performs the tiny canonical
     # registry update inline only from the two exact preparation code paths.
     original_prepare = current_prepare
@@ -93,12 +94,50 @@ def _install_guard() -> None:
     )
     getframe = sys._getframe
     canonical_json = _ledger_impl._canonical
+    ledger_schema_version = _ledger_impl._SCHEMA_VERSION
     fsync = _ledger_impl.os.fsync
     sha256_digest = sha256
     reserved_event_type = _RESERVED_EVENT_TYPE
     reserved_schema = _RESERVED_SCHEMA
     reserved_schema_version = _RESERVED_SCHEMA_VERSION
     publisher_code: CodeType | None = None
+
+    def snapshot_function_globals(
+        function: Any,
+    ) -> tuple[tuple[tuple[str, object], ...], object]:
+        globals_dict = function.__globals__
+        bindings = tuple(
+            (name, globals_dict[name])
+            for name in function.__code__.co_names
+            if name in globals_dict
+        )
+        return bindings, globals_dict.get("__builtins__")
+
+    def function_globals_match(
+        function: Any,
+        snapshot: tuple[tuple[tuple[str, object], ...], object],
+    ) -> bool:
+        bindings, builtins_binding = snapshot
+        globals_dict = function.__globals__
+        if globals_dict.get("__builtins__") is not builtins_binding:
+            return False
+        return all(
+            name in globals_dict and globals_dict[name] is expected
+            for name, expected in bindings
+        )
+
+    original_prepare_globals = snapshot_function_globals(original_prepare)
+    original_prepare_paper_value_globals = snapshot_function_globals(
+        original_prepare_paper_value
+    )
+    original_require_minted_globals = snapshot_function_globals(original_require_minted)
+    original_scope_payload_globals = snapshot_function_globals(original_scope_payload)
+    canonical_json_globals = snapshot_function_globals(canonical_json)
+
+    def checked_canonical_json(value: object) -> str:
+        if not function_globals_match(canonical_json, canonical_json_globals):
+            raise integrity_error("canonical PAPER ledger serializer globals were rebound")
+        return canonical_json(value)
 
     def canonical_text(value: object, name: str) -> str:
         if (
@@ -123,11 +162,11 @@ def _install_guard() -> None:
         sequence: int,
         previous_sha256: str | None,
     ) -> dict[str, Any]:
-        # The reserved event payload is validated by this guard before append.  Build
+        # The reserved event payload is validated by this guard before append. Build
         # the exact canonical event here rather than redispatching through mutable
         # PaperExecutionLedger._event after that validation boundary.
         body = {
-            "schema_version": _ledger_impl._SCHEMA_VERSION,
+            "schema_version": ledger_schema_version,
             "event_type": canonical_text(event_type, "event_type"),
             "run_id": canonical_text(run_id, "run_id"),
             "event_key": canonical_text(key, "event_key"),
@@ -136,7 +175,7 @@ def _install_guard() -> None:
             "payload": payload,
         }
         event_sha256 = sha256_digest(
-            canonical_json(body).encode("utf-8")
+            checked_canonical_json(body).encode("utf-8")
         ).hexdigest()
         return {**body, "event_sha256": event_sha256}
 
@@ -233,7 +272,7 @@ def _install_guard() -> None:
                 if comparable != proposed:
                     raise integrity_error("event_key already has different payload")
                 return
-            encoded = canonical_json(event) + "\n"
+            encoded = checked_canonical_json(event) + "\n"
             path_existed_before = self.path.exists()
             try:
                 with self.path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -260,22 +299,43 @@ def _install_guard() -> None:
             raise adoption_error("canonical PAPER preparation requires exact runtime")
         if runtime_type._mint_prepared is not guarded_mint_prepared:
             raise adoption_error("canonical prepared-execution mint dispatch was rebound")
-        if getframe(1).f_code not in prepare_codes:
+        caller_code = getframe(1).f_code
+        if caller_code is original_prepare.__code__:
+            globals_ok = function_globals_match(
+                original_prepare,
+                original_prepare_globals,
+            )
+        elif caller_code is original_prepare_paper_value.__code__:
+            globals_ok = function_globals_match(
+                original_prepare_paper_value,
+                original_prepare_paper_value_globals,
+            )
+        else:
             raise adoption_error(
                 "prepared execution mint is reserved for canonical preparation authority"
             )
-        if type(prepared) is not PreparedPaperExecution:
+        if not globals_ok:
+            raise adoption_error("canonical PAPER preparation globals were rebound")
+        if type(prepared) is not prepared_type:
             raise TypeError("prepared must be exact PreparedPaperExecution")
         self._prepared_authorities[id(prepared)] = prepared
         return prepared
 
     def with_mint_authority(method: Any) -> Any:
+        method_globals = (
+            original_prepare_globals
+            if method is original_prepare
+            else original_prepare_paper_value_globals
+        )
+
         @wraps(method)
         def owned(self: PaperExecutionAdoptionRuntime, *args: Any, **kwargs: Any) -> Any:
             if type(self) is not runtime_type:
                 raise adoption_error("canonical PAPER preparation requires exact runtime")
             if runtime_type._mint_prepared is not guarded_mint_prepared:
                 raise adoption_error("canonical prepared-execution mint dispatch was rebound")
+            if not function_globals_match(method, method_globals):
+                raise adoption_error("canonical PAPER preparation globals were rebound")
             return method(self, *args, **kwargs)
 
         return owned
@@ -322,6 +382,20 @@ def _install_guard() -> None:
             or live_scope_descriptor.__func__ is not original_scope_payload
         ):
             raise integrity_error("canonical PAPER exposure-scope payload authority was rebound")
+        if not function_globals_match(
+            original_require_minted,
+            original_require_minted_globals,
+        ):
+            raise integrity_error(
+                "canonical prepared-execution verification globals were rebound"
+            )
+        if not function_globals_match(
+            original_scope_payload,
+            original_scope_payload_globals,
+        ):
+            raise integrity_error(
+                "canonical PAPER exposure-scope payload globals were rebound"
+            )
 
         original_require_minted(self, prepared)
         payload = validate_owned_scope_payload(

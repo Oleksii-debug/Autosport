@@ -44,6 +44,8 @@ if "_PRISTINE_ACCESS_ID" not in globals():
     _PRISTINE_ACCESS_ID = evidence.HoldoutConsumptionLedger.access_id
 if "_PRISTINE_FRESHNESS_ID" not in globals():
     _PRISTINE_FRESHNESS_ID = evidence.HoldoutConsumptionLedger.freshness_id
+if "_PRISTINE_FIND_PHYSICAL_HOLDOUT" not in globals():
+    _PRISTINE_FIND_PHYSICAL_HOLDOUT = evidence._find_physical_holdout_consumption
 
 _PROVENANCE_GUARD_MODULE_NAME = (
     f"{__package__}._point_in_time_feature_provenance_guard"
@@ -604,11 +606,13 @@ def _assert_unused_from_lineage(
         with evidence._HoldoutLedgerLock(self._path.parent):
             self._load()
             canonical = _resolve_canonical_snapshot(self, dataset_snapshot)
-            freshness_id = _PRISTINE_FRESHNESS_ID(
-                dataset_snapshot=canonical,
-                confirmation_trial_family_id=confirmation_trial_family_id,
+            evidence._text(
+                confirmation_trial_family_id, "confirmation_trial_family_id"
             )
-            existing = self._records.get(freshness_id)
+            existing = _PRISTINE_FIND_PHYSICAL_HOLDOUT(
+                self._records,
+                dataset_snapshot=canonical,
+            )
             if existing is not None:
                 raise evidence.HoldoutAlreadyConsumedError(
                     f"holdout {existing.holdout_access_id} was already consumed by "
@@ -681,6 +685,17 @@ def _consume_from_lineage(
                 raise evidence.HoldoutAlreadyConsumedError(
                     f"holdout {existing.holdout_access_id} was already consumed by "
                     f"{existing.consumer_identity}"
+                )
+
+            physical_existing = _PRISTINE_FIND_PHYSICAL_HOLDOUT(
+                self._records,
+                dataset_snapshot=canonical,
+            )
+            if physical_existing is not None:
+                raise evidence.HoldoutAlreadyConsumedError(
+                    f"physical holdout {physical_existing.holdout_access_id} was already "
+                    f"consumed under confirmation trial family "
+                    f"{physical_existing.confirmation_trial_family_id}"
                 )
 
             previous_state_sha256 = self._state_sha256

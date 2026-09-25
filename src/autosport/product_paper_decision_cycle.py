@@ -157,8 +157,8 @@ class ProductPaperDecisionCycle:
             raise TypeError(
                 "intent_factory must expose canonical strategy_version_id"
             )
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be the canonical ScientificRegistry")
         if not isinstance(execution_config, PaperExecutionModelConfig):
             raise TypeError("execution_config must be PaperExecutionModelConfig")
         if not isinstance(max_quote_age, timedelta) or max_quote_age <= timedelta(0):
@@ -187,9 +187,9 @@ class ProductPaperDecisionCycle:
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable or None")
 
-        workspace = Path(runtime.workspace)
-        registry_path = Path(scientific_registry.path)
-        if registry_path.parent.resolve() != workspace.resolve():
+        workspace = Path(runtime.workspace).resolve(strict=False)
+        registry_path = Path(scientific_registry.path).resolve(strict=False)
+        if registry_path.parent != workspace:
             raise ProductPaperDecisionCycleError(
                 "scientific registry must belong to the product runtime workspace"
             )
@@ -198,7 +198,10 @@ class ProductPaperDecisionCycle:
         self.loop_id = loop_id
         self.authority = authority
         self.intent_factory = intent_factory
-        self.scientific_registry = scientific_registry
+        # Bind the product-owned registry location, not the caller-held Python object.
+        # Every decision cycle reconstructs a fresh canonical registry from this exact
+        # workspace path before resolving StrategyVersion/ModelVersion provenance.
+        self._scientific_registry_path = registry_path
         self.execution_config = execution_config
         self.max_quote_age = max_quote_age
         self.inputs = inputs
@@ -209,6 +212,35 @@ class ProductPaperDecisionCycle:
     @property
     def workspace(self) -> Path:
         return Path(self.runtime.workspace)
+
+    def _load_current_scientific_registry(self) -> ScientificRegistry:
+        """Reconstruct current product scientific authority from the bound path.
+
+        The constructor accepts only the exact canonical registry type, then retains
+        only its canonical product-workspace location. This prevents a caller-owned
+        subclass or a post-construction mutation of that original instance from
+        becoming StrategyVersion/ModelVersion provenance authority later in a cycle.
+        """
+
+        try:
+            registry = ScientificRegistry(self._scientific_registry_path)
+        except Exception as exc:
+            raise ProductPaperDecisionCycleError(
+                "canonical product scientific registry cannot be reconstructed"
+            ) from exc
+        if type(registry) is not ScientificRegistry:
+            raise ProductPaperDecisionCycleError(
+                "scientific registry reconstruction returned a non-canonical type"
+            )
+        resolved = Path(registry.path).resolve(strict=False)
+        if (
+            resolved != self._scientific_registry_path
+            or resolved.parent != self.workspace.resolve(strict=False)
+        ):
+            raise ProductPaperDecisionCycleError(
+                "scientific registry reconstruction escaped the product workspace"
+            )
+        return registry
 
     def _require_running_runtime(self) -> None:
         try:
@@ -310,11 +342,12 @@ class ProductPaperDecisionCycle:
 
     def _run_decision_cycle(self) -> LiveCycleResult:
         self._require_running_runtime()
+        scientific_registry = self._load_current_scientific_registry()
         provenance_now = (
             self.clock() if self.clock is not None else datetime.now(timezone.utc)
         )
         LiveIntentProvenance.from_registry(
-            self.scientific_registry,
+            scientific_registry,
             self.intent_factory.strategy_version_id,
             as_of=provenance_now,
         )
@@ -337,7 +370,7 @@ class ProductPaperDecisionCycle:
             book=book,
             authority=self.authority,
             intent_factory=self.intent_factory,
-            scientific_registry=self.scientific_registry,
+            scientific_registry=scientific_registry,
             decision_ledger=decision_ledger,
             paper_execution=execution,
             max_quote_age=self.max_quote_age,

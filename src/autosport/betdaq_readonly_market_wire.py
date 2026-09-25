@@ -280,6 +280,13 @@ def _parse_price_level(
             raise BetdaqSoapProtocolError("nil price level must be empty")
         return None
 
+    unexpected_attributes = sorted(set(element.attrib) - {"Price", "Stake"})
+    if unexpected_attributes:
+        raise BetdaqSoapProtocolError(
+            f"{provider_side} price level contains unexpected attribute(s): "
+            + ", ".join(unexpected_attributes)
+        )
+
     price_text = _optional_attr(element, "Price")
     stake_text = _optional_attr(element, "Stake")
     if price_text is None or stake_text is None:
@@ -526,11 +533,23 @@ def parse_get_prices_response(
         _tag(EXTERNAL_API_NS, "GetPricesResult"),
         "GetPricesResult",
     )
+    if result.attrib:
+        raise BetdaqSoapProtocolError(
+            "GetPricesResult must not contain attributes"
+        )
     return_status = _one_child(
         result,
         _tag(EXTERNAL_API_NS, "ReturnStatus"),
         "ReturnStatus",
     )
+    unexpected_status_attributes = sorted(
+        set(return_status.attrib) - {"Code", "Description", "CallId"}
+    )
+    if unexpected_status_attributes:
+        raise BetdaqSoapProtocolError(
+            "ReturnStatus contains unexpected attribute(s): "
+            + ", ".join(unexpected_status_attributes)
+        )
     return_code = _integer(
         _required_attr(return_status, "Code"),
         "ReturnStatus Code",

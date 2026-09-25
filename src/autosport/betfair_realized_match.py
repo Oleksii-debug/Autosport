@@ -33,6 +33,8 @@ _LEDGER_READ_SURFACES = (
     ("saga", _LEDGER_SAGA),
     ("provider_order_reference", _LEDGER_PROVIDER_ORDER_REFERENCE),
 )
+_READBACK_ASSERT_AUTHORITATIVE = BetfairExecutionReadbackEnvelope.assert_authoritative
+_READBACK_AUTHORITY_FINGERPRINT = BetfairExecutionReadbackEnvelope._authority_fingerprint
 
 
 class RealizedMatchEvidenceError(RuntimeError):
@@ -361,12 +363,38 @@ def _identity_check(
     readback: BetfairExecutionReadbackEnvelope,
     provider_order_ref: str,
 ) -> int:
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
+        raise TypeError("readback must be exact BetfairExecutionReadbackEnvelope")
+    if (
+        BetfairExecutionReadbackEnvelope.assert_authoritative
+        is not _READBACK_ASSERT_AUTHORITATIVE
+        or BetfairExecutionReadbackEnvelope._authority_fingerprint
+        is not _READBACK_AUTHORITY_FINGERPRINT
+    ):
+        raise RealizedMatchEvidenceError(
+            "canonical execution readback authority changed"
+        )
     try:
-        readback.assert_authoritative()
+        before_fingerprint = _READBACK_AUTHORITY_FINGERPRINT(readback)
+        _READBACK_ASSERT_AUTHORITATIVE(readback)
+        after_fingerprint = _READBACK_AUTHORITY_FINGERPRINT(readback)
     except BetfairReadOnlyError as exc:
         raise RealizedMatchEvidenceError(
             "execution readback is not canonical provider evidence"
         ) from exc
+    if before_fingerprint != after_fingerprint:
+        raise RealizedMatchEvidenceError(
+            "execution readback changed during authority verification"
+        )
+    if (
+        BetfairExecutionReadbackEnvelope.assert_authoritative
+        is not _READBACK_ASSERT_AUTHORITATIVE
+        or BetfairExecutionReadbackEnvelope._authority_fingerprint
+        is not _READBACK_AUTHORITY_FINGERPRINT
+    ):
+        raise RealizedMatchEvidenceError(
+            "canonical execution readback authority changed during verification"
+        )
 
     if action.bookmaker_id != "betfair" or readback.venue_id != action.bookmaker_id:
         raise RealizedMatchEvidenceError(
@@ -612,8 +640,8 @@ def _resolve_betfair_realized_match(
     *,
     attempt_id: str,
 ) -> BetfairRealizedMatchEvidence:
-    if not isinstance(readback, BetfairExecutionReadbackEnvelope):
-        raise TypeError("readback must be BetfairExecutionReadbackEnvelope")
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
+        raise TypeError("readback must be exact BetfairExecutionReadbackEnvelope")
 
     binding = _attempt_binding(plan, ledger, attempt_id)
     action = binding.action

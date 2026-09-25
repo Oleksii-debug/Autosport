@@ -83,7 +83,6 @@ def _install_guard() -> None:
     hashlib_sha256 = _feature.hashlib.sha256
     json_dumps = _feature.json.dumps
     math_isfinite = _feature.math.isfinite
-    datetime_fromisoformat = _feature.datetime.fromisoformat
     timezone_utc = _feature.timezone.utc
 
     def require_canonical_dispatch() -> None:
@@ -142,7 +141,6 @@ def _install_guard() -> None:
             _feature.hashlib.sha256 is not hashlib_sha256
             or _feature.json.dumps is not json_dumps
             or _feature.math.isfinite is not math_isfinite
-            or _feature.datetime.fromisoformat is not datetime_fromisoformat
             or _feature.timezone.utc is not timezone_utc
         ):
             raise error_type("registered live feature primitive dispatch changed")

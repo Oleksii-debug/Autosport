@@ -50,10 +50,12 @@ class ParlayApiOutputRetentionEvidence:
     beyond 90 days. Any future written-consent or redistribution grant must be a
     separate re-resolvable authority, not an unchecked field here.
 
-    ``policy_identity`` is allowed to describe an older historical capture so an
-    as-of audit can reconstruct the evidence. New captures should use
-    :func:`new_capture_retention_evidence`, which binds the current policy
-    identity.
+    ``available_at`` is the first causal provider-availability time known to this
+    evidence; an output cannot be captured before that instant. Replay of this exact
+    capture is additionally bounded by ``captured_at`` because product knowledge
+    cannot predate acquisition. ``policy_identity`` may describe an older historical
+    capture so an as-of audit can reconstruct the evidence. New captures should use
+    :func:`new_capture_retention_evidence`, which binds the current policy identity.
     """
 
     output_class: ParlayApiOutputClass
@@ -74,8 +76,8 @@ class ParlayApiOutputRetentionEvidence:
         _require_sha256(self.acquisition_identity_sha256, "acquisition_identity_sha256")
         _require_aware(self.captured_at, "captured_at")
         _require_aware(self.available_at, "available_at")
-        if self.available_at < self.captured_at:
-            raise ParlayApiRetentionError("available_at cannot precede captured_at")
+        if self.captured_at < self.available_at:
+            raise ParlayApiRetentionError("captured_at cannot precede available_at")
         _require_text(self.policy_identity, "policy_identity")
         if self.observed_cache_control is not None:
             _require_text(self.observed_cache_control, "observed_cache_control")
@@ -138,7 +140,7 @@ class ParlayApiOutputRetentionEvidence:
         _require_text(current_policy_identity, "current_policy_identity")
         deadline = self.effective_retention_deadline()
 
-        if as_of < self.available_at:
+        if as_of < self.captured_at:
             return ParlayApiRetentionDecision(
                 state=ParlayApiRetentionState.NOT_YET_AVAILABLE,
                 effective_retention_deadline=deadline,
@@ -146,7 +148,7 @@ class ParlayApiOutputRetentionEvidence:
                 training_corpus_allowed=False,
                 raw_redistribution_allowed=False,
                 delete_raw_output=False,
-                reason="provider Output was not yet available at this cutoff",
+                reason="this provider Output capture did not yet exist at this cutoff",
             )
 
         # Binding deletion/expiry always wins over a policy-version review. A
@@ -363,8 +365,14 @@ def _cache_control_deadline(
                 raise ParlayApiRetentionError(
                     f"{normalized} cache-control directive requires non-negative integer seconds"
                 )
-            seconds = int(raw)
-            deadlines.append(captured_at + timedelta(seconds=seconds))
+            try:
+                seconds = int(raw)
+                deadline = captured_at + timedelta(seconds=seconds)
+            except (OverflowError, ValueError) as exc:
+                raise ParlayApiRetentionError(
+                    f"{normalized} cache-control age exceeds supported datetime range"
+                ) from exc
+            deadlines.append(deadline)
     return min(deadlines) if deadlines else None
 
 

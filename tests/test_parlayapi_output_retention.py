@@ -120,16 +120,25 @@ def test_result_or_other_raw_output_needs_explicit_finite_internal_horizon() -> 
     ).state is ParlayApiRetentionState.DELETE_REQUIRED
 
 
-def test_capture_availability_is_causal_and_cannot_be_backdated() -> None:
-    evidence = capture(available_at=T0 + timedelta(hours=2))
+def test_capture_availability_is_causal_and_replay_waits_for_actual_capture() -> None:
+    provider_available = T0 + timedelta(hours=1)
+    captured = T0 + timedelta(hours=2)
+    evidence = capture(
+        available_at=provider_available,
+        captured_at=captured,
+    )
 
-    before = evidence.evaluate(as_of=T0 + timedelta(hours=1))
-    after = evidence.evaluate(as_of=T0 + timedelta(hours=2))
+    before_provider = evidence.evaluate(as_of=T0 + timedelta(minutes=30))
+    after_provider_before_capture = evidence.evaluate(
+        as_of=T0 + timedelta(hours=1, minutes=30)
+    )
+    after_capture = evidence.evaluate(as_of=captured)
 
-    assert before.state is ParlayApiRetentionState.NOT_YET_AVAILABLE
-    assert before.training_corpus_allowed is False
-    assert after.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
-    assert after.raw_use_allowed is False
+    assert before_provider.state is ParlayApiRetentionState.NOT_YET_AVAILABLE
+    assert after_provider_before_capture.state is ParlayApiRetentionState.NOT_YET_AVAILABLE
+    assert after_provider_before_capture.training_corpus_allowed is False
+    assert after_capture.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
+    assert after_capture.raw_use_allowed is False
 
 
 def test_caller_rewrap_cannot_reset_old_raw_output_retention_authority() -> None:
@@ -231,8 +240,15 @@ def test_deletion_tombstone_retains_only_non_output_audit_metadata() -> None:
     ("kwargs", "message"),
     [
         ({"source_payload_sha256": "A" * 64}, "source_payload_sha256"),
-        ({"available_at": T0 - timedelta(seconds=1)}, "available_at cannot precede"),
+        (
+            {"available_at": T0 + timedelta(seconds=1)},
+            "captured_at cannot precede available_at",
+        ),
         ({"observed_cache_control": "max-age=abc"}, "non-negative integer"),
+        (
+            {"observed_cache_control": "max-age=" + "9" * 50},
+            "exceeds supported datetime range",
+        ),
         ({"internal_retention_until": T0 - timedelta(seconds=1)}, "cannot precede"),
     ],
 )

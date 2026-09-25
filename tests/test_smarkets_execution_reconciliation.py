@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -229,6 +229,23 @@ def test_published_percentage_mapping_preserves_display_tick() -> None:
     assert effect.accepted_odds == Decimal("1.65")
     assert effect.accepted_stake == Decimal("9.99998329")
     assert effect.accepted_liability == Decimal("9.99998329")
+
+
+def test_canonical_decimal_text_is_ambient_context_independent() -> None:
+    with localcontext() as context:
+        context.prec = 50
+        value = Decimal(10000) / Decimal(3500)
+    expected = format(value, "f")
+
+    observed: list[str] = []
+    for precision in (6, 12, 28, 50):
+        with localcontext() as context:
+            context.prec = precision
+            text = smarkets_reconciliation._decimal_text(value)
+        observed.append(text)
+        assert Decimal(text) == value
+
+    assert observed == [expected] * 4
 
 
 def test_non_tick_average_price_projects_deterministically() -> None:

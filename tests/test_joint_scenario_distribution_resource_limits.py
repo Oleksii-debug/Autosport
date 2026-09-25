@@ -35,12 +35,7 @@ class JointScenarioDistributionResourceLimitTests(unittest.TestCase):
                 "event-winner",
                 (
                     ScenarioOutcome("event|winner|a", Decimal("1E-4097")),
-                    # ScenarioGroup performs its historical tolerance-based sum check
-                    # before the Wave-B analyser can validate Decimal shape.  Pair the
-                    # pathological tiny marginal with 1 so construction remains valid
-                    # under the normal Decimal context and the intended resource fence
-                    # is what this test actually exercises.
-                    ScenarioOutcome("event|winner|b", Decimal("1")),
+                    ScenarioOutcome("event|winner|b", Decimal("0.5")),
                 ),
             ),
         )

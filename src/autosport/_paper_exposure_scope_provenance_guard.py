@@ -75,14 +75,10 @@ def _install_guard() -> None:
     if current_append is not current_lower_append:
         raise RuntimeError("PAPER public/lower ledger append dispatch is inconsistent")
 
-    # Do not retain current_lower_append/current_mint in any installed function state.
-    # Python closures/defaults/__wrapped__ are inspectable, so hiding a generic bypass
-    # there is not an authority boundary. Generic append is reproduced below with the
-    # existing canonical ledger primitives, while minting performs the tiny canonical
-    # registry update inline only from the two exact preparation code paths.
     original_prepare = current_prepare
     original_prepare_paper_value = current_prepare_paper_value
     original_require_minted = runtime_type._require_minted
+    original_execute_unlocked = runtime_type._execute_unlocked
     scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
     if not isinstance(scope_descriptor, classmethod):
         raise RuntimeError("canonical PAPER exposure-scope payload dispatch is unavailable")
@@ -131,6 +127,7 @@ def _install_guard() -> None:
         original_prepare_paper_value
     )
     original_require_minted_globals = snapshot_function_globals(original_require_minted)
+    original_execute_unlocked_globals = snapshot_function_globals(original_execute_unlocked)
     original_scope_payload_globals = snapshot_function_globals(original_scope_payload)
     canonical_json_globals = snapshot_function_globals(canonical_json)
 
@@ -162,9 +159,6 @@ def _install_guard() -> None:
         sequence: int,
         previous_sha256: str | None,
     ) -> dict[str, Any]:
-        # The reserved event payload is validated by this guard before append. Build
-        # the exact canonical event here rather than redispatching through mutable
-        # PaperExecutionLedger._event after that validation boundary.
         body = {
             "schema_version": ledger_schema_version,
             "event_type": canonical_text(event_type, "event_type"),
@@ -242,9 +236,6 @@ def _install_guard() -> None:
                 "PAPER_EXPOSURE_SCOPE_BOUND is reserved for canonical adoption authority"
             )
 
-        # Inline the canonical legacy append algorithm rather than retaining the old
-        # generic append function as an inspectable closure/default/wrapped callable.
-        # The existing ledger owns locking, chain validation and durability barriers.
         def mutate() -> None:
             self._ensure_existing_path_durable()
             events = self._load_unlocked()
@@ -353,6 +344,17 @@ def _install_guard() -> None:
             raise integrity_error(
                 "canonical PAPER exposure scope requires exact adoption runtime and ledger"
             )
+        if runtime_type._execute_unlocked is not original_execute_unlocked:
+            raise integrity_error("canonical PAPER execution dispatch was rebound")
+        if getframe(1).f_code is not original_execute_unlocked.__code__:
+            raise integrity_error(
+                "PAPER exposure-scope publication is reserved for canonical execution authority"
+            )
+        if not function_globals_match(
+            original_execute_unlocked,
+            original_execute_unlocked_globals,
+        ):
+            raise integrity_error("canonical PAPER execution globals were rebound")
         if (
             ledger_type._append_event is not guarded_append_event
             or append_owner.__dict__.get("_append_event") is not guarded_append_event
@@ -420,8 +422,6 @@ def _install_guard() -> None:
     ):
         method._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
 
-    # Fence the actual lower owner as well as the public subclass. Otherwise a
-    # caller can bypass the reservation by invoking the inherited owner directly.
     append_owner._append_event = guarded_append_event
     ledger_type._append_event = guarded_append_event
     runtime_type._mint_prepared = guarded_mint_prepared

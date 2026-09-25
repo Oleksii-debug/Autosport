@@ -463,7 +463,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 MultiLegExposureProjectionError,
-                "canonical execution ledger cannot support",
+                "durable exposure-scope event does not bind exact execution plan",
             ):
                 project_multileg_realized_exposure(
                     ledger=ledger,

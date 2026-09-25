@@ -1,20 +1,26 @@
-"""Seal exact Smarkets Decimal journal serialization against ambient context.
+"""Seal Smarkets reconciliation runtime invariants at package composition.
 
-The owning reconciliation module used ``Decimal.normalize()`` before formatting.
-``normalize()`` applies the current Decimal context, so a provider-derived value
-computed under the module's precision-50 conversion could be silently rounded when
-serialized under the process-default precision (or a caller-mutated lower precision).
-Durable replay then recomputed the exact value and rejected its own journal record.
+The owning reconciliation module historically had two narrow ambient-process seams:
 
-Keep this repair narrow: change only the text projection helper; provider native
-integer units, arithmetic precision, record hashes and replay verification remain
-owned by ``smarkets_execution_reconciliation``.
+* ``Decimal.normalize()`` made durable Decimal text depend on the caller's active
+  arithmetic context; and
+* the append-only reconciliation journal performed ``load -> validate -> append``
+  without the canonical cross-process economic-writer lock. Two cooperating writers
+  could therefore derive the same chain head and both acknowledge appends whose
+  combined journal was invalid after restart.
+
+Keep both repairs compositional. Provider-native integer economics, hash-chain
+validation and record semantics remain owned by ``smarkets_execution_reconciliation``;
+writer serialization reuses Autosport's existing ``WorkspaceEconomicLock`` rather
+than creating a second lock authority.
 """
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from . import smarkets_execution_reconciliation as _target
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 def _exact_decimal_text(value: Decimal) -> str:
@@ -31,12 +37,34 @@ def _exact_decimal_text(value: Decimal) -> str:
     return text
 
 
+_ORIGINAL_JOURNAL_APPEND = _target.SmarketsReconciliationJournal.append
+
+
+def _locked_journal_append(
+    self: _target.SmarketsReconciliationJournal,
+    effect: _target.VerifiedSmarketsOrderEffect,
+) -> None:
+    """Serialize one complete hash-chain mutation under the canonical economic lock."""
+
+    try:
+        with WorkspaceEconomicLock(self.path.parent):
+            _ORIGINAL_JOURNAL_APPEND(self, effect)
+    except WorkspaceEconomicLockError as exc:
+        raise _target.SmarketsReconciliationError(
+            "cannot acquire Smarkets reconciliation economic-writer lock"
+        ) from exc
+
+
 def _install() -> None:
-    current = _target._decimal_text
-    if getattr(current, "_autosport_context_independent_decimal_text", False):
-        return
-    _exact_decimal_text._autosport_context_independent_decimal_text = True  # type: ignore[attr-defined]
-    _target._decimal_text = _exact_decimal_text
+    current_text = _target._decimal_text
+    if not getattr(current_text, "_autosport_context_independent_decimal_text", False):
+        _exact_decimal_text._autosport_context_independent_decimal_text = True  # type: ignore[attr-defined]
+        _target._decimal_text = _exact_decimal_text
+
+    current_append: Any = _target.SmarketsReconciliationJournal.append
+    if not getattr(current_append, "_autosport_economic_writer_locked", False):
+        _locked_journal_append._autosport_economic_writer_locked = True  # type: ignore[attr-defined]
+        _target.SmarketsReconciliationJournal.append = _locked_journal_append
 
 
 _install()

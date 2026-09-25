@@ -23,9 +23,9 @@ class _DispatchState:
     """Keep predecessor entrypoints behind guard-enforcing methods.
 
     Public wrapper closure cells intentionally capture only this sealed state
-    object, never an unguarded predecessor FunctionType. Extracting the state
-    through ordinary closure reflection therefore still leaves the caller on
-    guard-enforcing methods rather than handing out a directly callable bypass.
+    object and guard-enforcing bound methods, never an unguarded predecessor
+    FunctionType. The bound methods and their internal guard callables are pinned
+    before publication so later class-method rebinding cannot redirect dispatch.
     """
 
     __slots__ = (
@@ -68,6 +68,9 @@ class _DispatchState:
         "_public_issue",
         "_public_resolve",
         "_public_verify",
+        "_constructor_guard",
+        "_common_guard",
+        "_trusted_clock_callable",
         "_sealed",
     )
 
@@ -156,6 +159,25 @@ class _DispatchState:
         object.__setattr__(self, "_public_resolve", None)
         object.__setattr__(self, "_public_verify", None)
 
+        # Pin bound guard methods before the state becomes reachable through any
+        # published wrapper. Later monkeypatching of _DispatchState methods must
+        # not redirect a positive authority entrypoint or its internal checks.
+        object.__setattr__(
+            self,
+            "_constructor_guard",
+            object.__getattribute__(self, "_require_store_constructor_authority"),
+        )
+        object.__setattr__(
+            self,
+            "_common_guard",
+            object.__getattribute__(self, "_require_common_dispatch"),
+        )
+        object.__setattr__(
+            self,
+            "_trusted_clock_callable",
+            object.__getattribute__(self, "trusted_clock"),
+        )
+
     def __getattribute__(self, name: str):
         if name.startswith("_DispatchState__original_"):
             raise AttributeError("unguarded predecessor entrypoints are not exposed")
@@ -175,11 +197,6 @@ class _DispatchState:
         object.__setattr__(self, "_public_verify", verify_fn)
         object.__setattr__(self, "_sealed", True)
 
-    def _raise_rebound(self, detail: str) -> None:
-        raise self._error_type(
-            f"product PolicyEvaluation issuance authority was rebound: {detail}"
-        )
-
     def _require_store_constructor_authority(self) -> None:
         issuance_module = self._issuance_module
         factory_module = self._factory_module
@@ -198,22 +215,29 @@ class _DispatchState:
             or self._store_init_globals.get("datetime") is not self._factory_datetime
             or self._store_init_globals.get("timezone") is not self._factory_timezone
         ):
-            self._raise_rebound("FactoryArtifactStore constructor/clock dispatch")
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "FactoryArtifactStore constructor/clock dispatch"
+            )
 
     def trusted_clock(self):
         return self._trusted_datetime.now(self._trusted_utc)
 
     def open(self, authority):
-        self._require_store_constructor_authority()
+        constructor_guard = object.__getattribute__(self, "_constructor_guard")
+        constructor_guard()
         original_open = object.__getattribute__(self, "_DispatchState__original_open")
         registry, store = original_open(authority)
-        self._require_store_constructor_authority()
+        constructor_guard()
         if type(store) is not self._store_type:
-            self._raise_rebound("canonical artifact store type")
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "canonical artifact store type"
+            )
         # The owning constructor publicly supports an injected test clock. The
         # product issuer never accepts one: replace its default source before any
         # result materialization can occur.
-        store._clock = self.trusted_clock
+        store._clock = object.__getattribute__(self, "_trusted_clock_callable")
         return registry, store
 
     def _require_common_dispatch(self) -> None:
@@ -244,8 +268,11 @@ class _DispatchState:
             or issuance_module._BUNDLE_ID_PREFIX != self._bundle_id_prefix
             or issuance_module._ISSUER_SOURCE_SHA256 != self._issuer_source_sha256
         ):
-            self._raise_rebound("direct helper graph")
-        self._require_store_constructor_authority()
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "direct helper graph"
+            )
+        object.__getattribute__(self, "_constructor_guard")()
 
     def issue(
         self,
@@ -255,7 +282,8 @@ class _DispatchState:
         source_evaluation_bundle_id: str,
         baseline_kind=None,
     ):
-        self._require_common_dispatch()
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
         original_issue = object.__getattribute__(self, "_DispatchState__original_issue")
         result = original_issue(
             authority,
@@ -263,29 +291,39 @@ class _DispatchState:
             source_evaluation_bundle_id=source_evaluation_bundle_id,
             baseline_kind=baseline_kind,
         )
-        self._require_common_dispatch()
+        common_guard()
         return result
 
     def resolve(self, authority, protocol, reference):
-        self._require_common_dispatch()
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
         original_resolve = object.__getattribute__(self, "_DispatchState__original_resolve")
         result = original_resolve(authority, protocol, reference)
-        self._require_common_dispatch()
+        common_guard()
         return result
 
     def verify(self, authority, protocol, reference, claimed):
-        self._require_common_dispatch()
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
         original_verify = object.__getattribute__(self, "_DispatchState__original_verify")
         result = original_verify(authority, protocol, reference, claimed)
-        self._require_common_dispatch()
+        common_guard()
         return result
 
 
 def _build_dispatch_guards():
     state = _DispatchState()
+    open_dispatch = state.open
+    issue_dispatch = state.issue
+    resolve_dispatch = state.resolve
+    verify_dispatch = state.verify
 
     def guarded_open(authority: ProductPolicyEvaluationWorkspace):
-        return state.open(authority)
+        # Keep the sealed state directly visible to the reflection falsifier while
+        # dispatching through the bound method pinned before publication.
+        if not state._sealed:
+            raise RuntimeError("policy issuance dispatch state is not sealed")
+        return open_dispatch(authority)
 
     def guarded_issue(
         authority: ProductPolicyEvaluationWorkspace,
@@ -294,7 +332,9 @@ def _build_dispatch_guards():
         source_evaluation_bundle_id: str,
         baseline_kind: BaselineKind | None = None,
     ) -> IssuedPolicyEvaluationRef:
-        return state.issue(
+        if not state._sealed:
+            raise RuntimeError("policy issuance dispatch state is not sealed")
+        return issue_dispatch(
             authority,
             protocol,
             source_evaluation_bundle_id=source_evaluation_bundle_id,
@@ -306,7 +346,9 @@ def _build_dispatch_guards():
         protocol: FrozenBaselineProtocol,
         reference: IssuedPolicyEvaluationRef,
     ) -> PolicyEvaluation:
-        return state.resolve(authority, protocol, reference)
+        if not state._sealed:
+            raise RuntimeError("policy issuance dispatch state is not sealed")
+        return resolve_dispatch(authority, protocol, reference)
 
     def guarded_verify(
         authority: ProductPolicyEvaluationWorkspace,
@@ -314,7 +356,9 @@ def _build_dispatch_guards():
         reference: IssuedPolicyEvaluationRef,
         claimed: PolicyEvaluation,
     ) -> PolicyEvaluation:
-        return state.verify(authority, protocol, reference, claimed)
+        if not state._sealed:
+            raise RuntimeError("policy issuance dispatch state is not sealed")
+        return verify_dispatch(authority, protocol, reference, claimed)
 
     state.bind_public(guarded_open, guarded_issue, guarded_resolve, guarded_verify)
     return guarded_open, guarded_issue, guarded_resolve, guarded_verify

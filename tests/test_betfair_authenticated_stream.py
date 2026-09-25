@@ -163,6 +163,30 @@ def _identity(selection_id: int = 1) -> BetfairQuoteIdentity:
     )
 
 
+def _fresh_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[
+    stream.BetfairStreamTlsTransport,
+    BetfairAuthenticatedStreamFreshnessRuntime,
+    BetfairAuthenticatedFreshnessDecision,
+    list[int],
+]:
+    from autosport import betfair_authenticated_stream as auth
+
+    clock_ns = [1_010_000_000]
+    monkeypatch.setattr(auth.time, "time_ns", lambda: clock_ns[0])
+    transport, _ = _transport(monkeypatch, _subscription_status() + _mcm())
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+    )
+    assert decision.decision_eligible
+    return transport, runtime, decision, clock_ns
+
+
 def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -205,6 +229,38 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert not subscription.grants_provider_write_authority
     assert not subscription.grants_execution_authority
     assert not subscription.real_money_authorized
+
+
+def test_positive_decision_expires_under_original_freshness_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _transport_value, _runtime, decision, clock_ns = _fresh_decision(monkeypatch)
+
+    clock_ns[0] = 1_100_000_000
+    assert not decision.decision_eligible
+
+
+def test_disconnect_revokes_already_issued_positive_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, _runtime, decision, _clock_ns = _fresh_decision(monkeypatch)
+
+    transport.close()
+    assert not decision.decision_eligible
+
+
+def test_subscription_authority_is_bound_to_exact_transport_object_not_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, _ = _transport(monkeypatch, _subscription_status())
+    subscription = _open(first)
+    second, _ = _transport(monkeypatch, b"")
+
+    assert first is not second
+    assert first.connection_id == second.connection_id == "conn-1"
+    assert first._connection_generation == second._connection_generation == 1
+    with pytest.raises(BetfairAuthenticatedStreamError, match="exact transport object"):
+        BetfairAuthenticatedStreamFreshnessRuntime(second, subscription)
 
 
 def test_subscription_requires_exact_provider_success_id_and_closes_connection(

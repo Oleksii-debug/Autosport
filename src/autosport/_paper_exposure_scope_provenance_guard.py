@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
+from functools import wraps
 from typing import Any
 
 from .paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PreparedPaperExecution,
 )
@@ -16,6 +19,14 @@ _RESERVED_EVENT_TYPE = "PAPER_EXPOSURE_SCOPE_BOUND"
 _RESERVED_SCHEMA = "autosport.paper_execution.exposure_scope_binding"
 _RESERVED_SCHEMA_VERSION = 1
 
+# Mint authority is deliberately task/thread local and carries the exact runtime
+# object. A caller cannot obtain a durable/replayable token from PreparedPaperExecution
+# itself; canonical public issuance re-enters this module for every restart.
+_MINT_AUTHORITY: ContextVar[PaperExecutionAdoptionRuntime | None] = ContextVar(
+    "autosport_paper_exposure_scope_mint_authority",
+    default=None,
+)
+
 _ORIGINAL_LEDGER_APPEND = getattr(
     PaperExecutionLedger,
     "_autosport_exposure_scope_original_append_event",
@@ -25,6 +36,21 @@ _ORIGINAL_RUNTIME_PUBLISH = getattr(
     PaperExecutionAdoptionRuntime,
     "_autosport_exposure_scope_original_publish",
     PaperExecutionAdoptionRuntime._publish_exposure_scope,
+)
+_ORIGINAL_RUNTIME_MINT = getattr(
+    PaperExecutionAdoptionRuntime,
+    "_autosport_exposure_scope_original_mint_prepared",
+    PaperExecutionAdoptionRuntime._mint_prepared,
+)
+_ORIGINAL_RUNTIME_PREPARE = getattr(
+    PaperExecutionAdoptionRuntime,
+    "_autosport_exposure_scope_original_prepare",
+    PaperExecutionAdoptionRuntime.prepare,
+)
+_ORIGINAL_RUNTIME_PREPARE_PAPER_VALUE = getattr(
+    PaperExecutionAdoptionRuntime,
+    "_autosport_exposure_scope_original_prepare_paper_value_action",
+    PaperExecutionAdoptionRuntime.prepare_paper_value_action,
 )
 
 
@@ -49,6 +75,35 @@ def _guarded_append_event(
         key=key,
         payload=payload,
     )
+
+
+def _guarded_mint_prepared(
+    self: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+) -> PreparedPaperExecution:
+    """Mint only while an exact canonical public preparation path is executing."""
+
+    if _MINT_AUTHORITY.get() is not self:
+        raise PaperExecutionAdoptionError(
+            "prepared execution mint is reserved for canonical preparation authority"
+        )
+    return _ORIGINAL_RUNTIME_MINT(self, prepared)
+
+
+def _with_mint_authority(method: Any) -> Any:
+    @wraps(method)
+    def _owned(self: PaperExecutionAdoptionRuntime, *args: Any, **kwargs: Any) -> Any:
+        token = _MINT_AUTHORITY.set(self)
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _MINT_AUTHORITY.reset(token)
+
+    return _owned
+
+
+_OWNED_PREPARE = _with_mint_authority(_ORIGINAL_RUNTIME_PREPARE)
+_OWNED_PREPARE_PAPER_VALUE = _with_mint_authority(_ORIGINAL_RUNTIME_PREPARE_PAPER_VALUE)
 
 
 def _validate_owned_scope_payload(payload: object) -> dict[str, Any]:
@@ -162,5 +217,17 @@ if not getattr(
     PaperExecutionAdoptionRuntime._autosport_exposure_scope_original_publish = (  # type: ignore[attr-defined]
         _ORIGINAL_RUNTIME_PUBLISH
     )
+    PaperExecutionAdoptionRuntime._autosport_exposure_scope_original_mint_prepared = (  # type: ignore[attr-defined]
+        _ORIGINAL_RUNTIME_MINT
+    )
+    PaperExecutionAdoptionRuntime._autosport_exposure_scope_original_prepare = (  # type: ignore[attr-defined]
+        _ORIGINAL_RUNTIME_PREPARE
+    )
+    PaperExecutionAdoptionRuntime._autosport_exposure_scope_original_prepare_paper_value_action = (  # type: ignore[attr-defined]
+        _ORIGINAL_RUNTIME_PREPARE_PAPER_VALUE
+    )
+    PaperExecutionAdoptionRuntime._mint_prepared = _guarded_mint_prepared
+    PaperExecutionAdoptionRuntime.prepare = _OWNED_PREPARE
+    PaperExecutionAdoptionRuntime.prepare_paper_value_action = _OWNED_PREPARE_PAPER_VALUE
     PaperExecutionAdoptionRuntime._publish_exposure_scope = _publish_owned_exposure_scope
     PaperExecutionAdoptionRuntime._autosport_exposure_scope_provenance_guard_installed = True  # type: ignore[attr-defined]

@@ -4,7 +4,6 @@ import sys
 from contextvars import ContextVar
 from functools import wraps
 from hashlib import sha256
-from types import CodeType
 from typing import Any
 
 from . import _paper_execution_reality_legacy as _ledger_impl
@@ -117,8 +116,7 @@ def _install_guard() -> None:
     reserved_event_type = _RESERVED_EVENT_TYPE
     reserved_schema = _RESERVED_SCHEMA
     reserved_schema_version = _RESERVED_SCHEMA_VERSION
-    publisher_code: CodeType | None = None
-
+    
     def snapshot_function_globals(
         function: Any,
     ) -> tuple[tuple[tuple[str, object], ...], object]:
@@ -253,7 +251,7 @@ def _install_guard() -> None:
         key: str,
         payload: dict[str, Any],
     ) -> None:
-        if event_type == reserved_event_type and getframe(1).f_code is not publisher_code:
+        if event_type == reserved_event_type:
             raise integrity_error(
                 "PAPER_EXPOSURE_SCOPE_BOUND is reserved for canonical adoption authority"
             )
@@ -526,18 +524,92 @@ def _install_guard() -> None:
             )
 
         original_require_minted(self, prepared)
-        payload = validate_owned_scope_payload(
-            original_scope_payload(runtime_type, prepared)
-        )
-        guarded_append_event(
-            self.ledger,
-            event_type=reserved_event_type,
-            run_id=run_id,
-            key=f"{run_id}:exposure-scope",
-            payload=payload,
-        )
 
-    publisher_code = publish_owned_exposure_scope.__code__
+        # Re-derive the reserved payload inside the canonical publisher.  The
+        # public classmethod remains a dispatch/tamper sentinel only; it is not
+        # executed as authority because its module globals are mutable Python
+        # state.  These exact captured primitives match paper_execution_adoption._digest.
+        body: dict[str, object] = {
+            "schema": reserved_schema,
+            "schema_version": reserved_schema_version,
+            "plan_id": prepared.execution_plan.plan_id,
+            "plan_fingerprint": prepared.execution_plan.fingerprint,
+            "intent_evidence_sha256": sha256_digest(
+                prepared.intent_evidence_json.encode("utf-8")
+            ).hexdigest(),
+            "bindings": [
+                {
+                    "action_id": binding.action_id,
+                    "sport": binding.sport,
+                    "bankroll_id": binding.bankroll_id,
+                    "currency": binding.currency,
+                }
+                for binding in prepared.exposure_bindings
+            ],
+        }
+        payload = validate_owned_scope_payload(
+            {
+                **body,
+                "binding_sha256": sha256_digest(
+                    checked_canonical_json(body).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        event_key = f"{run_id}:exposure-scope"
+
+        # The generic ledger append rejects the reserved event unconditionally.
+        # Persist the one product-owned reserved event here so there is no
+        # inspectable generic reserved-event capability or writable publisher
+        # code cell that an ordinary caller can retarget.
+        def mutate_reserved_scope() -> None:
+            self.ledger._ensure_existing_path_durable()
+            events = self.ledger._load_unlocked()
+            by_key = {item["event_key"]: item for item in events}
+            prior = by_key.get(event_key)
+            sequence = len(events)
+            previous_sha256 = None if not events else events[-1]["event_sha256"]
+            event = build_event(
+                event_type=reserved_event_type,
+                run_id=run_id,
+                key=event_key,
+                payload=payload,
+                sequence=sequence,
+                previous_sha256=previous_sha256,
+            )
+            if prior is not None:
+                comparable = dict(prior)
+                comparable.pop("sequence", None)
+                comparable.pop("previous_sha256", None)
+                comparable.pop("event_sha256", None)
+                proposed = dict(event)
+                proposed.pop("sequence", None)
+                proposed.pop("previous_sha256", None)
+                proposed.pop("event_sha256", None)
+                if comparable != proposed:
+                    raise integrity_error("event_key already has different payload")
+                return
+            encoded = checked_canonical_json(event) + "\n"
+            path_existed_before = self.ledger.path.exists()
+            try:
+                with self.ledger.path.open(
+                    "a",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    fsync(handle.fileno())
+                if not path_existed_before or not self.ledger._path_durable:
+                    self.ledger._sync_parent_directory()
+                self.ledger._write_anchor_unlocked(events + [event])
+            except OSError as exc:
+                self.ledger._path_durable = False
+                raise integrity_error(
+                    "PAPER execution ledger durability barrier failed"
+                ) from exc
+            self.ledger._path_durable = True
+
+        self.ledger._with_writer_lock(mutate_reserved_scope)
 
     for method in (
         guarded_append_event,

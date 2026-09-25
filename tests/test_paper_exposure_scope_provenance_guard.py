@@ -306,6 +306,64 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 )
             self.assertEqual(ledger.events(), ())
 
+    def test_direct_unlocked_execution_cannot_publish_reserved_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "reserved for canonical execute authority",
+            ):
+                runtime._execute_unlocked(
+                    prepared=prepared,
+                    trigger_id="direct-unlocked-trigger",
+                    started_at=QUOTE_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), ())
+
+    def test_wrapped_execute_cannot_bypass_execution_authority_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+            hidden_execute = PaperExecutionAdoptionRuntime.execute.__wrapped__
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "reserved for canonical execute authority",
+            ):
+                hidden_execute(
+                    runtime,
+                    prepared=prepared,
+                    trigger_id="hidden-execute-trigger",
+                    started_at=QUOTE_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), ())
+
+    def test_wrapped_unlocked_execute_cannot_bypass_public_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+            hidden_unlocked = PaperExecutionAdoptionRuntime._execute_unlocked.__wrapped__
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical execution authority",
+            ):
+                hidden_unlocked(
+                    runtime,
+                    prepared=prepared,
+                    trigger_id="hidden-unlocked-trigger",
+                    started_at=QUOTE_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), ())
+
     def test_direct_scope_publisher_cannot_choose_reserved_run_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))

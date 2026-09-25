@@ -158,3 +158,7 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # valid but unanchored pre-existing file from being adopted as positive settlement
 # authority merely because independent monotonic history is absent.
 from . import _betfair_settlement_monotonic_baseline_guard as _betfair_settlement_monotonic_baseline_guard  # noqa: F401,E402
+
+# Provider settlement must retain the durable execution action's exact requested
+# economics and physically possible provider chronology before a revision is issued.
+from . import _betfair_settlement_execution_identity_guard as _betfair_settlement_execution_identity_guard  # noqa: F401,E402

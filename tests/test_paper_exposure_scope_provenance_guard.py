@@ -6,6 +6,7 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import autosport._paper_exposure_scope_provenance_guard as scope_guard
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -91,6 +92,34 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             ):
                 runtime._mint_prepared(caller_authored)
 
+    def test_guard_does_not_publish_original_bypass_callables(self) -> None:
+        for owner, names in (
+            (
+                PaperExecutionLedger,
+                ("_autosport_exposure_scope_original_append_event",),
+            ),
+            (
+                PaperExecutionAdoptionRuntime,
+                (
+                    "_autosport_exposure_scope_original_publish",
+                    "_autosport_exposure_scope_original_mint_prepared",
+                    "_autosport_exposure_scope_original_prepare",
+                    "_autosport_exposure_scope_original_prepare_paper_value_action",
+                ),
+            ),
+        ):
+            for name in names:
+                self.assertFalse(hasattr(owner, name), name)
+        for name in (
+            "_ORIGINAL_LEDGER_APPEND",
+            "_ORIGINAL_RUNTIME_PUBLISH",
+            "_ORIGINAL_RUNTIME_MINT",
+            "_ORIGINAL_RUNTIME_PREPARE",
+            "_ORIGINAL_RUNTIME_PREPARE_PAPER_VALUE",
+            "_MINT_AUTHORITY",
+        ):
+            self.assertFalse(hasattr(scope_guard, name), name)
+
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
@@ -104,6 +133,27 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     key="forged-run:exposure-scope",
                     payload={"forged": True},
                 )
+            self.assertEqual(ledger.events(), ())
+
+    def test_public_ledger_dispatch_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+            run_id = runtime.expected_run_id(prepared, "scope-trigger")
+            guarded_append = PaperExecutionLedger._append_event
+
+            def forged_append(*args: object, **kwargs: object) -> None:
+                raise AssertionError("forged append must never be invoked")
+
+            PaperExecutionLedger._append_event = forged_append  # type: ignore[method-assign]
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+            finally:
+                PaperExecutionLedger._append_event = guarded_append  # type: ignore[method-assign]
             self.assertEqual(ledger.events(), ())
 
     def test_canonical_runtime_can_publish_reserved_scope_idempotently(self) -> None:

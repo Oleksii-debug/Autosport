@@ -326,7 +326,7 @@ def open_authenticated_market_subscription(
             or raw_status.get("connectionClosed") is True
             or "errorCode" in raw_status
             or "errorMessage" in raw_status
-            or provider_error not in (None, False)
+            or (provider_error is not None and provider_error is not False)
         ):
             raise BetfairAuthenticatedStreamError(
                 "Betfair market subscription was not acknowledged SUCCESS"

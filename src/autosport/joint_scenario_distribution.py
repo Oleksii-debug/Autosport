@@ -6,13 +6,23 @@ import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
-from typing import Iterable
+from typing import Iterable, TypeVar
 
 from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
 from .portfolio import PortfolioEngine, _scenario_profit_in_context
 from .risk import PaperRiskPolicy
 from .scenario_search import ScenarioGroup
+
+
+_T = TypeVar("_T")
+
+_MAX_JOINT_SCENARIO_GROUPS = 256
+_MAX_JOINT_SCENARIO_OUTCOMES_PER_GROUP = 1024
+_MAX_JOINT_SCENARIO_STATES = 10_000
+_MAX_JOINT_SCENARIO_SELECTED_KEYS = _MAX_JOINT_SCENARIO_GROUPS
+_MAX_PROBABILITY_COEFFICIENT_DIGITS = 4096
+_MAX_PROBABILITY_ABS_EXPONENT = 4096
 
 
 def _canonical_text(value: object, *, field_name: str) -> str:
@@ -27,12 +37,43 @@ def _canonical_text(value: object, *, field_name: str) -> str:
     return value
 
 
-def _canonical_decimal_identity(value: Decimal) -> tuple[int, tuple[int, ...], int]:
+def _bounded_materialize(
+    values: Iterable[_T],
+    *,
+    max_items: int,
+    field_name: str,
+) -> tuple[_T, ...]:
+    """Materialize an iterable without allowing an unbounded/infinite input walk."""
+
+    materialized: list[_T] = []
+    try:
+        iterator = iter(values)
+        for item in iterator:
+            if len(materialized) >= max_items:
+                raise ValueError(f"{field_name} exceeds resource limit")
+            materialized.append(item)
+    except TypeError as exc:
+        raise ValueError(f"{field_name} must be iterable") from exc
+    return tuple(materialized)
+
+
+def _probability_parts(value: Decimal, *, field_name: str):
+    """Validate a Decimal shape before exact Fraction/integer amplification."""
+
     if not isinstance(value, Decimal) or not value.is_finite():
-        raise ValueError("joint scenario probability must be a finite Decimal")
+        raise ValueError(f"{field_name} must be a finite Decimal")
     parts = value.as_tuple()
     if not isinstance(parts.exponent, int):
-        raise ValueError("joint scenario probability exponent must be an integer")
+        raise ValueError(f"{field_name} exponent must be an integer")
+    if len(parts.digits) > _MAX_PROBABILITY_COEFFICIENT_DIGITS:
+        raise ValueError(f"{field_name} coefficient exceeds resource limit")
+    if abs(parts.exponent) > _MAX_PROBABILITY_ABS_EXPONENT:
+        raise ValueError(f"{field_name} exponent exceeds resource limit")
+    return parts
+
+
+def _canonical_decimal_identity(value: Decimal) -> tuple[int, tuple[int, ...], int]:
+    parts = _probability_parts(value, field_name="joint scenario probability")
     digits = list(parts.digits)
     exponent = parts.exponent
     while len(digits) > 1 and digits[-1] == 0:
@@ -81,6 +122,8 @@ class JointScenarioState:
         _canonical_text(self.state_id, field_name="joint scenario state_id")
         if type(self.selected_quote_keys) is not tuple or not self.selected_quote_keys:
             raise ValueError("joint scenario selected_quote_keys must be a non-empty tuple")
+        if len(self.selected_quote_keys) > _MAX_JOINT_SCENARIO_SELECTED_KEYS:
+            raise ValueError("joint scenario selected_quote_keys exceeds resource limit")
         normalized = tuple(
             _canonical_text(item, field_name="joint scenario quote key")
             for item in self.selected_quote_keys
@@ -96,6 +139,10 @@ class JointScenarioState:
             raise ValueError(
                 "joint scenario probability must be a positive finite Decimal at most 1"
             )
+        _probability_parts(
+            self.probability,
+            field_name="joint scenario probability",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,10 +173,11 @@ class _GroupSnapshot:
 
 
 def _snapshot_groups(groups: Iterable[ScenarioGroup]) -> tuple[_GroupSnapshot, ...]:
-    try:
-        materialized = tuple(groups)
-    except TypeError as exc:
-        raise ValueError("joint scenario groups must be iterable") from exc
+    materialized = _bounded_materialize(
+        groups,
+        max_items=_MAX_JOINT_SCENARIO_GROUPS,
+        field_name="joint scenario groups",
+    )
     if not materialized:
         raise ValueError("joint scenario groups are required")
 
@@ -146,6 +194,8 @@ def _snapshot_groups(groups: Iterable[ScenarioGroup]) -> tuple[_GroupSnapshot, .
 
         if type(group.outcomes) is not tuple or len(group.outcomes) < 2:
             raise ValueError("joint scenario group requires at least two outcomes")
+        if len(group.outcomes) > _MAX_JOINT_SCENARIO_OUTCOMES_PER_GROUP:
+            raise ValueError("joint scenario group outcomes exceeds resource limit")
         quote_keys: list[str] = []
         declared: list[tuple[str, Decimal]] = []
         for outcome in group.outcomes:
@@ -170,6 +220,10 @@ def _snapshot_groups(groups: Iterable[ScenarioGroup]) -> tuple[_GroupSnapshot, .
                     raise ValueError(
                         "declared marginal probabilities must be finite Decimals between 0 and 1"
                     )
+                _probability_parts(
+                    probability,
+                    field_name="declared marginal probability",
+                )
                 declared.append((quote_key, probability))
 
         if declared and len(declared) != len(quote_keys):
@@ -261,10 +315,11 @@ def analyse_joint_distribution(
         raise ValueError("PaperBook changed during joint scenario analysis")
 
     group_snapshots = _snapshot_groups(groups)
-    try:
-        state_values = tuple(states)
-    except TypeError as exc:
-        raise ValueError("joint scenario states must be iterable") from exc
+    state_values = _bounded_materialize(
+        states,
+        max_items=_MAX_JOINT_SCENARIO_STATES,
+        field_name="joint scenario states",
+    )
     if not state_values:
         raise ValueError("joint scenario states are required")
     if any(not isinstance(state, JointScenarioState) for state in state_values):

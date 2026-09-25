@@ -320,10 +320,13 @@ def open_authenticated_market_subscription(
             )
         if raw_status.get("id") != provider_request_id:
             raise BetfairAuthenticatedStreamError("provider status acknowledgement id mismatch")
+        provider_error = raw_status.get("error")
         if (
             raw_status.get("statusCode") != "SUCCESS"
-            or raw_status.get("error") is not False
             or raw_status.get("connectionClosed") is True
+            or "errorCode" in raw_status
+            or "errorMessage" in raw_status
+            or provider_error not in (None, False)
         ):
             raise BetfairAuthenticatedStreamError(
                 "Betfair market subscription was not acknowledged SUCCESS"

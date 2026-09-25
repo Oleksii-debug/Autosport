@@ -8,6 +8,7 @@ from pathlib import Path
 from types import FunctionType
 
 import autosport._paper_exposure_scope_provenance_guard as scope_guard
+import autosport._paper_value_execution_authority as value_authority
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -138,6 +139,23 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 "reserved for canonical preparation authority",
             ):
                 runtime._mint_prepared(caller_authored)
+
+    def test_hidden_original_prepare_cannot_mint_without_owned_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _ledger, runtime = self._runtime(Path(tmp))
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "reserved for canonical preparation authority",
+            ):
+                value_authority._ORIGINAL_PREPARE_PAPER_VALUE_ACTION(
+                    runtime,
+                    event=_event(),
+                    stake=Decimal("5.00"),
+                    decision_id="scope-hidden-original",
+                    account_id="paper-account",
+                    bankroll_id="bankroll-eur",
+                    currency="EUR",
+                )
 
     def test_guard_does_not_publish_original_bypass_callables(self) -> None:
         for owner, names in (

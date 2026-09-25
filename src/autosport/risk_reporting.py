@@ -15,6 +15,7 @@ from decimal import Decimal, DecimalException, localcontext
 from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
+from .economic_goal_store import economic_goal_from_payload, economic_goal_to_payload
 from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
@@ -227,13 +228,26 @@ def build_paper_risk_report(
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
 
-    goal_provenance = provenance_for(goal)
+    # Frozen dataclasses remain technically mutable through low-level same-process
+    # operations such as object.__setattr__. Capture one canonical persisted-value
+    # snapshot and fence the source contract before, immediately after capture, and
+    # again before return so report fields/headroom cannot mix two goal revisions.
+    goal_provenance_before = provenance_for(goal)
+    goal_snapshot = economic_goal_from_payload(economic_goal_to_payload(goal))
+    goal_snapshot_provenance = provenance_for(goal_snapshot)
+    goal_provenance_after_capture = provenance_for(goal)
+    if (
+        goal_provenance_before != goal_snapshot_provenance
+        or goal_provenance_after_capture != goal_snapshot_provenance
+    ):
+        raise ValueError("canonical economic goal changed during reporting")
+
     before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
 
     metrics = PaperRiskPolicy._historical_risk_metrics(book)
-    rooms = PaperRiskPolicy._goal_history_rooms(book, goal)
+    rooms = PaperRiskPolicy._goal_history_rooms(book, goal_snapshot)
     maximum_drawdown = _historical_max_drawdown(book)
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if (
@@ -260,18 +274,18 @@ def build_paper_risk_report(
     if current_drawdown_amount < 0:
         raise ValueError("canonical PAPER drawdown state is inconsistent")
 
-    return PaperRiskReport(
+    report = PaperRiskReport(
         schema=RISK_REPORT_SCHEMA,
         scope=RISK_REPORT_SCOPE_PAPER_ONLY,
         drawdown_metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
         includes_live_execution_exposure=False,
         live_execution_headroom_authoritative=False,
         portfolio_risk_state_sha256=after_sha256,
-        goal_id=goal.goal_id,
-        goal_revision=goal.revision,
-        bankroll_id=goal.bankroll_id,
-        currency=goal.currency,
-        goal_contract_sha256=goal_provenance.contract_sha256,
+        goal_id=goal_snapshot.goal_id,
+        goal_revision=goal_snapshot.revision,
+        bankroll_id=goal_snapshot.bankroll_id,
+        currency=goal_snapshot.currency,
+        goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
         initial_bankroll=metrics.initial_bankroll,
         current_equity=metrics.current_equity,
         peak_equity=metrics.peak_equity,
@@ -284,8 +298,12 @@ def build_paper_risk_report(
         historical_max_drawdown_peak_id=maximum_drawdown.peak_id,
         historical_max_drawdown_trough_id=maximum_drawdown.trough_id,
         drawdown_loss_room=drawdown_loss_room,
-        max_drawdown_fraction=goal.max_drawdown_fraction,
-        risk_of_ruin_limit=goal.max_risk_of_ruin,
+        max_drawdown_fraction=goal_snapshot.max_drawdown_fraction,
+        risk_of_ruin_limit=goal_snapshot.max_risk_of_ruin,
         risk_of_ruin_upper_bound=None,
         risk_of_ruin_status=RISK_OF_RUIN_STATUS_UNKNOWN,
     )
+
+    if provenance_for(goal) != goal_snapshot_provenance:
+        raise ValueError("canonical economic goal changed during reporting")
+    return report

@@ -153,3 +153,8 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# A new #1272 settlement journal has no trusted legacy baseline. Prevent a structurally
+# valid but unanchored pre-existing file from being adopted as positive settlement
+# authority merely because independent monotonic history is absent.
+from . import _betfair_settlement_monotonic_baseline_guard as _betfair_settlement_monotonic_baseline_guard  # noqa: F401,E402

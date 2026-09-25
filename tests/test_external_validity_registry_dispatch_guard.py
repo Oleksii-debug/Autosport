@@ -41,6 +41,21 @@ def test_public_build_is_dispatch_guarded() -> None:
     )
 
 
+def test_public_guard_does_not_retain_predecessor_build_callable_in_closure() -> None:
+    guarded = registry_module.build_registered_external_validity_report
+    retained = []
+    for cell in guarded.__closure__ or ():
+        value = cell.cell_contents
+        if (
+            callable(value)
+            and getattr(value, "__name__", None)
+            == "build_registered_external_validity_report"
+            and value is not guarded
+        ):
+            retained.append(value)
+    assert retained == []
+
+
 def test_self_confirming_cached_get_and_class_get_rebind_fails_before_forged_read(
     tmp_path,
     monkeypatch,

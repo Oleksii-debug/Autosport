@@ -1,12 +1,13 @@
 """Seal external-validity provenance reads to canonical ScientificRegistry authority.
 
-This guard owns no registry storage or comparison semantics.  It replaces only the
+This guard owns no registry storage or comparison semantics. It replaces only the
 older adapter's cached registry-read seam with the already-integrated source-owned
 ScientificRegistry read authority and fails closed if the adapter dispatch changes.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from . import _external_validity_registry_core as _adapter
@@ -24,7 +25,6 @@ def _install_guard() -> None:
     authority_error = read_authority_module.ScientificRegistryReadAuthorityError
     authority_verifier = read_authority_module.require_scientific_registry_read_authority
 
-    original_build = adapter.build_registered_external_validity_report
     original_resolve = adapter._resolve_registered_origin
     original_bundle_hash = adapter.canonical_policy_evaluation_bundle_sha256
     original_text = adapter._text
@@ -97,7 +97,17 @@ def _install_guard() -> None:
                 "external-validity registry adapter dispatch changed"
             )
 
-    def build_registered_external_validity_report(*args: Any, **kwargs: Any):
+    def build_registered_external_validity_report(
+        registry: object,
+        protocol: object,
+        candidate: object,
+        baseline_results: Sequence[object],
+        *,
+        candidate_evaluation_bundle_id: str,
+        baseline_evaluation_bundle_ids: object,
+    ):
+        """Build the registered report without retaining predecessor build authority."""
+
         if (
             adapter.build_registered_external_validity_report
             is not build_registered_external_validity_report
@@ -107,7 +117,81 @@ def _install_guard() -> None:
             )
         _assert_adapter_dispatch()
         _verified_get_capability()
-        return original_build(*args, **kwargs)
+
+        canonical_registry = _require_exact_registry_authority(registry)
+        if type(protocol) is not original_protocol_type:
+            raise adapter_error(
+                "protocol must be an exact FrozenBaselineProtocol value"
+            )
+        if type(candidate) is not original_policy_type:
+            raise adapter_error(
+                "candidate must be an exact PolicyEvaluation value"
+            )
+        if not isinstance(baseline_evaluation_bundle_ids, original_mapping):
+            raise adapter_error(
+                "baseline_evaluation_bundle_ids must be a mapping"
+            )
+
+        supported_ids = {
+            definition.baseline_id
+            for definition in protocol.baselines
+            if definition.supported
+        }
+        supplied_bundle_ids = set(baseline_evaluation_bundle_ids)
+        if supplied_bundle_ids != supported_ids:
+            missing = sorted(supported_ids - supplied_bundle_ids)
+            unexpected = sorted(supplied_bundle_ids - supported_ids)
+            detail: list[str] = []
+            if missing:
+                detail.append("missing=" + ",".join(missing))
+            if unexpected:
+                detail.append("unexpected=" + ",".join(unexpected))
+            raise adapter_error(
+                "baseline evaluation bundle IDs must match supported frozen baselines"
+                + (": " + "; ".join(detail) if detail else "")
+            )
+
+        by_id: dict[str, Any] = {}
+        for result in baseline_results:
+            if type(result) is not original_policy_type:
+                raise adapter_error(
+                    "baseline_results must contain exact PolicyEvaluation values"
+                )
+            if result.policy_id in by_id:
+                raise adapter_error(
+                    f"duplicate baseline result for policy_id: {result.policy_id}"
+                )
+            by_id[result.policy_id] = result
+
+        candidate_origin = original_resolve(
+            canonical_registry,
+            evaluation_bundle_id=candidate_evaluation_bundle_id,
+            evaluation=candidate,
+            protocol=protocol,
+        )
+
+        for baseline_id in sorted(supported_ids):
+            result = by_id.get(baseline_id)
+            if result is None:
+                raise adapter_error(
+                    f"supported baseline result is missing: {baseline_id}"
+                )
+            origin = original_resolve(
+                canonical_registry,
+                evaluation_bundle_id=baseline_evaluation_bundle_ids[baseline_id],
+                evaluation=result,
+                protocol=protocol,
+            )
+            if origin.dataset_snapshot_id != candidate_origin.dataset_snapshot_id:
+                raise adapter_error(
+                    f"{baseline_id}: registry dataset snapshot differs from candidate"
+                )
+            if origin.protocol_sha256 != candidate_origin.protocol_sha256:
+                raise adapter_error(
+                    f"{baseline_id}: registry protocol SHA differs from candidate"
+                )
+
+        return original_report_builder(protocol, candidate, baseline_results)
 
     build_registered_external_validity_report._autosport_external_validity_registry_dispatch_guard = True  # type: ignore[attr-defined]
     _require_exact_registry_authority._autosport_external_validity_registry_dispatch_guard = True  # type: ignore[attr-defined]

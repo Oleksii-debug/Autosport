@@ -5,6 +5,7 @@ import unittest
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import FunctionType
 
 import autosport._paper_exposure_scope_provenance_guard as scope_guard
 from autosport.domain import MarketEvent
@@ -65,6 +66,34 @@ def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
     )
 
 
+def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
+    """Enumerate callable capability references exposed by ordinary function metadata."""
+
+    pending: list[object] = [root]
+    seen: set[int] = set()
+    found: list[FunctionType] = []
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, FunctionType) or id(value) in seen:
+            continue
+        seen.add(id(value))
+        found.append(value)
+        wrapped = getattr(value, "__wrapped__", None)
+        if wrapped is not None:
+            pending.append(wrapped)
+        if value.__defaults__:
+            pending.extend(value.__defaults__)
+        if value.__kwdefaults__:
+            pending.extend(value.__kwdefaults__.values())
+        if value.__closure__:
+            for cell in value.__closure__:
+                try:
+                    pending.append(cell.cell_contents)
+                except ValueError:
+                    pass
+    return tuple(found)
+
+
 class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
     def _runtime(self, root: Path) -> tuple[PaperExecutionLedger, PaperExecutionAdoptionRuntime]:
         ledger = PaperExecutionLedger(root / "paper-execution.jsonl")
@@ -120,6 +149,26 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(scope_guard, name), name)
 
+    def test_function_metadata_exposes_no_generic_append_or_mint_bypass(self) -> None:
+        roots = (
+            PaperExecutionLedger._append_event,
+            PaperExecutionAdoptionRuntime._mint_prepared,
+            PaperExecutionAdoptionRuntime.prepare,
+            PaperExecutionAdoptionRuntime.prepare_paper_value_action,
+            PaperExecutionAdoptionRuntime._publish_exposure_scope,
+        )
+        reachable = {
+            id(function): function
+            for root in roots
+            for function in _reachable_functions(root)
+        }
+        bypasses = sorted(
+            function.__name__
+            for function in reachable.values()
+            if function.__name__ in {"_append_event", "_mint_prepared"}
+        )
+        self.assertEqual(bypasses, [])
+
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
@@ -134,6 +183,26 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     payload={"forged": True},
                 )
             self.assertEqual(ledger.events(), ())
+
+    def test_guarded_generic_append_preserves_non_reserved_ledger_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._append_event(
+                event_type="FOCUSED_NON_RESERVED_TEST",
+                run_id="generic-run",
+                key="generic-run:event",
+                payload={"value": 1},
+            )
+            ledger._append_event(
+                event_type="FOCUSED_NON_RESERVED_TEST",
+                run_id="generic-run",
+                key="generic-run:event",
+                payload={"value": 1},
+            )
+            events = ledger.events("generic-run")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "FOCUSED_NON_RESERVED_TEST")
+            self.assertEqual(events[0]["payload"], {"value": 1})
 
     def test_inherited_lower_append_cannot_bypass_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

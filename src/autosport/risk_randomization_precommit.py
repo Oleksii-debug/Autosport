@@ -338,6 +338,17 @@ def _receipt(
         )
     membership = state["membership"]
     assert type(membership) is dict
+    expected_binding = _semantic_binding_sha256(
+        experiment_key=_experiment_key(_text(state.get("experiment_id"), "experiment_id")),
+        membership_receipt_sha256=_sha256_text(
+            membership.get("membership_receipt_sha256"), "membership_receipt_sha256"
+        ),
+        state_sha256=_sha256_text(state_sha256, "state_sha256"),
+    )
+    if authority_record.semantic_binding_sha256 != expected_binding:
+        raise RiskRandomizationPrecommitError(
+            "monotonic authority semantic binding does not match exact randomization state"
+        )
     core = {
         "workspace_instance_id": authority.workspace_instance_id,
         "experiment_id": state["experiment_id"],

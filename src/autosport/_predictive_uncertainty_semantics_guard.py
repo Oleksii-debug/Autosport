@@ -1,18 +1,28 @@
 from __future__ import annotations
 
-"""Fail closed when ForecastRecord uncertainty lacks probability-radius semantics.
+"""Fail closed on known-invalid ForecastRecord uncertainty semantics.
 
 ``ForecastRecord.uncertainty`` predates the durable predictive admission authority and
-is also used by research producers for descriptive quantities.  Positive allocation,
-however, interprets that scalar as an absolute probability radius.  A bare number —
-including the legacy default ``0`` — therefore cannot carry predictive authority.
+is used by some research producers for descriptive quantities. Positive allocation,
+however, currently interprets that scalar as an absolute probability radius.
 
-This composition guard preserves the existing ForecastRecord wire schema while
-requiring an explicit, canonical semantic declaration before the scientific resolver
-may compare the value with a frozen ``maximum_uncertainty`` policy.  Research/audit
-forecasts with other uncertainty meanings remain valid records but are ineligible for
-positive predictive allocation.
+This compatibility guard closes two concrete unsafe cases without rewriting the legacy
+wire schema inside the participant-strength lineage:
+
+* the historical omitted/default ``uncertainty=0`` value must not mean mathematical
+  certainty when no semantics were declared; and
+* any producer that explicitly declares a non-probability uncertainty meaning (for
+  example participant-strength descriptive rating radius) cannot reach positive
+  predictive authority.
+
+Legacy non-zero forecasts that predate semantic tagging remain readable/resolvable so
+this bounded convergence repair does not silently invalidate older evidence. They are
+not proof that the broader typed-uncertainty migration is complete; new/updated
+producers should declare ``absolute_probability_radius_v1`` only when that quantity is
+actually derived by their frozen scientific method.
 """
+
+from decimal import Decimal
 
 from .forecasting import ForecastRecord
 from . import predictive_authority as _authority
@@ -24,16 +34,22 @@ _ORIGINAL_AUTHORITY_RESOLVE = _authority.resolve_predictive_eligibility
 _ORIGINAL_QUALIFICATION_RESOLVE = _qualification.resolve_predictive_eligibility
 
 
-def _require_probability_radius_semantics(forecast: object) -> None:
+def _require_supported_uncertainty_semantics(forecast: object) -> None:
     # Let the already-installed exact-type/public fences own malformed or
-    # polymorphic ForecastRecord diagnostics.  This guard owns only semantic truth
+    # polymorphic ForecastRecord diagnostics. This guard owns only semantic truth
     # for exact canonical records.
     if type(forecast) is not ForecastRecord:
         return
     semantics = forecast.provenance.get("uncertainty_semantics")
+    if semantics is None:
+        if forecast.uncertainty == Decimal("0"):
+            raise _qualification.PredictiveQualificationError(
+                "forecast default-zero uncertainty lacks probability-radius semantics"
+            )
+        return
     if semantics != _ABSOLUTE_PROBABILITY_RADIUS:
         raise _qualification.PredictiveQualificationError(
-            "forecast uncertainty is not declared as absolute_probability_radius_v1"
+            "forecast uncertainty semantics are not absolute_probability_radius_v1"
         )
 
 
@@ -45,7 +61,7 @@ def _guarded_authority_resolve(
     policy,
     qualification,
 ):
-    _require_probability_radius_semantics(forecast)
+    _require_supported_uncertainty_semantics(forecast)
     return _ORIGINAL_AUTHORITY_RESOLVE(
         registry,
         forecast,
@@ -63,7 +79,7 @@ def _guarded_qualification_resolve(
     policy,
     qualification,
 ):
-    _require_probability_radius_semantics(forecast)
+    _require_supported_uncertainty_semantics(forecast)
     return _ORIGINAL_QUALIFICATION_RESOLVE(
         registry,
         forecast,

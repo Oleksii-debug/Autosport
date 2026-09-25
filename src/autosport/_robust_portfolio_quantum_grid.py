@@ -5,7 +5,17 @@ from decimal import Decimal, localcontext
 from . import portfolio_plan as _portfolio_plan
 
 
-_ORIGINAL_DERIVE = _portfolio_plan.RobustPortfolioProposal.derive.__func__
+_PROPOSAL = _portfolio_plan.RobustPortfolioProposal
+_ORIGINAL_DERIVE = getattr(
+    _PROPOSAL,
+    "_autosport_exact_quantum_grid_original_derive",
+    _PROPOSAL.derive.__func__,
+)
+_ORIGINAL_POST_INIT = getattr(
+    _PROPOSAL,
+    "_autosport_exact_stressed_limit_original_post_init",
+    _PROPOSAL.__post_init__,
+)
 _MAX_GRID_DECIMAL_COEFFICIENT_DIGITS = 4096
 _MAX_GRID_DECIMAL_ABS_EXPONENT = 4096
 _MAX_GRID_ALIGNED_INTEGER_DIGITS = 4096
@@ -97,6 +107,45 @@ def _floor_to_quantum_grid(value: Decimal, quantum: Decimal) -> Decimal:
     )
 
 
+def _post_init_with_exact_stressed_limit(self) -> None:
+    """Preserve owner validation while eliminating a precision-truncation false reject.
+
+    The owning validator deliberately computes stress factors in a fixed deterministic
+    Decimal context.  Its final ``base_stake * robust_scale`` comparison, however,
+    must not round a high-precision base stake *before* checking the conservative
+    upper bound.  If that one legacy check rejects, recompute only that product with
+    enough precision for an exact finite Decimal multiplication and keep every other
+    validation/error contract unchanged.
+    """
+
+    try:
+        _ORIGINAL_POST_INIT(self)
+        return
+    except ValueError as exc:
+        if str(exc) != (
+            "robust proposal stake cannot exceed its conservative stressed base stake"
+        ):
+            raise
+
+    scale_digits = len(self.robust_scale.as_tuple().digits)
+    for base_stake, proposed_stake in zip(
+        self.base_stakes,
+        self.proposed_stakes,
+        strict=True,
+    ):
+        required_precision = max(
+            _portfolio_plan._ROBUST_STRESS_DECIMAL_CONTEXT.prec,
+            len(base_stake.as_tuple().digits) + scale_digits + 2,
+        )
+        with localcontext(_portfolio_plan._ROBUST_STRESS_DECIMAL_CONTEXT) as context:
+            context.prec = required_precision
+            exact_limit = base_stake * self.robust_scale
+        if proposed_stake > exact_limit:
+            raise ValueError(
+                "robust proposal stake cannot exceed its conservative stressed base stake"
+            )
+
+
 def _derive_on_exact_quantum_grid(
     cls,
     base_stakes: tuple[Decimal, ...],
@@ -140,11 +189,19 @@ def _derive_on_exact_quantum_grid(
 
 
 if not getattr(
-    _portfolio_plan.RobustPortfolioProposal,
+    _PROPOSAL,
+    "_autosport_exact_stressed_limit_installed",
+    False,
+):
+    _PROPOSAL._autosport_exact_stressed_limit_original_post_init = _ORIGINAL_POST_INIT
+    _PROPOSAL.__post_init__ = _post_init_with_exact_stressed_limit
+    _PROPOSAL._autosport_exact_stressed_limit_installed = True
+
+if not getattr(
+    _PROPOSAL,
     "_autosport_exact_quantum_grid_installed",
     False,
 ):
-    _portfolio_plan.RobustPortfolioProposal.derive = classmethod(
-        _derive_on_exact_quantum_grid
-    )
-    _portfolio_plan.RobustPortfolioProposal._autosport_exact_quantum_grid_installed = True
+    _PROPOSAL._autosport_exact_quantum_grid_original_derive = _ORIGINAL_DERIVE
+    _PROPOSAL.derive = classmethod(_derive_on_exact_quantum_grid)
+    _PROPOSAL._autosport_exact_quantum_grid_installed = True

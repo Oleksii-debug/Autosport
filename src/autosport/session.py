@@ -298,11 +298,15 @@ class AutosportSession:
             )
             engine = ReplayEngine(market_events)
 
-            def consume(event) -> None:
-                self.store.append(event)
+            def consume_applied(event: MarketEvent) -> None:
                 orchestrator.on_market_event(event)
 
-            replay = engine.run(consume, speed=speed, run_id=run_id)
+            replay = engine.run(
+                consume_applied,
+                speed=speed,
+                run_id=run_id,
+                on_raw_event=self.store.append,
+            )
             # Fail closed on any planned causal decision that did not execute before
             # loading sealed outcome facts into settlement.
             orchestrator.finalize_replay()

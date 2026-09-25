@@ -7,7 +7,10 @@ import os
 from .betfair_campaign_economic_composition import (
     derive_campaign_economics_with_betfair_commission,
 )
-from .betfair_commission_cost_evidence import issue_betfair_commission_cost_evidence
+from .betfair_commission_cost_evidence import (
+    BetfairCommissionCostEvidenceError,
+    issue_betfair_commission_cost_evidence,
+)
 from .betfair_market_commission_authority import (
     SOURCE_FAMILY as BETFAIR_COMMISSION_SOURCE_FAMILY,
     BetfairMarketCommissionAuthority,
@@ -130,68 +133,84 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         as_of: datetime,
         previous: CampaignEconomicEvidenceVersion | None,
     ) -> CampaignEconomicEvidenceVersion:
-        predecessor = self._active_source_qualified_predecessor(previous)
-        if predecessor is None:
-            return self.derive_betfair_commission(
+        inherited = self._durably_source_qualified_target_costs(previous)
+        try:
+            commission = issue_betfair_commission_cost_evidence(
+                source=self._betfair_source,
+                campaign=self.campaign,
+                provider_scope=self._provider_scope,
                 receipt_id=receipt_id,
                 record_sha256=record_sha256,
                 as_of=as_of,
-                previous=previous,
             )
+        except BetfairCommissionCostEvidenceError as direct_error:
+            # A corrected MARKET receipt names its predecessor at the provider
+            # source boundary. The campaign store may already contain several
+            # independent MARKET commission costs, so resolve the correction
+            # against the exact durable predecessor rather than assuming the
+            # whole campaign has only one active commission receipt.
+            corrections: dict[str, CostEvidence] = {}
+            for predecessor in inherited:
+                try:
+                    candidate = issue_betfair_commission_cost_evidence(
+                        source=self._betfair_source,
+                        campaign=self.campaign,
+                        provider_scope=self._provider_scope,
+                        receipt_id=receipt_id,
+                        record_sha256=record_sha256,
+                        as_of=as_of,
+                        supersedes=predecessor,
+                    )
+                except BetfairCommissionCostEvidenceError:
+                    continue
+                corrections[candidate.cost_evidence_id] = candidate
+            if not corrections:
+                raise direct_error
+            if len(corrections) != 1:
+                raise CampaignEconomicStoreError(
+                    "Betfair commission correction is ambiguous across active market predecessors"
+                )
+            commission = next(iter(corrections.values()))
 
-        correction = issue_betfair_commission_cost_evidence(
-            source=self._betfair_source,
-            campaign=self.campaign,
-            provider_scope=self._provider_scope,
-            receipt_id=receipt_id,
-            record_sha256=record_sha256,
-            as_of=as_of,
-            supersedes=predecessor,
-        )
-        costs = tuple(
-            sorted(
-                (
-                    *(
-                        item
-                        for item in previous.costs
-                        if item.cost_evidence_id != predecessor.cost_evidence_id
-                    ),
-                    correction,
-                ),
-                key=lambda item: item.cost_evidence_id,
-            )
-        )
+        costs = _merge_source_cost(previous, commission)
         generic = super().derive(
             costs=costs,
             as_of=as_of,
             previous=previous,
         )
-        return _qualify_exact_source_variant(generic, correction)
+        trusted = {
+            item.cost_evidence_id: item
+            for item in inherited
+            if item.cost_evidence_id not in commission.supersedes_cost_evidence_ids
+        }
+        trusted[commission.cost_evidence_id] = commission
+        return _qualify_exact_source_variant(
+            generic,
+            tuple(sorted(trusted.values(), key=lambda item: item.cost_evidence_id)),
+        )
 
-    def _active_source_qualified_predecessor(
+    def _durably_source_qualified_target_costs(
         self,
         previous: CampaignEconomicEvidenceVersion | None,
-    ) -> CostEvidence | None:
+    ) -> tuple[CostEvidence, ...]:
         if previous is None:
-            return None
+            return ()
         effective_target = _target_costs(previous.costs)
-        betfair = tuple(
-            item
-            for item in effective_target
-            if item.source.family == BETFAIR_COMMISSION_SOURCE_FAMILY
-        )
-        if not betfair:
-            return None
-        if (
-            len(effective_target) != 1
-            or len(betfair) != 1
-            or _UNRESOLVED_REASON in previous.incomplete_reasons
-            or not self._has_durable_source_qualification(previous)
-        ):
+        if not effective_target:
+            return ()
+        if _UNRESOLVED_REASON in previous.incomplete_reasons:
+            # A prior generic version may contain Betfair-shaped values without
+            # source authority. Never use those values as correction capability.
+            return ()
+        if not self._has_durable_source_qualification(previous):
             raise CampaignEconomicStoreError(
-                "Betfair commission correction requires exactly one durable active source-qualified predecessor"
+                "resolved Betfair commission history lacks durable source qualification"
             )
-        return betfair[0]
+        if not all(_is_betfair_source_cost(item) for item in effective_target):
+            raise CampaignEconomicStoreError(
+                "resolved Betfair commission history contains non-canonical target cost evidence"
+            )
+        return effective_target
 
     def _is_exact_live_retry(
         self,
@@ -201,19 +220,22 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         record_sha256: str,
         as_of: datetime,
     ) -> bool:
-        if version.as_of != as_of or _UNRESOLVED_REASON in version.incomplete_reasons:
+        if _UNRESOLVED_REASON in version.incomplete_reasons:
             return False
-        target = _target_costs(version.costs)
-        if len(target) != 1:
+        if as_of < version.as_of:
+            raise CampaignEconomicStoreError(
+                "Betfair commission retry as_of cannot predate latest durable economic version"
+            )
+        matches = tuple(
+            item
+            for item in _target_costs(version.costs)
+            if item.source.family == BETFAIR_COMMISSION_SOURCE_FAMILY
+            and item.source.evidence_id == receipt_id
+            and item.source.sha256 == record_sha256
+        )
+        if len(matches) != 1:
             return False
-        observed = target[0]
-        if (
-            observed.source.family != BETFAIR_COMMISSION_SOURCE_FAMILY
-            or observed.source.evidence_id != receipt_id
-            or observed.source.sha256 != record_sha256
-        ):
-            return False
-        self._reverify_live_commission(version)
+        self._reverify_source_cost(version, matches[0], as_of=as_of)
         return True
 
     def _validate_derived(
@@ -253,34 +275,41 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         previous: CampaignEconomicEvidenceVersion | None = None,
     ) -> None:
         target = _target_costs(version.costs)
-        if len(target) != 1:
+        previous_target_ids = (
+            set()
+            if previous is None
+            else {item.cost_evidence_id for item in _target_costs(previous.costs)}
+        )
+        introduced = tuple(
+            item for item in target if item.cost_evidence_id not in previous_target_ids
+        )
+        if len(introduced) != 1:
             raise CampaignEconomicStoreError(
-                "source-qualified Betfair version must contain one effective commission receipt"
+                "source-qualified Betfair append must introduce exactly one commission receipt"
             )
-        observed = target[0]
-        supersedes = observed.supersedes_cost_evidence_ids
-        predecessor: CostEvidence | None = None
-        if supersedes:
-            if len(supersedes) != 1 or version.previous_version_id is None:
-                raise CampaignEconomicStoreError(
-                    "Betfair correction must name one predecessor cost in the prior economic version"
-                )
-            if previous is None:
-                previous = self._load_raw(version.previous_version_id)
-            if previous.version_id != version.previous_version_id:
-                raise CampaignEconomicStoreError(
-                    "Betfair correction predecessor economic version mismatch"
-                )
-            matches = tuple(
-                item
-                for item in previous.costs
-                if item.cost_evidence_id == supersedes[0]
+        self._reverify_source_cost(
+            version,
+            introduced[0],
+            previous=previous,
+        )
+
+    def _reverify_source_cost(
+        self,
+        version: CampaignEconomicEvidenceVersion,
+        observed: CostEvidence,
+        *,
+        previous: CampaignEconomicEvidenceVersion | None = None,
+        as_of: datetime | None = None,
+    ) -> None:
+        if not _is_betfair_source_cost(observed):
+            raise CampaignEconomicStoreError(
+                "source-qualified Betfair version contains invalid commission evidence"
             )
-            if len(matches) != 1:
-                raise CampaignEconomicStoreError(
-                    "Betfair correction target is not uniquely present in predecessor economics"
-                )
-            predecessor = matches[0]
+        predecessor = self._find_correction_predecessor(
+            version,
+            observed,
+            previous=previous,
+        )
         try:
             expected = issue_betfair_commission_cost_evidence(
                 source=self._betfair_source,
@@ -288,7 +317,7 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
                 provider_scope=self._provider_scope,
                 receipt_id=observed.source.evidence_id,
                 record_sha256=observed.source.sha256,
-                as_of=version.as_of,
+                as_of=version.as_of if as_of is None else as_of,
                 supersedes=predecessor,
             )
         except Exception as exc:
@@ -299,6 +328,49 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
             raise CampaignEconomicStoreError(
                 "Betfair commission changed during durable economic admission"
             )
+
+    def _find_correction_predecessor(
+        self,
+        version: CampaignEconomicEvidenceVersion,
+        observed: CostEvidence,
+        *,
+        previous: CampaignEconomicEvidenceVersion | None = None,
+    ) -> CostEvidence | None:
+        supersedes = observed.supersedes_cost_evidence_ids
+        if not supersedes:
+            return None
+        if len(supersedes) != 1:
+            raise CampaignEconomicStoreError(
+                "Betfair correction must name exactly one predecessor cost"
+            )
+        predecessor_id = supersedes[0]
+        cursor = previous
+        if cursor is None and version.previous_version_id is not None:
+            cursor = self._load_raw(version.previous_version_id)
+        seen: set[str] = set()
+        while cursor is not None:
+            if cursor.version_id in seen:
+                raise CampaignEconomicStoreError(
+                    "economic history cycle while resolving Betfair correction"
+                )
+            seen.add(cursor.version_id)
+            matches = tuple(
+                item
+                for item in cursor.costs
+                if item.cost_evidence_id == predecessor_id
+            )
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise CampaignEconomicStoreError(
+                    "Betfair correction predecessor is not unique"
+                )
+            if cursor.previous_version_id is None:
+                break
+            cursor = self._load_raw(cursor.previous_version_id)
+        raise CampaignEconomicStoreError(
+            "Betfair correction predecessor is absent from durable economic history"
+        )
 
     def _has_durable_source_qualification(
         self,
@@ -323,6 +395,50 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         )
 
 
+def _merge_source_cost(
+    previous: CampaignEconomicEvidenceVersion | None,
+    commission: CostEvidence,
+) -> tuple[CostEvidence, ...]:
+    prior = () if previous is None else previous.costs
+    superseded = set(commission.supersedes_cost_evidence_ids)
+    retained = tuple(
+        item for item in prior if item.cost_evidence_id not in superseded
+    )
+    duplicate = tuple(
+        item
+        for item in retained
+        if item.cost_evidence_id == commission.cost_evidence_id
+    )
+    if duplicate:
+        if len(duplicate) != 1 or duplicate[0] != commission:
+            raise CampaignEconomicStoreError(
+                "Betfair commission evidence identity conflicts with durable history"
+            )
+        raise CampaignEconomicStoreError(
+            "existing Betfair commission receipt requires an exact live retry"
+        )
+    return tuple(
+        sorted(
+            (*retained, commission),
+            key=lambda item: item.cost_evidence_id,
+        )
+    )
+
+
+def _is_betfair_source_cost(cost: CostEvidence) -> bool:
+    return (
+        type(cost) is CostEvidence
+        and cost.cost_class is _TARGET_CLASS
+        and cost.source.family == BETFAIR_COMMISSION_SOURCE_FAMILY
+        and cost.basis is CostBasis.OBSERVED_INCURRED
+        and cost.treatment is CostTreatment.INFORMATIONAL
+        and cost.truth in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}
+        and cost.unit is CostUnit.MONEY
+        and cost.shared_source
+        and cost.allocation_source is None
+    )
+
+
 def _effective_costs(costs: tuple[CostEvidence, ...]) -> tuple[CostEvidence, ...]:
     superseded = {
         evidence_id
@@ -344,10 +460,13 @@ def _target_costs(costs: tuple[CostEvidence, ...]) -> tuple[CostEvidence, ...]:
 
 def _qualify_exact_source_variant(
     generic: CampaignEconomicEvidenceVersion,
-    source_cost: CostEvidence,
+    source_costs: tuple[CostEvidence, ...],
 ) -> CampaignEconomicEvidenceVersion:
     target = _target_costs(generic.costs)
-    if len(target) != 1 or target[0] != source_cost:
+    trusted = tuple(sorted(source_costs, key=lambda item: item.cost_evidence_id))
+    if not target or target != trusted:
+        return generic
+    if not all(_is_betfair_source_cost(item) for item in target):
         return generic
     reasons = set(generic.incomplete_reasons)
     if _UNRESOLVED_REASON not in reasons:
@@ -361,18 +480,7 @@ def _is_exact_betfair_source_qualified_variant(
     candidate: CampaignEconomicEvidenceVersion,
 ) -> bool:
     target = _target_costs(candidate.costs)
-    if len(target) != 1:
-        return False
-    cost = target[0]
-    if (
-        cost.source.family != BETFAIR_COMMISSION_SOURCE_FAMILY
-        or cost.basis is not CostBasis.OBSERVED_INCURRED
-        or cost.treatment is not CostTreatment.INFORMATIONAL
-        or cost.truth not in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}
-        or cost.unit is not CostUnit.MONEY
-        or not cost.shared_source
-        or cost.allocation_source is not None
-    ):
+    if not target or not all(_is_betfair_source_cost(cost) for cost in target):
         return False
     reasons = set(generic.incomplete_reasons)
     if _UNRESOLVED_REASON not in reasons:

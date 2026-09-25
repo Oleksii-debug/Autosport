@@ -220,8 +220,8 @@ def _snapshot_physical_identity(
     Existing canonical DatasetSnapshot records currently expose a manifest but not
     observation membership. That absence is intentionally represented as ``None``:
     callers must not infer disjointness merely because two manifest hashes differ.
-    A future/extended canonical record may expose ``observation_membership_sha256s``;
-    when present it must be a non-empty duplicate-free JSON list of canonical hashes.
+    A future canonical DatasetSnapshot schema may expose typed observation membership;
+    until then raw payload extras are not scientific authority and fail closed.
 
     Product calls use the exact canonical ScientificRegistry implementation and a
     captured ``get`` descriptor. Lightweight non-registry fakes remain supported for
@@ -229,7 +229,8 @@ def _snapshot_physical_identity(
     """
 
     snapshot_id = _factory._text(snapshot_id, "promotion evidence dataset_snapshot_id")
-    if isinstance(registry, _CANONICAL_REGISTRY_TYPE):
+    canonical_registry = isinstance(registry, _CANONICAL_REGISTRY_TYPE)
+    if canonical_registry:
         _require_canonical_registry_dispatch(registry)
         snapshot = _CANONICAL_REGISTRY_GET(registry, "DatasetSnapshot", snapshot_id)
         _require_canonical_registry_dispatch(registry)
@@ -253,6 +254,10 @@ def _snapshot_physical_identity(
     membership = payload.get("observation_membership_sha256s")
     if membership is None:
         return manifest, None
+    if canonical_registry:
+        raise ValueError(
+            "canonical DatasetSnapshot schema does not type observation membership authority"
+        )
     if type(membership) is not list or not membership:
         raise ValueError(
             "DatasetSnapshot observation membership must be a non-empty JSON list"
@@ -285,8 +290,8 @@ def _holdout_consumed_by_physical_evidence(
     """Return whether physical holdout evidence was disclosed by another attempt.
 
     Manifest inequality is not proof of physical disjointness. Distinct manifests
-    therefore remain consumed unless both immutable DatasetSnapshot records expose
-    exact observation membership and those memberships are provably disjoint.
+    therefore remain consumed unless both snapshots have product-owned, typed exact
+    observation membership and those memberships are provably disjoint.
     """
 
     payloads = tuple(prior_payloads)

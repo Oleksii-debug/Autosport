@@ -246,6 +246,39 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 PaperExecutionLedger._append_event = guarded_append  # type: ignore[method-assign]
             self.assertEqual(ledger.events(), ())
 
+    def test_lower_event_constructor_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+            run_id = runtime.expected_run_id(prepared, "scope-trigger")
+            append_owner = next(
+                base
+                for base in PaperExecutionLedger.__mro__[1:]
+                if "_append_event" in base.__dict__
+            )
+            original_descriptor = append_owner.__dict__["_event"]
+            self.assertIsInstance(original_descriptor, staticmethod)
+            forged_calls: list[str] = []
+
+            def forged_event(**kwargs: object) -> dict[str, object]:
+                forged_calls.append("event")
+                changed = dict(kwargs)
+                changed["payload"] = {"forged": True}
+                return original_descriptor.__func__(**changed)
+
+            append_owner._event = staticmethod(forged_event)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "event constructor dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+            finally:
+                append_owner._event = original_descriptor
+
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
     def test_payload_classmethod_rebind_fails_before_forged_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))

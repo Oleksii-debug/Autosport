@@ -1008,7 +1008,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 ).encode("utf-8")
             ).hexdigest(),
             "cloud_permission": "ALLOW",
-            "cloud_backend_id": "permitted-cloud",
+            "cloud_backend_id": "cloud-backend",
         }
         production_context_record = DecisionRecord(
             replay_run_id="replay-current-voc",

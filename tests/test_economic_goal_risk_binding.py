@@ -525,7 +525,11 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
                 Decimal("0.01"),
             ),
         )
-        self.assertTrue(at_boundary.allowed)
+        self.assertFalse(at_boundary.allowed)
+        self.assertEqual(
+            at_boundary.reason,
+            "portfolio risk-of-ruin evidence lacks product-issued durable authority",
+        )
 
         exceeded = policy.evaluate(
             book,
@@ -619,7 +623,11 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             restarted = PaperBook.load(path)
 
         decision = policy.evaluate(restarted, Decimal("1"), context=bound)
-        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "portfolio risk-of-ruin evidence lacks product-issued durable authority",
+        )
 
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")

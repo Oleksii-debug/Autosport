@@ -78,6 +78,20 @@ class RunTransactionRetainedBaseCrashGuardTests(unittest.TestCase):
         tx.stage_outputs(terminal, ledger_path)
         return tx, experiment_key, book_path, base_payload
 
+    def test_guard_does_not_publish_raw_predecessor_bypass_methods(self):
+        self.assertFalse(
+            hasattr(
+                RunTransaction,
+                "_autosport_retained_base_crash_original_precommit",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                RunTransaction,
+                "_autosport_retained_base_crash_original_validate_precommit",
+            )
+        )
+
     def test_declared_retained_contract_missing_base_sidecar_cannot_precommit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

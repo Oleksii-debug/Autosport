@@ -18,7 +18,7 @@ from unittest.mock import patch
 from autosport import predictive_authority as _runtime_authority
 from autosport.opportunity import Opportunity
 from autosport.paper import PaperBook
-from autosport.portfolio_plan import PortfolioAction, build_portfolio_plan
+from autosport.portfolio_plan import PortfolioAction
 
 
 _IMPL_PATH = Path(__file__).with_name("_test_portfolio_plan_impl.py")
@@ -103,7 +103,7 @@ class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
             fee=Decimal("0.01"),
             partial_fill=Decimal("0.05"),
         )
-        plan = build_portfolio_plan(
+        plan = _historical_build_portfolio_plan(
             book,
             intents,
             self._policy(goal),

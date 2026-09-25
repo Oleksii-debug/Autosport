@@ -27,6 +27,7 @@ def _install_guard() -> None:
     backpressure_type = _historical.BetfairHistoricalBackpressure
 
     original_client_init = client_type.__init__
+    original_remember = client_type._remember
     original_require_context = client_type._require_context
     original_require_issued = client_type._require_issued
     original_issue_witness = client_type.issue_provider_origin_witness
@@ -49,6 +50,8 @@ def _install_guard() -> None:
     http_do_open = _historical._CANONICAL_HTTP_DO_OPEN
     https_response = _historical._CANONICAL_HTTPS_RESPONSE
     stdlib_redirect = _historical._CANONICAL_STDLIB_REDIRECT_HANDLER.redirect_request
+    urljoin_path = _historical.urljoin
+    origin_of = _historical._origin
 
     http_module = _historical._CANONICAL_HTTPS_OPEN.__globals__.get("http")
     if http_module is None:
@@ -80,8 +83,8 @@ def _install_guard() -> None:
         raise RuntimeError("canonical Historical Data opener construction changed")
 
     def sealed_redirect(handler, request, fp, code, message, headers, new_url):
-        resolved = _historical.urljoin(request.full_url, new_url)
-        if _historical._origin(request.full_url) != _historical._origin(resolved):
+        resolved = urljoin_path(request.full_url, new_url)
+        if origin_of(request.full_url) != origin_of(resolved):
             raise error_type("Betfair Historical Data cross-origin redirect blocked")
         return stdlib_redirect(
             handler,
@@ -272,7 +275,8 @@ def _install_guard() -> None:
             digest(payload).hexdigest(),
             packages,
         )
-        self._remember(
+        original_remember(
+            self,
             "snapshot",
             value,
             value.snapshot_sha256,
@@ -336,7 +340,8 @@ def _install_guard() -> None:
             paths,
         )
         positive = bool(snapshot_origin and provider_origin)
-        self._remember(
+        original_remember(
+            self,
             "listing",
             value,
             value.listing_sha256,
@@ -388,7 +393,8 @@ def _install_guard() -> None:
             len(payload),
         )
         positive = bool(snapshot_origin and listing_origin and provider_origin)
-        self._remember(
+        original_remember(
+            self,
             "download",
             value,
             value.file_identity_sha256,

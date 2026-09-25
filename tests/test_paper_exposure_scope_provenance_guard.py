@@ -44,20 +44,24 @@ def _config() -> PaperExecutionModelConfig:
     )
 
 
+def _event() -> MarketEvent:
+    return MarketEvent(
+        event_id="event-1",
+        market_id="winner",
+        selection_id="home",
+        decimal_odds=Decimal("2.00"),
+        observed_ts=QUOTE_AT,
+        source_id="paper-venue",
+        sequence=1,
+        source_ts=QUOTE_AT,
+        ingest_ts=QUOTE_AT,
+        sport="soccer",
+    )
+
+
 def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
     return runtime.prepare_paper_value_action(
-        event=MarketEvent(
-            event_id="event-1",
-            market_id="winner",
-            selection_id="home",
-            decimal_odds=Decimal("2.00"),
-            observed_ts=QUOTE_AT,
-            source_id="paper-venue",
-            sequence=1,
-            source_ts=QUOTE_AT,
-            ingest_ts=QUOTE_AT,
-            sport="soccer",
-        ),
+        event=_event(),
         stake=Decimal("5.00"),
         decision_id="scope-decision",
         account_id="paper-account",
@@ -168,6 +172,55 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             if function.__name__ in {"_append_event", "_mint_prepared"}
         )
         self.assertEqual(bypasses, [])
+
+    def test_hidden_prepare_globals_mutation_cannot_mint_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _ledger, runtime = self._runtime(Path(tmp))
+            guarded = PaperExecutionAdoptionRuntime.prepare_paper_value_action
+            original = guarded.__wrapped__
+            original_globals = original.__globals__
+            canonical_digest = original_globals["_digest"]
+            original_globals["_digest"] = lambda _value: "forged-digest"
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "preparation globals were rebound",
+                ):
+                    original(
+                        runtime,
+                        event=_event(),
+                        stake=Decimal("5.00"),
+                        decision_id="scope-decision",
+                        account_id="paper-account",
+                        bankroll_id="bankroll-eur",
+                        currency="EUR",
+                    )
+            finally:
+                original_globals["_digest"] = canonical_digest
+
+    def test_hidden_scope_payload_globals_mutation_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+            run_id = runtime.expected_run_id(prepared, "scope-trigger")
+            descriptor = PaperExecutionAdoptionRuntime.__dict__["_exposure_scope_payload"]
+            self.assertIsInstance(descriptor, classmethod)
+            original_scope = descriptor.__func__
+            original_globals = original_scope.__globals__
+            canonical_digest = original_globals["_digest"]
+            original_globals["_digest"] = lambda _value: "forged-binding-sha256"
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "payload globals were rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        run_id=run_id,
+                    )
+            finally:
+                original_globals["_digest"] = canonical_digest
+            self.assertEqual(ledger.events(), ())
 
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.smarkets_execution_reconciliation as smarkets_reconciliation
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
@@ -551,6 +552,91 @@ def test_rate_limit_evidence_requires_exact_429_contract(
     values.update(changes)
     with pytest.raises(SmarketsReconciliationError):
         SmarketsRateLimitEvidence(**values)
+
+
+def test_journal_rejects_file_over_total_byte_envelope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    monkeypatch.setattr(
+        smarkets_reconciliation,
+        "_SMARKETS_JOURNAL_MAX_BYTES",
+        32,
+    )
+    path.write_bytes(b"x" * 33)
+
+    with pytest.raises(SmarketsReconciliationError, match="exceeds byte limit"):
+        SmarketsReconciliationJournal(path).verify()
+
+
+def test_journal_rejects_record_over_line_envelope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    monkeypatch.setattr(
+        smarkets_reconciliation,
+        "_SMK_JOURNAL_MAX_LINE_BYTES",
+        16,
+    )
+    path.write_bytes(b"x" * 17)
+
+    with pytest.raises(SmarketsReconciliationError, match="exceeds line limit"):
+        SmarketsReconciliationJournal(path).verify()
+
+
+def test_journal_rejects_record_count_over_envelope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    first = _verify(_action(), _profile(), _authority(), _readback())
+    second = _verify(
+        _action(action_id="action-2"),
+        _profile(),
+        _authority(),
+        _readback(
+            provider_order_id="order-200",
+            reference_id="reference-2",
+        ),
+        expected_reference_id="reference-2",
+    )
+    journal.append(first)
+    journal.append(second)
+    monkeypatch.setattr(
+        smarkets_reconciliation,
+        "_SMK_JOURNAL_MAX_RECORDS",
+        1,
+    )
+
+    with pytest.raises(SmarketsReconciliationError, match="exceeds record limit"):
+        SmarketsReconciliationJournal(path).verify()
+
+
+def test_journal_rejects_symlink_alias(tmp_path: Path) -> None:
+    target = tmp_path / "target.jsonl"
+    target.write_bytes(b"")
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    try:
+        path.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation is unavailable on this test host")
+
+    with pytest.raises(
+        SmarketsReconciliationError,
+        match="regular non-symlink file",
+    ):
+        SmarketsReconciliationJournal(path).verify()
+
+
+def test_journal_invalid_utf8_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    path.write_bytes(b'{"record":"\xff"}\n')
+
+    with pytest.raises(SmarketsReconciliationError, match="cannot read Smarkets journal"):
+        SmarketsReconciliationJournal(path).verify()
 
 
 def test_journal_is_restart_verifiable_and_exact_replay_is_idempotent(

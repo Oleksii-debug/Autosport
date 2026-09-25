@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from autosport.risk import RiskOfRuinEvidence
+import autosport.risk_of_ruin_authority as authority
 from autosport.risk_of_ruin_authority import (
     _product_result_matches_evidence,
     _resolve_product_evaluator_result,
@@ -133,3 +134,30 @@ def test_product_evaluator_dispatch_rebinding_fails_closed(tmp_path, monkeypatch
 
     with pytest.raises(RiskOfRuinIssuanceError, match="executable authority was rebound"):
         _resolve_product_evaluator_result(tmp_path, RESULT_ID)
+
+
+def test_synchronized_product_evaluator_rebinding_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    attacker_called = False
+
+    class ForgedEvaluator:
+        def __init__(self, *, workspace):
+            self.workspace = workspace
+
+        def resolve(self, result_id):
+            nonlocal attacker_called
+            attacker_called = True
+            return _issued_single_result()
+
+    monkeypatch.setattr(authority, "ProductRiskOfRuinEvaluator", ForgedEvaluator)
+    # Recreate every mutable module capture used by the predecessor.  The live
+    # resolver must remain bound to its closure-sealed canonical class/methods.
+    monkeypatch.setattr(authority, "_PRODUCT_EVALUATOR_CLASS", ForgedEvaluator, raising=False)
+    monkeypatch.setattr(authority, "_PRODUCT_EVALUATOR_INIT", ForgedEvaluator.__init__, raising=False)
+    monkeypatch.setattr(authority, "_PRODUCT_EVALUATOR_RESOLVE", ForgedEvaluator.resolve, raising=False)
+
+    with pytest.raises(RiskOfRuinIssuanceError, match="executable authority was rebound"):
+        authority._resolve_product_evaluator_result(tmp_path, RESULT_ID)
+
+    assert attacker_called is False

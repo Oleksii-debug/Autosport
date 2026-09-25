@@ -432,7 +432,7 @@ def run_product(
                 try:
                     primary_failure.add_note(
                         "runtime STOP also failed during exceptional cleanup: "
-                        f"{type(stop_error).__name__}: {stop_error}"
+                        f"{type(stop_error).__name__}"
                     )
                 except BaseException:
                     pass
@@ -446,7 +446,7 @@ def run_product(
                 try:
                     primary_failure.add_note(
                         "runtime close also failed during cleanup: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{type(exc).__name__}"
                     )
                 except BaseException:
                     pass
@@ -461,7 +461,7 @@ def run_product(
                     try:
                         primary_failure.add_note(
                             "signal handler restoration also failed during cleanup: "
-                            f"{type(exc).__name__}: {exc}"
+                            f"{type(exc).__name__}"
                         )
                     except BaseException:
                         pass

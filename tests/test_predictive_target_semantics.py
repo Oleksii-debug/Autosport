@@ -10,7 +10,7 @@ from autosport.predictive_target_semantics import (
     PREDICTIVE_TARGET_ARTIFACT_PREFIX,
     PredictiveTargetContract,
     PredictiveTargetSemanticsError,
-    resolve_binary_predictive_target,
+    resolve_preregistered_binary_target_population,
 )
 from autosport.reproducibility_manifest import (
     FactoryReproducibilityManifest,
@@ -250,7 +250,7 @@ def test_binary_target_resolution_requires_exact_preregistered_population(
     registry, protocol = _registry_and_protocol(tmp_path, contract)
     manifest = _manifest(points, protocol)
 
-    resolved = resolve_binary_predictive_target(
+    resolved = resolve_preregistered_binary_target_population(
         registry,
         manifest,
         contract,
@@ -267,7 +267,10 @@ def test_binary_target_resolution_requires_exact_preregistered_population(
     assert resolved.negative_count == 1
     assert len(resolved.target_population_sha256) == 64
     assert resolved.to_dict()["truth"] == {
-        "binary_target_semantics_resolved": True,
+        "target_contract_preregistered": True,
+        "binary_value_domain_verified": True,
+        "training_population_hash_bound": True,
+        "outcome_label_semantics_verified": False,
         "model_output_probability_authority": False,
         "calibration_authority": False,
         "forecast_authority": False,
@@ -288,7 +291,7 @@ def test_generic_numeric_factory_target_cannot_be_relabelled_binary(
         PredictiveTargetSemanticsError,
         match="binary target values must be exactly 0 or 1",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry, manifest, contract, points, as_of=T4
         )
 
@@ -303,7 +306,7 @@ def test_binary_label_without_causal_evidence_fails_closed(tmp_path) -> None:
         PredictiveTargetSemanticsError,
         match="binary target labels require causal evidence digests",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry, manifest, contract, points, as_of=T4
         )
 
@@ -322,7 +325,7 @@ def test_substituted_target_contract_digest_fails_closed(tmp_path) -> None:
         PredictiveTargetSemanticsError,
         match="digest does not match preregistration",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry, manifest, substituted, points, as_of=T4
         )
 
@@ -348,7 +351,7 @@ def test_ambiguous_multiple_target_contract_tokens_fail_closed(
         PredictiveTargetSemanticsError,
         match="preregister exactly one predictive target contract",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry, manifest, contract, points, as_of=T4
         )
 
@@ -367,7 +370,7 @@ def test_protocol_must_be_available_before_training_population(tmp_path) -> None
         PredictiveTargetSemanticsError,
         match="not durably available before training population",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry, manifest, contract, points, as_of=T4
         )
 
@@ -386,7 +389,7 @@ def test_contract_must_be_frozen_by_protocol_freeze(tmp_path) -> None:
         PredictiveTargetSemanticsError,
         match="target contract was not frozen by protocol freeze",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry, manifest, contract, points, as_of=T4
         )
 
@@ -405,7 +408,7 @@ def test_training_population_substitution_fails_before_semantic_resolution(
         PredictiveTargetSemanticsError,
         match="do not match reproducibility manifest",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry,
             manifest,
             contract,
@@ -424,7 +427,7 @@ def test_future_label_is_not_causally_available_for_resolution(tmp_path) -> None
         PredictiveTargetSemanticsError,
         match="target label was not causally available at resolution time",
     ):
-        resolve_binary_predictive_target(
+        resolve_preregistered_binary_target_population(
             registry,
             manifest,
             contract,

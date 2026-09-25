@@ -1,9 +1,11 @@
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.paper import PaperBook
+from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import build_paper_risk_report
 
 
@@ -99,6 +101,33 @@ class PaperRiskReportGoalProvenanceFalsifierTests(unittest.TestCase):
             tightened_report.goal_contract_sha256,
             provenance_for(tightened).contract_sha256,
         )
+
+    def test_goal_mutation_during_projection_fails_closed_instead_of_mixing_revisions(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal(currency="USD", max_drawdown_fraction=Decimal("0.20"))
+        original_metrics = PaperRiskPolicy._historical_risk_metrics
+        mutated = False
+
+        def mutate_goal(current_book: PaperBook):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                object.__setattr__(goal, "currency", "EUR")
+                object.__setattr__(goal, "max_drawdown_fraction", Decimal("0.10"))
+            return original_metrics(current_book)
+
+        with patch.object(
+            PaperRiskPolicy,
+            "_historical_risk_metrics",
+            side_effect=mutate_goal,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical economic goal changed during reporting",
+            ):
+                build_paper_risk_report(book, goal)
+
+        self.assertTrue(mutated)
 
 
 if __name__ == "__main__":

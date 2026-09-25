@@ -7,9 +7,16 @@ membership resolver, or the public receipt resolver could otherwise steer or
 relabel durable randomization authority without changing persisted truth.
 
 A copied ``FunctionType.__globals__`` dictionary is also directly inspectable and
-mutable. Reuse the monotonic-root dispatch-sealing pattern: every authority-bearing
-clone is invoked only through a wrapper that checks an exact globals snapshot, while
-private facades are checked for exact captured callable attributes before use.
+mutable. Reuse the monotonic-root dispatch-sealing pattern for the supported API:
+every authority-bearing clone reached through that API is invoked only through a
+wrapper that checks an exact globals snapshot, while private facades are checked
+for exact captured callable attributes before use.
+
+This is not a same-process capability-security boundary. Python code allowed to
+extract private slots with ``object.__getattribute__``, mutate arbitrary function
+globals/defaults/closures, or otherwise rewrite interpreter objects is explicitly
+outside the authority threat model and is reported as unproven by the receipt.
+Adding another Python wrapper cannot make that stronger claim true.
 No estimator, membership, persistence schema, or money authority is added here.
 """
 from __future__ import annotations
@@ -287,7 +294,7 @@ def _install_guard() -> None:
     implementation_snapshot = snapshot_globals(frozen_implementation)
 
     class CheckedImplementation:
-        """Callable boundary that keeps raw issuer FunctionType out of function metadata."""
+        """Seal the raw issuer on supported API calls, not against interpreter reflection."""
 
         __slots__ = ("_function", "_snapshot")
 

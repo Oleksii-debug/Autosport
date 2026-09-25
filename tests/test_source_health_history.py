@@ -83,7 +83,7 @@ class SourceHealthHistoryTests(unittest.TestCase):
                 error=ConnectionError("down"),
             )
             persisted = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(persisted["schema_version"], 3)
+            self.assertEqual(persisted["schema_version"], 4)
             self.assertEqual(len(persisted["history"]["provider-a"]), 2)
             self.assertEqual(
                 [entry["transition_order"] for entry in persisted["history"]["provider-a"]],

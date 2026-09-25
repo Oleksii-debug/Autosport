@@ -13,7 +13,7 @@ from .ingestion_health import (
     parse_source_timestamp,
 )
 from .market_bus import MarketEventBus, MarketEventDeliveryError
-from .providers import CanonicalNormalizer, MarketProvider
+from .providers import CanonicalNormalizer, MarketProvider, ProviderUnavailableError
 
 
 Clock = Callable[[], str]
@@ -62,6 +62,8 @@ class _SourceHealthSnapshot:
     last_cursor: str | None
     latest_source_ts: str | None
     quality_flags: tuple[str, ...]
+    last_failure_kind: str | None
+    consecutive_failure_kind_count: int
 
     @classmethod
     def from_state(cls, state: SourceHealthState) -> "_SourceHealthSnapshot":
@@ -80,6 +82,8 @@ class _SourceHealthSnapshot:
             last_cursor=state.last_cursor,
             latest_source_ts=state.latest_source_ts,
             quality_flags=state.quality_flags,
+            last_failure_kind=state.last_failure_kind,
+            consecutive_failure_kind_count=state.consecutive_failure_kind_count,
         )
 
     def to_state(self) -> SourceHealthState:
@@ -98,6 +102,8 @@ class _SourceHealthSnapshot:
             last_cursor=self.last_cursor,
             latest_source_ts=self.latest_source_ts,
             quality_flags=self.quality_flags,
+            last_failure_kind=self.last_failure_kind,
+            consecutive_failure_kind_count=self.consecutive_failure_kind_count,
         )
 
     def after_success(
@@ -126,6 +132,8 @@ class _SourceHealthSnapshot:
             last_cursor=outcome.cursor,
             latest_source_ts=latest_source_ts,
             quality_flags=quality_flags,
+            last_failure_kind=None,
+            consecutive_failure_kind_count=0,
         )
 
 
@@ -250,7 +258,14 @@ class IngestionEngine:
             if self.health_store is not None and provider_source_id is not None:
                 try:
                     self.health_store.record_failure(
-                        provider_source_id, now=self.clock(), error=exc
+                        provider_source_id,
+                        now=self.clock(),
+                        error=exc,
+                        failure_kind=(
+                            "provider_unavailable"
+                            if isinstance(exc, ProviderUnavailableError)
+                            else "provider_or_validation"
+                        ),
                     )
                 except Exception as health_error:
                     exc.add_note(

@@ -19,6 +19,78 @@ from autosport.release_package import (
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _COPY_CHUNK_SIZE = 1024 * 1024
+_CANONICAL_START_FILE = PurePosixPath("WINDOWS_START_HERE.txt")
+_CANONICAL_EXAMPLE_DIR = PurePosixPath("examples/tt_demo")
+_SAFE_DOTENV_TEMPLATES = frozenset(
+    {".env.example", ".env.sample", ".env.template", ".env.dist"}
+)
+_SECRET_BASENAMES = frozenset(
+    {
+        ".env",
+        ".envrc",
+        ".pypirc",
+        "application_default_credentials.json",
+        "cookies",
+        "cookies.json",
+        "cookies.sqlite",
+        "credentials.json",
+        "key3.db",
+        "key4.db",
+        "local state",
+        "login data",
+        "logins.json",
+        "oauth_credentials.json",
+        "secrets.json",
+        "secrets.toml",
+        "token.json",
+        "web data",
+    }
+)
+_SECRET_DIRECTORY_NAMES = frozenset({".aws", ".azure", ".mozilla", ".ssh", "user data"})
+_PRIVATE_KEY_BASENAMES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
+
+
+def _secret_source_path_reason(path: PurePosixPath) -> str | None:
+    """Classify high-confidence local credential/session paths by name only.
+
+    Package construction never needs to inspect or copy secret contents to make
+    this decision. Safe template names remain permitted so documentation can ship
+    placeholders without weakening the runtime-secret boundary.
+    """
+
+    if not isinstance(path, PurePosixPath) or not path.parts:
+        raise ValueError("release static payload path must be a concrete PurePosixPath")
+    normalized_parts = tuple(part.casefold() for part in path.parts)
+    basename = normalized_parts[-1]
+
+    if any(part in _SECRET_DIRECTORY_NAMES for part in normalized_parts[:-1]):
+        return "credential/profile directory"
+    if basename in _SECRET_BASENAMES:
+        return "credential/session file"
+    if (
+        basename.startswith(".env.")
+        and basename not in _SAFE_DOTENV_TEMPLATES
+    ):
+        return "runtime environment file"
+    if basename.startswith("client_secret") and basename.endswith(".json"):
+        return "OAuth client-secret file"
+    if basename.endswith(".session") or basename.endswith(".session-journal"):
+        return "Telegram session file"
+    if basename.endswith(".key") or basename in _PRIVATE_KEY_BASENAMES:
+        return "private-key file"
+    if basename.endswith(".pem") and "private" in basename:
+        return "private-key file"
+    return None
+
+
+def _require_safe_static_release_paths(paths: tuple[PurePosixPath, ...]) -> None:
+    for path in paths:
+        reason = _secret_source_path_reason(path)
+        if reason is not None:
+            raise ValueError(
+                "release static payload contains forbidden "
+                f"{reason}: {path.as_posix()}"
+            )
 
 
 def _git_output(repo_root: Path, *args: str) -> str:
@@ -378,6 +450,14 @@ def _materialize_exact_static_payload(
 
     start_relative = _repo_relative_path(repo_root, start_file, field="start_file")
     example_relative = _repo_relative_path(repo_root, example_dir, field="example_dir")
+    if start_relative != _CANONICAL_START_FILE:
+        raise ValueError(
+            "start_file must be the canonical tracked WINDOWS_START_HERE.txt"
+        )
+    if example_relative != _CANONICAL_EXAMPLE_DIR:
+        raise ValueError(
+            "example_dir must be the canonical tracked examples/tt_demo directory"
+        )
 
     start_entries = _exact_tree_entries(repo_root, source_sha, start_relative)
     if len(start_entries) != 1 or start_entries[0][0] != start_relative:
@@ -389,6 +469,11 @@ def _materialize_exact_static_payload(
         raise ValueError("example_dir has no tracked regular files in source_sha")
     if any(not path.as_posix().startswith(prefix) for path, _object_sha in example_entries):
         raise ValueError("example_dir exact source tree escaped its requested prefix")
+    relative_example_paths = tuple(
+        path.relative_to(example_relative)
+        for path, _object_sha in example_entries
+    )
+    _require_safe_static_release_paths(relative_example_paths)
 
     static_root = snapshot_dir / "exact-source-static"
     trusted_start = static_root.joinpath(*start_relative.parts)

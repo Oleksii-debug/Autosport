@@ -1086,7 +1086,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertEqual(forged_calls, [])
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
-            "no longer matches exact durable authority owner bytes",
+            "supported START activation evidence no longer matches durable authority",
         ):
             self._verify()
 
@@ -1636,7 +1636,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
-            "no longer matches durable authority",
+            "economic_goal no longer matches exact durable authority owner bytes",
         ):
             self._verify(
                 economic_goal=changed_goal,

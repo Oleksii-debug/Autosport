@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .integrity import atomic_write_json, durable_path_lock
+from .json_integrity import strict_json_loads
 from .opponent_intelligence import OpponentIntelligenceStore
 from .participant_identity import ParticipantIdentityRegistry
 from .sport_memory_runtime import SportMemoryRuntime
@@ -93,8 +94,8 @@ def _opponent_source_root(path: Path) -> str:
     """
 
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw: Any = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise SportMemoryCheckpointError(
             "cannot read opponent canonical store"
         ) from exc
@@ -319,8 +320,8 @@ def _checkpoint_from_raw(raw: object) -> SportMemoryAuthorityCheckpoint:
 
 def _read_checkpoint(path: Path) -> SportMemoryAuthorityCheckpoint:
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw: Any = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise SportMemoryCheckpointError(
             "cannot load sport-memory authority checkpoint"
         ) from exc

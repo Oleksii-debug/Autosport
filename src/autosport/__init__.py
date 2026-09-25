@@ -126,6 +126,11 @@ from . import _campaign_provider_scope_stable_projection as _campaign_provider_s
 # mutable exact instance cannot shadow methods and mint deletion authority.
 from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
 
+# The headless collector state is one durable read/modify/replace authority. Serialize
+# independent instances/processes on the same workspace so counters and terminal STOP
+# cannot be lost to a stale predecessor publication.
+from . import _collector_service_state_serialization as _collector_service_state_serialization  # noqa: F401,E402
+
 # ScientificRegistry successors are protected by an independent machine authority;
 # every read must consume the exact authority-current image before causal witnesses
 # can be minted from it.
@@ -144,3 +149,12 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # Replay must recognize the cross-ledger witness kind, but callers must not mint that
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
+
+# Product PolicyEvaluation issuance already exact-fences the FactoryArtifactStore
+# surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
+# so a class/module rebind cannot inject forged bytes beneath that trusted surface.
+from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
+
+# Robust portfolio stakes are monetary grid values, not Decimal exponent values.
+# Install the exact arbitrary-quantum floor after the owning proposal implementation.
+from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402

@@ -143,12 +143,12 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _ledger, runtime = self._runtime(Path(tmp))
             minted = _prepared(runtime)
+            run_id = runtime.expected_run_id(minted, "scope-trigger")
             unminted = PreparedPaperExecution(
                 execution_plan=minted.execution_plan,
                 exposure_bindings=minted.exposure_bindings,
                 intent_evidence_json=minted.intent_evidence_json,
             )
-            run_id = runtime.expected_run_id(unminted, "scope-trigger")
 
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,

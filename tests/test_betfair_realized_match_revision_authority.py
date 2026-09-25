@@ -8,6 +8,7 @@ import json
 import pytest
 
 from autosport.betfair_account_readonly import (
+    BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
 )
@@ -178,6 +179,64 @@ def _resolve_current(root: Path):
     )
     evidence.assert_authoritative()
     return plan, ledger, provider_ref, evidence
+
+
+def test_resolver_rejects_readback_subclass_virtual_authority_bypass(
+    tmp_path: Path,
+) -> None:
+    plan, ledger, provider_ref = _prepared(tmp_path)
+    readback = _capture(
+        provider_ref,
+        observed_at=datetime(2026, 9, 21, 9, 55, tzinfo=timezone.utc),
+        current=_current(provider_ref, matched_price=3.1),
+    )
+
+    class ForgedReadback(BetfairExecutionReadbackEnvelope):
+        def assert_authoritative(self) -> None:
+            return None
+
+    forged = ForgedReadback(
+        **{
+            field.name: getattr(readback, field.name)
+            for field in fields(BetfairExecutionReadbackEnvelope)
+        }
+    )
+
+    with pytest.raises(TypeError, match="exact BetfairExecutionReadbackEnvelope"):
+        resolve_betfair_realized_match(
+            plan,
+            ledger,
+            forged,
+            attempt_id=ATTEMPT_ID,
+        )
+
+
+def test_resolver_detects_readback_class_authority_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, ledger, provider_ref = _prepared(tmp_path)
+    readback = _capture(
+        provider_ref,
+        observed_at=datetime(2026, 9, 21, 9, 55, tzinfo=timezone.utc),
+        current=_current(provider_ref, matched_price=3.1),
+    )
+    monkeypatch.setattr(
+        BetfairExecutionReadbackEnvelope,
+        "assert_authoritative",
+        lambda self: None,
+    )
+
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="canonical execution readback authority changed",
+    ):
+        resolve_betfair_realized_match(
+            plan,
+            ledger,
+            readback,
+            attempt_id=ATTEMPT_ID,
+        )
 
 
 def test_revision_rejects_subclass_virtual_authority_bypass(tmp_path: Path) -> None:

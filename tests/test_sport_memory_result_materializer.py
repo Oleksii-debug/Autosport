@@ -657,7 +657,7 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
     assert visible[0].performance_id == first.performance_id
     assert visible[0].score == "1"
 
-    market_store.close()
+    materializer.runtime.close()
     reopened_store = OpponentIntelligenceStore(
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
@@ -678,7 +678,7 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
     replay = reopened.materialize(replay_binding, _settlement(reopened, replay_binding), as_of=T3)
     assert replay == first
     assert len(reopened_store.graph_edges(as_of=T3)) == 1
-    reopened_market.close()
+    reopened_runtime.close()
 
 
 def test_result_projection_requires_explicit_store_correction_lineage(tmp_path):
@@ -1035,7 +1035,7 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
     assert len(store.graph_edges(as_of=T2)) == 1
     assert store.graph_edges(as_of=T3) == ()
 
-    market_store.close()
+    materializer.runtime.close()
     reopened_store = OpponentIntelligenceStore(
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
@@ -1069,7 +1069,7 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
     )
     assert replay == receipt
     assert reopened_store.graph_edges(as_of=T4) == ()
-    reopened_market.close()
+    reopened_runtime.close()
 
     script = f"""
 import sys

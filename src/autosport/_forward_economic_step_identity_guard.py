@@ -29,6 +29,15 @@ def _install_forward_economic_step_identity_guard() -> None:
     step_type = _evidence.ForwardEconomicStep
     step_to_payload = step_type.to_payload
     step_to_payload_code = getattr(step_to_payload, "__code__", None)
+    summary_type = _evidence.ForwardEconomicEvidenceSummary
+    summary_init = summary_type.__init__
+    summary_init_code = getattr(summary_init, "__code__", None)
+    summary_to_payload = summary_type.to_payload
+    summary_to_payload_code = getattr(summary_to_payload, "__code__", None)
+    summary_field_descriptors = tuple(
+        (name, getattr(summary_type, name))
+        for name in summary_type.__dataclass_fields__
+    )
     canonical_digest = _evidence._canonical_digest
     canonical_digest_code = getattr(canonical_digest, "__code__", None)
     instant_text = _evidence._instant_text
@@ -95,6 +104,15 @@ def _install_forward_economic_step_identity_guard() -> None:
             _evidence.ForwardEconomicStep is not step_type
             or getattr(step_type, "to_payload", None) is not step_to_payload
             or getattr(step_to_payload, "__code__", None) is not step_to_payload_code
+            or _evidence.ForwardEconomicEvidenceSummary is not summary_type
+            or getattr(summary_type, "__init__", None) is not summary_init
+            or getattr(summary_init, "__code__", None) is not summary_init_code
+            or getattr(summary_type, "to_payload", None) is not summary_to_payload
+            or getattr(summary_to_payload, "__code__", None) is not summary_to_payload_code
+            or any(
+                getattr(summary_type, name, None) is not descriptor
+                for name, descriptor in summary_field_descriptors
+            )
             or getattr(_evidence, "_canonical_digest", None) is not canonical_digest
             or getattr(canonical_digest, "__code__", None) is not canonical_digest_code
             or getattr(_evidence, "_instant_text", None) is not instant_text
@@ -276,8 +294,14 @@ def _install_forward_economic_step_identity_guard() -> None:
     ) -> _evidence.ForwardEconomicEvidenceSummary:
         _validated_recorded_steps(self)
         expected_evidence_sha256 = _expected_evidence_sha256(self)
+        _require_executable_identity()
         summary = raw_summary(self)
+        _require_executable_identity()
         _validated_recorded_steps(self)
+        if type(summary) is not summary_type:
+            raise _evidence.ForwardEconomicEvidenceError(
+                "forward economic summary publication type authority drift"
+            )
         if summary.evidence_sha256 != expected_evidence_sha256:
             raise _evidence.ForwardEconomicEvidenceError(
                 "recorded step evidence publication identity drift"

@@ -313,16 +313,48 @@ class _DispatchState:
 
 def _build_dispatch_guards():
     state = _DispatchState()
+    state_type = type(state)
+    error_type = object.__getattribute__(state, "_error_type")
+    state_getattribute = state_type.__getattribute__
+    state_setattr = state_type.__setattr__
+    state_bind_public = state_type.bind_public
+    state_constructor_guard = state_type._require_store_constructor_authority
+    state_common_guard = state_type._require_common_dispatch
+    state_trusted_clock = state_type.trusted_clock
+    state_open = state_type.open
+    state_issue = state_type.issue
+    state_resolve = state_type.resolve
+    state_verify = state_type.verify
+
     open_dispatch = state.open
     issue_dispatch = state.issue
     resolve_dispatch = state.resolve
     verify_dispatch = state.verify
 
+    def require_state_class_authority() -> None:
+        if (
+            type(state) is not state_type
+            or state_type.__getattribute__ is not state_getattribute
+            or state_type.__setattr__ is not state_setattr
+            or state_type.bind_public is not state_bind_public
+            or state_type._require_store_constructor_authority
+            is not state_constructor_guard
+            or state_type._require_common_dispatch is not state_common_guard
+            or state_type.trusted_clock is not state_trusted_clock
+            or state_type.open is not state_open
+            or state_type.issue is not state_issue
+            or state_type.resolve is not state_resolve
+            or state_type.verify is not state_verify
+        ):
+            raise error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "dispatch state class"
+            )
+
     def guarded_open(authority: ProductPolicyEvaluationWorkspace):
-        # Keep the sealed state directly visible to the reflection falsifier while
-        # dispatching through the bound method pinned before publication.
-        if not state._sealed:
-            raise RuntimeError("policy issuance dispatch state is not sealed")
+        require_state_class_authority()
+        if object.__getattribute__(state, "_sealed") is not True:
+            raise error_type("policy issuance dispatch state is not sealed")
         return open_dispatch(authority)
 
     def guarded_issue(
@@ -332,8 +364,9 @@ def _build_dispatch_guards():
         source_evaluation_bundle_id: str,
         baseline_kind: BaselineKind | None = None,
     ) -> IssuedPolicyEvaluationRef:
-        if not state._sealed:
-            raise RuntimeError("policy issuance dispatch state is not sealed")
+        require_state_class_authority()
+        if object.__getattribute__(state, "_sealed") is not True:
+            raise error_type("policy issuance dispatch state is not sealed")
         return issue_dispatch(
             authority,
             protocol,
@@ -346,8 +379,9 @@ def _build_dispatch_guards():
         protocol: FrozenBaselineProtocol,
         reference: IssuedPolicyEvaluationRef,
     ) -> PolicyEvaluation:
-        if not state._sealed:
-            raise RuntimeError("policy issuance dispatch state is not sealed")
+        require_state_class_authority()
+        if object.__getattribute__(state, "_sealed") is not True:
+            raise error_type("policy issuance dispatch state is not sealed")
         return resolve_dispatch(authority, protocol, reference)
 
     def guarded_verify(
@@ -356,8 +390,9 @@ def _build_dispatch_guards():
         reference: IssuedPolicyEvaluationRef,
         claimed: PolicyEvaluation,
     ) -> PolicyEvaluation:
-        if not state._sealed:
-            raise RuntimeError("policy issuance dispatch state is not sealed")
+        require_state_class_authority()
+        if object.__getattribute__(state, "_sealed") is not True:
+            raise error_type("policy issuance dispatch state is not sealed")
         return verify_dispatch(authority, protocol, reference, claimed)
 
     state.bind_public(guarded_open, guarded_issue, guarded_resolve, guarded_verify)

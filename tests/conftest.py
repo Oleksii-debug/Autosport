@@ -168,5 +168,3 @@ def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
         return value
 
     monkeypatch.setattr(stream.time, "monotonic", monotonic)
-
-

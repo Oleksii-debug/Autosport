@@ -19,7 +19,7 @@ import json
 import math
 import time
 from typing import Any
-from weakref import WeakKeyDictionary
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from .betfair_stream_codec import BetfairCrlfJsonDecoder, BetfairQuoteIdentity
 from .betfair_stream_publish_freshness import (
@@ -78,8 +78,12 @@ class BetfairAuthenticatedMarketSubscription:
     upstream_context_sha256: str
 
     def assert_issued(self) -> None:
-        expected = _ISSUED_SUBSCRIPTIONS.get(self)
-        if expected is None or expected != _subscription_fingerprint(self):
+        authority = _ISSUED_SUBSCRIPTIONS.get(self)
+        if (
+            authority is None
+            or authority.fingerprint != _subscription_fingerprint(self)
+            or authority.transport_ref() is None
+        ):
             raise BetfairAuthenticatedStreamError(
                 "Betfair market subscription was not issued by authenticated product composition"
             )
@@ -97,9 +101,15 @@ class BetfairAuthenticatedMarketSubscription:
         return False
 
 
-_ISSUED_SUBSCRIPTIONS: WeakKeyDictionary[BetfairAuthenticatedMarketSubscription, str] = (
-    WeakKeyDictionary()
-)
+@dataclass(frozen=True, slots=True)
+class _SubscriptionAuthority:
+    fingerprint: str
+    transport_ref: ReferenceType[BetfairStreamTlsTransport]
+
+
+_ISSUED_SUBSCRIPTIONS: WeakKeyDictionary[
+    BetfairAuthenticatedMarketSubscription, _SubscriptionAuthority
+] = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
@@ -118,8 +128,22 @@ class BetfairAuthenticatedFreshnessDecision:
             is not BetfairAuthenticatedFreshnessVerdict.FRESH_AUTHENTICATED_PROVIDER_PUBLISH
         ):
             return False
-        expected = _ISSUED_DECISIONS.get(self)
-        return expected is not None and expected == _decision_fingerprint(self)
+        authority = _ISSUED_DECISIONS.get(self)
+        if authority is None or authority.fingerprint != _decision_fingerprint(self):
+            return False
+        runtime = authority.runtime_ref()
+        if runtime is None:
+            return False
+        try:
+            now_ms = _wall_time_ms()
+        except BetfairAuthenticatedStreamError:
+            return False
+        return runtime._decision_is_current(  # noqa: SLF001 - process-local authority check
+            self,
+            authority.identity,
+            authority.policy,
+            now_ms,
+        )
 
     @property
     def grants_provider_write_authority(self) -> bool:
@@ -134,9 +158,17 @@ class BetfairAuthenticatedFreshnessDecision:
         return False
 
 
-_ISSUED_DECISIONS: WeakKeyDictionary[BetfairAuthenticatedFreshnessDecision, str] = (
-    WeakKeyDictionary()
-)
+@dataclass(frozen=True, slots=True)
+class _DecisionAuthority:
+    fingerprint: str
+    runtime_ref: ReferenceType[Any]
+    identity: BetfairQuoteIdentity
+    policy: BetfairStreamFreshnessPolicy
+
+
+_ISSUED_DECISIONS: WeakKeyDictionary[
+    BetfairAuthenticatedFreshnessDecision, _DecisionAuthority
+] = WeakKeyDictionary()
 
 
 def open_authenticated_market_subscription(
@@ -153,7 +185,7 @@ def open_authenticated_market_subscription(
 
     This intentionally supports the first subscription on one authenticated connection.
     Replacement/resubscribe is a separate recovery authority because Betfair clock
-    continuation has materially different truth semantics.  Requiring acknowledgement
+    continuation has materially different truth semantics. Requiring acknowledgement
     frame sequence 1 means prior post-auth reads cannot be silently relabelled as this
     subscription's provider acknowledgement.
     """
@@ -292,7 +324,10 @@ def open_authenticated_market_subscription(
         subscription_id=subscription_id,
         upstream_context_sha256=upstream_context_sha256,
     )
-    _ISSUED_SUBSCRIPTIONS[issued] = _subscription_fingerprint(issued)
+    _ISSUED_SUBSCRIPTIONS[issued] = _SubscriptionAuthority(
+        _subscription_fingerprint(issued),
+        ref(transport),
+    )
     return issued
 
 
@@ -316,7 +351,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             raise TypeError(
                 "subscription must be canonical BetfairAuthenticatedMarketSubscription"
             )
-        subscription.assert_issued()
+        _require_subscription_for_transport(subscription, transport)
         self._transport = transport
         self._subscription = subscription
         self._require_current_connection()
@@ -366,9 +401,6 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 and len(self._transport_by_identity)
                 >= _MAX_TRACKED_AUTHORITATIVE_QUOTES
             ):
-                # Structural freshness may already have accepted the frame. Clearing
-                # this separate transport-origin map makes the overflow fail closed:
-                # no existing or new structural evidence can be promoted afterward.
                 self._transport_by_identity.clear()
                 raise BetfairAuthenticatedStreamError(
                     "authenticated freshness transport-origin map exceeded its bound"
@@ -392,19 +424,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             as_of_ms=evaluated_at_ms,
             policy=policy,
         )
-        binding = self._transport_by_identity.get(identity)
-        frame_sha: str | None = None
-        if structural.evidence_id is not None and binding is not None:
-            bound_evidence_id, bound_frame_sha = binding
-            if bound_evidence_id == structural.evidence_id:
-                frame_sha = bound_frame_sha
-            else:
-                # A replaced structural record must never inherit transport origin
-                # from a prior evidence id for the same quote identity.
-                self._transport_by_identity.pop(identity, None)
-        elif structural.evidence_id is None:
-            self._transport_by_identity.pop(identity, None)
-
+        frame_sha = self._bound_frame_sha(identity, structural.evidence_id)
         if (
             structural.verdict is not BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
             or structural.evidence_id is None
@@ -418,7 +438,6 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 transport_frame_sha256=frame_sha,
                 evaluated_at_ms=evaluated_at_ms,
             )
-        self._subscription.assert_issued()
         self._require_current_connection()
         decision = BetfairAuthenticatedFreshnessDecision(
             verdict=(
@@ -432,11 +451,62 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             transport_frame_sha256=frame_sha,
             evaluated_at_ms=evaluated_at_ms,
         )
-        _ISSUED_DECISIONS[decision] = _decision_fingerprint(decision)
+        _ISSUED_DECISIONS[decision] = _DecisionAuthority(
+            _decision_fingerprint(decision),
+            ref(self),
+            identity,
+            policy,
+        )
         return decision
 
+    def _bound_frame_sha(
+        self,
+        identity: BetfairQuoteIdentity,
+        evidence_id: str | None,
+    ) -> str | None:
+        binding = self._transport_by_identity.get(identity)
+        if evidence_id is not None and binding is not None:
+            bound_evidence_id, bound_frame_sha = binding
+            if bound_evidence_id == evidence_id:
+                return bound_frame_sha
+            self._transport_by_identity.pop(identity, None)
+        elif evidence_id is None:
+            self._transport_by_identity.pop(identity, None)
+        return None
+
+    def _decision_is_current(
+        self,
+        decision: BetfairAuthenticatedFreshnessDecision,
+        identity: BetfairQuoteIdentity,
+        policy: BetfairStreamFreshnessPolicy,
+        now_ms: int,
+    ) -> bool:
+        if now_ms < decision.evaluated_at_ms:
+            return False
+        try:
+            self._require_current_connection()
+        except BetfairAuthenticatedStreamError:
+            return False
+        if decision.subscription_id != self._subscription.subscription_id:
+            return False
+        structural = self._freshness.evaluate(
+            identity,
+            as_of_ms=now_ms,
+            policy=policy,
+        )
+        if (
+            structural.verdict is not BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
+            or structural.evidence_id != decision.evidence_id
+        ):
+            return False
+        frame_sha = self._bound_frame_sha(identity, structural.evidence_id)
+        return (
+            frame_sha is not None
+            and frame_sha == decision.transport_frame_sha256
+        )
+
     def _require_current_connection(self) -> None:
-        self._subscription.assert_issued()
+        _require_subscription_for_transport(self._subscription, self._transport)
         if (
             not self._transport.is_authenticated
             or self._transport.connection_id != self._subscription.connection_id
@@ -446,6 +516,18 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             raise BetfairAuthenticatedStreamError(
                 "authenticated subscription is no longer bound to the live transport connection"
             )
+
+
+def _require_subscription_for_transport(
+    subscription: BetfairAuthenticatedMarketSubscription,
+    transport: BetfairStreamTlsTransport,
+) -> None:
+    subscription.assert_issued()
+    authority = _ISSUED_SUBSCRIPTIONS.get(subscription)
+    if authority is None or authority.transport_ref() is not transport:
+        raise BetfairAuthenticatedStreamError(
+            "Betfair market subscription was not issued for this exact transport object"
+        )
 
 
 def _decode_exact_transport_frame(

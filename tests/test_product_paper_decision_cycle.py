@@ -403,6 +403,29 @@ class ProductPaperDecisionCycleTests(unittest.TestCase):
                     inputs=(ProductDecisionInput("input-a"),),
                 )
 
+    def test_economic_authority_subclass_is_rejected_before_cycle(self) -> None:
+        class _AuthoritySubclass(_FakeAuthority):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory, self._patch_dependencies():
+            workspace = Path(directory)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical EconomicDecisionAuthority",
+            ):
+                ProductPaperDecisionCycle(
+                    _FakeRuntime(workspace),
+                    loop_id="product-paper-loop",
+                    authority=_AuthoritySubclass(),
+                    intent_factory=_FakeIntentFactory(),
+                    scientific_registry=_FakeRegistry(
+                        workspace / "scientific_registry.json"
+                    ),
+                    execution_config=_FakeExecutionConfig(),
+                    max_quote_age=timedelta(seconds=5),
+                    inputs=(ProductDecisionInput("input-a"),),
+                )
+
     def test_runtime_lookalike_is_rejected_before_any_other_validation(self) -> None:
         with self.assertRaisesRegex(
             TypeError,

@@ -10,6 +10,7 @@ from .bookmaker_routing import (
     VenueObservation,
     VenueQuote,
     _dedupe_external_receipts,
+    _exact_decimal_sum,
 )
 from .bookmaker_routing_plan import (
     ParallelRoutingProposal,
@@ -372,6 +373,7 @@ def _validate_durable_effect_receipts(
     *,
     ledger: RealExecutionLedger,
     parent_plan_id: str,
+    requested_stake: Decimal,
 ) -> bool:
     """Bind routing claims to one fenced durable snapshot.
 
@@ -403,6 +405,23 @@ def _validate_durable_effect_receipts(
         raise RoutingContractError(
             "durable execution plan payload is invalid"
         ) from exc
+
+    if (
+        not isinstance(requested_stake, Decimal)
+        or not requested_stake.is_finite()
+        or requested_stake <= 0
+    ):
+        raise RoutingContractError(
+            "requested_stake must be an exact positive finite Decimal"
+        )
+    durable_parent_amount = _exact_decimal_sum(
+        _durable_decimal(action.get("requested_stake"), "requested_stake")
+        for action in actions
+    )
+    if requested_stake != durable_parent_amount:
+        raise RoutingContractError(
+            "requested_stake does not match durable parent execution amount"
+        )
 
     attempted_action_ids = {
         event.get("action_id")
@@ -610,6 +629,12 @@ def reconcile_equal_split_residual_against_ledger(
     until the external effect is conclusively resolved. UNKNOWN without an external
     receipt remains admissible only because it blocks routing.
 
+    Positive reroute also requires the caller's parent amount to equal the exact
+    sum of requested stakes in the durable execution plan. The ledger schema has no
+    separate original routing-request amount, so a partially covered parent cannot
+    safely mint a larger residual from caller input; it remains fail-closed until a
+    product-owned parent-amount authority exists.
+
     This function does not append ledger events, call a provider, or move money.
     It reuses the ledger writer boundary as a short read-authority lease so reads
     and writes share one serialization domain.
@@ -629,6 +654,7 @@ def reconcile_equal_split_residual_against_ledger(
         normalized,
         ledger=ledger,
         parent_plan_id=parent_plan_id,
+        requested_stake=requested_stake,
     )
 
     def resolve_under_ledger_serialization() -> ParallelRoutingProposal:
@@ -636,6 +662,7 @@ def reconcile_equal_split_residual_against_ledger(
             normalized,
             ledger=ledger,
             parent_plan_id=parent_plan_id,
+            requested_stake=requested_stake,
         )
         proposal = plan_equal_split_residual(
             requested_stake,

@@ -305,7 +305,6 @@ def _install_guard() -> None:
             dataset_snapshot_id=dataset_snapshot_id,
             experiment_id=experiment_id,
             authority_root=authority_root,
-            _product_token_bytes=canonical_token_bytes,
         )
 
     sealed_issue_risk_randomization_precommit._autosport_randomization_dispatch_sealed = True

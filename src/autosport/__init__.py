@@ -153,3 +153,7 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# A retained-evidence manifest must never cross precommit without its exact BASE
+# PaperBook sidecar. Legacy staging can backfill only while canonical state is BASE.
+from . import _run_transaction_retained_base_crash_guard as _run_transaction_retained_base_crash_guard  # noqa: F401,E402

@@ -6,11 +6,11 @@ the mutable module globals dictionary.  Rebinding ``hashlib`` (or a helper that
 uses it) could therefore steer the persisted randomization root or its durable
 binding without changing the public issuer function identity.
 
-Reuse the monotonic-root dispatch-sealing pattern: clone the authority-bearing
-implementation and its integrity helpers over private dependency snapshots, keep
-the public signature unchanged, and fail closed when the public entropy/hash/root
-surfaces are rebound.  No estimator, membership, persistence schema, or money
-authority is added here.
+A copied ``FunctionType.__globals__`` dictionary is also directly inspectable and
+mutable.  Reuse the monotonic-root dispatch-sealing pattern: every authority-bearing
+clone is invoked only through a wrapper that checks an exact globals snapshot, while
+private facades are checked for exact captured callable attributes before use.
+No estimator, membership, persistence schema, or money authority is added here.
 """
 from __future__ import annotations
 
@@ -78,8 +78,8 @@ def _install_guard() -> None:
     canonical_root_bytes = precommit_module._ROOT_BYTES
 
     # Private facades hold exact callable objects rather than mutable public module
-    # dispatch.  A later ``precommit.hashlib = ...`` or attribute replacement cannot
-    # steer any authority-bearing hash after this package guard has installed.
+    # dispatch. They remain introspectable Python objects, so their attributes are
+    # also verified immediately before every sealed clone executes.
     frozen_hashlib = SimpleNamespace(sha256=canonical_sha256)
     frozen_json = SimpleNamespace(dumps=canonical_json_dumps)
     frozen_os = SimpleNamespace(stat=canonical_os_stat, fstat=canonical_os_fstat)
@@ -87,71 +87,169 @@ def _install_guard() -> None:
     frozen_uuid = SimpleNamespace(uuid4=canonical_uuid4)
     frozen_secrets = SimpleNamespace(token_bytes=canonical_token_bytes)
 
-    frozen_text = _clone_function(precommit_module._text)
-    frozen_sha256_text = _clone_function(
+    missing = object()
+
+    def snapshot_globals(function: FunctionType) -> tuple[tuple[str, object], ...]:
+        names = sorted(
+            name for name in set(function.__code__.co_names) if name in function.__globals__
+        )
+        if "__builtins__" in function.__globals__:
+            names.append("__builtins__")
+        return tuple((name, function.__globals__[name]) for name in names)
+
+    def require_snapshot(
+        function: FunctionType,
+        snapshot: tuple[tuple[str, object], ...],
+        label: str,
+    ) -> None:
+        for name, expected in snapshot:
+            if function.__globals__.get(name, missing) is not expected:
+                raise canonical_error(f"frozen {label} global {name!r} was rebound")
+
+    def require_private_facades() -> None:
+        if frozen_hashlib.sha256 is not canonical_sha256:
+            raise canonical_error("frozen randomization SHA-256 dispatch was rebound")
+        if frozen_json.dumps is not canonical_json_dumps:
+            raise canonical_error("frozen randomization JSON dispatch was rebound")
+        if frozen_os.stat is not canonical_os_stat or frozen_os.fstat is not canonical_os_fstat:
+            raise canonical_error("frozen randomization file-stat dispatch was rebound")
+        if frozen_stat.S_ISREG is not canonical_s_isreg:
+            raise canonical_error("frozen randomization regular-file dispatch was rebound")
+        if frozen_uuid.uuid4 is not canonical_uuid4:
+            raise canonical_error("frozen randomization transaction-id dispatch was rebound")
+        if frozen_secrets.token_bytes is not canonical_token_bytes:
+            raise canonical_error("frozen randomization entropy dispatch was rebound")
+
+    def sealed_clone(function: FunctionType, label: str):
+        snapshot = snapshot_globals(function)
+
+        def sealed(*args, **kwargs):
+            require_private_facades()
+            require_snapshot(function, snapshot, label)
+            return function(*args, **kwargs)
+
+        return sealed
+
+    frozen_text_impl = _clone_function(precommit_module._text)
+    sealed_text = sealed_clone(frozen_text_impl, "randomization text validator")
+
+    frozen_sha256_text_impl = _clone_function(
         precommit_module._sha256_text,
-        globals_overrides={"_text": frozen_text},
+        globals_overrides={"_text": sealed_text},
     )
-    frozen_canonical_bytes = _clone_function(
+    sealed_sha256_text = sealed_clone(
+        frozen_sha256_text_impl,
+        "randomization SHA-256 text validator",
+    )
+
+    frozen_canonical_bytes_impl = _clone_function(
         precommit_module._canonical_bytes,
         globals_overrides={"json": frozen_json},
     )
-    frozen_pretty_bytes = _clone_function(
+    sealed_canonical_bytes = sealed_clone(
+        frozen_canonical_bytes_impl,
+        "randomization canonical serializer",
+    )
+
+    frozen_pretty_bytes_impl = _clone_function(
         precommit_module._pretty_bytes,
         globals_overrides={"json": frozen_json},
     )
-    frozen_sha256_bytes = _clone_function(
+    sealed_pretty_bytes = sealed_clone(
+        frozen_pretty_bytes_impl,
+        "randomization state serializer",
+    )
+
+    frozen_sha256_bytes_impl = _clone_function(
         precommit_module._sha256_bytes,
         globals_overrides={"hashlib": frozen_hashlib},
     )
-    frozen_experiment_key = _clone_function(
+    sealed_sha256_bytes = sealed_clone(
+        frozen_sha256_bytes_impl,
+        "randomization byte hasher",
+    )
+
+    frozen_experiment_key_impl = _clone_function(
         precommit_module._experiment_key,
         globals_overrides={"hashlib": frozen_hashlib},
     )
-    frozen_workspace_path = _clone_function(precommit_module._workspace_path)
-    frozen_read_regular_bytes = _clone_function(
+    sealed_experiment_key = sealed_clone(
+        frozen_experiment_key_impl,
+        "randomization experiment-key hasher",
+    )
+
+    frozen_workspace_path_impl = _clone_function(precommit_module._workspace_path)
+    sealed_workspace_path = sealed_clone(
+        frozen_workspace_path_impl,
+        "randomization workspace resolver",
+    )
+
+    frozen_read_regular_bytes_impl = _clone_function(
         precommit_module._read_regular_bytes,
         globals_overrides={"os": frozen_os, "stat": frozen_stat},
     )
-    frozen_membership_binding = _clone_function(
+    sealed_read_regular_bytes = sealed_clone(
+        frozen_read_regular_bytes_impl,
+        "randomization stable-file reader",
+    )
+
+    frozen_membership_binding_impl = _clone_function(
         precommit_module._membership_binding,
         globals_overrides={
-            "_sha256_text": frozen_sha256_text,
-            "_text": frozen_text,
+            "_sha256_text": sealed_sha256_text,
+            "_text": sealed_text,
         },
     )
-    frozen_decode_state = _clone_function(
+    sealed_membership_binding = sealed_clone(
+        frozen_membership_binding_impl,
+        "randomization membership binder",
+    )
+
+    frozen_decode_state_impl = _clone_function(
         precommit_module._decode_state,
         globals_overrides={
-            "_read_regular_bytes": frozen_read_regular_bytes,
-            "_sha256_text": frozen_sha256_text,
-            "_pretty_bytes": frozen_pretty_bytes,
-            "_sha256_bytes": frozen_sha256_bytes,
+            "_read_regular_bytes": sealed_read_regular_bytes,
+            "_sha256_text": sealed_sha256_text,
+            "_pretty_bytes": sealed_pretty_bytes,
+            "_sha256_bytes": sealed_sha256_bytes,
         },
     )
-    frozen_semantic_binding = _clone_function(
+    sealed_decode_state = sealed_clone(
+        frozen_decode_state_impl,
+        "randomization state decoder",
+    )
+
+    frozen_semantic_binding_impl = _clone_function(
         precommit_module._semantic_binding_sha256,
         globals_overrides={
-            "_sha256_bytes": frozen_sha256_bytes,
-            "_canonical_bytes": frozen_canonical_bytes,
+            "_sha256_bytes": sealed_sha256_bytes,
+            "_canonical_bytes": sealed_canonical_bytes,
         },
     )
-    frozen_receipt = _clone_function(
+    sealed_semantic_binding = sealed_clone(
+        frozen_semantic_binding_impl,
+        "randomization semantic binder",
+    )
+
+    frozen_receipt_impl = _clone_function(
         precommit_module._receipt,
         globals_overrides={
-            "_semantic_binding_sha256": frozen_semantic_binding,
-            "_experiment_key": frozen_experiment_key,
-            "_text": frozen_text,
-            "_sha256_text": frozen_sha256_text,
-            "_sha256_bytes": frozen_sha256_bytes,
-            "_canonical_bytes": frozen_canonical_bytes,
+            "_semantic_binding_sha256": sealed_semantic_binding,
+            "_experiment_key": sealed_experiment_key,
+            "_text": sealed_text,
+            "_sha256_text": sealed_sha256_text,
+            "_sha256_bytes": sealed_sha256_bytes,
+            "_canonical_bytes": sealed_canonical_bytes,
         },
+    )
+    sealed_receipt = sealed_clone(
+        frozen_receipt_impl,
+        "randomization receipt builder",
     )
 
     # Keep the existing upstream membership-publication seam unchanged in this
-    # bounded repair.  The receipt still passes the exact-type/content checks in
-    # ``frozen_membership_binding``; sealing upstream membership issuance is owned
-    # by that authority family rather than creating a second registry here.
+    # bounded repair. The receipt still passes exact-type/content checks; sealing
+    # upstream membership issuance remains owned by that authority family.
     def membership_resolver(*args, **kwargs):
         return precommit_module.resolve_fixed_n_membership_publication(*args, **kwargs)
 
@@ -163,18 +261,19 @@ def _install_guard() -> None:
             "secrets": frozen_secrets,
             "uuid": frozen_uuid,
             "_ROOT_BYTES": canonical_root_bytes,
-            "_text": frozen_text,
-            "_workspace_path": frozen_workspace_path,
+            "_text": sealed_text,
+            "_workspace_path": sealed_workspace_path,
             "resolve_fixed_n_membership_publication": membership_resolver,
-            "_membership_binding": frozen_membership_binding,
-            "_experiment_key": frozen_experiment_key,
-            "_decode_state": frozen_decode_state,
-            "_semantic_binding_sha256": frozen_semantic_binding,
-            "_sha256_bytes": frozen_sha256_bytes,
-            "_pretty_bytes": frozen_pretty_bytes,
-            "_receipt": frozen_receipt,
+            "_membership_binding": sealed_membership_binding,
+            "_experiment_key": sealed_experiment_key,
+            "_decode_state": sealed_decode_state,
+            "_semantic_binding_sha256": sealed_semantic_binding,
+            "_sha256_bytes": sealed_sha256_bytes,
+            "_pretty_bytes": sealed_pretty_bytes,
+            "_receipt": sealed_receipt,
         },
     )
+    implementation_snapshot = snapshot_globals(frozen_implementation)
 
     def sealed_issue_risk_randomization_precommit(
         registry_path,
@@ -185,9 +284,6 @@ def _install_guard() -> None:
         experiment_id,
         authority_root=None,
     ):
-        # Persistent replacement is integrity loss.  Races after these checks are
-        # harmless to root selection because ``frozen_implementation`` owns private
-        # callable snapshots rather than late-reading these public surfaces.
         if precommit_module.issue_risk_randomization_precommit is not sealed_issue_risk_randomization_precommit:
             raise canonical_error("risk randomization public issuer was rebound")
         if precommit_module.hashlib is not canonical_hashlib or canonical_hashlib.sha256 is not canonical_sha256:
@@ -196,6 +292,12 @@ def _install_guard() -> None:
             raise canonical_error("randomization entropy source was rebound")
         if type(precommit_module._ROOT_BYTES) is not int or precommit_module._ROOT_BYTES != canonical_root_bytes:
             raise canonical_error("randomization root size authority was rebound")
+        require_private_facades()
+        require_snapshot(
+            frozen_implementation,
+            implementation_snapshot,
+            "randomization implementation",
+        )
         return frozen_implementation(
             registry_path,
             workspace=workspace,

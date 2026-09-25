@@ -56,7 +56,7 @@ def _canonical_selector(value: _Selector, field: str) -> _Selector:
         for item in value
     ):
         raise ValueError(f"{field} must contain non-empty trimmed strings")
-    if len(set(value)) != len(set(value)) or value != tuple(sorted(value)):
+    if len(set(value)) != len(value) or value != tuple(sorted(value)):
         raise ValueError(f"{field} must be sorted and unique")
     return value
 

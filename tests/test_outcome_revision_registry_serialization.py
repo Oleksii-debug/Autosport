@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.outcome_trust import OutcomeLineageBinding, TrustedOutcomeRevision
+from autosport.outcome_trust import (
+    OutcomeLineageBinding,
+    OutcomeLineageTrustError,
+    TrustedOutcomeRevision,
+)
 from autosport.run_registry import RunRegistry, UnresolvedExperimentError
 
 
@@ -107,7 +111,11 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
 
             with (
                 patch.object(RunRegistry, "_read", new=fenced_read),
-                patch("autosport.run_registry._utc_now", side_effect=product_clock),
+                patch("autosport.run_registry._utc_now", side_effect=product_clock) as product_now,
+                patch(
+                    "autosport._outcome_availability_registry_serialization._PRODUCT_UTC_NOW",
+                    new=product_now,
+                ),
             ):
                 thread_a = threading.Thread(target=writer_a, name="writer-a")
                 thread_b = threading.Thread(target=writer_b, name="writer-b")
@@ -163,7 +171,11 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
 
             with (
                 patch.object(RunRegistry, "_write", new=traced_write),
-                patch("autosport.run_registry._utc_now", side_effect=product_clock),
+                patch("autosport.run_registry._utc_now", side_effect=product_clock) as product_now,
+                patch(
+                    "autosport._outcome_availability_registry_serialization._PRODUCT_UTC_NOW",
+                    new=product_now,
+                ),
             ):
                 registry.begin(
                     self._sha("market"),
@@ -191,9 +203,15 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             registry = RunRegistry.initialize_pristine(path)
             binding = self._binding("r1")
 
-            with patch(
-                "autosport.run_registry._utc_now",
-                side_effect=RuntimeError("crash after identity publication"),
+            with (
+                patch(
+                    "autosport.run_registry._utc_now",
+                    side_effect=RuntimeError("crash after identity publication"),
+                ) as product_now,
+                patch(
+                    "autosport._outcome_availability_registry_serialization._PRODUCT_UTC_NOW",
+                    new=product_now,
+                ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -215,9 +233,15 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             self.assertNotIn("first_available_at", revision)
             self.assertEqual(staged["runs"], {})
 
-            with patch(
-                "autosport.run_registry._utc_now",
-                return_value="2026-01-01T11:00:00Z",
+            with (
+                patch(
+                    "autosport.run_registry._utc_now",
+                    return_value="2026-01-01T11:00:00Z",
+                ) as product_now,
+                patch(
+                    "autosport._outcome_availability_registry_serialization._PRODUCT_UTC_NOW",
+                    new=product_now,
+                ),
             ):
                 key = reopened.begin(
                     self._sha("market-crash"),
@@ -241,9 +265,15 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             path = Path(tmp) / "run_registry.json"
             registry = RunRegistry.initialize_pristine(path)
 
-            with patch(
-                "autosport.run_registry._utc_now",
-                return_value="2026-01-01T10:00:00Z",
+            with (
+                patch(
+                    "autosport.run_registry._utc_now",
+                    return_value="2026-01-01T10:00:00Z",
+                ) as product_now,
+                patch(
+                    "autosport._outcome_availability_registry_serialization._PRODUCT_UTC_NOW",
+                    new=product_now,
+                ),
             ):
                 first_key = registry.begin(
                     self._sha("market-r1"),
@@ -280,6 +310,10 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 patch(
                     "autosport.run_registry._utc_now",
                     return_value="2026-01-01T11:00:00Z",
+                ) as product_now,
+                patch(
+                    "autosport._outcome_availability_registry_serialization._PRODUCT_UTC_NOW",
+                    new=product_now,
                 ),
             ):
                 second_key = registry.begin(
@@ -302,6 +336,32 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             self.assertIsNotNone(at_r2)
             self.assertEqual(at_mid.revision, 1)
             self.assertEqual(at_r2.revision, 2)
+
+    def test_public_clock_dispatch_rebinding_fails_closed_after_unknown_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+
+            with patch(
+                "autosport.run_registry._utc_now",
+                return_value="2000-01-01T00:00:00Z",
+            ):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "product UTC clock authority was rebound",
+                ):
+                    registry.begin(
+                        self._sha("market-rebound"),
+                        self._sha("results-rebound"),
+                        "baseline-v1",
+                        "run-rebound",
+                        outcome_lineage=self._binding("r1"),
+                    )
+
+            durable = json.loads(path.read_text(encoding="utf-8"))
+            revision = durable["outcome_lineage_trust"][0]["revisions"][0]
+            self.assertNotIn("first_available_at", revision)
+            self.assertEqual(durable["runs"], {})
 
     def test_all_run_registry_read_modify_write_methods_are_serialized(self) -> None:
         for method_name in (

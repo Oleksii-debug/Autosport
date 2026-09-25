@@ -29,15 +29,6 @@ _SCIENTIFIC_REGISTRY_GET = ScientificRegistry.get
 _SCIENTIFIC_REGISTRY_READ = ScientificRegistry._read
 _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY = ScientificRegistry._validate_entry
 
-# The financial consumer must resolve the *canonical* product evaluator, not a
-# caller-swapped object with the same public method names. Capture the exact
-# constructor/resolve implementation once and invoke those captured callables
-# directly. This bridge grants no authority while ProductRiskOfRuinEvaluator
-# itself remains fail-closed; it merely removes the future second-consumer seam.
-_PRODUCT_EVALUATOR_CLASS = ProductRiskOfRuinEvaluator
-_PRODUCT_EVALUATOR_INIT = ProductRiskOfRuinEvaluator.__init__
-_PRODUCT_EVALUATOR_RESOLVE = ProductRiskOfRuinEvaluator.resolve
-
 
 def _canonical_decimal(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
@@ -203,35 +194,70 @@ def _entry_from_state(
     return None
 
 
-def _resolve_product_evaluator_result(
+def _resolve_product_evaluator_result_impl(
     workspace: Path,
     result_id: str,
+    *,
+    evaluator_class,
+    evaluator_init,
+    evaluator_resolve,
 ) -> IssuedRiskOfRuinResult:
-    """Resolve through captured product-evaluator dispatch only."""
+    """Resolve through one closure-sealed product-evaluator dispatch snapshot."""
 
     if (
-        ProductRiskOfRuinEvaluator is not _PRODUCT_EVALUATOR_CLASS
-        or ProductRiskOfRuinEvaluator.__init__ is not _PRODUCT_EVALUATOR_INIT
-        or ProductRiskOfRuinEvaluator.resolve is not _PRODUCT_EVALUATOR_RESOLVE
+        ProductRiskOfRuinEvaluator is not evaluator_class
+        or ProductRiskOfRuinEvaluator.__init__ is not evaluator_init
+        or ProductRiskOfRuinEvaluator.resolve is not evaluator_resolve
     ):
         raise RiskOfRuinIssuanceError(
             "risk-of-ruin product evaluator executable authority was rebound"
         )
-    evaluator = object.__new__(_PRODUCT_EVALUATOR_CLASS)
-    _PRODUCT_EVALUATOR_INIT(evaluator, workspace=workspace)
-    result = _PRODUCT_EVALUATOR_RESOLVE(evaluator, result_id)
+    evaluator = object.__new__(evaluator_class)
+    evaluator_init(evaluator, workspace=workspace)
+    result = evaluator_resolve(evaluator, result_id)
     if type(result) is not IssuedRiskOfRuinResult:
         raise RiskOfRuinIssuanceError(
             "risk-of-ruin product evaluator returned unsupported result type"
         )
     if (
-        ProductRiskOfRuinEvaluator.__init__ is not _PRODUCT_EVALUATOR_INIT
-        or ProductRiskOfRuinEvaluator.resolve is not _PRODUCT_EVALUATOR_RESOLVE
+        ProductRiskOfRuinEvaluator is not evaluator_class
+        or ProductRiskOfRuinEvaluator.__init__ is not evaluator_init
+        or ProductRiskOfRuinEvaluator.resolve is not evaluator_resolve
     ):
         raise RiskOfRuinIssuanceError(
             "risk-of-ruin product evaluator dispatch changed during resolution"
         )
     return result
+
+
+def _bind_product_evaluator_resolver(
+    resolver_impl,
+    evaluator_class,
+    evaluator_init,
+    evaluator_resolve,
+):
+    def _resolve_product_evaluator_result(
+        workspace: Path,
+        result_id: str,
+    ) -> IssuedRiskOfRuinResult:
+        return resolver_impl(
+            workspace,
+            result_id,
+            evaluator_class=evaluator_class,
+            evaluator_init=evaluator_init,
+            evaluator_resolve=evaluator_resolve,
+        )
+
+    return _resolve_product_evaluator_result
+
+
+_resolve_product_evaluator_result = _bind_product_evaluator_resolver(
+    _resolve_product_evaluator_result_impl,
+    ProductRiskOfRuinEvaluator,
+    ProductRiskOfRuinEvaluator.__init__,
+    ProductRiskOfRuinEvaluator.resolve,
+)
+del _bind_product_evaluator_resolver
 
 
 def _product_result_matches_evidence(

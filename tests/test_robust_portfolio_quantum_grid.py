@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_UP, localcontext
 
+import pytest
+
 from autosport.portfolio_plan import PortfolioDependencyEvidence, RobustPortfolioProposal
 
 
@@ -56,7 +58,7 @@ def test_arbitrary_quantum_floors_stressed_value_not_only_decimal_exponent() -> 
         quantum=Decimal("0.05"),
     )
 
-    # Exact stressed values are 7.5075 and 5.9925.  Exponent-only quantize
+    # Exact stressed values are 7.5075 and 5.9925. Exponent-only quantize
     # would produce 7.51 / 5.99; the money grid requires 7.50 / 5.95.
     assert proposal.proposed_stakes == (Decimal("7.50"), Decimal("5.95"))
 
@@ -89,3 +91,25 @@ def test_quantum_larger_than_stressed_stake_conservatively_returns_zero() -> Non
     )
 
     assert proposal.proposed_stakes == (Decimal("0.00"), Decimal("0.05"))
+
+
+def test_quantum_grid_rejects_attacker_sized_coefficient_before_exact_arithmetic() -> None:
+    quantum = Decimal((0, (1,) * 4097, -2))
+
+    with pytest.raises(ValueError, match="coefficient exceeds resource limit"):
+        RobustPortfolioProposal.derive(
+            (Decimal("10.03"), Decimal("20.08")),
+            _evidence(),
+            quantum=quantum,
+        )
+
+
+def test_quantum_grid_rejects_attacker_sized_exponent_before_exact_arithmetic() -> None:
+    quantum = Decimal("1E-4097")
+
+    with pytest.raises(ValueError, match="exponent exceeds resource limit"):
+        RobustPortfolioProposal.derive(
+            (Decimal("0"), Decimal("0")),
+            _evidence(),
+            quantum=quantum,
+        )

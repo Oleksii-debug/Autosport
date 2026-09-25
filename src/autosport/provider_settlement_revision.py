@@ -258,7 +258,6 @@ class ProviderSettlementRevisionChain:
         str | None,
         str | None,
         str | None,
-        str | None,
     ]:
         settlement = revision.settlement
         return (
@@ -271,7 +270,6 @@ class ProviderSettlementRevisionChain:
             settlement.provider_amount_semantics,
             settlement.provider_side,
             _decimal_text(settlement.decimal_odds),
-            settlement.external_receipt_id,
         )
 
     @property

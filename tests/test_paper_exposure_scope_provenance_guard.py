@@ -3,13 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
+from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
-    PaperExposureBinding,
     PreparedPaperExecution,
 )
 from autosport.paper_execution_reality import (
@@ -18,11 +19,9 @@ from autosport.paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
-from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 
 
 QUOTE_AT = "2026-09-25T12:00:00+00:00"
-EXPIRES_AT = "2026-09-25T12:01:00+00:00"
 
 
 def _config() -> PaperExecutionModelConfig:
@@ -44,41 +43,24 @@ def _config() -> PaperExecutionModelConfig:
 
 
 def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
-    action = ExecutionAction(
-        action_id="scope-action",
-        bookmaker_id="paper-venue",
-        account_id="paper-account",
-        event_id="event-1",
-        market_id="winner",
-        selection_id="home",
-        side="BACK",
-        requested_odds="2.00",
-        requested_stake="5.00",
-        quote_id="quote-1",
-        quote_observed_at=QUOTE_AT,
-        expires_at=EXPIRES_AT,
-    )
-    plan = ExecutionPlan(
-        plan_id="scope-plan",
-        bookmaker_profile_version="paper-profile-v1",
+    return runtime.prepare_paper_value_action(
+        event=MarketEvent(
+            event_id="event-1",
+            market_id="winner",
+            selection_id="home",
+            decimal_odds=Decimal("2.00"),
+            observed_ts=QUOTE_AT,
+            source_id="paper-venue",
+            sequence=1,
+            source_ts=QUOTE_AT,
+            ingest_ts=QUOTE_AT,
+            sport="soccer",
+        ),
+        stake=Decimal("5.00"),
         decision_id="scope-decision",
-        approval_id="paper-only-no-real-money",
-        created_at=QUOTE_AT,
-        actions=(action,),
-    )
-    return runtime._mint_prepared(
-        PreparedPaperExecution(
-            execution_plan=plan,
-            exposure_bindings=(
-                PaperExposureBinding(
-                    action_id=action.action_id,
-                    sport="soccer",
-                    bankroll_id="bankroll-eur",
-                    currency="EUR",
-                ),
-            ),
-            intent_evidence_json='{"schema":"focused-regression"}',
-        )
+        account_id="paper-account",
+        bankroll_id="bankroll-eur",
+        currency="EUR",
     )
 
 
@@ -93,6 +75,21 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             paper_book_path=root / "paper-book.json",
         )
         return ledger, runtime
+
+    def test_direct_mint_is_not_an_ambient_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _ledger, runtime = self._runtime(Path(tmp))
+            canonical = _prepared(runtime)
+            caller_authored = PreparedPaperExecution(
+                execution_plan=canonical.execution_plan,
+                exposure_bindings=canonical.exposure_bindings,
+                intent_evidence_json=canonical.intent_evidence_json,
+            )
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "reserved for canonical preparation authority",
+            ):
+                runtime._mint_prepared(caller_authored)
 
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,7 +128,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 events[0]["payload"]["bindings"],
                 [
                     {
-                        "action_id": "scope-action",
+                        "action_id": prepared.execution_plan.actions[0].action_id,
                         "sport": "soccer",
                         "bankroll_id": "bankroll-eur",
                         "currency": "EUR",

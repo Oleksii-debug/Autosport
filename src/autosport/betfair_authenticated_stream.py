@@ -211,7 +211,24 @@ def open_authenticated_market_subscription(
     _validate_json_bounds(market_filter)
     _reject_secret_keys(market_filter)
 
+    # The caller owns ``market_filter`` and can retain/mutate aliases.  Freeze one
+    # canonical byte snapshot inside the authority-bearing issuer itself, detach a
+    # product-owned JSON value from those exact bytes, and use that same detached
+    # value for both the capability hash and the provider request.  This makes every
+    # callable path to this issuer safe, including aliases/wrappers that bypass any
+    # package-level guard.
     market_filter_bytes = _canonical_json_bytes(market_filter)
+    try:
+        sealed_market_filter = json.loads(market_filter_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover
+        raise ValueError("market_filter canonical snapshot is not valid JSON") from exc
+    if type(sealed_market_filter) is not dict or not sealed_market_filter:
+        raise ValueError("market_filter canonical snapshot must be a non-empty object")
+    _validate_json_bounds(sealed_market_filter)
+    _reject_secret_keys(sealed_market_filter)
+    if _canonical_json_bytes(sealed_market_filter) != market_filter_bytes:
+        raise ValueError("market_filter canonical snapshot is not stable")
+
     market_filter_sha256 = sha256(market_filter_bytes).hexdigest()
     provisional_context = BetfairStreamSubscriptionContext(
         upstream_context_sha256="0" * 64,
@@ -236,7 +253,7 @@ def open_authenticated_market_subscription(
         "id": provider_request_id,
         "heartbeatMs": heartbeat_ms,
         "conflateMs": conflate_ms,
-        "marketFilter": market_filter,
+        "marketFilter": sealed_market_filter,
         "marketDataFilter": market_data_filter,
     }
     request_payload = _canonical_json_bytes(request) + b"\r\n"

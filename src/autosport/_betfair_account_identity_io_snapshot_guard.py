@@ -508,6 +508,13 @@ def _install_guard() -> None:
             local_observed_at,
             local_transport_post,
         ) = fresh_call_clones()
+        try:
+            # Reserve from the real canonical client's monotonic sequence before
+            # building the isolated shadow. Reinitializing a fresh shadow at zero
+            # would otherwise reuse JSON-RPC id=1 on every K07 identity read.
+            reserved_request_id = local_next_request_id(client)
+        except BaseException as exc:
+            raise identity_error("K07 request-id authority is unavailable") from exc
         sealed_credentials = credentials_type(
             credentials.application_key,
             credentials.session_token,
@@ -524,7 +531,18 @@ def _install_guard() -> None:
             venue_id=venue_id,
             account_id=account_id,
         )
-        shadow._next_request_id = MethodType(local_next_request_id, shadow)
+        request_id_consumed = False
+
+        def reserved_next_request_id(_shadow) -> int:
+            nonlocal request_id_consumed
+            if request_id_consumed:
+                raise identity_error(
+                    "K07 account-details acquisition attempted multiple request ids"
+                )
+            request_id_consumed = True
+            return reserved_request_id
+
+        shadow._next_request_id = MethodType(reserved_next_request_id, shadow)
         shadow._observed_at = MethodType(local_observed_at, shadow)
 
         captured: list[object] = []

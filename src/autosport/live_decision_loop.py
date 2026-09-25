@@ -1493,18 +1493,35 @@ class PersistentLiveDecisionLoop:
                 ),
             )
             produced = self.intent_factory(input_id, focused)
-            self._intent_cache[input_id] = self._validated_intents(produced)
+            self._intent_cache[input_id] = self._validated_intents(
+                produced,
+                snapshot=focused,
+            )
 
-    def _validated_intents(self, produced: object) -> tuple[object, ...]:
+    def _validated_intents(
+        self,
+        produced: object,
+        *,
+        snapshot: MirrorSnapshot,
+    ) -> tuple[object, ...]:
         from .portfolio_plan import OpportunityIntent
 
         self._verify_intent_factory_provenance()
+        if not isinstance(snapshot, MirrorSnapshot):
+            raise TypeError("snapshot must be a MirrorSnapshot")
         if type(produced) is not tuple:
             raise TypeError("intent_factory must return a tuple")
         if any(not isinstance(intent, OpportunityIntent) for intent in produced):
             raise TypeError(
                 "intent_factory must return only canonical OpportunityIntent values"
             )
+        visible_event_sha256s = frozenset(
+            _canonical_json_sha256(event.to_dict())
+            for event in snapshot.events
+        )
+        decision_snapshot_sha256 = _canonical_json_sha256(
+            [event.to_dict() for event in snapshot.events]
+        )
         provenance = self.intent_provenance
         for intent in produced:
             if intent.strategy_id != provenance.strategy_version_id:
@@ -1519,6 +1536,18 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "live intent model identity does not match registered StrategyVersion"
                 )
+            for quote in intent.opportunity.quotes:
+                if quote.market_snapshot_hash != decision_snapshot_sha256:
+                    raise LiveDecisionProgressError(
+                        "live intent snapshot identity does not match the "
+                        "decision-visible snapshot"
+                    )
+            for quote_event in intent.risk_context.quotes:
+                quote_sha256 = _canonical_json_sha256(quote_event.to_dict())
+                if quote_sha256 not in visible_event_sha256s:
+                    raise LiveDecisionProgressError(
+                        "live intent quote is outside the decision-visible snapshot"
+                    )
         return produced
 
     def _capture_input_views(
@@ -1553,7 +1582,10 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         for input_id, snapshot in snapshots.items():
             produced = self.intent_factory(input_id, snapshot)
-            self._intent_cache[input_id] = self._validated_intents(produced)
+            self._intent_cache[input_id] = self._validated_intents(
+                produced,
+                snapshot=snapshot,
+            )
 
     def _all_cached_intents(self) -> tuple[object, ...]:
         flattened: list[object] = []

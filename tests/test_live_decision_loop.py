@@ -30,6 +30,7 @@ from autosport.live_decision_loop import (
     PersistentLiveDecisionLoop,
 )
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror import MirrorSnapshot
 from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
@@ -116,9 +117,11 @@ class _PositiveIntentFactory:
         self,
         config_sha256: str,
         strategy_version_id: str = "live-test-strategy-v1",
+        snapshot_hash_override: str | None = None,
     ) -> None:
         self.strategy_version_id = strategy_version_id
         self.config_sha256 = config_sha256
+        self.snapshot_hash_override = snapshot_hash_override
         self.calls = 0
 
     def __call__(self, input_id, snapshot):
@@ -142,9 +145,22 @@ class _PositiveIntentFactory:
             currency="EUR",
             proposal_ts=event.observed_ts,
         )
+        snapshot_hash = hashlib.sha256(
+            json.dumps(
+                [visible.to_dict() for visible in snapshot.events],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
         quote = QuoteRef.from_market_event(
             event,
-            market_snapshot_hash="9" * 64,
+            market_snapshot_hash=(
+                snapshot_hash
+                if self.snapshot_hash_override is None
+                else self.snapshot_hash_override
+            ),
         )
         opportunity = Opportunity(
             strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
@@ -374,7 +390,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 LiveDecisionProgressError,
                 "strategy identity does not match registered StrategyVersion",
             ):
-                loop._validated_intents((forged,))
+                loop._validated_intents(
+                    (forged,),
+                    snapshot=MirrorSnapshot(revision=0, events=()),
+                )
 
     def test_positive_paper_plan_without_execution_adoption_fails_closed_before_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1590,6 +1609,119 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
+
+    def test_stale_snapshot_cannot_reintroduce_cached_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            stale_event = self._event(sequence=1)
+            seed_factory = _PositiveIntentFactory(self.INTENT_CONFIG_SHA256)
+            cached_intents = seed_factory(
+                "input-a",
+                MirrorSnapshot(revision=1, events=(stale_event,)),
+            )
+            self.assertEqual(len(cached_intents), 1)
+
+            def stale_factory(input_id, snapshot):
+                self.assertEqual(input_id, "input-a")
+                self.assertEqual(snapshot.events, ())
+                return cached_intents
+
+            stale_factory.strategy_version_id = "live-test-strategy-v1"
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(stale_event,)]),
+                factory=stale_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=7)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "outside the decision-visible snapshot",
+            ):
+                loop.run_cycle()
+
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop.book.tickets, {})
+
+    def test_exact_snapshot_allows_intent_bound_to_visible_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(sequence=1)
+            snapshot = MirrorSnapshot(revision=1, events=(event,))
+            factory = _PositiveIntentFactory(self.INTENT_CONFIG_SHA256)
+            intents = factory("input-a", snapshot)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+
+            self.assertEqual(
+                loop._validated_intents(intents, snapshot=snapshot),
+                intents,
+            )
+
+    def test_visible_quote_with_foreign_snapshot_identity_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(sequence=1)
+            snapshot = MirrorSnapshot(revision=1, events=(event,))
+            factory = _PositiveIntentFactory(
+                self.INTENT_CONFIG_SHA256,
+                snapshot_hash_override="9" * 64,
+            )
+            intents = factory("input-a", snapshot)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "snapshot identity does not match the decision-visible snapshot",
+            ):
+                loop._validated_intents(intents, snapshot=snapshot)
+
+    def test_cached_intent_cannot_relabel_unchanged_quote_as_new_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            quoted = self._event(selection="selection-a", sequence=1)
+            context_before = self._event(
+                selection="selection-b",
+                sequence=1,
+                odds="3.00",
+            )
+            context_after = self._event(
+                selection="selection-b",
+                sequence=2,
+                odds="3.10",
+            )
+            old_snapshot = MirrorSnapshot(
+                revision=1,
+                events=(quoted, context_before),
+            )
+            new_snapshot = MirrorSnapshot(
+                revision=2,
+                events=(quoted, context_after),
+            )
+            factory = _PositiveIntentFactory(self.INTENT_CONFIG_SHA256)
+            cached_intents = factory("input-a", old_snapshot)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "snapshot identity does not match the decision-visible snapshot",
+            ):
+                loop._validated_intents(cached_intents, snapshot=new_snapshot)
 
     def test_pause_and_stop_are_durable_and_do_not_poll_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

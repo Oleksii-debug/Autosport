@@ -56,7 +56,7 @@ def _canonical_selector(value: _Selector, field: str) -> _Selector:
         for item in value
     ):
         raise ValueError(f"{field} must contain non-empty trimmed strings")
-    if len(set(value)) != len(value) or value != tuple(sorted(value)):
+    if len(set(value)) != len(set(value)) or value != tuple(sorted(value)):
         raise ValueError(f"{field} must be sorted and unique")
     return value
 
@@ -79,6 +79,177 @@ def _verified_live_recovery_cursor(workspace: Path) -> _Progress | None:
         raise ProductPaperDecisionCycleError(
             "live decision recovery cursor cannot be verified before PaperBook bootstrap"
         ) from exc
+
+
+def _make_product_authority_resolver(
+    *,
+    activation_store_class,
+    economic_goal_store_class,
+    risk_policy_store_class,
+    authority_class,
+    provenance_resolver,
+    intent_producer_class,
+    path_class,
+    decimal_class,
+):
+    """Freeze the exact supported-START authority dispatch at module composition time."""
+
+    activation_store_init = activation_store_class.__dict__.get("__init__")
+    activation_store_load = activation_store_class.__dict__.get("load")
+    activation_store_verify = activation_store_class.__dict__.get("verify")
+    goal_store_init = economic_goal_store_class.__dict__.get("__init__")
+    goal_store_load = economic_goal_store_class.__dict__.get("load")
+    risk_store_init = risk_policy_store_class.__dict__.get("__init__")
+    risk_store_load = risk_policy_store_class.__dict__.get("load")
+    authority_init = authority_class.__dict__.get("__init__")
+    authority_eq = authority_class.__dict__.get("__eq__")
+    authority_post_init = authority_class.__dict__.get("__post_init__")
+    provenance_code = getattr(provenance_resolver, "__code__", None)
+    registered_strategy_member = intent_producer_class.REGISTERED_STRATEGY
+    object_new = object.__new__
+
+    required_callables = (
+        activation_store_init,
+        activation_store_load,
+        activation_store_verify,
+        goal_store_init,
+        goal_store_load,
+        risk_store_init,
+        risk_store_load,
+        authority_init,
+        authority_eq,
+        provenance_resolver,
+    )
+    if any(not callable(value) for value in required_callables):
+        raise RuntimeError("supported PAPER decision authority dispatch is incomplete")
+
+    def _require_canonical_dispatch() -> None:
+        if (
+            ProductDecisionActivationStore is not activation_store_class
+            or EconomicGoalStore is not economic_goal_store_class
+            or PaperRiskPolicyStore is not risk_policy_store_class
+            or EconomicDecisionAuthority is not authority_class
+            or provenance_for is not provenance_resolver
+            or BuiltInIntentProducer is not intent_producer_class
+            or Path is not path_class
+            or Decimal is not decimal_class
+            or activation_store_class.__dict__.get("__init__")
+            is not activation_store_init
+            or activation_store_class.__dict__.get("load") is not activation_store_load
+            or activation_store_class.__dict__.get("verify")
+            is not activation_store_verify
+            or economic_goal_store_class.__dict__.get("__init__") is not goal_store_init
+            or economic_goal_store_class.__dict__.get("load") is not goal_store_load
+            or risk_policy_store_class.__dict__.get("__init__") is not risk_store_init
+            or risk_policy_store_class.__dict__.get("load") is not risk_store_load
+            or authority_class.__dict__.get("__init__") is not authority_init
+            or authority_class.__dict__.get("__eq__") is not authority_eq
+            or authority_class.__dict__.get("__post_init__") is not authority_post_init
+            or getattr(provenance_for, "__code__", None) is not provenance_code
+            or intent_producer_class.REGISTERED_STRATEGY
+            is not registered_strategy_member
+        ):
+            raise ProductPaperDecisionCycleError(
+                "canonical supported START decision-authority dispatch changed"
+            )
+
+    def _construct(store_class, store_init, workspace):
+        instance = object_new(store_class)
+        store_init(instance, workspace)
+        return instance
+
+    def resolve(self):
+        _require_canonical_dispatch()
+        workspace = path_class(self.runtime.workspace)
+        try:
+            activation_store = _construct(
+                activation_store_class,
+                activation_store_init,
+                workspace,
+            )
+            activation = activation_store_load(activation_store)
+            goal_store = _construct(
+                economic_goal_store_class,
+                goal_store_init,
+                workspace,
+            )
+            economic_goal = goal_store_load(goal_store)
+            goal_provenance = provenance_resolver(economic_goal)
+            if goal_provenance.contract_sha256 != activation.economic_goal_contract_sha256:
+                raise ProductPaperDecisionCycleError(
+                    "durable EconomicGoalContract does not match supported START activation"
+                )
+            if (
+                economic_goal.goal_id != activation.goal_id
+                or economic_goal.revision != activation.goal_revision
+                or economic_goal.bankroll_id != activation.bankroll_id
+                or economic_goal.currency != activation.currency
+            ):
+                raise ProductPaperDecisionCycleError(
+                    "durable EconomicGoalContract identity does not match supported START activation"
+                )
+            risk_store = _construct(
+                risk_policy_store_class,
+                risk_store_init,
+                workspace,
+            )
+            risk_policy = risk_store_load(
+                risk_store,
+                economic_goal=economic_goal,
+                expected_policy_provenance_sha256=activation.risk_policy_provenance_sha256,
+            )
+            verified_activation = activation_store_verify(
+                activation_store,
+                scientific_registry=self.scientific_registry,
+                strategy_version_id=self.intent_factory.strategy_version_id,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                execution_config=self.execution_config,
+                intent_producer=registered_strategy_member,
+            )
+        except ProductPaperDecisionCycleError:
+            raise
+        except Exception as exc:
+            raise ProductPaperDecisionCycleError(
+                "supported PAPER decision authority cannot be reconstructed from durable START authority"
+            ) from exc
+
+        if verified_activation != activation:
+            raise ProductPaperDecisionCycleError(
+                "supported START activation changed during decision authority reconstruction"
+            )
+        durable_authority = object_new(authority_class)
+        authority_init(durable_authority, economic_goal, risk_policy)
+        if type(self.authority) is not authority_class or not authority_eq(
+            durable_authority,
+            self.authority,
+        ):
+            raise ProductPaperDecisionCycleError(
+                "caller-supplied decision authority does not match durable supported START authority"
+            )
+        max_quote_age_seconds = (
+            decimal_class(self.max_quote_age.days * 86400 + self.max_quote_age.seconds)
+            + decimal_class(self.max_quote_age.microseconds) / decimal_class(1_000_000)
+        )
+        if max_quote_age_seconds > durable_authority.contract.max_quote_age_seconds:
+            raise ProductPaperDecisionCycleError(
+                "configured max_quote_age exceeds durable EconomicGoalContract authority"
+            )
+        return durable_authority
+
+    return resolve
+
+
+_CANONICAL_PRODUCT_AUTHORITY_RESOLVER = _make_product_authority_resolver(
+    activation_store_class=ProductDecisionActivationStore,
+    economic_goal_store_class=EconomicGoalStore,
+    risk_policy_store_class=PaperRiskPolicyStore,
+    authority_class=EconomicDecisionAuthority,
+    provenance_resolver=provenance_for,
+    intent_producer_class=BuiltInIntentProducer,
+    path_class=Path,
+    decimal_class=Decimal,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,71 +416,7 @@ class ProductPaperDecisionCycle:
     def workspace(self) -> Path:
         return Path(self.runtime.workspace)
 
-    def _resolve_product_authority(self) -> EconomicDecisionAuthority:
-        """Reconstruct the supported decision authority from durable owner truth.
-
-        ``self.authority`` remains a compatibility expectation for low-level callers;
-        supported ``tick()`` never forwards that caller-created object.  It re-resolves
-        the exact EconomicGoalContract and PaperRiskPolicy, verifies the sealed product
-        activation against current scientific/execution/product composition, and then
-        creates a fresh EconomicDecisionAuthority from those durable objects.
-        """
-
-        try:
-            activation_store = ProductDecisionActivationStore(self.workspace)
-            activation = activation_store.load()
-            economic_goal = EconomicGoalStore(self.workspace).load()
-            goal_provenance = provenance_for(economic_goal)
-            if goal_provenance.contract_sha256 != activation.economic_goal_contract_sha256:
-                raise ProductPaperDecisionCycleError(
-                    "durable EconomicGoalContract does not match supported START activation"
-                )
-            if (
-                economic_goal.goal_id != activation.goal_id
-                or economic_goal.revision != activation.goal_revision
-                or economic_goal.bankroll_id != activation.bankroll_id
-                or economic_goal.currency != activation.currency
-            ):
-                raise ProductPaperDecisionCycleError(
-                    "durable EconomicGoalContract identity does not match supported START activation"
-                )
-            risk_policy = PaperRiskPolicyStore(self.workspace).load(
-                economic_goal=economic_goal,
-                expected_policy_provenance_sha256=activation.risk_policy_provenance_sha256,
-            )
-            verified_activation = activation_store.verify(
-                scientific_registry=self.scientific_registry,
-                strategy_version_id=self.intent_factory.strategy_version_id,
-                economic_goal=economic_goal,
-                risk_policy=risk_policy,
-                execution_config=self.execution_config,
-                intent_producer=BuiltInIntentProducer.REGISTERED_STRATEGY,
-            )
-        except ProductPaperDecisionCycleError:
-            raise
-        except Exception as exc:
-            raise ProductPaperDecisionCycleError(
-                "supported PAPER decision authority cannot be reconstructed from durable START authority"
-            ) from exc
-
-        if verified_activation != activation:
-            raise ProductPaperDecisionCycleError(
-                "supported START activation changed during decision authority reconstruction"
-            )
-        durable_authority = EconomicDecisionAuthority(economic_goal, risk_policy)
-        if durable_authority != self.authority:
-            raise ProductPaperDecisionCycleError(
-                "caller-supplied decision authority does not match durable supported START authority"
-            )
-        max_quote_age_seconds = (
-            Decimal(self.max_quote_age.days * 86400 + self.max_quote_age.seconds)
-            + Decimal(self.max_quote_age.microseconds) / Decimal(1_000_000)
-        )
-        if max_quote_age_seconds > durable_authority.contract.max_quote_age_seconds:
-            raise ProductPaperDecisionCycleError(
-                "configured max_quote_age exceeds durable EconomicGoalContract authority"
-            )
-        return durable_authority
+    _resolve_product_authority = _CANONICAL_PRODUCT_AUTHORITY_RESOLVER
 
     def _require_running_runtime(self) -> None:
         try:

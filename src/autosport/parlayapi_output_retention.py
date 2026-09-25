@@ -51,9 +51,10 @@ class ParlayApiOutputRetentionEvidence:
     separate re-resolvable authority, not an unchecked field here.
 
     ``available_at`` is the first causal provider-availability time known to this
-    evidence; an output cannot be captured before that instant. ``policy_identity``
-    is allowed to describe an older historical capture so an as-of audit can
-    reconstruct the evidence. New captures should use
+    evidence; an output cannot be captured before that instant. Replay of this exact
+    capture is additionally bounded by ``captured_at`` because product knowledge
+    cannot predate acquisition. ``policy_identity`` may describe an older historical
+    capture so an as-of audit can reconstruct the evidence. New captures should use
     :func:`new_capture_retention_evidence`, which binds the current policy identity.
     """
 
@@ -139,7 +140,7 @@ class ParlayApiOutputRetentionEvidence:
         _require_text(current_policy_identity, "current_policy_identity")
         deadline = self.effective_retention_deadline()
 
-        if as_of < self.available_at:
+        if as_of < self.captured_at:
             return ParlayApiRetentionDecision(
                 state=ParlayApiRetentionState.NOT_YET_AVAILABLE,
                 effective_retention_deadline=deadline,
@@ -147,7 +148,7 @@ class ParlayApiOutputRetentionEvidence:
                 training_corpus_allowed=False,
                 raw_redistribution_allowed=False,
                 delete_raw_output=False,
-                reason="provider Output was not yet available at this cutoff",
+                reason="this provider Output capture did not yet exist at this cutoff",
             )
 
         # Binding deletion/expiry always wins over a policy-version review. A
@@ -364,8 +365,14 @@ def _cache_control_deadline(
                 raise ParlayApiRetentionError(
                     f"{normalized} cache-control directive requires non-negative integer seconds"
                 )
-            seconds = int(raw)
-            deadlines.append(captured_at + timedelta(seconds=seconds))
+            try:
+                seconds = int(raw)
+                deadline = captured_at + timedelta(seconds=seconds)
+            except (OverflowError, ValueError) as exc:
+                raise ParlayApiRetentionError(
+                    f"{normalized} cache-control age exceeds supported datetime range"
+                ) from exc
+            deadlines.append(deadline)
     return min(deadlines) if deadlines else None
 
 

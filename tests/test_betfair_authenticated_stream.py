@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from decimal import Decimal
 
@@ -90,9 +91,11 @@ def _subscription_status(*, request_id: int = 7, success: bool = True) -> bytes:
 def _mcm(
     *,
     request_id: int = 7,
-    pt: int = 1000,
+    pt: int | None = None,
     runners: list[dict[str, object]] | None = None,
 ) -> bytes:
+    if pt is None:
+        pt = time.time_ns() // 1_000_000
     payload = {
         "op": "mcm",
         "id": request_id,
@@ -169,30 +172,22 @@ def _fresh_decision(
     stream.BetfairStreamTlsTransport,
     BetfairAuthenticatedStreamFreshnessRuntime,
     BetfairAuthenticatedFreshnessDecision,
-    list[int],
 ]:
-    from autosport import betfair_authenticated_stream as auth
-
-    clock_ns = [1_010_000_000]
-    monkeypatch.setattr(auth.time, "time_ns", lambda: clock_ns[0])
     transport, _ = _transport(monkeypatch, _subscription_status() + _mcm())
     subscription = _open(transport)
     runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
     runtime.read_and_ingest()
     decision = runtime.evaluate(
         _identity(),
-        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
     )
     assert decision.decision_eligible
-    return transport, runtime, decision, clock_ns
+    return transport, runtime, decision
 
 
 def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from autosport import betfair_authenticated_stream as auth
-
-    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
     transport, fake = _transport(
         monkeypatch,
         _subscription_status() + _mcm(),
@@ -215,7 +210,7 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert len(evidence) == 1
     decision = runtime.evaluate(
         _identity(),
-        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
     )
     assert (
         decision.verdict
@@ -231,19 +226,34 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert not subscription.real_money_authorized
 
 
-def test_positive_decision_expires_under_original_freshness_policy(
+def test_public_clock_rebinding_revokes_already_issued_positive_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _transport_value, _runtime, decision, clock_ns = _fresh_decision(monkeypatch)
+    from autosport import betfair_authenticated_stream as auth
 
-    clock_ns[0] = 1_100_000_000
+    _transport_value, _runtime, decision = _fresh_decision(monkeypatch)
+    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+
     assert not decision.decision_eligible
+
+
+def test_clock_rebinding_before_runtime_construction_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    transport, _ = _transport(monkeypatch, _subscription_status())
+    subscription = _open(transport)
+    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+
+    with pytest.raises(BetfairAuthenticatedStreamError, match="wall-clock dispatch changed"):
+        BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
 
 
 def test_disconnect_revokes_already_issued_positive_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport, _runtime, decision, _clock_ns = _fresh_decision(monkeypatch)
+    transport, _runtime, decision = _fresh_decision(monkeypatch)
 
     transport.close()
     assert not decision.decision_eligible
@@ -316,9 +326,6 @@ def test_prior_post_auth_frame_prevents_subscription_relabeling(
 def test_old_subscription_message_is_rejected_before_freshness_state_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from autosport import betfair_authenticated_stream as auth
-
-    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
     transport, _ = _transport(
         monkeypatch,
         _subscription_status() + _mcm(request_id=6),
@@ -330,7 +337,7 @@ def test_old_subscription_message_is_rejected_before_freshness_state_mutation(
         runtime.read_and_ingest()
     decision = runtime.evaluate(
         _identity(),
-        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
     )
     assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
     assert not decision.decision_eligible
@@ -417,7 +424,6 @@ def test_transport_origin_tracking_is_bounded_and_overflow_fails_closed(
 ) -> None:
     from autosport import betfair_authenticated_stream as auth
 
-    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
     monkeypatch.setattr(auth, "_MAX_TRACKED_AUTHORITATIVE_QUOTES", 1)
     transport, _ = _transport(
         monkeypatch,
@@ -436,7 +442,7 @@ def test_transport_origin_tracking_is_bounded_and_overflow_fails_closed(
         runtime.read_and_ingest()
     decision = runtime.evaluate(
         _identity(1),
-        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
     )
     assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
     assert not decision.decision_eligible

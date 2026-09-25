@@ -117,10 +117,6 @@ def _install() -> None:
         False,
     ):
         return
-    _RunTransaction._autosport_retained_base_crash_original_precommit = _ORIGINAL_PRECOMMIT
-    _RunTransaction._autosport_retained_base_crash_original_validate_precommit = (
-        _ORIGINAL_VALIDATE_PRECOMMIT
-    )
     _RunTransaction.precommit = _precommit_with_retained_base
     _RunTransaction._validate_precommit_evidence = _validate_precommit_with_retained_base
     _RunTransaction._autosport_retained_base_crash_guard_v1 = True

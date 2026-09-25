@@ -153,3 +153,9 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# Reproducibility bundles contain Experiment outcome. Their outward file-export path
+# therefore consumes the canonically resolved confirmation holdout before publication;
+# legacy direct export is fail-closed so callers cannot substitute holdout identity.
+from . import scientific_disclosure_export as _scientific_disclosure_export  # noqa: F401,E402
+from . import _scientific_disclosure_export_reload_guard as _scientific_disclosure_export_reload_guard  # noqa: F401,E402

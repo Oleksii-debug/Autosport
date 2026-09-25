@@ -445,9 +445,9 @@ def inspect_fixed_n_iid_occurrences(
             occurrence.member_id,
             f"occurrences[{index}].member_id",
         )
-        if occurrence.member_index != index or isinstance(occurrence.member_index, bool):
+        if type(occurrence.member_index) is not int or occurrence.member_index != index:
             raise RiskSamplingDependenceError(
-                "occurrence member_index must equal its frozen member position"
+                "occurrence member_index must be an exact integer equal to its frozen member position"
             )
         if member_id != expected_member_id:
             raise RiskSamplingDependenceError(

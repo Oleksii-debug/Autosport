@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from datetime import timedelta
@@ -265,6 +267,32 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 )
             self.assertEqual(ledger.events(), ())
 
+    def test_reserved_append_has_no_mutable_publisher_code_cell(self) -> None:
+        guarded = PaperExecutionLedger._append_event
+        cells = dict(
+            zip(
+                guarded.__code__.co_freevars,
+                guarded.__closure__ or (),
+                strict=True,
+            )
+        )
+        self.assertNotIn("publisher_code", cells)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical adoption authority",
+            ):
+                guarded(
+                    ledger,
+                    event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                    run_id="forged-closure-run",
+                    key="forged-closure-run:exposure-scope",
+                    payload={"forged": True},
+                )
+            self.assertEqual(ledger.events(), ())
+
     def test_guarded_generic_append_preserves_non_reserved_ledger_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
@@ -494,6 +522,26 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                         "currency": "EUR",
                     }
                 ],
+            )
+            payload = scope["payload"]
+            self.assertEqual(
+                payload["intent_evidence_sha256"],
+                hashlib.sha256(
+                    prepared.intent_evidence_json.encode("utf-8")
+                ).hexdigest(),
+            )
+            body = dict(payload)
+            binding_sha256 = body.pop("binding_sha256")
+            encoded = json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.assertEqual(
+                binding_sha256,
+                hashlib.sha256(encoded).hexdigest(),
             )
 
     def test_unminted_prepared_cannot_enter_canonical_execute_path(self) -> None:

@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Context, Decimal, DecimalException, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -247,6 +247,105 @@ class ForecastEvaluationSummary:
     model_versions: tuple[str, ...]
     strategy_versions: tuple[str, ...]
 
+_LOG_LOSS_MIN_DECIMAL_PRECISION = 64
+_LOG_LOSS_MAX_DECIMAL_COEFFICIENT_DIGITS = 4096
+_LOG_LOSS_MAX_DECIMAL_ABS_EFFECTIVE_EXPONENT = 1_000_000
+
+
+def _binary_log_loss(probability: Decimal, outcome: int) -> float:
+    """Return binary log loss without changing the declared Decimal probability.
+
+    Impossible realized endpoint predictions have unbounded log loss. Interior
+    loss is evaluated in a deterministic Decimal context sized to preserve the
+    declared decimal scale; only the final summary scalar is converted to float.
+    """
+
+    if not isinstance(probability, Decimal) or not probability.is_finite():
+        raise ValueError("log-loss probability must be a finite Decimal")
+    if probability < 0 or probability > 1:
+        raise ValueError("log-loss probability must be between 0 and 1")
+    if outcome not in (0, 1):
+        raise ValueError("log-loss outcome must be 0 or 1")
+
+    if probability == 0:
+        if outcome == 0:
+            return 0.0
+        raise ValueError(
+            "log loss is unbounded for probability=0 and realized outcome=1"
+        )
+    if probability == 1:
+        if outcome == 1:
+            return 0.0
+        raise ValueError(
+            "log loss is unbounded for probability=1 and realized outcome=0"
+        )
+
+    decimal_tuple = probability.as_tuple()
+    if len(decimal_tuple.digits) > _LOG_LOSS_MAX_DECIMAL_COEFFICIENT_DIGITS:
+        raise ValueError(
+            "log-loss probability Decimal coefficient exceeds supported resource bound"
+        )
+    raw_exponent = decimal_tuple.exponent
+    if not isinstance(raw_exponent, int):
+        raise ValueError("log-loss probability Decimal exponent must be an integer")
+    significant_digits = len(decimal_tuple.digits)
+    while (
+        significant_digits > 1
+        and decimal_tuple.digits[significant_digits - 1] == 0
+    ):
+        significant_digits -= 1
+    trailing_zeros = len(decimal_tuple.digits) - significant_digits
+    effective_exponent = raw_exponent + trailing_zeros
+    if abs(effective_exponent) > _LOG_LOSS_MAX_DECIMAL_ABS_EFFECTIVE_EXPONENT:
+        raise ValueError(
+            "log-loss probability Decimal exponent exceeds supported resource bound"
+        )
+
+    if outcome == 0 and float(probability) == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+
+    decimal_places = -effective_exponent if effective_exponent < 0 else 0
+    precision = max(
+        _LOG_LOSS_MIN_DECIMAL_PRECISION,
+        significant_digits + 2,
+        decimal_places + 2 if outcome == 0 else 0,
+    )
+    context = Context(
+        prec=precision,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999_999_999,
+        Emax=999_999_999,
+        capitals=1,
+        clamp=0,
+    )
+    try:
+        with localcontext(context):
+            if outcome == 1:
+                decimal_loss = -probability.ln()
+            else:
+                complement = Decimal(1) - probability
+                if complement <= 0:
+                    raise ValueError(
+                        "interior probability complement is not positive"
+                    )
+                decimal_loss = -complement.ln()
+    except DecimalException as exc:
+        raise ValueError(
+            "declared probability cannot be evaluated in the canonical "
+            "Decimal log-loss context"
+        ) from exc
+
+    binary_loss = float(decimal_loss)
+    if not math.isfinite(binary_loss):
+        raise ValueError("log loss is not representable as a finite binary64 value")
+    if decimal_loss != 0 and binary_loss == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+    return binary_loss
+
 
 def evaluate_forecast_window(
     records: Iterable[ForecastRecord],
@@ -289,13 +388,10 @@ def evaluate_forecast_window(
     probabilities = [float(record.probability) for record, _fact in selected]
     actuals = [fact.outcome for _record, fact in selected]
     brier = sum((p - y) ** 2 for p, y in zip(probabilities, actuals, strict=True)) / len(selected)
-    epsilon = 1e-15
-    losses = []
-    for probability, outcome in zip(probabilities, actuals, strict=True):
-        clipped = min(1.0 - epsilon, max(epsilon, probability))
-        losses.append(
-            -(outcome * math.log(clipped) + (1 - outcome) * math.log(1 - clipped))
-        )
+    losses = [
+        _binary_log_loss(record.probability, fact.outcome)
+        for record, fact in selected
+    ]
     mean_uncertainty = sum(
         float(record.uncertainty) for record, _fact in selected
     ) / len(selected)

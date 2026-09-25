@@ -408,7 +408,7 @@ def run_product(
             else:
                 sleep(float(poll_seconds))
         return exit_code
-    except Exception as exc:
+    except BaseException as exc:
         if started:
             if isinstance(exc, ProductRuntimeError):
                 raise
@@ -467,7 +467,7 @@ def run_product(
                         pass
 
         if cleanup_failure is not None:
-            if started and isinstance(cleanup_failure, Exception):
+            if started:
                 raise ProductRuntimeError(
                     type(cleanup_failure).__name__
                 ) from cleanup_failure
@@ -500,7 +500,7 @@ def run_product_command(
             output_format=output_format,
         )
         return 4
-    except Exception as exc:
+    except BaseException as exc:
         try:
             output_format = _validated_output_format(output_format)
         except ValueError:

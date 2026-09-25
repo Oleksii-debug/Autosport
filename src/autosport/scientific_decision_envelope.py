@@ -1,8 +1,10 @@
-"""Fail-closed causal sealing for scientific pre-decision evidence.
+"""Fail-closed sealing for scientific pre-decision evidence assertions.
 
-This module records what was knowable when a decision (including an explicit
-abstention) was made.  It is scientific evidence only: it grants no execution,
-risk, provider-write, or real-money authority.
+This module records the identity and chronology asserted for evidence presented to a
+decision path. Caller-created evidence references are deliberately not product-owned
+proof that the evidence was causally available at the asserted time. The envelope is
+scientific structure only: it grants no causal-availability, execution, risk,
+provider-write, promotion, or real-money authority.
 """
 from __future__ import annotations
 
@@ -80,7 +82,14 @@ def _digest(payload: Mapping[str, Any]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class CausalEvidenceRef:
-    """One immutable reference to evidence available before the decision."""
+    """One immutable caller assertion about evidence chronology and identity.
+
+    Structural ordering is validated, but ordinary construction does not prove that
+    the product actually observed or durably published the evidence at ``available_at``.
+    Consumers requiring scientific causal-availability authority must therefore use a
+    separate product-owned availability/trust receipt and must not treat this DTO as
+    that receipt.
+    """
 
     evidence_id: str
     kind: EvidenceKind
@@ -102,6 +111,12 @@ class CausalEvidenceRef:
         if ingested > available:
             raise DecisionEnvelopeError("ingested_at must not be after available_at")
 
+    @property
+    def availability_authority_proven(self) -> bool:
+        """Caller-authored chronology is never product-owned availability authority."""
+
+        return False
+
     def canonical_payload(self) -> dict[str, Any]:
         return {
             "evidence_id": self.evidence_id,
@@ -110,15 +125,15 @@ class CausalEvidenceRef:
             "event_at": _time(self.event_at, "event_at"),
             "ingested_at": _time(self.ingested_at, "ingested_at"),
             "available_at": _time(self.available_at, "available_at"),
+            "availability_authority_proven": False,
         }
-
 
 
 def evidence_snapshot_sha256(
     evidence: tuple[CausalEvidenceRef, ...],
     kind: EvidenceKind,
 ) -> str:
-    """Hash the exact canonical evidence subset for one scientific surface."""
+    """Hash the exact canonical assertion subset for one scientific surface."""
 
     if not isinstance(evidence, tuple):
         raise DecisionEnvelopeError("evidence must be a tuple")
@@ -132,15 +147,18 @@ def evidence_snapshot_sha256(
     )
     if not selected:
         raise DecisionEnvelopeError(f"{kind.value} evidence must not be empty")
-    return _digest({"kind": kind.value, "evidence": selected, "schema_version": 1})
+    return _digest({"kind": kind.value, "evidence": selected, "schema_version": 2})
 
 
 @dataclass(frozen=True, slots=True)
 class SealedDecisionEnvelope:
-    """Canonical pre-decision scientific envelope.
+    """Canonical pre-decision scientific assertion envelope.
 
-    The envelope is intentionally not an authority token.  It proves only the
-    identity and causal timing of the evidence set presented to a decision path.
+    The envelope seals exactly what a caller presented and when the caller asserted it
+    was available. It does not prove the product-owned causal availability of those
+    inputs. This distinction is machine-readable and non-overridable so downstream
+    evaluation/promotion code cannot lawfully interpret the sealed timestamps as a
+    positive availability receipt.
     """
 
     protocol_id: str
@@ -244,10 +262,24 @@ class SealedDecisionEnvelope:
             abstention_reason=abstention_reason,
         )
 
+    @property
+    def availability_authority_proven(self) -> bool:
+        """This contract never upgrades asserted timestamps into causal authority."""
+
+        return False
+
+    def require_product_proven_causal_availability(self) -> None:
+        """Fail closed for consumers that require authoritative causal availability."""
+
+        raise DecisionEnvelopeError(
+            "sealed decision envelope contains caller-asserted chronology only; "
+            "product-owned causal availability authority is unproven"
+        )
+
     def canonical_payload(self) -> dict[str, Any]:
         return {
             "schema": "autosport.sealed_decision_envelope",
-            "schema_version": 1,
+            "schema_version": 2,
             "protocol_id": self.protocol_id,
             "decision_id": self.decision_id,
             "decision_at": _time(self.decision_at, "decision_at"),
@@ -259,6 +291,8 @@ class SealedDecisionEnvelope:
             "feature_snapshot_sha256": self.feature_snapshot_sha256,
             "market_snapshot_sha256": self.market_snapshot_sha256,
             "evidence": [item.canonical_payload() for item in self.evidence],
+            "availability_authority_proven": False,
+            "availability_semantics": "caller_asserted_ordering_only",
             "authority_grant": False,
         }
 

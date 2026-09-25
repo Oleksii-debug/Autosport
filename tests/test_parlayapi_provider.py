@@ -119,6 +119,48 @@ class ParlayApiProviderTests(unittest.TestCase):
         self.assertEqual(batch.quotes[0].metadata["bookmaker_key"], "book-a")
         self.assertFalse(batch.quotes[0].metadata["public_preview"])
 
+    def test_explicit_cross_sport_payload_is_rejected_before_quote_relabeling(self):
+        event = dict(SAMPLE_EVENT)
+        event["sport_key"] = "basketball_nba"
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse([event], 200, {}),
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "sport_key does not match configured provider sport",
+        ):
+            provider.read_batch()
+
+    def test_missing_sport_key_preserves_configured_table_tennis_identity(self):
+        event = dict(SAMPLE_EVENT)
+        event.pop("sport_key")
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse([event], 200, {}),
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+
+        batch = provider.read_batch(max_items=1)
+
+        self.assertEqual(batch.source_id, "parlayapi:table_tennis")
+        self.assertEqual(batch.quotes[0].sport, "table_tennis")
+        self.assertEqual(batch.quotes[0].metadata["sport_key"], "table_tennis")
+
+    def test_explicit_non_text_sport_key_is_rejected(self):
+        event = dict(SAMPLE_EVENT)
+        event["sport_key"] = 123
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=lambda *_: HttpJsonResponse([event], 200, {}),
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+
+        with self.assertRaisesRegex(ProviderPayloadError, "event sport_key must be a string"):
+            provider.read_batch()
+
     def test_public_preview_wrapper_uses_same_parser_without_api_key(self):
         seen = {}
 

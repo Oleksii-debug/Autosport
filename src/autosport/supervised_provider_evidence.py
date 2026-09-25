@@ -444,6 +444,12 @@ def _evaluate_betfair_provider_state_semantics(
             raise ProviderEvidenceError(
                 "provider order identity conflicts with execution action"
             )
+        if _time(order.placed_date, "provider order placed_date") < _time(
+            action.quote_observed_at, "execution quote_observed_at"
+        ):
+            raise ProviderEvidenceError(
+                "provider order placement predates execution action quote"
+            )
         if kind == "current":
             assert isinstance(order, BetfairCurrentOrderObservation)
             if order.price is None or order.price != action.requested_odds:

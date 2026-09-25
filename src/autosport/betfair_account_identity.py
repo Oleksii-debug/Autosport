@@ -460,6 +460,10 @@ def _make_account_identity_authority():
             )
 
         context = context_for(client)
+        if canonical_read_account_details is not client_type.read_account_details:
+            raise identity_error_type(
+                "canonical Betfair account-details read authority changed"
+            )
         try:
             # Invoke the import-time canonical implementation directly. The method
             # itself dispatches through _rpc/_next_request_id/_observed_at, whose

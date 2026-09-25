@@ -48,6 +48,7 @@ _SECRET_BASENAMES = frozenset(
 )
 _SECRET_DIRECTORY_NAMES = frozenset({".aws", ".azure", ".mozilla", ".ssh", "user data"})
 _PRIVATE_KEY_BASENAMES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"})
+_PRIVATE_KEY_CONTAINER_SUFFIXES = (".key", ".ppk", ".pfx", ".p12")
 
 
 def _secret_source_path_reason(path: PurePosixPath) -> str | None:
@@ -76,10 +77,12 @@ def _secret_source_path_reason(path: PurePosixPath) -> str | None:
         return "OAuth client-secret file"
     if basename.endswith(".session") or basename.endswith(".session-journal"):
         return "Telegram session file"
-    if basename.endswith(".key") or basename in _PRIVATE_KEY_BASENAMES:
+    if basename.endswith(_PRIVATE_KEY_CONTAINER_SUFFIXES) or basename in _PRIVATE_KEY_BASENAMES:
         return "private-key file"
-    if basename.endswith(".pem") and "private" in basename:
-        return "private-key file"
+    if basename.endswith(".pem"):
+        stem = basename[:-4]
+        if "private" in basename or stem in _PRIVATE_KEY_BASENAMES:
+            return "private-key file"
     return None
 
 

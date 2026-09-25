@@ -107,6 +107,47 @@ def test_detects_mixed_case_url_percent_hex_across_chunks(tmp_path: Path) -> Non
     assert CANARY not in repr(report)
 
 
+def test_detects_fully_percent_encoded_unreserved_bytes_across_chunks(
+    tmp_path: Path,
+) -> None:
+    raw = CANARY.encode("utf-8")
+    fully_encoded = b"".join(f"%{byte:02X}".encode("ascii") for byte in raw)
+    assert fully_encoded != quote(CANARY, safe="").encode("ascii")
+    (tmp_path / "fully-percent.bin").write_bytes(
+        b"prefix:" + fully_encoded + b":suffix"
+    )
+
+    report = scan_secret_canary(tmp_path, CANARY, chunk_size=5)
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "url-percent-utf8-semantic" in report.findings[0].encodings
+    assert CANARY not in repr(report)
+
+
+def test_detects_mixed_literal_and_percent_encoded_utf8_bytes(
+    tmp_path: Path,
+) -> None:
+    raw = CANARY.encode("utf-8")
+    mixed = b"".join(
+        bytes((byte,)) if index % 2 == 0 else f"%{byte:02x}".encode("ascii")
+        for index, byte in enumerate(raw)
+    )
+    assert raw not in mixed
+    (tmp_path / "mixed-semantic-percent.bin").write_bytes(
+        b"prefix:" + mixed + b":suffix"
+    )
+
+    report = scan_secret_canary(tmp_path, CANARY, chunk_size=7)
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "url-percent-utf8-semantic" in report.findings[0].encodings
+    assert CANARY not in repr(report)
+
+
 def test_detects_match_crossing_stream_chunk_boundary(tmp_path: Path) -> None:
     raw = CANARY.encode("utf-8")
     (tmp_path / "boundary.bin").write_bytes(b"x" * 4 + raw + b"tail")

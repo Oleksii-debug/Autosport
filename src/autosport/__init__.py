@@ -153,3 +153,8 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# Predictive-target provenance may trust a frozen ResearchProtocol only when the
+# factory manifest precommits the exact durable registry envelope and the resolver
+# re-reads that envelope through source-owned ScientificRegistry read authority.
+from . import _predictive_target_protocol_envelope_authority as _predictive_target_protocol_envelope_authority  # noqa: F401,E402

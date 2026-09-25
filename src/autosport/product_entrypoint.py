@@ -58,6 +58,8 @@ class _SignalStopRequest:
         self._event = threading.Event()
 
     def handle(self, signum: int, _frame: object) -> None:
+        if self.signal_number is not None:
+            return
         self.signal_number = signum
         self._event.set()
 

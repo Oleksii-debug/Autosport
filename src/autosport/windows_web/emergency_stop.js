@@ -23,6 +23,17 @@
       return;
     }
 
+    // Emergency backend dispatch is an independent safety lane, but the shared
+    // frontend dispatcher performs a causally ordered get_state() after it. That
+    // state read may legitimately wait for an unrelated ordinary controller lock.
+    // Give a blind/keyboard operator immediate, explicitly non-final feedback
+    // before awaiting the ordered durable confirmation. Never claim STOP here.
+    setStatus(
+      "Аварійний STOP: запит передано. "
+      + "Очікується підтвердження стійкого журналу заборони.",
+    );
+    focusStatus();
+
     try {
       const result = await dispatch(
         "emergency_stop.activate",

@@ -101,17 +101,28 @@ def _timestamp(value: str, name: str) -> datetime:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+    if type(value) is Decimal:
+        parsed = value
+    elif type(value) is str:
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be a finite Decimal")
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"{name} must be finite and > 0")
     return parsed
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
+    # Decimal.normalize() applies the ambient Decimal Context and can round
+    # exact money/odds before durable persistence. Formatting the original
+    # coefficient/exponent is context-independent; trim only representational
+    # fractional trailing zeros so numerically equivalent scales canonicalize.
+    text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 

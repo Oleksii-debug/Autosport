@@ -46,6 +46,64 @@ _ACTIVE_FACTORY_REGISTRY: ContextVar[object | None] = ContextVar(
     default=None,
 )
 
+# Positive physical-freshness authority must come from the real canonical registry,
+# never from caller-controlled virtual dispatch on an isinstance-compatible subclass
+# or a method shadow installed on an otherwise exact instance. Direct internal helper
+# tests may still use lightweight non-ScientificRegistry fakes; the product runner
+# below always requires this exact authority before installing registry context.
+_CANONICAL_REGISTRY_TYPE = _factory.ScientificRegistry
+_CANONICAL_REGISTRY_GET = vars(_CANONICAL_REGISTRY_TYPE).get("get")
+_CANONICAL_REGISTRY_READ = vars(_CANONICAL_REGISTRY_TYPE).get("_read")
+_CANONICAL_REGISTRY_VALIDATE_ENTRY = vars(_CANONICAL_REGISTRY_TYPE).get(
+    "_validate_entry"
+)
+if not callable(_CANONICAL_REGISTRY_GET) or not callable(_CANONICAL_REGISTRY_READ):
+    raise RuntimeError("canonical ScientificRegistry read dispatch is unavailable")
+if not callable(_CANONICAL_REGISTRY_VALIDATE_ENTRY):
+    raise RuntimeError("canonical ScientificRegistry validation dispatch is unavailable")
+_CANONICAL_REGISTRY_GET_CODE = getattr(_CANONICAL_REGISTRY_GET, "__code__", None)
+_CANONICAL_REGISTRY_READ_CODE = getattr(_CANONICAL_REGISTRY_READ, "__code__", None)
+_CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE = getattr(
+    _CANONICAL_REGISTRY_VALIDATE_ENTRY,
+    "__code__",
+    None,
+)
+if (
+    _CANONICAL_REGISTRY_GET_CODE is None
+    or _CANONICAL_REGISTRY_READ_CODE is None
+    or _CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE is None
+):
+    raise RuntimeError("canonical ScientificRegistry authority code is unavailable")
+_CANONICAL_REGISTRY_SCHEMA_VERSION = _CANONICAL_REGISTRY_TYPE.SCHEMA_VERSION
+_REGISTRY_INSTANCE_DISPATCH_NAMES = frozenset(
+    {"get", "_read", "_validate_entry", "SCHEMA_VERSION"}
+)
+
+
+def _require_canonical_registry_dispatch(registry: object) -> None:
+    if type(registry) is not _CANONICAL_REGISTRY_TYPE:
+        raise ValueError(
+            "physical holdout authority requires the exact canonical ScientificRegistry"
+        )
+    current_get = vars(_CANONICAL_REGISTRY_TYPE).get("get")
+    current_read = vars(_CANONICAL_REGISTRY_TYPE).get("_read")
+    current_validate = vars(_CANONICAL_REGISTRY_TYPE).get("_validate_entry")
+    if (
+        current_get is not _CANONICAL_REGISTRY_GET
+        or getattr(current_get, "__code__", None) is not _CANONICAL_REGISTRY_GET_CODE
+        or current_read is not _CANONICAL_REGISTRY_READ
+        or getattr(current_read, "__code__", None) is not _CANONICAL_REGISTRY_READ_CODE
+        or current_validate is not _CANONICAL_REGISTRY_VALIDATE_ENTRY
+        or getattr(current_validate, "__code__", None)
+        is not _CANONICAL_REGISTRY_VALIDATE_ENTRY_CODE
+        or _CANONICAL_REGISTRY_TYPE.SCHEMA_VERSION
+        != _CANONICAL_REGISTRY_SCHEMA_VERSION
+    ):
+        raise ValueError("canonical ScientificRegistry read dispatch changed")
+    instance_state = getattr(registry, "__dict__", {})
+    if any(name in instance_state for name in _REGISTRY_INSTANCE_DISPATCH_NAMES):
+        raise ValueError("canonical ScientificRegistry instance dispatch changed")
+
 
 def _physical_freshness_id(
     *,
@@ -158,13 +216,22 @@ def _snapshot_physical_identity(
     callers must not infer disjointness merely because two manifest hashes differ.
     A future/extended canonical record may expose ``observation_membership_sha256s``;
     when present it must be a non-empty duplicate-free JSON list of canonical hashes.
+
+    Product calls use the exact canonical ScientificRegistry implementation and a
+    captured ``get`` descriptor. Lightweight non-registry fakes remain supported for
+    direct unit-helper tests only and never pass the ExperimentRunner product fence.
     """
 
     snapshot_id = _factory._text(snapshot_id, "promotion evidence dataset_snapshot_id")
-    getter = getattr(registry, "get", None)
-    if not callable(getter):
-        raise ValueError("factory physical holdout check requires canonical registry access")
-    snapshot = getter("DatasetSnapshot", snapshot_id)
+    if isinstance(registry, _CANONICAL_REGISTRY_TYPE):
+        _require_canonical_registry_dispatch(registry)
+        snapshot = _CANONICAL_REGISTRY_GET(registry, "DatasetSnapshot", snapshot_id)
+        _require_canonical_registry_dispatch(registry)
+    else:
+        getter = getattr(registry, "get", None)
+        if not callable(getter):
+            raise ValueError("factory physical holdout check requires canonical registry access")
+        snapshot = getter("DatasetSnapshot", snapshot_id)
     if snapshot is None:
         raise ValueError(
             "promotion evidence references missing DatasetSnapshot physical authority"
@@ -275,6 +342,7 @@ def _run_with_physical_holdout_context(
     rule: _factory.PromotionRule,
     minimum_train_size: int | None = None,
 ):
+    _require_canonical_registry_dispatch(self.registry)
     token = _ACTIVE_FACTORY_REGISTRY.set(self.registry)
     try:
         return _ORIGINAL_FACTORY_RUN(

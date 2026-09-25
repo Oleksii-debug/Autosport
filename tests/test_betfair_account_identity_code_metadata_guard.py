@@ -157,14 +157,14 @@ def test_transient_hidden_decoder_code_swap_during_io_cannot_launder_identity(
     worker.start()
     assert read_entered.wait(timeout=5)
 
-    # The active authority-bearing call already owns a fresh decoder built from
-    # frozen metadata. Mutating the inspectable persistent template now cannot
-    # alter the bytes->JSON path used by this in-flight observation.
+    # The active authority-bearing call has already created its fresh decoder from
+    # frozen metadata. Mutate the inspectable persistent template only while that
+    # provider read is in flight, then restore before ordinary post-call guards.
     sealed_decode.__code__ = forged_decode.__code__
     release_payload.set()
-    worker.join(timeout=5)
     sealed_decode.__code__ = original_code
 
+    worker.join(timeout=5)
     assert not worker.is_alive()
     assert "error" not in result, repr(result.get("error"))
     value = result["value"]

@@ -22,6 +22,16 @@ _FACTORY_SPEC = "autosport.product_source:create_parlay_product_source"
 _PROVIDER_SOURCE_ID = "parlayapi:table_tennis"
 
 
+@pytest.fixture(autouse=True)
+def _fixed_supervised_decision_clock(monkeypatch) -> None:
+    """Keep inherited #1212 approval/quote evidence inside its causal decision cut."""
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: provider_tests.RESERVED_AT,
+    )
+
+
 class _ProfileRuntime:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
@@ -215,10 +225,6 @@ def test_admitted_provider_write_linearizes_against_runtime_profile_revocation(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(http.client, "HTTPSConnection", provider_tests._TestHTTPSConnection)
-    monkeypatch.setattr(
-        "autosport.supervised_execution._trusted_now",
-        lambda: provider_tests.RESERVED_AT,
-    )
     _arm_stop(tmp_path)
     runtime, trusted = _issue_profile(monkeypatch, tmp_path)
     transport = _BlockingTransport()

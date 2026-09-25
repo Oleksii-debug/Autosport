@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import (
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
@@ -52,6 +55,7 @@ _AUTHORITY_KEY = "issued-results-v1"
 _JOURNAL_NAME = "risk-of-ruin-evaluator-v1.json"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+_MAX_JOURNAL_BYTES = 16 * 1024 * 1024
 # Operational implementation support budget, not a statistical max-N or
 # sample-adequacy rule. The current exact CP implementation performs 240
 # high-precision bisection evaluations with O(k) recurrence work per step.
@@ -111,10 +115,6 @@ def _instant(value: object, name: str) -> datetime:
 
 
 def _decimal(value: object, name: str) -> Decimal:
-    # Decimal is a caller-facing authority boundary.  Decimal subclasses may
-    # override is_finite(), as_tuple() and __format__(), so accepting them would
-    # let virtual methods bypass the pre-materialization resource fence or make
-    # canonical text/hash output depend on mutable caller state.
     if type(value) is not Decimal or not value.is_finite():
         raise RiskOfRuinEvaluationError(f"{name} must be a finite exact Decimal")
     return value
@@ -137,8 +137,6 @@ def _require_supported_fixed_n_work_domain(independent_units: int) -> None:
 
 
 def _fixed_point_materialization_length(value: Decimal) -> int:
-    """Return format(value, "f") size without materializing that string."""
-
     value = _decimal(value, "decimal")
     if value.is_zero():
         return 1
@@ -156,10 +154,7 @@ def _decimal_text(value: Decimal) -> str:
     value = _decimal(value, "decimal")
     if value.is_zero():
         return "0"
-    if (
-        _fixed_point_materialization_length(value)
-        > _MAX_FIXED_POINT_MATERIALIZATION_LENGTH
-    ):
+    if _fixed_point_materialization_length(value) > _MAX_FIXED_POINT_MATERIALIZATION_LENGTH:
         raise RiskOfRuinEvaluationError(
             "decimal fixed-point representation exceeds supported canonical size"
         )
@@ -170,19 +165,10 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _clopper_pearson_working_precision(confidence: Decimal) -> int:
-    """Bound CP arithmetic precision to the accepted canonical Decimal domain."""
-
     text = _decimal_text(confidence)
     _, separator, fractional = text.partition(".")
     decimal_places = len(fractional) if separator else 0
-    # Near 0/1, subtraction in alpha=1-confidence and q=1-p must preserve
-    # the input's decimal scale *plus* the bisection working digits.  A fixed
-    # 70-digit context loses that tail for legal values such as 1E-69.
-    return (
-        _CP_BASE_WORKING_PRECISION
-        + decimal_places
-        + _CP_INPUT_SCALE_GUARD_DIGITS
-    )
+    return _CP_BASE_WORKING_PRECISION + decimal_places + _CP_INPUT_SCALE_GUARD_DIGITS
 
 
 def _decimal_from_payload(value: object, name: str) -> Decimal:
@@ -207,22 +193,12 @@ def _decimal_from_payload(value: object, name: str) -> Decimal:
 def _decimal_tuple_from_payload(value: object, name: str) -> tuple[Decimal, ...]:
     if type(value) is not list or not value:
         raise RiskOfRuinEvaluationError(f"{name} must be a non-empty JSON array")
-    return tuple(
-        _decimal_from_payload(item, f"{name} item")
-        for item in value
-    )
+    return tuple(_decimal_from_payload(item, f"{name} item") for item in value)
 
 
-def _int_from_payload(
-    value: object,
-    name: str,
-    *,
-    minimum: int = 0,
-) -> int:
+def _int_from_payload(value: object, name: str, *, minimum: int = 0) -> int:
     if type(value) is not int or value < minimum:
-        raise RiskOfRuinEvaluationError(
-            f"{name} must be a canonical integer >= {minimum}"
-        )
+        raise RiskOfRuinEvaluationError(f"{name} must be a canonical integer >= {minimum}")
     return value
 
 
@@ -253,14 +229,61 @@ def _atomic_json_bytes(payload: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _file_sha256(path: Path) -> str | None:
-    if not path.exists():
+def _read_stable_journal_bytes(path: Path) -> bytes | None:
+    """Read one bounded regular journal file without following path replacement."""
+    try:
+        before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
         return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal cannot be inspected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal must be one regular file")
+    if before.st_size > _MAX_JOURNAL_BYTES:
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal exceeds supported size")
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+            ):
+                raise RiskOfRuinIssuanceError(
+                    "risk-of-ruin journal changed during open"
+                )
+            payload = handle.read(_MAX_JOURNAL_BYTES + 1)
+            after_open = os.fstat(handle.fileno())
+        after = os.stat(path, follow_symlinks=False)
+    except RiskOfRuinIssuanceError:
+        raise
+    except OSError as exc:
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal is unreadable") from exc
+    if len(payload) > _MAX_JOURNAL_BYTES:
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal exceeds supported size")
+    path_identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+        value.st_nlink,
+    )
+    handle_identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+        value.st_nlink,
+    )
+    if path_identity(before) != path_identity(after) or handle_identity(opened) != handle_identity(after_open):
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal changed during stable read")
+    return payload
 
 
 def evaluator_source_sha256() -> str:
-    """Return the exact current evaluator source digest for scientific lineage."""
     try:
         return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     except OSError as exc:
@@ -271,8 +294,6 @@ def evaluator_source_sha256() -> str:
 
 @dataclass(frozen=True, slots=True)
 class RiskPathObservation:
-    """One pre-registered independent bankroll path observation."""
-
     independent_unit_id: str
     dependence_group_id: str
     minimum_equity: Decimal
@@ -300,8 +321,6 @@ class RiskPathObservation:
 
 @dataclass(frozen=True, slots=True)
 class RiskOfRuinEvaluationRequest:
-    """Frozen evaluator inputs. There is intentionally no upper_bound field."""
-
     target_kind: RiskTargetKind
     bankroll_id: str
     currency: str
@@ -328,12 +347,7 @@ class RiskOfRuinEvaluationRequest:
             raise RiskOfRuinEvaluationError("evidence_class must be RiskEvidenceClass")
         _text(self.bankroll_id, "bankroll_id")
         currency = _text(self.currency, "currency")
-        if (
-            len(currency) != 3
-            or not currency.isascii()
-            or not currency.isalpha()
-            or currency != currency.upper()
-        ):
+        if len(currency) != 3 or not currency.isascii() or not currency.isalpha() or currency != currency.upper():
             raise RiskOfRuinEvaluationError(
                 "currency must be a three-letter uppercase ASCII code"
             )
@@ -350,83 +364,47 @@ class RiskOfRuinEvaluationRequest:
         cutoff = _instant(self.causal_cutoff, "causal_cutoff")
         evaluated = _instant(self.evaluated_at, "evaluated_at")
         if cutoff > evaluated:
-            raise RiskOfRuinEvaluationError(
-                "causal_cutoff must not be after evaluated_at"
-            )
+            raise RiskOfRuinEvaluationError("causal_cutoff must not be after evaluated_at")
         _probability(self.confidence_level, "confidence_level")
-        # Keep the public request and direct estimator on the same bounded
-        # canonical Decimal domain before any precision is allocated from scale.
         _decimal_text(self.confidence_level)
         _decimal_text(self.ruin_threshold)
-        if (
-            isinstance(self.planned_independent_units, bool)
-            or not isinstance(self.planned_independent_units, int)
-            or self.planned_independent_units <= 0
-        ):
-            raise RiskOfRuinEvaluationError(
-                "planned_independent_units must be a positive integer"
-            )
-        _require_supported_fixed_n_work_domain(
-            self.planned_independent_units
-        )
+        if isinstance(self.planned_independent_units, bool) or not isinstance(self.planned_independent_units, int) or self.planned_independent_units <= 0:
+            raise RiskOfRuinEvaluationError("planned_independent_units must be a positive integer")
+        _require_supported_fixed_n_work_domain(self.planned_independent_units)
         if type(self.evaluated_stakes) is not tuple or not self.evaluated_stakes:
-            raise RiskOfRuinEvaluationError(
-                "evaluated_stakes must be a non-empty tuple"
-            )
+            raise RiskOfRuinEvaluationError("evaluated_stakes must be a non-empty tuple")
         if len(self.evaluated_stakes) > _MAX_SUPPORTED_EVALUATED_STAKES:
             raise RiskOfRuinEvaluationError(
-                f"{_UNSUPPORTED_RESOURCE_DOMAIN}: evaluated stake vector "
-                "exceeds the current implementation work budget; this is not "
-                "a statistical validity or sample-adequacy judgment"
+                f"{_UNSUPPORTED_RESOURCE_DOMAIN}: evaluated stake vector exceeds the current implementation work budget; this is not a statistical validity or sample-adequacy judgment"
             )
         for stake in self.evaluated_stakes:
             if _decimal(stake, "evaluated_stake") <= 0:
-                raise RiskOfRuinEvaluationError(
-                    "evaluated stakes must be positive exact Decimals"
-                )
+                raise RiskOfRuinEvaluationError("evaluated stakes must be positive exact Decimals")
             _decimal_text(stake)
         if self.target_kind is RiskTargetKind.SINGLE and len(self.evaluated_stakes) != 1:
-            raise RiskOfRuinEvaluationError(
-                "single target requires exactly one evaluated stake"
-            )
+            raise RiskOfRuinEvaluationError("single target requires exactly one evaluated stake")
         if type(self.observations) is not tuple or not self.observations:
             raise RiskOfRuinEvaluationError("observations must be a non-empty tuple")
         if len(self.observations) > _MAX_SUPPORTED_FIXED_N_OBSERVATIONS:
             raise RiskOfRuinEvaluationError(
-                f"{_UNSUPPORTED_RESOURCE_DOMAIN}: observation cohort exceeds "
-                "the current implementation work budget; this is not a "
-                "statistical validity or sample-adequacy judgment"
+                f"{_UNSUPPORTED_RESOURCE_DOMAIN}: observation cohort exceeds the current implementation work budget; this is not a statistical validity or sample-adequacy judgment"
             )
         if any(type(item) is not RiskPathObservation for item in self.observations):
-            raise RiskOfRuinEvaluationError(
-                "observations must contain exact RiskPathObservation values"
-            )
+            raise RiskOfRuinEvaluationError("observations must contain exact RiskPathObservation values")
         if len(self.observations) != self.planned_independent_units:
-            raise RiskOfRuinEvaluationError(
-                "fixed-N evaluation requires exactly the pre-registered unit count"
-            )
+            raise RiskOfRuinEvaluationError("fixed-N evaluation requires exactly the pre-registered unit count")
         unit_ids = tuple(item.independent_unit_id for item in self.observations)
         groups = tuple(item.dependence_group_id for item in self.observations)
-        evidence_ids = tuple(
-            item.source_evidence_sha256.lower() for item in self.observations
-        )
+        evidence_ids = tuple(item.source_evidence_sha256.lower() for item in self.observations)
         if len(unit_ids) != len(set(unit_ids)):
-            raise RiskOfRuinEvaluationError(
-                "independent_unit_id values must be unique"
-            )
+            raise RiskOfRuinEvaluationError("independent_unit_id values must be unique")
         if len(groups) != len(set(groups)):
-            raise RiskOfRuinEvaluationError(
-                "fixed-N IID evaluation cannot reuse a dependence group"
-            )
+            raise RiskOfRuinEvaluationError("fixed-N IID evaluation cannot reuse a dependence group")
         if len(evidence_ids) != len(set(evidence_ids)):
-            raise RiskOfRuinEvaluationError(
-                "fixed-N IID evaluation requires unique source evidence identity"
-            )
+            raise RiskOfRuinEvaluationError("fixed-N IID evaluation requires unique source evidence identity")
         for item in self.observations:
             if _instant(item.outcome_available_at, "outcome_available_at") > cutoff:
-                raise RiskOfRuinEvaluationError(
-                    "all consumed outcomes must be causally available by causal_cutoff"
-                )
+                raise RiskOfRuinEvaluationError("all consumed outcomes must be causally available by causal_cutoff")
 
     @property
     def request_sha256(self) -> str:
@@ -437,9 +415,7 @@ class RiskOfRuinEvaluationRequest:
         payload = {
             "observations": [
                 item.canonical_payload()
-                for item in sorted(
-                    self.observations, key=lambda item: item.independent_unit_id
-                )
+                for item in sorted(self.observations, key=lambda item: item.independent_unit_id)
             ]
         }
         return _payload_sha256(payload)
@@ -454,16 +430,12 @@ class RiskOfRuinEvaluationRequest:
             "base_portfolio_sha256": self.base_portfolio_sha256.lower(),
             "capital_state_sha256": self.capital_state_sha256.lower(),
             "target_sha256": self.target_sha256.lower(),
-            "evaluated_stakes": [
-                _decimal_text(value) for value in self.evaluated_stakes
-            ],
+            "evaluated_stakes": [_decimal_text(value) for value in self.evaluated_stakes],
             "research_protocol_sha256": self.research_protocol_sha256.lower(),
             "reproducibility_bundle_sha256": self.reproducibility_bundle_sha256.lower(),
             "dataset_snapshot_id": self.dataset_snapshot_id,
             "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
-            "causal_cutoff": _instant(
-                self.causal_cutoff, "causal_cutoff"
-            ).isoformat(),
+            "causal_cutoff": _instant(self.causal_cutoff, "causal_cutoff").isoformat(),
             "evaluated_at": _instant(self.evaluated_at, "evaluated_at").isoformat(),
             "confidence_level": _decimal_text(self.confidence_level),
             "ruin_threshold": _decimal_text(self.ruin_threshold),
@@ -473,9 +445,7 @@ class RiskOfRuinEvaluationRequest:
             "independence_contract": _INDEPENDENCE_CONTRACT,
             "observations": [
                 item.canonical_payload()
-                for item in sorted(
-                    self.observations, key=lambda item: item.independent_unit_id
-                )
+                for item in sorted(self.observations, key=lambda item: item.independent_unit_id)
             ],
         }
 
@@ -504,46 +474,17 @@ def _binomial_cdf(k: int, n: int, p: Decimal) -> Decimal:
     return total
 
 
-def clopper_pearson_upper_bound(
-    *,
-    ruin_count: int,
-    independent_units: int,
-    confidence_level: Decimal,
-) -> Decimal:
-    """One-sided exact binomial upper confidence bound.
-
-    The result is valid only for the fixed-N independent Bernoulli contract
-    enforced by RiskOfRuinEvaluationRequest.
-    """
-
-    if (
-        isinstance(independent_units, bool)
-        or not isinstance(independent_units, int)
-        or independent_units <= 0
-    ):
-        raise RiskOfRuinEvaluationError(
-            "independent_units must be a positive integer"
-        )
-    if (
-        isinstance(ruin_count, bool)
-        or not isinstance(ruin_count, int)
-        or ruin_count < 0
-        or ruin_count > independent_units
-    ):
-        raise RiskOfRuinEvaluationError(
-            "ruin_count must be an integer inside [0, independent_units]"
-        )
+def clopper_pearson_upper_bound(*, ruin_count: int, independent_units: int, confidence_level: Decimal) -> Decimal:
+    if isinstance(independent_units, bool) or not isinstance(independent_units, int) or independent_units <= 0:
+        raise RiskOfRuinEvaluationError("independent_units must be a positive integer")
+    if isinstance(ruin_count, bool) or not isinstance(ruin_count, int) or ruin_count < 0 or ruin_count > independent_units:
+        raise RiskOfRuinEvaluationError("ruin_count must be an integer inside [0, independent_units]")
     confidence = _probability(confidence_level, "confidence_level")
     working_precision = _clopper_pearson_working_precision(confidence)
     if ruin_count == independent_units:
         return Decimal(1)
     _require_supported_fixed_n_work_domain(independent_units)
-
     with localcontext() as context:
-        # This is a scientific arithmetic boundary, not an ambient process-context
-        # boundary.  A caller may legitimately change Decimal precision, rounding,
-        # exponent limits or traps elsewhere in the process; none of those settings
-        # may move an exact confidence endpoint inward.
         context.prec = working_precision
         context.rounding = ROUND_HALF_EVEN
         context.Emin = MIN_EMIN
@@ -556,7 +497,6 @@ def clopper_pearson_upper_bound(
         context.traps[DivisionByZero] = True
         context.traps[Overflow] = True
         context.clear_flags()
-
         alpha = Decimal(1) - confidence
         low = Decimal(0)
         high = Decimal(1)
@@ -567,9 +507,6 @@ def clopper_pearson_upper_bound(
                 low = middle
             else:
                 high = middle
-        # The bisection invariant keeps high on the conservative side.
-        # Final public precision must therefore round outward, never back through
-        # the mathematical endpoint.
         context.prec = _CP_FINAL_PRECISION
         context.rounding = ROUND_CEILING
         return +high
@@ -653,135 +590,66 @@ class IssuedRiskOfRuinResult:
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "IssuedRiskOfRuinResult":
         expected_fields = {
-            "schema",
-            "result_version",
-            "workspace_instance_id",
-            "result_id",
-            "request_sha256",
-            "target_kind",
-            "bankroll_id",
-            "currency",
-            "base_portfolio_sha256",
-            "capital_state_sha256",
-            "target_sha256",
-            "evaluated_stakes",
-            "research_protocol_sha256",
-            "reproducibility_bundle_sha256",
-            "dataset_snapshot_id",
-            "dataset_manifest_sha256",
-            "observation_manifest_sha256",
-            "causal_cutoff",
-            "evaluated_at",
-            "issued_at",
-            "evidence_class",
-            "method_id",
-            "evaluator_source_sha256",
-            "stopping_rule",
-            "independence_contract",
-            "confidence_level",
-            "ruin_threshold",
-            "independent_units",
-            "ruin_count",
-            "upper_bound",
-            "producer_identity",
+            "schema", "result_version", "workspace_instance_id", "result_id",
+            "request_sha256", "target_kind", "bankroll_id", "currency",
+            "base_portfolio_sha256", "capital_state_sha256", "target_sha256",
+            "evaluated_stakes", "research_protocol_sha256",
+            "reproducibility_bundle_sha256", "dataset_snapshot_id",
+            "dataset_manifest_sha256", "observation_manifest_sha256",
+            "causal_cutoff", "evaluated_at", "issued_at", "evidence_class",
+            "method_id", "evaluator_source_sha256", "stopping_rule",
+            "independence_contract", "confidence_level", "ruin_threshold",
+            "independent_units", "ruin_count", "upper_bound", "producer_identity",
             "real_money_execution_authority",
         }
         if set(payload) != expected_fields:
             raise RiskOfRuinIssuanceError("risk-of-ruin result fields mismatch")
         result_version = payload.get("result_version")
-        if (
-            payload.get("schema") != _SCHEMA
-            or type(result_version) is not int
-            or result_version != 1
-        ):
+        if payload.get("schema") != _SCHEMA or type(result_version) is not int or result_version != 1:
             raise RiskOfRuinIssuanceError("unsupported risk-of-ruin result schema")
         try:
             result = cls(
-                workspace_instance_id=_text(
-                    payload["workspace_instance_id"], "workspace_instance_id"
-                ),
+                workspace_instance_id=_text(payload["workspace_instance_id"], "workspace_instance_id"),
                 result_id=_sha256(payload["result_id"], "result_id"),
                 request_sha256=_sha256(payload["request_sha256"], "request_sha256"),
                 target_kind=RiskTargetKind(payload["target_kind"]),
                 bankroll_id=_text(payload["bankroll_id"], "bankroll_id"),
                 currency=_text(payload["currency"], "currency"),
-                base_portfolio_sha256=_sha256(
-                    payload["base_portfolio_sha256"], "base_portfolio_sha256"
-                ),
-                capital_state_sha256=_sha256(
-                    payload["capital_state_sha256"], "capital_state_sha256"
-                ),
+                base_portfolio_sha256=_sha256(payload["base_portfolio_sha256"], "base_portfolio_sha256"),
+                capital_state_sha256=_sha256(payload["capital_state_sha256"], "capital_state_sha256"),
                 target_sha256=_sha256(payload["target_sha256"], "target_sha256"),
-                evaluated_stakes=_decimal_tuple_from_payload(
-                    payload["evaluated_stakes"], "evaluated_stakes"
-                ),
-                research_protocol_sha256=_sha256(
-                    payload["research_protocol_sha256"], "research_protocol_sha256"
-                ),
-                reproducibility_bundle_sha256=_sha256(
-                    payload["reproducibility_bundle_sha256"],
-                    "reproducibility_bundle_sha256",
-                ),
-                dataset_snapshot_id=_text(
-                    payload["dataset_snapshot_id"], "dataset_snapshot_id"
-                ),
-                dataset_manifest_sha256=_sha256(
-                    payload["dataset_manifest_sha256"], "dataset_manifest_sha256"
-                ),
-                observation_manifest_sha256=_sha256(
-                    payload["observation_manifest_sha256"],
-                    "observation_manifest_sha256",
-                ),
-                causal_cutoff=_instant(
-                    payload["causal_cutoff"], "causal_cutoff"
-                ).isoformat(),
-                evaluated_at=_instant(
-                    payload["evaluated_at"], "evaluated_at"
-                ).isoformat(),
+                evaluated_stakes=_decimal_tuple_from_payload(payload["evaluated_stakes"], "evaluated_stakes"),
+                research_protocol_sha256=_sha256(payload["research_protocol_sha256"], "research_protocol_sha256"),
+                reproducibility_bundle_sha256=_sha256(payload["reproducibility_bundle_sha256"], "reproducibility_bundle_sha256"),
+                dataset_snapshot_id=_text(payload["dataset_snapshot_id"], "dataset_snapshot_id"),
+                dataset_manifest_sha256=_sha256(payload["dataset_manifest_sha256"], "dataset_manifest_sha256"),
+                observation_manifest_sha256=_sha256(payload["observation_manifest_sha256"], "observation_manifest_sha256"),
+                causal_cutoff=_instant(payload["causal_cutoff"], "causal_cutoff").isoformat(),
+                evaluated_at=_instant(payload["evaluated_at"], "evaluated_at").isoformat(),
                 issued_at=_instant(payload["issued_at"], "issued_at").isoformat(),
                 evidence_class=RiskEvidenceClass(payload["evidence_class"]),
                 method_id=_text(payload["method_id"], "method_id"),
-                evaluator_source_sha256=_sha256(
-                    payload["evaluator_source_sha256"], "evaluator_source_sha256"
-                ),
+                evaluator_source_sha256=_sha256(payload["evaluator_source_sha256"], "evaluator_source_sha256"),
                 stopping_rule=_text(payload["stopping_rule"], "stopping_rule"),
-                independence_contract=_text(
-                    payload["independence_contract"], "independence_contract"
-                ),
-                confidence_level=_decimal_from_payload(
-                    payload["confidence_level"], "confidence_level"
-                ),
-                ruin_threshold=_decimal_from_payload(
-                    payload["ruin_threshold"], "ruin_threshold"
-                ),
-                independent_units=_int_from_payload(
-                    payload["independent_units"], "independent_units", minimum=1
-                ),
-                ruin_count=_int_from_payload(
-                    payload["ruin_count"], "ruin_count", minimum=0
-                ),
-                upper_bound=_decimal_from_payload(
-                    payload["upper_bound"], "upper_bound"
-                ),
+                independence_contract=_text(payload["independence_contract"], "independence_contract"),
+                confidence_level=_decimal_from_payload(payload["confidence_level"], "confidence_level"),
+                ruin_threshold=_decimal_from_payload(payload["ruin_threshold"], "ruin_threshold"),
+                independent_units=_int_from_payload(payload["independent_units"], "independent_units", minimum=1),
+                ruin_count=_int_from_payload(payload["ruin_count"], "ruin_count", minimum=0),
+                upper_bound=_decimal_from_payload(payload["upper_bound"], "upper_bound"),
             )
         except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
-            raise RiskOfRuinIssuanceError(
-                "invalid durable risk-of-ruin result payload"
-            ) from exc
+            raise RiskOfRuinIssuanceError("invalid durable risk-of-ruin result payload") from exc
         if payload.get("producer_identity") != _PRODUCER_IDENTITY:
             raise RiskOfRuinIssuanceError("risk-of-ruin producer identity mismatch")
         if payload.get("real_money_execution_authority") is not False:
-            raise RiskOfRuinIssuanceError(
-                "risk-of-ruin result cannot carry real-money authority"
-            )
+            raise RiskOfRuinIssuanceError("risk-of-ruin result cannot carry real-money authority")
         if result.method_id != _METHOD_ID:
             raise RiskOfRuinIssuanceError("risk-of-ruin method identity mismatch")
         if result.stopping_rule != _STOPPING_RULE:
             raise RiskOfRuinIssuanceError("risk-of-ruin stopping rule mismatch")
         if result.independence_contract != _INDEPENDENCE_CONTRACT:
-            raise RiskOfRuinIssuanceError(
-                "risk-of-ruin independence contract mismatch"
-            )
+            raise RiskOfRuinIssuanceError("risk-of-ruin independence contract mismatch")
         if result.ruin_count < 0 or result.ruin_count > result.independent_units:
             raise RiskOfRuinIssuanceError("risk-of-ruin count is invalid")
         expected = clopper_pearson_upper_bound(
@@ -790,13 +658,10 @@ class IssuedRiskOfRuinResult:
             confidence_level=result.confidence_level,
         )
         if result.upper_bound != expected:
-            raise RiskOfRuinIssuanceError(
-                "durable risk-of-ruin upper bound does not rederive exactly"
-            )
+            raise RiskOfRuinIssuanceError("durable risk-of-ruin upper bound does not rederive exactly")
         material = dict(result.canonical_payload())
         material.pop("result_id")
-        expected_id = _payload_sha256(material)
-        if result.result_id != expected_id:
+        if result.result_id != _payload_sha256(material):
             raise RiskOfRuinIssuanceError("risk-of-ruin result_id mismatch")
         return result
 
@@ -808,24 +673,16 @@ def evaluate_risk_of_ruin(
     issued_at: str,
     source_sha256: str,
 ) -> IssuedRiskOfRuinResult:
-    """Derive the exact result from raw path observations; no final bound input exists."""
-
     if type(request) is not RiskOfRuinEvaluationRequest:
         raise TypeError("request must be exact RiskOfRuinEvaluationRequest")
     workspace_instance_id = _text(workspace_instance_id, "workspace_instance_id")
     issued = _instant(issued_at, "issued_at")
     evaluated = _instant(request.evaluated_at, "evaluated_at")
     if issued < evaluated:
-        raise RiskOfRuinEvaluationError(
-            "product issuance cannot precede evaluation completion"
-        )
+        raise RiskOfRuinEvaluationError("product issuance cannot precede evaluation completion")
     source_sha256 = _sha256(source_sha256, "evaluator_source_sha256")
-    ordered = tuple(
-        sorted(request.observations, key=lambda item: item.independent_unit_id)
-    )
-    ruin_count = sum(
-        item.minimum_equity <= request.ruin_threshold for item in ordered
-    )
+    ordered = tuple(sorted(request.observations, key=lambda item: item.independent_unit_id))
+    ruin_count = sum(item.minimum_equity <= request.ruin_threshold for item in ordered)
     upper = clopper_pearson_upper_bound(
         ruin_count=ruin_count,
         independent_units=len(ordered),
@@ -863,15 +720,10 @@ def evaluate_risk_of_ruin(
     provisional = IssuedRiskOfRuinResult(result_id="0" * 64, **common)
     material = dict(provisional.canonical_payload())
     material.pop("result_id")
-    result_id = _payload_sha256(material)
-    return IssuedRiskOfRuinResult(result_id=result_id, **common)
+    return IssuedRiskOfRuinResult(result_id=_payload_sha256(material), **common)
 
 
-def _record_payload(
-    result: IssuedRiskOfRuinResult,
-    *,
-    previous_record_sha256: str | None,
-) -> dict[str, object]:
+def _record_payload(result: IssuedRiskOfRuinResult, *, previous_record_sha256: str | None) -> dict[str, object]:
     payload: dict[str, object] = {
         "result": result.canonical_payload(),
         "previous_record_sha256": previous_record_sha256,
@@ -889,27 +741,13 @@ def _record_payload(
     return payload
 
 
-def _validate_journal(
-    state: object,
-    *,
-    workspace_instance_id: str,
-) -> tuple[dict[str, object], ...]:
+def _validate_journal(state: object, *, workspace_instance_id: str) -> tuple[dict[str, object], ...]:
     if type(state) is not dict:
         raise RiskOfRuinIssuanceError("risk-of-ruin journal must be an object")
-    if set(state) != {
-        "schema",
-        "schema_version",
-        "workspace_instance_id",
-        "records",
-    }:
+    if set(state) != {"schema", "schema_version", "workspace_instance_id", "records"}:
         raise RiskOfRuinIssuanceError("risk-of-ruin journal fields mismatch")
     schema_version = state.get("schema_version")
-    if (
-        state.get("schema") != _JOURNAL_SCHEMA
-        or type(schema_version) is not int
-        or schema_version != 1
-        or state.get("workspace_instance_id") != workspace_instance_id
-    ):
+    if state.get("schema") != _JOURNAL_SCHEMA or type(schema_version) is not int or schema_version != 1 or state.get("workspace_instance_id") != workspace_instance_id:
         raise RiskOfRuinIssuanceError("risk-of-ruin journal identity mismatch")
     records = state.get("records")
     if type(records) is not list:
@@ -921,13 +759,7 @@ def _validate_journal(
     for raw in records:
         if type(raw) is not dict:
             raise RiskOfRuinIssuanceError("risk-of-ruin journal record is invalid")
-        if set(raw) != {
-            "result",
-            "previous_record_sha256",
-            "authority_tx_id",
-            "semantic_binding_sha256",
-            "record_sha256",
-        }:
+        if set(raw) != {"result", "previous_record_sha256", "authority_tx_id", "semantic_binding_sha256", "record_sha256"}:
             raise RiskOfRuinIssuanceError("risk-of-ruin journal record fields mismatch")
         if raw["previous_record_sha256"] != previous:
             raise RiskOfRuinIssuanceError("risk-of-ruin journal chain is broken")
@@ -937,9 +769,7 @@ def _validate_journal(
             raise RiskOfRuinIssuanceError("risk-of-ruin journal record digest mismatch")
         result = IssuedRiskOfRuinResult.from_payload(raw["result"])
         if result.workspace_instance_id != workspace_instance_id:
-            raise RiskOfRuinIssuanceError(
-                "risk-of-ruin result belongs to another workspace"
-            )
+            raise RiskOfRuinIssuanceError("risk-of-ruin result belongs to another workspace")
         expected_tx = f"risk-eval-{result.result_id}"
         if raw["authority_tx_id"] != expected_tx:
             raise RiskOfRuinIssuanceError("risk-of-ruin authority transaction mismatch")
@@ -954,9 +784,7 @@ def _validate_journal(
         if raw["semantic_binding_sha256"] != expected_binding:
             raise RiskOfRuinIssuanceError("risk-of-ruin semantic binding mismatch")
         if result.result_id in seen_results or result.request_sha256 in seen_requests:
-            raise RiskOfRuinIssuanceError(
-                "risk-of-ruin journal contains duplicate result/request identity"
-            )
+            raise RiskOfRuinIssuanceError("risk-of-ruin journal contains duplicate result/request identity")
         seen_results.add(result.result_id)
         seen_requests.add(result.request_sha256)
         previous = record_sha
@@ -965,14 +793,6 @@ def _validate_journal(
 
 
 class ProductRiskOfRuinEvaluator:
-    """Estimator with fail-closed positive issuance and durable-read quarantine.
-
-    The legacy journal remains parseable as non-authoritative audit history, but
-    no durable record is product-issued while the canonical positive producer is
-    missing. Both issuance and positive re-resolution therefore remain closed
-    until product-owned observation/provenance and IID/dependence authority exists.
-    """
-
     def __init__(
         self,
         *,
@@ -993,9 +813,7 @@ class ProductRiskOfRuinEvaluator:
                 authority_root=authority_root,
             )
         except MonotonicWorkspaceAuthorityError as exc:
-            raise RiskOfRuinIssuanceError(
-                "risk-of-ruin monotonic authority is unavailable"
-            ) from exc
+            raise RiskOfRuinIssuanceError("risk-of-ruin monotonic authority is unavailable") from exc
 
     def _empty_state(self) -> dict[str, object]:
         return {
@@ -1006,26 +824,24 @@ class ProductRiskOfRuinEvaluator:
         }
 
     def _read_state_under_lock(self) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
-        observed = _file_sha256(self.journal_path)
-        if observed is None:
+        payload = _read_stable_journal_bytes(self.journal_path)
+        if payload is None:
+            observed = None
             state = self._empty_state()
             records: tuple[dict[str, object], ...] = ()
         else:
+            observed = hashlib.sha256(payload).hexdigest()
             try:
-                state = json.loads(self.journal_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise RiskOfRuinIssuanceError(
-                    "risk-of-ruin journal is unreadable"
-                ) from exc
+                text = payload.decode("utf-8")
+                state = strict_json_loads(text)
+            except (UnicodeError, ValueError) as exc:
+                raise RiskOfRuinIssuanceError("risk-of-ruin journal is unreadable") from exc
             records = _validate_journal(
                 state,
                 workspace_instance_id=self.authority.workspace_instance_id,
             )
-        tx_id = None
-        binding = None
-        if records:
-            tx_id = records[-1]["authority_tx_id"]
-            binding = records[-1]["semantic_binding_sha256"]
+        tx_id = records[-1]["authority_tx_id"] if records else None
+        binding = records[-1]["semantic_binding_sha256"] if records else None
         try:
             recovery = self.authority.recover(
                 observed_state_sha256=observed,
@@ -1038,36 +854,20 @@ class ProductRiskOfRuinEvaluator:
             ) from exc
         if recovery.committed_state_sha256 != observed:
             if observed is not None or recovery.committed_state_sha256 is not None:
-                raise RiskOfRuinIssuanceError(
-                    "risk-of-ruin journal/authority state mismatch"
-                )
+                raise RiskOfRuinIssuanceError("risk-of-ruin journal/authority state mismatch")
         return state, records
 
-    def issue(
-        self,
-        request: RiskOfRuinEvaluationRequest,
-    ) -> IssuedRiskOfRuinResult:
-        """Refuse to promote caller-owned input assertions to product authority.
-
-        RiskOfRuinEvaluationRequest remains useful as the pure estimator input
-        contract. It is not, by itself, evidence that Autosport observed the paths,
-        froze the dataset before outcomes, or established the declared
-        independence/dependence structure. Until those facts can be re-resolved
-        from a canonical product-owned producer, durable issuance remains closed.
-        """
+    def issue(self, request: RiskOfRuinEvaluationRequest) -> IssuedRiskOfRuinResult:
         if type(request) is not RiskOfRuinEvaluationRequest:
             raise TypeError("request must be exact RiskOfRuinEvaluationRequest")
         raise RiskOfRuinIssuanceError(
-            "product-issued risk-of-ruin requires canonical product-owned "
-            "observation, dataset/provenance and independence authority; "
-            "caller-constructed evaluation requests are assertion-only"
+            "product-issued risk-of-ruin requires canonical product-owned observation, dataset/provenance and independence authority; caller-constructed evaluation requests are assertion-only"
         )
 
     def resolve(self, result_id: str) -> IssuedRiskOfRuinResult:
         _sha256(result_id, "result_id")
         raise RiskOfRuinIssuanceError(
-            "product-issued risk-of-ruin resolution is unavailable; "
-            "pre-authority journal records are quarantined as audit history"
+            "product-issued risk-of-ruin resolution is unavailable; pre-authority journal records are quarantined as audit history"
         )
 
     def verify(self, result: IssuedRiskOfRuinResult) -> bool:

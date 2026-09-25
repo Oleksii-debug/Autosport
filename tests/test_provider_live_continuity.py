@@ -171,6 +171,50 @@ class ProviderLiveContinuityTests(unittest.TestCase):
         self.assertEqual(resynced.last_sequence_id, 20)
         self.assertTrue(continuity_gate(resynced, now_monotonic_ns=300).actionable)
 
+    def test_reconnect_rejects_snapshot_received_before_latest_boundary(self) -> None:
+        synchronized = accept_authoritative_snapshot(
+            self.initial(),
+            self.snapshot(
+                sequence_id=10,
+                evidence_id="provider-at-10",
+                received_monotonic_ns=10,
+            ),
+        )
+        disconnected = mark_disconnected(
+            synchronized,
+            observed_monotonic_ns=100,
+        )
+        reconnecting = begin_reconnect(
+            disconnected,
+            observed_monotonic_ns=110,
+        )
+
+        self.assertEqual(disconnected.resync_not_before_monotonic_ns, 100)
+        self.assertEqual(reconnecting.resync_not_before_monotonic_ns, 110)
+        with self.assertRaisesRegex(ValueError, "reconnect resync boundary"):
+            accept_authoritative_snapshot(
+                reconnecting,
+                self.snapshot(
+                    sequence_id=20,
+                    evidence_id="cached-before-reconnect",
+                    received_monotonic_ns=90,
+                ),
+            )
+
+        resynced = accept_authoritative_snapshot(
+            reconnecting,
+            self.snapshot(
+                sequence_id=20,
+                evidence_id="post-reconnect-full-snapshot",
+                received_monotonic_ns=120,
+            ),
+        )
+        self.assertEqual(resynced.status, ProviderContinuityStatus.SYNCHRONIZED)
+        self.assertEqual(resynced.generation, 2)
+        self.assertEqual(resynced.last_received_monotonic_ns, 120)
+        self.assertIsNone(resynced.resync_not_before_monotonic_ns)
+
+
     def test_disconnect_reconnect_requires_snapshot_before_new_delta(self) -> None:
         state = self.synchronized()
         disconnected = mark_disconnected(state, observed_monotonic_ns=150)

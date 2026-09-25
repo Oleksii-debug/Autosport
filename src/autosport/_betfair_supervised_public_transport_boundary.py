@@ -5,12 +5,13 @@ callback so ``execute_betfair_supervised_action`` can cross the durable SUBMITTE
 boundary after STOP admission and immediately before the irreversible POST. That
 private seam must not be caller authority.
 
-This composition guard therefore keeps the already-qualified canonical private
-primitive untouched. A caller-code-sensitive descriptor returns that primitive only
-to the exact canonical high-level execution code object. Every ordinary class or
-instance access receives a genuinely narrow public function that is incapable of
-creating a provider effect. Provider writes are available only through the canonical
-approval + ledger lifecycle owned by ``execute_betfair_supervised_action``.
+This composition guard keeps the already-qualified canonical private primitive
+untouched. A caller-code-sensitive descriptor returns that primitive only to the
+exact canonical high-level execution code object. Every ordinary class or instance
+access receives a narrow public function exposing product inputs only. The public
+function delegates to the frozen canonical primitive with the product-owned HTTPS
+POST, response parser, and observation clock explicitly bound; callers cannot
+replace those authorities.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from . import betfair_supervised_execution as _impl
 
 
 _CLIENT_TYPE = _impl.BetfairSupervisedPlaceOrdersClient
+_CANONICAL_TRANSPORT_TYPE = _impl.UrllibBetfairHttpTransport
 _PRIVATE_PLACE_ACTION = _CLIENT_TYPE.__dict__.get("place_action")
 _PRIVATE_PLACE_ACTION_CODE = getattr(_PRIVATE_PLACE_ACTION, "__code__", None)
 _CANONICAL_EXECUTE = _impl.execute_betfair_supervised_action
@@ -53,6 +55,7 @@ if (
 def _canonical_public_dispatch_unchanged() -> bool:
     return (
         _CLIENT_TYPE is _impl.BetfairSupervisedPlaceOrdersClient
+        and _CANONICAL_TRANSPORT_TYPE is _impl.UrllibBetfairHttpTransport
         and _CLIENT_TYPE.__dict__.get("place_action") is _BOUNDARY
         and _impl._CANONICAL_BETFAIR_PLACE_ACTION is _PRIVATE_PLACE_ACTION
         and _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE
@@ -86,19 +89,30 @@ def _public_place_action(
     provider_order_ref: str,
     execution_workspace: Path,
 ) -> _impl.BetfairPlaceExecutionReport:
-    """Fail closed: irreversible writes require approval + ledger orchestration."""
+    """Dispatch a narrow public write through product-owned provider authorities."""
 
     if type(self) is not _CLIENT_TYPE:
         raise _impl.BetfairSupervisedExecutionError(
             "public Betfair provider write requires the exact canonical client"
         )
+    if type(self._transport) is not _CANONICAL_TRANSPORT_TYPE:
+        raise _impl.BetfairSupervisedExecutionError(
+            "public Betfair provider write requires canonical HTTPS transport state"
+        )
     if not _canonical_public_dispatch_unchanged():
         raise _impl.BetfairSupervisedExecutionError(
             "canonical Betfair public provider-write authority changed"
         )
-    raise _impl.BetfairSupervisedExecutionError(
-        "direct public Betfair provider write is disabled; "
-        "use execute_betfair_supervised_action"
+    return _PRIVATE_PLACE_ACTION(
+        self,
+        action,
+        profile=profile,
+        bound=bound,
+        provider_order_ref=provider_order_ref,
+        execution_workspace=execution_workspace,
+        _transport_post=_PROVIDER_HTTP_POST,
+        _response_parser=_RESPONSE_PARSER,
+        _observation_clock=_OBSERVATION_CLOCK,
     )
 
 

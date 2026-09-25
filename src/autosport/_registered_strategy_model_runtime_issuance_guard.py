@@ -1,8 +1,9 @@
 """Fail-closed dispatch guard for registered-strategy model runtime issuance.
 
-The owning resolver and runtime remain in registered_strategy_model_runtime.  This
-module only seals the package-visible positive issuance boundary against ordinary
-module/class rebinding, following the existing package-installed guard pattern.
+The owning resolver and runtime remain in registered_strategy_model_runtime. This
+module seals the package-visible positive issuance boundary against ordinary
+module/class/dependency rebinding, following the existing package-installed guard
+pattern.
 """
 
 from __future__ import annotations
@@ -18,7 +19,55 @@ def _install_guard() -> None:
     resolver = _runtime.resolve_registered_strategy_model
     resolver_code = getattr(resolver, "__code__", None)
 
-    def guarded_resolver(*args, **kwargs):
+    # The resolver wrapper closes over the implementation, but that implementation
+    # still resolves these authority-bearing names through the module globals dict.
+    # Snapshot them at package installation so a later ordinary module rebind cannot
+    # redirect durable registry/artifact/scientific validation without changing the
+    # resolver code object.
+    dependency_names = (
+        "ScientificRegistry",
+        "FactoryArtifactStore",
+        "MeanBaselineModel",
+        "WalkForwardEvaluationConfig",
+        "Path",
+        "_registry_state_sha256",
+        "_require_causal_entry",
+        "_require_precedes",
+        "_promotion_authority",
+        "_matching_positive_experiment",
+        "_require_publication_registry_prefix",
+        "_decode_mean_baseline_artifact",
+        "_text",
+        "_sha256",
+        "_instant",
+    )
+    canonical_dependencies = tuple(
+        (name, getattr(_runtime, name)) for name in dependency_names
+    )
+
+    registry_type = _runtime.ScientificRegistry
+    registry_schema_version = registry_type.SCHEMA_VERSION
+    registry_dispatch = tuple(
+        (name, getattr(registry_type, name))
+        for name in (
+            "__init__",
+            "_read",
+            "get",
+            "causal_records",
+            "causal_precedes",
+            "champion_strategy",
+            "reproducibility_bundle",
+        )
+    )
+    artifact_store_type = _runtime.FactoryArtifactStore
+    artifact_store_dispatch = tuple(
+        (name, getattr(artifact_store_type, name))
+        for name in ("__init__", "read", "publication_receipt")
+    )
+    evaluation_config_type = _runtime.WalkForwardEvaluationConfig
+    evaluation_from_frozen_text = evaluation_config_type.from_frozen_text
+
+    def require_canonical_dispatch() -> None:
         if (
             _runtime.RegisteredStrategyModelRuntime is not runtime_type
             or _runtime.RegisteredStrategyModelRuntimeError is not error_type
@@ -30,7 +79,32 @@ def _install_guard() -> None:
             raise error_type(
                 "registered-strategy runtime issuance authority changed"
             )
+        for name, expected in canonical_dependencies:
+            if getattr(_runtime, name, None) is not expected:
+                raise error_type(
+                    f"registered-strategy runtime dependency {name!r} changed"
+                )
+        if registry_type.SCHEMA_VERSION != registry_schema_version:
+            raise error_type(
+                "registered-strategy ScientificRegistry schema authority changed"
+            )
+        for name, expected in registry_dispatch:
+            if getattr(registry_type, name, None) is not expected:
+                raise error_type(
+                    f"registered-strategy ScientificRegistry dispatch {name!r} changed"
+                )
+        for name, expected in artifact_store_dispatch:
+            if getattr(artifact_store_type, name, None) is not expected:
+                raise error_type(
+                    f"registered-strategy artifact-store dispatch {name!r} changed"
+                )
+        if evaluation_config_type.from_frozen_text is not evaluation_from_frozen_text:
+            raise error_type(
+                "registered-strategy evaluation-config dispatch changed"
+            )
 
+    def guarded_resolver(*args, **kwargs):
+        require_canonical_dispatch()
         result = resolver(*args, **kwargs)
         if type(result) is not runtime_type:
             raise error_type(

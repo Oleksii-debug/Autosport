@@ -57,6 +57,7 @@ def _path_digest(root: Path, path: Path) -> str:
 
 _PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
 _PERCENT_HEX_BYTES = re.compile(rb"%[0-9A-Fa-f]{2}")
+_HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
 
 def _lower_percent_hex(value: str) -> str:
@@ -65,6 +66,26 @@ def _lower_percent_hex(value: str) -> str:
 
 def _lower_percent_hex_bytes(value: bytes) -> bytes:
     return _PERCENT_HEX_BYTES.sub(lambda match: match.group(0).lower(), value)
+
+
+def _percent_decode_bytes(value: bytes) -> bytes:
+    """Decode only valid %HH triplets while preserving every literal byte exactly."""
+
+    decoded = bytearray()
+    index = 0
+    while index < len(value):
+        if (
+            value[index] == 0x25
+            and index + 2 < len(value)
+            and value[index + 1] in _HEX_DIGITS
+            and value[index + 2] in _HEX_DIGITS
+        ):
+            decoded.append(int(value[index + 1 : index + 3], 16))
+            index += 3
+            continue
+        decoded.append(value[index])
+        index += 1
+    return bytes(decoded)
 
 
 def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
@@ -90,11 +111,18 @@ def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
 def _scan_file(
     path: Path,
     needles: tuple[tuple[bytes, tuple[str, ...]], ...],
+    semantic_utf8: bytes,
     *,
     chunk_size: int,
 ) -> tuple[str, ...]:
-    max_needle = max(len(needle) for needle, _labels in needles)
+    max_needle = max(
+        max(len(needle) for needle, _labels in needles),
+        len(semantic_utf8) * 3,
+    )
     overlap = max(0, max_needle - 1)
+    required_labels = {
+        label for _needle, labels in needles for label in labels
+    }
     found: set[str] = set()
     tail = b""
     with path.open("rb") as handle:
@@ -114,7 +142,21 @@ def _scan_file(
                     haystack = normalized_percent_window
                 if needle in haystack:
                     found.update(labels)
-            if len(found) == sum(len(labels) for _needle, labels in needles):
+
+            # URL percent encoding permits every UTF-8 byte to be represented as
+            # %HH, including RFC-unreserved bytes that urllib normally leaves
+            # literal. Decode only valid triplets into a private byte window and
+            # compare against the exact UTF-8 secret. Literal bytes retain their
+            # original case, so this does not broaden ASCII matching authority.
+            if (
+                "url-percent-utf8-semantic" not in found
+                and semantic_utf8 not in window
+                and b"%" in window
+                and semantic_utf8 in _percent_decode_bytes(window)
+            ):
+                found.add("url-percent-utf8-semantic")
+
+            if required_labels.issubset(found):
                 break
             tail = window[-overlap:] if overlap else b""
     return tuple(sorted(found))
@@ -181,7 +223,8 @@ def scan_secret_canary(
         raise ValueError("chunk_size must be a positive integer")
 
     root_path = Path(os.path.abspath(root))
-    canary_digest = hashlib.sha256(canary.encode("utf-8")).hexdigest()
+    semantic_utf8 = canary.encode("utf-8")
+    canary_digest = hashlib.sha256(semantic_utf8).hexdigest()
     findings: list[SecretCanaryFinding] = []
     errors: list[SecretCanaryScanError] = []
     scanned_files = 0
@@ -277,7 +320,12 @@ def scan_secret_canary(
                     excluded_files += 1
                     continue
                 scanned_files += 1
-                encodings = _scan_file(path, needles, chunk_size=chunk_size)
+                encodings = _scan_file(
+                    path,
+                    needles,
+                    semantic_utf8,
+                    chunk_size=chunk_size,
+                )
                 if encodings:
                     findings.append(
                         SecretCanaryFinding(

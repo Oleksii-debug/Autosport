@@ -5,13 +5,13 @@ product-built authenticated context before and after acquisition. A second
 thread could nevertheless transiently replace mutable client dispatch/state
 while provider I/O was in flight and restore it before the post-check. This
 composition layer leaves the canonical Betfair parser/RPC implementation in
-place, but routes the authority-bearing RPC through a closure-hidden snapshot
-client built from product-captured credentials, clock and transport code.
+place, but routes the authority-bearing RPC through a product snapshot client
+built from captured credentials, clock and transport code.
 
-The snapshot also freezes JSON encode/decode dispatch and binds the final
-identity fields back to the exact captured canonical RPC result. This prevents
-a transient live-parser/global substitution from laundering caller-selected
-currency or evidence metadata while preserving the real provider payload hash.
+Copied FunctionType globals remain mutable through ``__globals__``. Every cloned
+RPC/decode/request-id/clock/transport function therefore carries an exact globals
+snapshot that is checked before authority-bearing execution, and the private JSON
+facade is checked for its exact import-time encode/decode dispatch.
 """
 from __future__ import annotations
 
@@ -47,6 +47,7 @@ def _install_guard() -> None:
 
     records: WeakKeyDictionary = WeakKeyDictionary()
     active = local()
+    missing = object()
 
     def clone_function(
         function: object,
@@ -71,10 +72,23 @@ def _install_guard() -> None:
         )
         return cloned
 
-    # A copied globals dictionary alone is not enough for ``json`` because the
-    # module object itself is mutable. Keep only the import-time functions/error
-    # class behind a closure-hidden namespace and inject that into the sealed
-    # encode/decode functions.
+    def snapshot_globals(function: FunctionType) -> tuple[tuple[str, object], ...]:
+        names = sorted(
+            name for name in set(function.__code__.co_names) if name in function.__globals__
+        )
+        if "__builtins__" in function.__globals__:
+            names.append("__builtins__")
+        return tuple((name, function.__globals__[name]) for name in names)
+
+    def require_snapshot(
+        function: FunctionType,
+        snapshot: tuple[tuple[str, object], ...],
+        label: str,
+    ) -> None:
+        for name, expected in snapshot:
+            if function.__globals__.get(name, missing) is not expected:
+                raise identity_error(f"frozen {label} global {name!r} was rebound")
+
     sealed_json = SimpleNamespace(
         dumps=canonical_json_dumps,
         loads=canonical_json_loads,
@@ -85,6 +99,7 @@ def _install_guard() -> None:
         label="Betfair JSON decoder",
         globals_overrides={"json": sealed_json},
     )
+    decode_snapshot = snapshot_globals(sealed_decode_json)
     sealed_rpc = clone_function(
         canonical_rpc,
         label="Betfair RPC",
@@ -93,18 +108,47 @@ def _install_guard() -> None:
             "_decode_json": sealed_decode_json,
         },
     )
+    rpc_snapshot = snapshot_globals(sealed_rpc)
     sealed_next_request_id = clone_function(
         canonical_next_request_id,
         label="Betfair request-id allocator",
     )
+    request_id_snapshot = snapshot_globals(sealed_next_request_id)
     sealed_observed_at = clone_function(
         canonical_observed_at,
         label="Betfair observation clock adapter",
     )
+    observed_at_snapshot = snapshot_globals(sealed_observed_at)
     sealed_transport_post = clone_function(
         canonical_transport_post,
         label="Betfair HTTP transport",
     )
+    transport_snapshot = snapshot_globals(sealed_transport_post)
+
+    def require_static_snapshot() -> None:
+        if sealed_json.dumps is not canonical_json_dumps:
+            raise identity_error("frozen K07 JSON encode dispatch was rebound")
+        if sealed_json.loads is not canonical_json_loads:
+            raise identity_error("frozen K07 JSON decode dispatch was rebound")
+        if sealed_json.JSONDecodeError is not canonical_json_decode_error:
+            raise identity_error("frozen K07 JSON error authority was rebound")
+        require_snapshot(sealed_decode_json, decode_snapshot, "K07 Betfair JSON decoder")
+        require_snapshot(sealed_rpc, rpc_snapshot, "K07 Betfair RPC")
+        require_snapshot(
+            sealed_next_request_id,
+            request_id_snapshot,
+            "K07 Betfair request-id allocator",
+        )
+        require_snapshot(
+            sealed_observed_at,
+            observed_at_snapshot,
+            "K07 Betfair observation clock adapter",
+        )
+        require_snapshot(
+            sealed_transport_post,
+            transport_snapshot,
+            "K07 Betfair HTTP transport",
+        )
 
     def guarded_getattribute(client: object, name: str):
         if name == "_rpc":
@@ -123,6 +167,7 @@ def _install_guard() -> None:
         timeout_seconds: float = 10.0,
         account_label: str = "authenticated-account",
     ):
+        require_static_snapshot()
         if client_type.__getattribute__ is not guarded_getattribute:
             raise identity_error("K07 acquisition snapshot dispatch was rebound")
         if transport_type.post is not canonical_transport_post:
@@ -151,14 +196,12 @@ def _install_guard() -> None:
         ):
             raise identity_error("canonical K07 client origin cannot be snapshotted")
 
-        # Copy secret values into a closure-hidden credentials object. The public
-        # live credentials object may be transiently mutated in-place; the request
-        # snapshot must not share that mutable object identity.
         sealed_credentials = credentials_type(
             live_credentials.application_key,
             live_credentials.session_token,
         )
         sealed_clock = clone_function(live_clock, label="Betfair product clock")
+        clock_snapshot = snapshot_globals(sealed_clock)
 
         max_response_bytes = original_getattribute(
             live_transport, "_max_response_bytes"
@@ -166,9 +209,6 @@ def _install_guard() -> None:
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
             raise identity_error("canonical Betfair response bound is invalid")
         sealed_transport = transport_type(max_response_bytes=max_response_bytes)
-        # Use the exact canonical transport code object with a frozen globals
-        # snapshot (notably the canonical urlopen function). The object itself is
-        # closure-hidden so caller code cannot transiently shadow its ``post``.
         sealed_transport.post = MethodType(sealed_transport_post, sealed_transport)
 
         shadow = client_type(
@@ -183,9 +223,8 @@ def _install_guard() -> None:
         shadow._observed_at = MethodType(sealed_observed_at, shadow)
 
         def snapshot_rpc(method: str, params):
-            # Identity resolution owns exactly one empty-parameter account-details
-            # RPC. A transient parser/global rebind must not be able to redirect
-            # the sealed transport to a different read (or any future method).
+            require_static_snapshot()
+            require_snapshot(sealed_clock, clock_snapshot, "K07 Betfair product clock")
             if method != account_details_rpc or type(params) is not dict or params:
                 raise identity_error(
                     "K07 acquisition attempted a non-canonical account-details RPC"
@@ -201,8 +240,6 @@ def _install_guard() -> None:
                 captures[identity] = result
             return result
 
-        # WeakKeyDictionary prevents the guard from extending the real client's
-        # lifetime; the shadow is reachable only through this closure-hidden value.
         import weakref
 
         records[client] = (weakref.ref(client), snapshot_rpc)
@@ -213,11 +250,11 @@ def _install_guard() -> None:
         *,
         mode=_identity.BetfairAccountIdentityMode.PERSONAL_DEVELOPER,
     ):
+        require_static_snapshot()
         if client_type.__getattribute__ is not guarded_getattribute:
             raise identity_error("K07 acquisition snapshot dispatch was rebound")
         record = records.get(client)
         if record is None:
-            # Preserve canonical error semantics for direct/non-product clients.
             return original_resolve(client, mode=mode)
 
         mapping = getattr(active, "by_client_id", None)

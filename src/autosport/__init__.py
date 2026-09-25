@@ -153,3 +153,8 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# A still-live account snapshot is an ephemeral remote-provider capability. Reusing
+# its idempotency identity from another canonical acquirer is allowed only when the
+# exact in-memory Betfair credentials match the origin that issued the live object.
+from . import _account_snapshot_acquisition_origin_binding as _account_snapshot_acquisition_origin_binding  # noqa: F401,E402

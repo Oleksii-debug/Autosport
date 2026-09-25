@@ -190,3 +190,27 @@ def test_reordered_input_cannot_change_fit_history_or_closed_window_results() ->
     assert reordered_result == ordered_result
     assert reordered_result.result_sha256 == ordered_result.result_sha256
     assert reordered_factory.fit_calls == ordered_factory.fit_calls
+
+
+def test_mixed_timezone_offsets_use_instant_order_not_lexical_iso_order() -> None:
+    # Raw ISO string order is deliberately different from UTC instant order.
+    first = "2026-01-01T10:00:00+10:00"  # 2026-01-01 00:00Z
+    second = "2025-12-31T20:00:00-05:00"  # 2026-01-01 01:00Z
+    third = "2026-01-01T04:00:00+02:00"  # 2026-01-01 02:00Z
+    fourth = "2025-12-31T22:00:00-05:00"  # 2026-01-01 03:00Z
+    assert sorted((first, second, third, fourth)) != [first, second, third, fourth]
+
+    points = (
+        TrainingPoint(third, 3.0, 0.0, third),
+        TrainingPoint(first, 1.0, 0.0, first),
+        TrainingPoint(fourth, 4.0, 1.0, fourth),
+        TrainingPoint(second, 2.0, 1.0, second),
+    )
+    result, factory = _run(points)
+
+    assert [fold.evaluation_at for fold in result.folds] == [third, fourth]
+    assert [call.observed_at for call in factory.fit_calls] == [
+        (first, second),
+        (first, second, third),
+    ]
+    assert [call.training_cutoff for call in factory.fit_calls] == [second, third]

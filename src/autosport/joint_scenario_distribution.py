@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ from typing import Iterable
 
 from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
-from .portfolio import PortfolioEngine
+from .portfolio import PortfolioEngine, _scenario_profit_in_context
 from .risk import PaperRiskPolicy
 from .scenario_search import ScenarioGroup
 
@@ -240,6 +241,25 @@ def analyse_joint_distribution(
     if before_sha256 is None:
         raise ValueError("joint scenario analysis requires a valid canonical PaperBook")
 
+    # Bind all scenario economics to one detached canonical PaperBook cut. A live
+    # PaperTicket is mutable during settlement, so a tuple of object references is
+    # not a snapshot: an ABA mutation can affect one scenario and be restored before
+    # the final live-book hash. The detached book must independently hash to the
+    # exact pre-analysis commitment, and the live source must still match immediately
+    # after capture.
+    try:
+        book_snapshot = copy.deepcopy(book)
+    except Exception as exc:
+        raise ValueError("cannot capture canonical PaperBook snapshot") from exc
+    snapshot_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_snapshot)
+    capture_after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if (
+        snapshot_sha256 is None
+        or snapshot_sha256 != before_sha256
+        or capture_after_sha256 != before_sha256
+    ):
+        raise ValueError("PaperBook changed during joint scenario analysis")
+
     group_snapshots = _snapshot_groups(groups)
     try:
         state_values = tuple(states)
@@ -303,7 +323,7 @@ def analyse_joint_distribution(
 
     tickets: tuple[PaperTicket, ...] = tuple(
         ticket
-        for ticket in book.tickets.values()
+        for ticket in book_snapshot.tickets.values()
         if ticket.status is TicketStatus.OPEN
     )
     uncovered_quote_keys = {
@@ -320,12 +340,20 @@ def analyse_joint_distribution(
     weighted_profit = Fraction(0, 1)
     profits: list[Decimal] = []
     for state in normalized_states:
-        profit = PortfolioEngine.scenario_profit(
-            list(tickets),
-            set(state.selected_quote_keys),
+        winners = set(state.selected_quote_keys)
+        public_profit = PortfolioEngine.scenario_profit(list(tickets), winners)
+        canonical_profit = _scenario_profit_in_context(list(tickets), winners)
+        if public_profit != canonical_profit:
+            raise ValueError(
+                "portfolio scenario profit changed during joint scenario analysis"
+            )
+        snapshot_after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(
+            book_snapshot
         )
-        profits.append(profit)
-        weighted_profit += Fraction(state.probability) * Fraction(profit)
+        if snapshot_after_sha256 != snapshot_sha256:
+            raise ValueError("PaperBook snapshot changed during joint scenario analysis")
+        profits.append(canonical_profit)
+        weighted_profit += Fraction(state.probability) * Fraction(canonical_profit)
 
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if after_sha256 is None or after_sha256 != before_sha256:

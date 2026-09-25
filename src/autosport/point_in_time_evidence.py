@@ -384,15 +384,11 @@ class HoldoutConsumption:
 
 def _physical_holdout_key(
     dataset_snapshot: DatasetSnapshot,
-) -> tuple[str, str, str]:
-    """Canonical identity of the immutable physical confirmation dataset."""
+) -> str:
+    """Canonical immutable content identity of a physical confirmation dataset."""
     if type(dataset_snapshot) is not DatasetSnapshot:
         raise PointInTimeEvidenceError("dataset_snapshot must be an exact DatasetSnapshot")
-    return (
-        _sha256(dataset_snapshot.manifest_sha256, "dataset_snapshot.manifest_sha256"),
-        _text(dataset_snapshot.source_identity, "dataset_snapshot.source_identity"),
-        _text(dataset_snapshot.license_identity, "dataset_snapshot.license_identity"),
-    )
+    return _sha256(dataset_snapshot.manifest_sha256, "dataset_snapshot.manifest_sha256")
 
 
 def _find_physical_holdout_consumption(
@@ -400,14 +396,10 @@ def _find_physical_holdout_consumption(
     *,
     dataset_snapshot: DatasetSnapshot,
 ) -> HoldoutConsumption | None:
-    """Find prior consumption even when caller-controlled aliases changed."""
+    """Find prior physical consumption despite aliases in provenance or family labels."""
     wanted = _physical_holdout_key(dataset_snapshot)
     for record in records.values():
-        existing = (
-            _sha256(record.dataset_manifest_sha256, "dataset_manifest_sha256"),
-            _text(record.source_identity, "source_identity"),
-            _text(record.license_identity, "license_identity"),
-        )
+        existing = _sha256(record.dataset_manifest_sha256, "dataset_manifest_sha256")
         if existing == wanted:
             return record
     return None
@@ -418,10 +410,10 @@ class HoldoutConsumptionLedger:
 
     Persisted freshness identifiers deliberately exclude both
     ``dataset_snapshot_id`` and ``research_protocol_id``. For schema compatibility
-    they retain ``confirmation_trial_family_id``, but that caller-visible family label
-    is not freshness authority: eligibility also checks the exact immutable physical
-    dataset identity (manifest + source + license). Renaming a snapshot, protocol, or
-    family therefore cannot manufacture a fresh confirmation set.
+    they retain ``confirmation_trial_family_id`` plus provenance labels, but none of
+    those caller-visible aliases are physical freshness authority. Eligibility also
+    checks the immutable manifest/content identity, so renaming a snapshot, protocol,
+    family, source label, or license label cannot manufacture a fresh confirmation set.
 
     Every workspace-local ledger version is fenced by the shared, workspace-external
     ``MonotonicWorkspaceAuthority``. A valid older JSON file or a deleted ledger is

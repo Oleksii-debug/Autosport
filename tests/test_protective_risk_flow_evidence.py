@@ -1,6 +1,6 @@
 import copy
 import unittest
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_UP, localcontext
 
 from autosport.protective_risk_evidence import (
     PercentageEvidenceStatus,
@@ -284,24 +284,63 @@ class ProtectiveRiskFlowEvidenceTests(unittest.TestCase):
             )
 
     def test_unrepresentable_finite_decimal_fails_closed_with_typed_reason(self) -> None:
+        for value in (
+            "1e1000000",
+            "1e19",
+            "1e-19",
+            "1" * 49,
+            "0e1000000",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ProtectiveRiskEvidenceError) as caught:
+                    _valuation(1, "extreme", value, T0)
+                self.assertEqual(caught.exception.code, "ARITHMETIC_UNREPRESENTABLE")
+
+    def test_event_count_resource_limit_fails_before_replay(self) -> None:
+        one = _valuation(1, "v1", "1000", T0)
         with self.assertRaises(ProtectiveRiskEvidenceError) as caught:
-            _build((_valuation(1, "huge", "1e1000000", T0),))
+            _build((one,) * 10_001)
+        self.assertEqual(caught.exception.code, "EVIDENCE_RESOURCE_LIMIT")
 
-        self.assertEqual(caught.exception.code, "ARITHMETIC_UNREPRESENTABLE")
-
-    def test_decimal_result_is_independent_of_caller_context(self) -> None:
+    def test_decimal_result_is_independent_of_hostile_caller_context(self) -> None:
         events = (
-            _valuation(1, "v1", "1000", T0),
-            _valuation(2, "v2", "930", T1),
+            _valuation(1, "v1", "123456789012345.678901234567890123", T0),
+            _flow(
+                2,
+                "deposit",
+                "0.000000000000000123",
+                "owner",
+                "portfolio-A",
+                T1,
+            ),
+            _valuation(3, "v2", "123456789012345.678901234567890123", T1),
+            _flow(
+                4,
+                "withdrawal",
+                "0.000000000000000111",
+                "portfolio-A",
+                "owner",
+                T1,
+            ),
+            _valuation(5, "v3", "123456789012344.678901234567890111", T1),
         )
         baseline = _build(events)
 
         with localcontext() as context:
             context.prec = 3
+            context.rounding = ROUND_UP
             hostile = _build(events)
 
+        self.assertEqual(hostile.to_dict(), baseline.to_dict())
         self.assertEqual(hostile.evidence_sha256, baseline.evidence_sha256)
-        self.assertEqual(hostile.maximum_drawdown_fraction, Decimal("0.07"))
+        self.assertEqual(
+            hostile.points[1].flow_adjusted_equity,
+            Decimal("123456789012345.678901234567890000"),
+        )
+        self.assertEqual(
+            hostile.points[2].flow_adjusted_equity,
+            Decimal("123456789012344.678901234567890099"),
+        )
 
     def test_evidence_cannot_claim_source_or_risk_policy_authority(self) -> None:
         evidence = _build((_valuation(1, "v1", "1000", T0),))

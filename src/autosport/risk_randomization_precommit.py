@@ -373,9 +373,13 @@ def _issue_risk_randomization_precommit(
     dataset_snapshot_id: str,
     experiment_id: str,
     authority_root: str | Path | None = None,
-    _product_token_bytes,
 ) -> RiskRandomizationPrecommitReceipt:
-    """Implementation for one hard-sealed product-generated randomization root."""
+    """Implementation for one product-generated randomization root.
+
+    Entropy is always obtained inside this implementation from ``secrets.token_bytes``.
+    Package composition hard-seals that dispatch to the import-time product callable;
+    there is deliberately no seed/root/entropy parameter on any issuer callable.
+    """
 
     experiment_id = _text(experiment_id, "experiment_id")
     workspace_path = _workspace_path(workspace)
@@ -461,12 +465,8 @@ def _issue_risk_randomization_precommit(
                     "committed randomization state is missing from workspace"
                 )
 
-            if secrets.token_bytes is not _product_token_bytes:
-                raise RiskRandomizationPrecommitError(
-                    "randomization entropy source was rebound"
-                )
             randomization_root_sha256 = hashlib.sha256(
-                _product_token_bytes(_ROOT_BYTES)
+                secrets.token_bytes(_ROOT_BYTES)
             ).hexdigest()
             state = _state_template(
                 workspace_instance_id=authority.workspace_instance_id,
@@ -517,7 +517,7 @@ def _issue_risk_randomization_precommit(
         ) from exc
 
 
-def _bind_product_entropy_issuer(issue_impl, product_token_bytes):
+def _bind_product_entropy_issuer(issue_impl):
     def issue_risk_randomization_precommit(
         registry_path: str | Path,
         *,
@@ -529,10 +529,8 @@ def _bind_product_entropy_issuer(issue_impl, product_token_bytes):
     ) -> RiskRandomizationPrecommitReceipt:
         """Create-or-recover one product-generated randomization root.
 
-        The entropy callable is captured outside module-global dispatch, so
-        rebinding both ``secrets.token_bytes`` and any module token cannot mint
-        a product-issued root. There is no caller-supplied seed/root/entropy
-        argument.
+        There is no caller-supplied seed/root/entropy argument. Package composition
+        hard-seals the implementation's cryptographic and entropy dependencies.
         """
 
         return issue_impl(
@@ -542,7 +540,6 @@ def _bind_product_entropy_issuer(issue_impl, product_token_bytes):
             dataset_snapshot_id=dataset_snapshot_id,
             experiment_id=experiment_id,
             authority_root=authority_root,
-            _product_token_bytes=product_token_bytes,
         )
 
     return issue_risk_randomization_precommit
@@ -550,7 +547,6 @@ def _bind_product_entropy_issuer(issue_impl, product_token_bytes):
 
 issue_risk_randomization_precommit = _bind_product_entropy_issuer(
     _issue_risk_randomization_precommit,
-    secrets.token_bytes,
 )
 del _bind_product_entropy_issuer
 

@@ -8,6 +8,12 @@ MonotonicWorkspaceAuthority.
 It deliberately does *not* claim that member occurrences are product-owned or
 that the full experiment is IID-qualified.  A downstream occurrence producer
 must consume this exact receipt before it can prove member ancestry/completion.
+
+The product-owned claim is scoped to Autosport's supported API/module-dispatch
+boundary.  Python code with arbitrary same-process reflective capability can
+rewrite private object slots, function globals, defaults, or closure cells and is
+therefore equivalent to interpreter compromise for this authority.  This module
+does not claim resistance to that stronger attacker model.
 """
 
 from __future__ import annotations
@@ -61,6 +67,11 @@ class RiskRandomizationPrecommitReceipt:
     @property
     def product_randomization_root_issued(self) -> bool:
         return True
+
+    @property
+    def same_process_reflection_tamper_resistance_proven(self) -> bool:
+        """Whether arbitrary in-process Python reflection is an integrity boundary."""
+        return False
 
     @property
     def occurrence_ancestry_proven(self) -> bool:

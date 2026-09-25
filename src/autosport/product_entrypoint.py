@@ -119,9 +119,6 @@ def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
                 f"product source must provide callable {method}"
             )
 
-    # A source that owns durable product state must be bound to the same canonical
-    # workspace as the supported runtime before the composition root creates any
-    # runtime files. Generic stateless/external source factories remain compatible.
     source_workspace = getattr(source, "workspace", None)
     if source_workspace is not None:
         expected_workspace = _normalized_workspace(workspace, label="product runtime")
@@ -228,11 +225,7 @@ def _append_text_lines(lines: list[str], prefix: str, value: object) -> None:
 
 
 def _format_text_record(record: Mapping[str, object]) -> str:
-    """Return a stable line-oriented record suitable for keyboard/screen-reader use.
-
-    Every semantic value is paired with a textual label and strings are JSON-escaped,
-    so provider-controlled control characters cannot become ANSI/terminal commands.
-    """
+    """Return a stable line-oriented record suitable for keyboard/screen-reader use."""
 
     lines = ["AUTOSPORT RECORD"]
     handled: set[str] = set()
@@ -311,13 +304,7 @@ def run_product(
     sleep: Callable[[float], None] = time.sleep,
     install_signal_handlers: bool = True,
 ) -> int:
-    """Run the canonical headless PAPER product from one supported boundary.
-
-    Provider credentials and acquisition policy live behind ``source_factory``. This
-    command owns no provider truth, market store, PAPER book, settlement, or learning
-    authority; it only constructs the integrated product composition root and drives
-    its canonical ticks.
-    """
+    """Run the canonical headless PAPER product from one supported boundary."""
 
     output_format = _validated_output_format(output_format)
     if max_cycles is not None and (
@@ -336,9 +323,6 @@ def run_product(
     if max_cycles is None and float(poll_seconds) == 0.0:
         raise ValueError("unbounded product run requires a positive poll interval")
 
-    # Validate the complete production source capability before the composition root
-    # creates a workspace or durable manifest. Missing event resolution or a split
-    # source/runtime workspace must never be hidden by runtime initialization.
     source = _validated_source(source_factory, workspace=workspace)
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
@@ -349,6 +333,7 @@ def run_product(
     previous_handlers: dict[int, object] = {}
     installed_handlers: list[int] = []
     started = False
+    terminalized = False
     try:
         if install_signal_handlers:
             previous_handlers = {
@@ -372,10 +357,12 @@ def run_product(
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
                 exit_code = stop_request.exit_code
+                stop_status = runtime.stop(stop_request.reason)
+                terminalized = True
                 _print_record(
                     "product_status",
                     runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
+                    value=stop_status,
                     output_format=output_format,
                 )
                 break
@@ -389,24 +376,24 @@ def run_product(
                 output_format=output_format,
             )
 
-            # A signal observed during a completed tick is the selected STOP cause even
-            # when that tick also reaches max_cycles. Freeze the exit code at the same
-            # decision point so a later signal cannot contradict already-recorded STOP
-            # evidence.
             if stop_request.requested:
                 exit_code = stop_request.exit_code
+                stop_status = runtime.stop(stop_request.reason)
+                terminalized = True
                 _print_record(
                     "product_status",
                     runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
+                    value=stop_status,
                     output_format=output_format,
                 )
                 break
             if max_cycles is not None and cycles >= max_cycles:
+                stop_status = runtime.stop("max_cycles_reached")
+                terminalized = True
                 _print_record(
                     "product_status",
                     runtime=runtime,
-                    value=runtime.stop("max_cycles_reached"),
+                    value=stop_status,
                     output_format=output_format,
                 )
                 break
@@ -422,11 +409,22 @@ def run_product(
             raise ProductRuntimeError(type(exc).__name__) from exc
         raise
     finally:
-        # Cleanup is secondary to a failure already propagating out of the product
-        # path. Always try both runtime close and every installed-handler restore, but
-        # never replace the causal start/tick/STOP/setup failure with a cleanup symptom.
         primary_failure = sys.exc_info()[1]
         cleanup_failure: BaseException | None = None
+
+        if started and not terminalized and primary_failure is not None:
+            try:
+                runtime.stop("runtime_error")
+                terminalized = True
+            except BaseException as stop_error:
+                try:
+                    primary_failure.add_note(
+                        "runtime STOP also failed during exceptional cleanup: "
+                        f"{type(stop_error).__name__}: {stop_error}"
+                    )
+                except BaseException:
+                    pass
+
         try:
             runtime.close()
         except BaseException as exc:
@@ -491,10 +489,6 @@ def run_product_command(
         )
         return 4
     except Exception as exc:
-        # Product stdout is a public/machine-readable boundary. Arbitrary exception
-        # messages may contain provider credentials, response bodies or other secrets,
-        # so only stable classification is emitted here. Detailed diagnostics belong
-        # behind an explicitly secret-safe internal logging boundary.
         try:
             output_format = _validated_output_format(output_format)
         except ValueError:

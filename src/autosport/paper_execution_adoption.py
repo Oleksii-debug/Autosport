@@ -41,10 +41,29 @@ class PaperExposureBinding:
     sport: str | None
     bankroll_id: str | None
     currency: str | None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.action_id) is not str or not self.action_id:
             raise ValueError("action_id must be non-empty text")
+        if self.market_semantics_id is not None:
+            identity = self.market_semantics_id
+            if (
+                type(identity) is not str
+                or not identity
+                or identity.strip() != identity
+                or identity != identity.lower()
+                or any(
+                    character
+                    not in "abcdefghijklmnopqrstuvwxyz0123456789._:/-"
+                    for character in identity
+                )
+                or identity in {"unknown", "mixed", "unspecified"}
+            ):
+                raise ValueError(
+                    "market_semantics_id must be a non-reserved lowercase "
+                    "canonical semantic identity"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +343,7 @@ class PaperExecutionAdoptionRuntime:
                     action_id=action_id,
                     sport=leg.sport,
                     bankroll_id=context.bankroll_id,
+                    market_semantics_id=leg.market_semantics_id,
                     currency=context.currency,
                 )
             )
@@ -454,6 +474,7 @@ class PaperExecutionAdoptionRuntime:
                         action_id=action.action_id,
                         sport=event.sport,
                         bankroll_id=bankroll_id,
+                        market_semantics_id=event.market_semantics_id,
                         currency=currency,
                     ),
                 ),
@@ -537,6 +558,10 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "accepted-equivalent durable attempt lacks execution truth"
                 )
+            if action.side != "BACK" or attempt.side != action.side:
+                raise PaperExecutionAdoptionError(
+                    "accepted-equivalent PAPER adoption requires exact BACK execution side"
+                )
             expected.open_ticket(
                 [
                     TicketLeg(
@@ -545,6 +570,8 @@ class PaperExecutionAdoptionRuntime:
                         selection_id=attempt.selection_id,
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
+                        exchange_side="back",
+                        market_semantics_id=binding.market_semantics_id,
                     )
                 ],
                 attempt.execution_stake,
@@ -704,6 +731,10 @@ class PaperExecutionAdoptionRuntime:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"
             )
+        if action.side != "BACK" or attempt.side != action.side:
+            raise PaperExecutionAdoptionError(
+                "accepted-equivalent PAPER adoption requires exact BACK execution side"
+            )
         marker = f"{self._TICKET_MARKER}{attempt.attempt_id}"
         matches = [
             ticket
@@ -735,6 +766,8 @@ class PaperExecutionAdoptionRuntime:
                     selection_id=attempt.selection_id,
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
+                    exchange_side="back",
+                    market_semantics_id=binding.market_semantics_id,
                 )
             ],
             attempt.execution_stake,
@@ -779,4 +812,12 @@ class PaperExecutionAdoptionRuntime:
             and leg.selection_id == attempt.selection_id
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
+            and action.side == "BACK"
+            and attempt.side == action.side
+            # Existing #646-era adopted BACK tickets may predate durable
+            # exchange-side propagation. Exact action+attempt BACK authority is
+            # sufficient to keep that historical ticket readable/replayable,
+            # while every newly materialized ticket is bound to "back".
+            and leg.exchange_side in {None, "back"}
+            and leg.market_semantics_id == binding.market_semantics_id
         )

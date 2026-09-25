@@ -24,8 +24,8 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 7
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 8
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
@@ -308,6 +308,7 @@ class PaperBook:
                             "locked_odds": str(leg.locked_odds),
                             "sport": leg.sport,
                             "exchange_side": leg.exchange_side,
+                            "market_semantics_id": leg.market_semantics_id,
                         }
                         for leg in t.legs
                     ],
@@ -522,6 +523,25 @@ class PaperBook:
             if exchange_side not in {"back", "lay"}:
                 raise ValueError(
                     "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
+                )
+        if leg.market_semantics_id is not None:
+            market_semantics_id = cls._require_canonical_text(
+                leg.market_semantics_id,
+                f"market_semantics_id{suffix}",
+                forbid_quote_key_delimiter=True,
+            )
+            if (
+                market_semantics_id != market_semantics_id.lower()
+                or any(
+                    character
+                    not in "abcdefghijklmnopqrstuvwxyz0123456789._:/-"
+                    for character in market_semantics_id
+                )
+                or market_semantics_id in {"unknown", "mixed", "unspecified"}
+            ):
+                raise ValueError(
+                    "PaperBook ticket market_semantics_id must be a non-reserved "
+                    "lowercase canonical semantic identity"
                 )
         cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
@@ -810,6 +830,15 @@ class PaperBook:
                 if schema_version is not None and schema_version >= 7
                 else None
             )
+            market_semantics_id = (
+                cls._required_snapshot_field(
+                    raw_leg,
+                    "market_semantics_id",
+                    "ticket leg",
+                )
+                if schema_version is not None and schema_version >= 8
+                else None
+            )
             if sport is not None:
                 cls._require_canonical_text(
                     sport,
@@ -827,6 +856,7 @@ class PaperBook:
                     ),
                     sport=sport,
                     exchange_side=exchange_side,
+                    market_semantics_id=market_semantics_id,
                 )
             )
         return tuple(legs)
@@ -906,7 +936,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4, 5, 6, 7}:
+            if schema_version in {3, 4, 5, 6, 7, 8}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -922,7 +952,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version in {4, 5, 6, 7}
+                    if schema_version in {4, 5, 6, 7, 8}
                     else ()
                 )
                 bankroll_id = cls._required_snapshot_field(
@@ -955,7 +985,7 @@ class PaperBook:
                     cls._required_snapshot_field(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
-                    if schema_version in {5, 6, 7}
+                    if schema_version in {5, 6, 7, 8}
                     else None
                 ),
                 status=cls._parse_snapshot_status(

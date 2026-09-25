@@ -2,7 +2,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from autosport.domain import MarketEvent, PaperTicket, TicketLeg
-from autosport.paper_strategy import Forecast, PaperValueAgent
+from autosport.forecasting import ForecastRecord
+from autosport.paper import PaperBook
+from autosport.paper_strategy import PaperValueAgent
 
 
 class _CapturingRiskPolicy:
@@ -29,6 +31,7 @@ def _event(exchange_side: str) -> MarketEvent:
         sequence=1,
         sport="basketball",
         exchange_side=exchange_side,
+        market_semantics_id="basketball:h2h:v1",
     )
 
 
@@ -37,11 +40,21 @@ def test_paper_value_agent_preserves_exchange_side_in_proposed_leg() -> None:
     policy = _CapturingRiskPolicy()
     agent = PaperValueAgent(
         {
-            event.quote_key: Forecast(
+            event.quote_key: ForecastRecord(
                 quote_key=event.quote_key,
                 probability=Decimal("0.75"),
                 model_id="model-1",
-                as_of_ts=event.observed_ts,
+                model_version="1",
+                strategy_version="paper-value-v1",
+                model_training_cutoff_ts="2026-09-22T10:00:00+00:00",
+                input_cutoff_ts="2026-09-22T11:59:00+00:00",
+                generated_at="2026-09-22T11:59:30+00:00",
+                uncertainty=Decimal("0.05"),
+                evidence_hashes=("a" * 64,),
+                market_snapshot_hash="b" * 64,
+                provenance={"dataset": "market-semantics-composition"},
+                forecast_id="forecast-1",
+                market_semantics_id=event.market_semantics_id,
             )
         },
         minimum_expected_profit_per_unit="0",
@@ -49,7 +62,7 @@ def test_paper_value_agent_preserves_exchange_side_in_proposed_leg() -> None:
     )
     runtime = SimpleNamespace(ledger=SimpleNamespace(events=lambda: ()))
     context = SimpleNamespace(
-        paper_book=object(),
+        paper_book=PaperBook("100"),
         paper_execution=runtime,
         paper_provider_accounts=((event.source_id, "account-1"),),
         notes=[],
@@ -64,6 +77,7 @@ def test_paper_value_agent_preserves_exchange_side_in_proposed_leg() -> None:
     assert len(policy.captured_context.legs) == 1
     leg = policy.captured_context.legs[0]
     assert leg.exchange_side == "back"
+    assert leg.market_semantics_id == event.market_semantics_id
     assert leg.quote_key == event.quote_key
 
 
@@ -80,6 +94,7 @@ def test_restart_matcher_rejects_same_selection_on_opposite_exchange_side() -> N
                 locked_odds=back_event.decimal_odds,
                 sport=back_event.sport,
                 exchange_side="back",
+                market_semantics_id=back_event.market_semantics_id,
             ),
         ),
         placed_at=back_event.observed_ts,

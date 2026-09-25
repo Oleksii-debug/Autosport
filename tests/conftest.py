@@ -170,34 +170,3 @@ def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
     monkeypatch.setattr(stream.time, "monotonic", monotonic)
 
 
-@pytest.fixture(autouse=True)
-def _repair_stale_smarkets_ladder_fixture(request, monkeypatch):
-    """Keep one legacy ladder test coherent with the newer FILLED invariant.
-
-    The test intends to reach the exchange-ladder rejection for requested odds 6.1.
-    Its helper defaults to a FILLED 250000/250000 order, then the test changes only
-    requested quantity to 610000. That correctly trips the newer DTO state invariant
-    before the intended ladder assertion. For this exact node only, make the FILLED
-    executed quantity follow its requested quantity unless the test explicitly supplies
-    a different executed quantity. Production validation is untouched.
-    """
-
-    if (
-        Path(str(request.node.fspath)).name != "test_smarkets_execution_reconciliation.py"
-        or request.node.name != "test_requested_odds_must_be_a_published_smarkets_tick"
-    ):
-        return
-    module = request.module
-    original = getattr(module, "_readback", None)
-    if original is None:
-        raise AssertionError("Smarkets reconciliation test helper is unavailable")
-
-    def coherent_readback(**changes):
-        if (
-            "requested_quantity_units" in changes
-            and "executed_quantity_units" not in changes
-        ):
-            changes["executed_quantity_units"] = changes["requested_quantity_units"]
-        return original(**changes)
-
-    monkeypatch.setattr(module, "_readback", coherent_readback)

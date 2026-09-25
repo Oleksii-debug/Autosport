@@ -16,7 +16,6 @@ leaves durable identity but no favorable timestamp and no in-progress run.
 
 from __future__ import annotations
 
-from functools import wraps
 from typing import Callable, Final, TypeVar, cast
 
 from .integrity import durable_path_lock
@@ -293,13 +292,35 @@ def _stage_unavailable_identity(
     return staged, changed
 
 
-def _serialized(method: _F) -> _F:
-    @wraps(method)
-    def guarded(self, *args, **kwargs):
-        with durable_path_lock(self.path):
-            return method(self, *args, **kwargs)
+class _SerializedMethodBoundary:
+    """Keep one unlocked predecessor outside public FunctionType metadata."""
 
+    __slots__ = ("_function",)
+
+    def __init__(self, function: _F) -> None:
+        self._function = function
+
+    def __call__(self, registry, *args, **kwargs):
+        with durable_path_lock(registry.path):
+            return self._function(registry, *args, **kwargs)
+
+
+def _serialized(method: _F) -> _F:
+    # Do not use functools.wraps here.  __wrapped__ would publish the original
+    # unlocked RMW implementation as a directly callable bypass around the
+    # serialization domain.  The public wrapper closes only over a non-FunctionType
+    # boundary object, matching the metadata fence used by the causal begin guard.
+    boundary = _SerializedMethodBoundary(method)
+
+    def guarded(self, *args, **kwargs):
+        return boundary(self, *args, **kwargs)
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = dict(method.__annotations__)
     setattr(guarded, "_autosport_registry_rmw_serialized", True)
+    setattr(guarded, "_autosport_predecessor_unreachable", True)
     return cast(_F, guarded)
 
 

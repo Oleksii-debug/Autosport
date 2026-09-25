@@ -70,6 +70,20 @@ def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
     )
 
 
+def _execute(
+    runtime: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+    *,
+    trigger_id: str = "scope-trigger",
+) -> object:
+    return runtime.execute(
+        prepared=prepared,
+        trigger_id=trigger_id,
+        started_at=QUOTE_AT,
+        materialize_exposure=False,
+    )
+
+
 def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
     """Enumerate callable capability references exposed by ordinary function metadata."""
 
@@ -202,7 +216,6 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _prepared(runtime)
-            run_id = runtime.expected_run_id(prepared, "scope-trigger")
             descriptor = PaperExecutionAdoptionRuntime.__dict__["_exposure_scope_payload"]
             self.assertIsInstance(descriptor, classmethod)
             original_scope = descriptor.__func__
@@ -214,10 +227,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     PaperExecutionIntegrityError,
                     "payload globals were rebound",
                 ):
-                    runtime._publish_exposure_scope(
-                        prepared=prepared,
-                        run_id=run_id,
-                    )
+                    _execute(runtime, prepared)
             finally:
                 original_globals["_digest"] = canonical_digest
             self.assertEqual(ledger.events(), ())
@@ -278,11 +288,26 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 )
             self.assertEqual(ledger.events(), ())
 
+    def test_direct_scope_publisher_cannot_choose_reserved_run_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _prepared(runtime)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical execution authority",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    run_id="caller-selected-run",
+                )
+
+            self.assertEqual(ledger.events(), ())
+
     def test_public_ledger_dispatch_rebind_fails_before_reserved_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _prepared(runtime)
-            run_id = runtime.expected_run_id(prepared, "scope-trigger")
             guarded_append = PaperExecutionLedger._append_event
 
             def forged_append(*args: object, **kwargs: object) -> None:
@@ -294,7 +319,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     PaperExecutionIntegrityError,
                     "ledger dispatch was rebound",
                 ):
-                    runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+                    _execute(runtime, prepared)
             finally:
                 PaperExecutionLedger._append_event = guarded_append  # type: ignore[method-assign]
             self.assertEqual(ledger.events(), ())
@@ -303,7 +328,6 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _prepared(runtime)
-            run_id = runtime.expected_run_id(prepared, "scope-trigger")
             append_owner = next(
                 base
                 for base in PaperExecutionLedger.__mro__[1:]
@@ -325,7 +349,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     PaperExecutionIntegrityError,
                     "event constructor dispatch was rebound",
                 ):
-                    runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+                    _execute(runtime, prepared)
             finally:
                 append_owner._event = original_descriptor
 
@@ -336,7 +360,6 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _prepared(runtime)
-            run_id = runtime.expected_run_id(prepared, "scope-trigger")
             original_descriptor = PaperExecutionAdoptionRuntime.__dict__[
                 "_exposure_scope_payload"
             ]
@@ -355,33 +378,38 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     PaperExecutionIntegrityError,
                     "payload authority was rebound",
                 ):
-                    runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+                    _execute(runtime, prepared)
             finally:
                 PaperExecutionAdoptionRuntime._exposure_scope_payload = original_descriptor
 
             self.assertEqual(forged_calls, [])
             self.assertEqual(ledger.events(), ())
 
-    def test_canonical_runtime_can_publish_reserved_scope_idempotently(self) -> None:
+    def test_canonical_execute_publishes_reserved_scope_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _prepared(runtime)
             run_id = runtime.expected_run_id(prepared, "scope-trigger")
 
-            runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
-            runtime._publish_exposure_scope(prepared=prepared, run_id=run_id)
+            _execute(runtime, prepared)
+            _execute(runtime, prepared)
 
             events = ledger.events(run_id)
-            self.assertEqual(len(events), 1)
-            self.assertEqual(events[0]["event_type"], "PAPER_EXPOSURE_SCOPE_BOUND")
-            self.assertEqual(events[0]["event_key"], f"{run_id}:exposure-scope")
+            scope_events = [
+                event
+                for event in events
+                if event["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+            ]
+            self.assertEqual(len(scope_events), 1)
+            scope = scope_events[0]
+            self.assertEqual(scope["event_key"], f"{run_id}:exposure-scope")
             self.assertEqual(
-                events[0]["payload"]["schema"],
+                scope["payload"]["schema"],
                 "autosport.paper_execution.exposure_scope_binding",
             )
-            self.assertEqual(events[0]["payload"]["schema_version"], 1)
+            self.assertEqual(scope["payload"]["schema_version"], 1)
             self.assertEqual(
-                events[0]["payload"]["bindings"],
+                scope["payload"]["bindings"],
                 [
                     {
                         "action_id": prepared.execution_plan.actions[0].action_id,
@@ -392,11 +420,10 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 ],
             )
 
-    def test_unminted_prepared_cannot_use_canonical_scope_publisher(self) -> None:
+    def test_unminted_prepared_cannot_enter_canonical_execute_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            _ledger, runtime = self._runtime(Path(tmp))
+            ledger, runtime = self._runtime(Path(tmp))
             minted = _prepared(runtime)
-            run_id = runtime.expected_run_id(minted, "scope-trigger")
             unminted = PreparedPaperExecution(
                 execution_plan=minted.execution_plan,
                 exposure_bindings=minted.exposure_bindings,
@@ -407,7 +434,8 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 PaperExecutionAdoptionError,
                 "was not minted by this runtime",
             ):
-                runtime._publish_exposure_scope(prepared=unminted, run_id=run_id)
+                _execute(runtime, unminted)
+            self.assertEqual(ledger.events(), ())
 
 
 if __name__ == "__main__":

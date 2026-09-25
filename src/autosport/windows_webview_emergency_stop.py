@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from pathlib import Path
 from typing import Any, Mapping
 
 from .windows_emergency_stop import WindowsEmergencyStopBridge
-from .windows_webview_shell import AutosportWebController
+from .windows_webview_shell import AutosportWebController, _REQUEST_REPLAY_LIMIT
 
 
 _EMERGENCY_ACTION_ID = "emergency_stop.activate"
+_RETIRED_REQUEST_ID_LIMIT = 65_536
+_RETIRED_REQUEST_SENTINEL = "retired-request-id"
+
+
+def _request_id_digest(request_id: str) -> bytes:
+    return hashlib.sha256(request_id.encode("utf-8")).digest()
 
 
 class EmergencyStopWebController(AutosportWebController):
@@ -19,6 +26,11 @@ class EmergencyStopWebController(AutosportWebController):
     adapter adds one distinct command that only publishes/confirms the canonical
     durable execution-admission STOP authority. It deliberately does not claim
     that already-running provider, feed, worker, or settlement work has drained.
+
+    The packaged Windows path also owns the bridge replay-retirement fence. The
+    base controller keeps only a bounded result cache; evicted request identifiers
+    are retained here as compact SHA-256 tombstones so an old mutating command can
+    never become executable again merely because its response aged out of cache.
     """
 
     def __init__(
@@ -35,6 +47,62 @@ class EmergencyStopWebController(AutosportWebController):
         # Its own lock/cache preserve duplicate safety without waiting for
         # AutosportWebController._lock, which may be held by a slow command.
         self._emergency_dispatch_lock = threading.RLock()
+        self._retired_request_ids: set[bytes] = set()
+        self._request_replay_saturated = False
+
+    def _reserve_request_identity(
+        self,
+        request_id: str,
+        command_identity: str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Reserve a request without ever readmitting an evicted identifier."""
+
+        with self._request_replay_lock:
+            previous_identity = self._request_identities.get(request_id)
+            previous = self._request_results.get(request_id)
+            if previous_identity is not None:
+                return (
+                    previous_identity,
+                    None if previous is None else dict(previous[1]),
+                )
+
+            if (
+                self._request_replay_saturated
+                or _request_id_digest(request_id) in self._retired_request_ids
+            ):
+                # Command identities are canonical JSON objects and therefore can
+                # never equal this sentinel. The inherited dispatcher consequently
+                # rejects the request before action dispatch, even for the same old
+                # payload whose result has already been evicted.
+                return _RETIRED_REQUEST_SENTINEL, None
+
+            self._request_identities[request_id] = command_identity
+            return None, None
+
+    def _store_request_result(
+        self,
+        request_id: str,
+        command_identity: str,
+        result: Mapping[str, Any],
+    ) -> None:
+        """Bound replay payload memory while retaining fail-closed spent IDs."""
+
+        with self._request_replay_lock:
+            if self._request_identities.get(request_id) != command_identity:
+                raise RuntimeError("request identity reservation changed during dispatch")
+            self._request_results[request_id] = (command_identity, dict(result))
+            while len(self._request_results) > _REQUEST_REPLAY_LIMIT:
+                oldest = next(iter(self._request_results))
+                if len(self._retired_request_ids) < _RETIRED_REQUEST_ID_LIMIT:
+                    self._retired_request_ids.add(_request_id_digest(oldest))
+                else:
+                    # Never trade exactly-once safety for memory reclamation. Once
+                    # the bounded tombstone budget is exhausted, cached requests may
+                    # still replay but every previously unseen request fails closed
+                    # until the application is restarted with a fresh bridge session.
+                    self._request_replay_saturated = True
+                del self._request_results[oldest]
+                self._request_identities.pop(oldest, None)
 
     def state(self) -> dict[str, Any]:
         state = super().state()

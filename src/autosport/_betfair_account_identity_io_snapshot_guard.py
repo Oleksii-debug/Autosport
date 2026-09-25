@@ -84,6 +84,10 @@ def _install_guard() -> None:
     ):
         if client_type.__getattribute__ is not guarded_getattribute:
             raise identity_error("K07 acquisition snapshot dispatch was rebound")
+        if transport_type.post is not canonical_transport_post:
+            raise identity_error(
+                "invalid origin: canonical Betfair client/network implementation changed"
+            )
         client = original_build(
             credentials,
             timeout_seconds=timeout_seconds,

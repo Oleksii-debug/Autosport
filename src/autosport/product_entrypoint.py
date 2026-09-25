@@ -4,6 +4,8 @@ import argparse
 import json
 import math
 import signal
+import sys
+import threading
 import time
 import unicodedata
 from dataclasses import asdict
@@ -39,12 +41,30 @@ class ProductRuntimeError(ProductEntrypointError):
         self.error_type = error_type
 
 
+class _SecretSafeArgumentParser(argparse.ArgumentParser):
+    """Argument parser that never echoes rejected caller-controlled values."""
+
+    def error(self, _message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(
+            2,
+            f"{self.prog}: error: invalid command-line arguments; use --help\n",
+        )
+
+
 class _SignalStopRequest:
     def __init__(self) -> None:
         self.signal_number: int | None = None
+        self._event = threading.Event()
 
     def handle(self, signum: int, _frame: object) -> None:
         self.signal_number = signum
+        self._event.set()
+
+    def wait(self, timeout: float) -> bool:
+        """Wait for a stop request, returning early when a signal handler fires."""
+
+        return self._event.wait(timeout)
 
     @property
     def requested(self) -> bool:
@@ -65,6 +85,16 @@ class _SignalStopRequest:
         if self.signal_number is None:
             return 0
         return 128 + self.signal_number
+
+
+def _product_stop_signals() -> tuple[int, ...]:
+    """Return console stop signals supported by the running platform."""
+
+    signals = [int(signal.SIGINT), int(signal.SIGTERM)]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None and int(sigbreak) not in signals:
+        signals.append(int(sigbreak))
+    return tuple(signals)
 
 
 def _normalized_workspace(value: object, *, label: str) -> Path:
@@ -316,17 +346,19 @@ def run_product(
         initial_bankroll=initial_bankroll,
     )
     stop_request = _SignalStopRequest()
-    previous_handlers: dict[signal.Signals, object] = {}
-    if install_signal_handlers:
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM)
-        }
-        for signum in previous_handlers:
-            signal.signal(signum, stop_request.handle)
-
+    previous_handlers: dict[int, object] = {}
+    installed_handlers: list[int] = []
     started = False
     try:
+        if install_signal_handlers:
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in _product_stop_signals()
+            }
+            for signum in previous_handlers:
+                signal.signal(signum, stop_request.handle)
+                installed_handlers.append(signum)
+
         start_status = runtime.start()
         started = True
         _print_record(
@@ -336,8 +368,10 @@ def run_product(
             output_format=output_format,
         )
         cycles = 0
+        exit_code = 0
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
+                exit_code = stop_request.exit_code
                 _print_record(
                     "product_status",
                     runtime=runtime,
@@ -355,6 +389,19 @@ def run_product(
                 output_format=output_format,
             )
 
+            # A signal observed during a completed tick is the selected STOP cause even
+            # when that tick also reaches max_cycles. Freeze the exit code at the same
+            # decision point so a later signal cannot contradict already-recorded STOP
+            # evidence.
+            if stop_request.requested:
+                exit_code = stop_request.exit_code
+                _print_record(
+                    "product_status",
+                    runtime=runtime,
+                    value=runtime.stop(stop_request.reason),
+                    output_format=output_format,
+                )
+                break
             if max_cycles is not None and cycles >= max_cycles:
                 _print_record(
                     "product_status",
@@ -363,16 +410,11 @@ def run_product(
                     output_format=output_format,
                 )
                 break
-            if stop_request.requested:
-                _print_record(
-                    "product_status",
-                    runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
-                    output_format=output_format,
-                )
-                break
-            sleep(float(poll_seconds))
-        return stop_request.exit_code
+            if install_signal_handlers and sleep is time.sleep:
+                stop_request.wait(float(poll_seconds))
+            else:
+                sleep(float(poll_seconds))
+        return exit_code
     except Exception as exc:
         if started:
             if isinstance(exc, ProductRuntimeError):
@@ -380,15 +422,46 @@ def run_product(
             raise ProductRuntimeError(type(exc).__name__) from exc
         raise
     finally:
+        # Cleanup is secondary to a failure already propagating out of the product
+        # path. Always try both runtime close and every installed-handler restore, but
+        # never replace the causal start/tick/STOP/setup failure with a cleanup symptom.
+        primary_failure = sys.exc_info()[1]
+        cleanup_failure: BaseException | None = None
         try:
             runtime.close()
-        except Exception as exc:
-            if started:
-                raise ProductRuntimeError(type(exc).__name__) from exc
-            raise
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+        except BaseException as exc:
+            if primary_failure is None:
+                cleanup_failure = exc
+            else:
+                try:
+                    primary_failure.add_note(
+                        "runtime close also failed during cleanup: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                except BaseException:
+                    pass
+
+        for signum in reversed(installed_handlers):
+            try:
+                signal.signal(signum, previous_handlers[signum])
+            except BaseException as exc:
+                if primary_failure is None and cleanup_failure is None:
+                    cleanup_failure = exc
+                elif primary_failure is not None:
+                    try:
+                        primary_failure.add_note(
+                            "signal handler restoration also failed during cleanup: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    except BaseException:
+                        pass
+
+        if cleanup_failure is not None:
+            if started and isinstance(cleanup_failure, Exception):
+                raise ProductRuntimeError(
+                    type(cleanup_failure).__name__
+                ) from cleanup_failure
+            raise cleanup_failure
 
 
 def run_product_command(
@@ -436,7 +509,7 @@ def run_product_command(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SecretSafeArgumentParser(
         prog="autosport-product",
         description=(
             "Run the canonical durable Autosport PAPER product. Provider credentials "

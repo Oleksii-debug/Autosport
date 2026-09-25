@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from functools import wraps
+from hashlib import sha256
 from types import CodeType
 from typing import Any
 
@@ -40,6 +41,13 @@ def _install_guard() -> None:
     )
     if append_owner is None:
         raise RuntimeError("canonical PAPER lower ledger append is unavailable")
+
+    event_descriptor = append_owner.__dict__.get("_event")
+    if not isinstance(event_descriptor, staticmethod):
+        raise RuntimeError("canonical PAPER event constructor is unavailable")
+    canonical_event = event_descriptor.__func__
+    if "_event" in ledger_type.__dict__ or ledger_type._event is not canonical_event:
+        raise RuntimeError("canonical PAPER event constructor dispatch is inconsistent")
 
     current_append = ledger_type._append_event
     current_lower_append = append_owner.__dict__["_append_event"]
@@ -86,10 +94,51 @@ def _install_guard() -> None:
     getframe = sys._getframe
     canonical_json = _ledger_impl._canonical
     fsync = _ledger_impl.os.fsync
+    sha256_digest = sha256
     reserved_event_type = _RESERVED_EVENT_TYPE
     reserved_schema = _RESERVED_SCHEMA
     reserved_schema_version = _RESERVED_SCHEMA_VERSION
     publisher_code: CodeType | None = None
+
+    def canonical_text(value: object, name: str) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+            or "\x00" in value
+        ):
+            raise ValueError(f"{name} must be non-empty canonical text")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{name} must be UTF-8 encodable") from exc
+        return value
+
+    def build_event(
+        *,
+        event_type: str,
+        run_id: str,
+        key: str,
+        payload: dict[str, Any],
+        sequence: int,
+        previous_sha256: str | None,
+    ) -> dict[str, Any]:
+        # The reserved event payload is validated by this guard before append.  Build
+        # the exact canonical event here rather than redispatching through mutable
+        # PaperExecutionLedger._event after that validation boundary.
+        body = {
+            "schema_version": _ledger_impl._SCHEMA_VERSION,
+            "event_type": canonical_text(event_type, "event_type"),
+            "run_id": canonical_text(run_id, "run_id"),
+            "event_key": canonical_text(key, "event_key"),
+            "sequence": sequence,
+            "previous_sha256": previous_sha256,
+            "payload": payload,
+        }
+        event_sha256 = sha256_digest(
+            canonical_json(body).encode("utf-8")
+        ).hexdigest()
+        return {**body, "event_sha256": event_sha256}
 
     def validate_owned_scope_payload(payload: object) -> dict[str, Any]:
         expected = {
@@ -164,7 +213,7 @@ def _install_guard() -> None:
             prior = by_key.get(key)
             sequence = len(events)
             previous_sha256 = None if not events else events[-1]["event_sha256"]
-            event = self._event(
+            event = build_event(
                 event_type=event_type,
                 run_id=run_id,
                 key=key,
@@ -249,6 +298,14 @@ def _install_guard() -> None:
             or append_owner.__dict__.get("_append_event") is not guarded_append_event
         ):
             raise integrity_error("canonical PAPER exposure-scope ledger dispatch was rebound")
+        if (
+            append_owner.__dict__.get("_event") is not event_descriptor
+            or "_event" in ledger_type.__dict__
+            or "_event" in self.ledger.__dict__
+        ):
+            raise integrity_error(
+                "canonical PAPER exposure-scope event constructor dispatch was rebound"
+            )
         if runtime_type._publish_exposure_scope is not publish_owned_exposure_scope:
             raise integrity_error("canonical PAPER exposure-scope publisher dispatch was rebound")
         if runtime_type._mint_prepared is not guarded_mint_prepared:

@@ -5,10 +5,7 @@ from pathlib import Path
 import pytest
 
 from autosport.betfair_account_readonly import BetfairSessionCredentials
-from autosport.betfair_supervised_execution import (
-    BetfairSupervisedExecutionError,
-    BetfairSupervisedPlaceOrdersClient,
-)
+from autosport.betfair_supervised_execution import BetfairSupervisedPlaceOrdersClient
 
 
 def _client() -> BetfairSupervisedPlaceOrdersClient:
@@ -25,10 +22,7 @@ def test_direct_class_call_cannot_inject_transport_override() -> None:
         forged_calls.append((args, kwargs))
         return b"{}"
 
-    with pytest.raises(
-        BetfairSupervisedExecutionError,
-        match="private Betfair provider-write dispatch is internal-only",
-    ):
+    with pytest.raises(TypeError, match="_transport_post"):
         BetfairSupervisedPlaceOrdersClient.place_action(
             client,
             object(),
@@ -49,10 +43,7 @@ def test_direct_class_call_cannot_inject_pre_transport_callback() -> None:
     def forged_before_transport() -> None:
         callback_calls.append("called")
 
-    with pytest.raises(
-        BetfairSupervisedExecutionError,
-        match="private Betfair provider-write dispatch is internal-only",
-    ):
+    with pytest.raises(TypeError, match="_before_transport"):
         BetfairSupervisedPlaceOrdersClient.place_action(
             client,
             object(),

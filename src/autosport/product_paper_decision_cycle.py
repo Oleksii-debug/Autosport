@@ -8,6 +8,8 @@ from threading import Lock
 from typing import Callable
 
 from .decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
+from .economic_goal_provenance import provenance_for
+from .economic_goal_store import EconomicGoalStore
 from .json_integrity import strict_json_loads
 from .live_decision_loop import (
     LiveCycleResult,
@@ -22,6 +24,11 @@ from .live_decision_loop import (
 from .paper import PaperBook
 from .paper_execution_adoption import PaperExecutionAdoptionRuntime
 from .paper_execution_reality import PaperExecutionLedger, PaperExecutionModelConfig
+from .paper_risk_policy_store import PaperRiskPolicyStore
+from .product_decision_activation import (
+    BuiltInIntentProducer,
+    ProductDecisionActivationStore,
+)
 from .product_runtime import AutonomousProductRuntime, ProductCompositionError
 from .scientific_registry import ScientificRegistry
 from .continuous_session import (
@@ -238,6 +245,72 @@ class ProductPaperDecisionCycle:
     def workspace(self) -> Path:
         return Path(self.runtime.workspace)
 
+    def _resolve_product_authority(self) -> EconomicDecisionAuthority:
+        """Reconstruct the supported decision authority from durable owner truth.
+
+        ``self.authority`` remains a compatibility expectation for low-level callers;
+        supported ``tick()`` never forwards that caller-created object.  It re-resolves
+        the exact EconomicGoalContract and PaperRiskPolicy, verifies the sealed product
+        activation against current scientific/execution/product composition, and then
+        creates a fresh EconomicDecisionAuthority from those durable objects.
+        """
+
+        try:
+            activation_store = ProductDecisionActivationStore(self.workspace)
+            activation = activation_store.load()
+            economic_goal = EconomicGoalStore(self.workspace).load()
+            goal_provenance = provenance_for(economic_goal)
+            if goal_provenance.contract_sha256 != activation.economic_goal_contract_sha256:
+                raise ProductPaperDecisionCycleError(
+                    "durable EconomicGoalContract does not match supported START activation"
+                )
+            if (
+                economic_goal.goal_id != activation.goal_id
+                or economic_goal.revision != activation.goal_revision
+                or economic_goal.bankroll_id != activation.bankroll_id
+                or economic_goal.currency != activation.currency
+            ):
+                raise ProductPaperDecisionCycleError(
+                    "durable EconomicGoalContract identity does not match supported START activation"
+                )
+            risk_policy = PaperRiskPolicyStore(self.workspace).load(
+                economic_goal=economic_goal,
+                expected_policy_provenance_sha256=activation.risk_policy_provenance_sha256,
+            )
+            verified_activation = activation_store.verify(
+                scientific_registry=self.scientific_registry,
+                strategy_version_id=self.intent_factory.strategy_version_id,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                execution_config=self.execution_config,
+                intent_producer=BuiltInIntentProducer.REGISTERED_STRATEGY,
+            )
+        except ProductPaperDecisionCycleError:
+            raise
+        except Exception as exc:
+            raise ProductPaperDecisionCycleError(
+                "supported PAPER decision authority cannot be reconstructed from durable START authority"
+            ) from exc
+
+        if verified_activation != activation:
+            raise ProductPaperDecisionCycleError(
+                "supported START activation changed during decision authority reconstruction"
+            )
+        durable_authority = EconomicDecisionAuthority(economic_goal, risk_policy)
+        if durable_authority != self.authority:
+            raise ProductPaperDecisionCycleError(
+                "caller-supplied decision authority does not match durable supported START authority"
+            )
+        max_quote_age_seconds = (
+            Decimal(self.max_quote_age.days * 86400 + self.max_quote_age.seconds)
+            + Decimal(self.max_quote_age.microseconds) / Decimal(1_000_000)
+        )
+        if max_quote_age_seconds > durable_authority.contract.max_quote_age_seconds:
+            raise ProductPaperDecisionCycleError(
+                "configured max_quote_age exceeds durable EconomicGoalContract authority"
+            )
+        return durable_authority
+
     def _require_running_runtime(self) -> None:
         try:
             status = self.runtime.status()
@@ -340,8 +413,15 @@ class ProductPaperDecisionCycle:
 
         return None
 
-    def _run_decision_cycle(self) -> LiveCycleResult:
+    def _run_decision_cycle(
+        self,
+        *,
+        authority: EconomicDecisionAuthority | None = None,
+    ) -> LiveCycleResult:
         self._require_running_runtime()
+        effective_authority = self.authority if authority is None else authority
+        if not isinstance(effective_authority, EconomicDecisionAuthority):
+            raise TypeError("decision authority must be EconomicDecisionAuthority")
         provenance_now = (
             self.clock() if self.clock is not None else datetime.now(timezone.utc)
         )
@@ -367,7 +447,7 @@ class ProductPaperDecisionCycle:
             loop_id=self.loop_id,
             mode=LiveDecisionMode.PAPER,
             book=book,
-            authority=self.authority,
+            authority=effective_authority,
             intent_factory=self.intent_factory,
             scientific_registry=self.scientific_registry,
             decision_ledger=decision_ledger,
@@ -417,7 +497,8 @@ class ProductPaperDecisionCycle:
                     decision=None,
                     skipped_reason=skip_reason,
                 )
-            decision = self._run_decision_cycle()
+            authority = self._resolve_product_authority()
+            decision = self._run_decision_cycle(authority=authority)
             return ProductPaperDecisionTickResult(
                 product_tick=product_tick,
                 decision=decision,

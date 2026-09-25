@@ -153,6 +153,9 @@ def test_issue_retry_restart_resolves_exact_same_product_root(
     assert resolved == first
     assert len(first.randomization_root_sha256) == 64
     assert first.product_randomization_root_issued is True
+    assert first.same_process_reflection_tamper_resistance_proven is False
+    assert second.same_process_reflection_tamper_resistance_proven is False
+    assert resolved.same_process_reflection_tamper_resistance_proven is False
     assert first.occurrence_ancestry_proven is False
     assert first.iid_qualified is False
     assert first.grants_real_money_authority is False

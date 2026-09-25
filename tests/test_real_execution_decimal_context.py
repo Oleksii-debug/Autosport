@@ -49,6 +49,30 @@ def _plan() -> ExecutionPlan:
     )
 
 
+class _HostileDecimal(Decimal):
+    validation_calls = 0
+    comparison_calls = 0
+    format_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.validation_calls = 0
+        cls.comparison_calls = 0
+        cls.format_calls = 0
+
+    def is_finite(self) -> bool:
+        type(self).validation_calls += 1
+        return True
+
+    def __le__(self, other: object) -> bool:
+        type(self).comparison_calls += 1
+        return False
+
+    def __format__(self, format_spec: str) -> str:
+        type(self).format_calls += 1
+        return "999999"
+
+
 class RealExecutionDecimalContextTests(unittest.TestCase):
     def test_plan_payload_and_fingerprint_ignore_ambient_decimal_context(self) -> None:
         plan = _plan()
@@ -157,6 +181,49 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
                     ValueError, rf"{field} must be a finite Decimal"
                 ):
                     replace(acknowledgement, **{field: value})
+
+    def test_hostile_decimal_subclass_action_ingress_fails_before_virtual_hooks(
+        self,
+    ) -> None:
+        action = _plan().actions[0]
+        _HostileDecimal.reset_calls()
+
+        with self.assertRaisesRegex(
+            ValueError, r"requested_stake must be a finite Decimal"
+        ):
+            replace(
+                action,
+                requested_stake=_HostileDecimal("NaN"),
+            ).to_dict()
+
+        self.assertEqual(_HostileDecimal.validation_calls, 0)
+        self.assertEqual(_HostileDecimal.comparison_calls, 0)
+        self.assertEqual(_HostileDecimal.format_calls, 0)
+
+    def test_hostile_decimal_subclass_acknowledgement_ingress_fails_before_virtual_hooks(
+        self,
+    ) -> None:
+        acknowledgement = ExternalAcknowledgement(
+            attempt_id="attempt-hostile-decimal",
+            external_receipt_id="receipt-hostile-decimal",
+            status=AcknowledgementStatus.PARTIAL,
+            acknowledged_at="2026-09-21T20:00:03+00:00",
+            accepted_odds=Decimal("2.5"),
+            accepted_stake=Decimal("10"),
+        )
+        _HostileDecimal.reset_calls()
+
+        with self.assertRaisesRegex(
+            ValueError, r"accepted_odds must be a finite Decimal"
+        ):
+            replace(
+                acknowledgement,
+                accepted_odds=_HostileDecimal("NaN"),
+            ).to_dict()
+
+        self.assertEqual(_HostileDecimal.validation_calls, 0)
+        self.assertEqual(_HostileDecimal.comparison_calls, 0)
+        self.assertEqual(_HostileDecimal.format_calls, 0)
 
     def test_declared_decimal_input_types_remain_supported(self) -> None:
         action = replace(

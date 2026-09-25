@@ -85,9 +85,13 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
                 default_workspace()
 
     def test_home_resolution_failure_is_actionable_value_error(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "autosport.paths.Path.home",
-            side_effect=RuntimeError("home directory cannot be resolved"),
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("autosport.paths.sys.platform", "linux"),
+            patch(
+                "autosport.paths.Path.home",
+                side_effect=RuntimeError("home directory cannot be resolved"),
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -98,9 +102,13 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
 
     def test_relative_home_fails_closed_instead_of_following_cwd(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "autosport.paths.Path.home",
-            return_value=Path("relative-home"),
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("autosport.paths.sys.platform", "linux"),
+            patch(
+                "autosport.paths.Path.home",
+                return_value=Path("relative-home"),
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -111,9 +119,13 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
     def test_absolute_home_fallback_remains_stable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            with patch.dict(os.environ, {}, clear=True), patch(
-                "autosport.paths.Path.home",
-                return_value=home,
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("autosport.paths.sys.platform", "linux"),
+                patch(
+                    "autosport.paths.Path.home",
+                    return_value=home,
+                ),
             ):
                 self.assertEqual(
                     default_workspace(),

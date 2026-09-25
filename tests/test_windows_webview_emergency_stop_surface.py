@@ -216,10 +216,23 @@ def test_emergency_stop_frontend_reuses_shared_ordered_dispatch():
     assert "globalThis.pywebview.api.dispatch" not in script
     assert "globalThis.pywebview.api.get_state" not in script
     assert "readEmergencyState" not in script
-    assert "result.message" not in script
     assert "product_runtime.stop" not in script
     assert "disabled =" not in script
     assert "Ctrl+Shift+S" not in script
+
+
+def test_emergency_stop_announces_truthful_pending_state_before_ordered_refresh():
+    script = _asset("emergency_stop.js")
+
+    pending = script.index("Аварійний STOP: запит передано.")
+    awaited_dispatch = script.index("const result = await dispatch(")
+    assert pending < awaited_dispatch
+    assert "Очікується підтвердження стійкого журналу заборони." in script
+    assert script[:awaited_dispatch].count("focusStatus();") >= 1
+    # Pending feedback must not falsely claim that durable STOP is already proven.
+    pre_dispatch = script[:awaited_dispatch]
+    assert "STOP ПІДТВЕРДЖЕНО" not in pre_dispatch
+    assert "execution_blocked" not in pre_dispatch
 
 
 def test_package_data_policy_includes_the_emergency_stop_script():
@@ -281,7 +294,7 @@ def test_emergency_stop_local_failure_keeps_dedicated_accessible_readback():
     script = _asset("emergency_stop.js")
 
     assert 'typeof dispatch !== "function"' in script
-    assert script.count("setStatus(") >= 4
-    assert "focusStatus();" in script
+    assert script.count("setStatus(") >= 5
+    assert script.count("focusStatus();") >= 3
     assert "Канал застосунку недоступний." in script
     assert "перевірте журнал STOP." in script

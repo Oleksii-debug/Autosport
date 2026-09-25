@@ -191,15 +191,28 @@ class ProviderLiveContinuityTests(unittest.TestCase):
 
         self.assertEqual(disconnected.resync_not_before_monotonic_ns, 100)
         self.assertEqual(reconnecting.resync_not_before_monotonic_ns, 110)
-        with self.assertRaisesRegex(ValueError, "reconnect resync boundary"):
-            accept_authoritative_snapshot(
-                reconnecting,
-                self.snapshot(
-                    sequence_id=20,
-                    evidence_id="cached-before-reconnect",
-                    received_monotonic_ns=90,
-                ),
-            )
+        for received_at in (90, 105):
+            with self.subTest(received_at=received_at):
+                with self.assertRaisesRegex(ValueError, "reconnect resync boundary"):
+                    accept_authoritative_snapshot(
+                        reconnecting,
+                        self.snapshot(
+                            sequence_id=20,
+                            evidence_id=f"cached-before-reconnect-{received_at}",
+                            received_monotonic_ns=received_at,
+                        ),
+                    )
+
+        at_boundary = accept_authoritative_snapshot(
+            reconnecting,
+            self.snapshot(
+                sequence_id=20,
+                evidence_id="snapshot-at-reconnect-boundary",
+                received_monotonic_ns=110,
+            ),
+        )
+        self.assertEqual(at_boundary.status, ProviderContinuityStatus.SYNCHRONIZED)
+        self.assertTrue(continuity_gate(at_boundary, now_monotonic_ns=111).actionable)
 
         resynced = accept_authoritative_snapshot(
             reconnecting,
@@ -213,6 +226,7 @@ class ProviderLiveContinuityTests(unittest.TestCase):
         self.assertEqual(resynced.generation, 2)
         self.assertEqual(resynced.last_received_monotonic_ns, 120)
         self.assertIsNone(resynced.resync_not_before_monotonic_ns)
+        self.assertTrue(continuity_gate(resynced, now_monotonic_ns=121).actionable)
 
 
     def test_disconnect_reconnect_requires_snapshot_before_new_delta(self) -> None:

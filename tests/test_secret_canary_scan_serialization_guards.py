@@ -100,3 +100,53 @@ def test_reparse_fixture_exclusion_fails_closed(
     assert report.status == "INCOMPLETE"
     assert report.exit_code == 3
     assert report.errors[0].error_type == "FixtureReparsePoint"
+
+
+def test_symlink_ancestor_of_root_fails_closed_before_scan(tmp_path: Path) -> None:
+    canary = "planted-secret"
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    nested_root = real_parent / "scan-root"
+    nested_root.mkdir()
+    (nested_root / "safe.txt").write_text("safe", encoding="utf-8")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real_parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks unavailable in this test environment")
+
+    report = secret_canary_scan.scan_secret_canary(alias / "scan-root", canary)
+
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert report.scanned_files == 0
+    assert report.findings == ()
+    assert report.errors[0].error_type == "RootSymlinkAncestor"
+
+
+def test_reparse_ancestor_of_root_fails_closed_before_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    parent = tmp_path / "junction-parent"
+    parent.mkdir()
+    nested_root = parent / "scan-root"
+    nested_root.mkdir()
+    (nested_root / "safe.txt").write_text("safe", encoding="utf-8")
+    original = secret_canary_scan._path_is_reparse_point
+
+    def fake_reparse(path: Path) -> bool:
+        if path == parent:
+            return True
+        return original(path)
+
+    monkeypatch.setattr(secret_canary_scan, "_path_is_reparse_point", fake_reparse)
+
+    report = secret_canary_scan.scan_secret_canary(nested_root, canary)
+
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert report.scanned_files == 0
+    assert report.findings == ()
+    assert report.errors[0].error_type == "RootReparsePointAncestor"

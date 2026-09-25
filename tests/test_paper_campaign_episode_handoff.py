@@ -233,5 +233,149 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
                 )
 
 
+    def test_committed_children_exposes_exact_restart_locator_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = self._terminal_parent(root)
+            parent_snapshot = runtime.agent_loop.snapshot()
+            parent_checkpoint = runtime.environment.checkpoint()
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+            policy = self._child_policy(environment)
+
+            with patch(
+                "autosport.champion_agent_episode.load_champion_policy",
+                return_value=policy,
+            ):
+                result = self._call(handoff, root, environment, parent_snapshot)
+
+            before = handoff.state_path.read_bytes()
+            reopened = PaperCampaignEpisodeHandoff(runtime)
+            first = reopened.committed_children()
+            second = reopened.committed_children()
+            after = handoff.state_path.read_bytes()
+
+            self.assertEqual(first, second)
+            self.assertEqual(before, after)
+            self.assertEqual(len(first), 1)
+            record = first[0]
+            child = result.episode
+            child_snapshot = child.agent_loop.snapshot()
+            child_checkpoint = child.environment.checkpoint()
+            self.assertEqual(record.prepare_id, json.loads(before)["handoffs"][parent_checkpoint.checkpoint_id]["prepare_id"])
+            self.assertEqual(record.handoff_id, result.receipt.handoff_id)
+            self.assertEqual(record.parent_checkpoint_id, parent_checkpoint.checkpoint_id)
+            self.assertEqual(
+                record.parent_transition_id,
+                parent_snapshot.checkpointed_transition_id,
+            )
+            self.assertEqual(record.parent_episode_id, parent_snapshot.episode_id)
+            self.assertEqual(record.parent_policy_id, parent_snapshot.policy_id)
+            self.assertEqual(
+                record.parent_agent_loop_state_sha256,
+                parent_snapshot.state_sha256,
+            )
+            self.assertEqual(record.environment_id, environment.environment_id)
+            self.assertEqual(
+                Path(record.child_agent_loop_path),
+                (root / "child-agent-loop.json").resolve(strict=False),
+            )
+            self.assertEqual(record.child_loop_id, "campaign-loop-2")
+            self.assertEqual(record.child_episode_key, "campaign-episode-2")
+            self.assertEqual(record.canonical_strategy_id, "campaign-champion")
+            self.assertEqual(record.config_sha256, parent_snapshot.config_sha256)
+            self.assertEqual(
+                record.economic_goal_fingerprint,
+                parent_snapshot.economic_goal_fingerprint,
+            )
+            self.assertEqual(record.risk_fingerprint, parent_snapshot.risk_fingerprint)
+            self.assertEqual(record.source_sha256, parent_snapshot.source_sha256)
+            self.assertEqual(record.admissible_actions, ("PAPER_PROPOSAL",))
+            self.assertEqual(record.child_policy_id, child.policy.policy_id)
+            self.assertEqual(record.child_episode_id, child_snapshot.episode_id)
+            self.assertEqual(
+                record.child_initial_checkpoint_id,
+                child_checkpoint.checkpoint_id,
+            )
+
+    def test_prepared_child_is_not_exposed_as_restart_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = self._terminal_parent(root)
+            parent_snapshot = runtime.agent_loop.snapshot()
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+
+            with patch.object(
+                ChampionAgentEpisode,
+                "initialize_pristine",
+                side_effect=ChampionAgentEpisodeError("injected crash boundary"),
+            ):
+                with self.assertRaisesRegex(
+                    PaperCampaignEpisodeHandoffError,
+                    "canonical champion child episode rejected",
+                ):
+                    self._call(handoff, root, environment, parent_snapshot)
+
+            before = handoff.state_path.read_bytes()
+            self.assertEqual(handoff.committed_children(), ())
+            self.assertEqual(handoff.state_path.read_bytes(), before)
+
+    def test_self_consistent_local_handoff_rehash_cannot_forge_restart_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = self._terminal_parent(root)
+            parent_snapshot = runtime.agent_loop.snapshot()
+            parent_checkpoint = runtime.environment.checkpoint()
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+            policy = self._child_policy(environment)
+
+            with patch(
+                "autosport.champion_agent_episode.load_champion_policy",
+                return_value=policy,
+            ):
+                self._call(handoff, root, environment, parent_snapshot)
+
+            import autosport.paper_campaign_episode_handoff as handoff_module
+
+            state = json.loads(handoff.state_path.read_text(encoding="utf-8"))
+            record = state["handoffs"][parent_checkpoint.checkpoint_id]
+            record["child_episode_key"] = "forged-campaign-episode"
+            record["prepare_id"] = handoff_module._digest(
+                PaperCampaignEpisodeHandoff._prepared_semantic(record)
+            )
+            record["handoff_id"] = handoff_module._digest(
+                {
+                    "prepare_id": record["prepare_id"],
+                    "child_policy_id": record["child_policy_id"],
+                    "child_episode_id": record["child_episode_id"],
+                    "child_initial_checkpoint_id": record[
+                        "child_initial_checkpoint_id"
+                    ],
+                }
+            )
+            bare = {
+                "schema": state["schema"],
+                "schema_version": state["schema_version"],
+                "handoffs": state["handoffs"],
+            }
+            state["state_sha256"] = handoff_module._digest(bare)
+            handoff.state_path.write_text(
+                json.dumps(
+                    state,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PaperCampaignEpisodeHandoffError,
+                "independent intent authority",
+            ):
+                handoff.committed_children()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

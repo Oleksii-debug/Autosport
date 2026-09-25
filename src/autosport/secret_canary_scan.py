@@ -187,6 +187,22 @@ def _path_is_reparse_point(path: Path) -> bool:
     return bool(attributes & _REPARSE_POINT_FLAG)
 
 
+def _root_link_like_error(root: Path) -> str | None:
+    """Reject link-like traversal in the root itself or any absolute ancestor."""
+
+    components = (*reversed(root.parents), root)
+    for component in components:
+        if component.is_symlink():
+            return "RootSymlink" if component == root else "RootSymlinkAncestor"
+        if _path_is_reparse_point(component):
+            return (
+                "RootReparsePoint"
+                if component == root
+                else "RootReparsePointAncestor"
+            )
+    return None
+
+
 def _has_symlink_component(root: Path, candidate: Path) -> bool:
     relative = candidate.relative_to(root)
     current = root
@@ -242,10 +258,11 @@ def scan_secret_canary(
 ) -> SecretCanaryScanReport:
     """Scan a writable artifact tree for a planted secret without echoing the secret.
 
-    The scan is fail-closed. Symlinks, reparse points, unreadable entries,
-    unsupported filesystem entries, and invalid fixture exclusions produce
-    INCOMPLETE rather than CLEAN. Only an exact existing regular file below
-    ``root`` may be excluded as the planted fixture input.
+    The scan is fail-closed. Symlinks/reparse points in the absolute root path,
+    symlinks/reparse points below it, unreadable entries, unsupported filesystem
+    entries, and invalid fixture exclusions produce INCOMPLETE rather than CLEAN.
+    Only an exact existing regular file below ``root`` may be excluded as the
+    planted fixture input.
     """
 
     if not isinstance(canary, str) or not canary:
@@ -262,15 +279,12 @@ def scan_secret_canary(
     excluded_files = 0
 
     try:
-        if root_path.is_symlink():
-            errors.append(
-                SecretCanaryScanError(_path_digest(root_path, root_path), "RootSymlink")
-            )
-        elif _path_is_reparse_point(root_path):
+        root_link_error = _root_link_like_error(root_path)
+        if root_link_error is not None:
             errors.append(
                 SecretCanaryScanError(
                     _path_digest(root_path, root_path),
-                    "RootReparsePoint",
+                    root_link_error,
                 )
             )
         elif not root_path.is_dir():

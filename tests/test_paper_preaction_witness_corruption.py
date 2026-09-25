@@ -55,6 +55,36 @@ class PaperPreActionWitnessCorruptionTests(unittest.TestCase):
             ):
                 _load_pre_action_path(path, label="live recovery")
 
+
+    def test_invalid_utf8_pre_action_witness_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "live_decision_pre_action_book.json"
+            path.write_bytes(b'{"schema_version":4,"corrupt":"\\xff"}')
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "live recovery pre-action PaperBook is unreadable",
+            ):
+                _load_pre_action_path(path, label="live recovery")
+
+    def test_nonfinite_json_constant_pre_action_witness_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "live_decision_pre_action_book.json"
+            expected = PaperBook("100.00")
+            expected.save(path)
+            canonical = path.read_text(encoding="utf-8")
+            path.write_text(
+                canonical.replace('"balance":"100.00"', '"balance":NaN', 1),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "live recovery pre-action PaperBook is unreadable",
+            ):
+                _load_pre_action_path(path, label="live recovery")
+
+
     def test_live_loader_reads_exact_valid_durable_witness(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

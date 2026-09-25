@@ -17,6 +17,7 @@ from autosport.bookmaker_capability import (
     BookmakerCapabilityState,
 )
 from autosport.real_execution_ledger import AcknowledgementStatus, ExecutionAction
+from autosport.workspace_lock import WorkspaceEconomicLock
 from autosport.smarkets_execution_reconciliation import (
     SmarketsDataPurpose,
     SmarketsExecutionAuthority,
@@ -691,6 +692,38 @@ def test_journal_invalid_utf8_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(SmarketsReconciliationError, match="cannot read Smarkets journal"):
         SmarketsReconciliationJournal(path).verify()
+
+
+def test_journal_append_is_canonical_and_exposes_no_unlocked_predecessor() -> None:
+    assert SmarketsReconciliationJournal.append.__module__ == (
+        "autosport.smarkets_execution_reconciliation"
+    )
+    assert not hasattr(
+        smarkets_reconciliation,
+        "_ORIGINAL_JOURNAL_APPEND",
+    )
+
+
+def test_journal_append_fails_closed_during_competing_economic_writer(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+
+    with WorkspaceEconomicLock(tmp_path):
+        with pytest.raises(
+            SmarketsReconciliationError,
+            match="economic-writer lock",
+        ):
+            journal.append(object())  # type: ignore[arg-type]
+
+    assert not path.exists()
+
+    with pytest.raises(
+        SmarketsReconciliationError,
+        match="journal accepts only VerifiedSmarketsOrderEffect",
+    ):
+        journal.append(object())  # type: ignore[arg-type]
 
 
 def test_journal_is_restart_verifiable_and_exact_replay_is_idempotent(

@@ -343,6 +343,8 @@ def test_requested_odds_must_be_a_published_smarkets_tick() -> None:
             _readback(
                 requested_price_units=1639,
                 requested_quantity_units=610000,
+                executed_quantity_units=610000,
+                executed_avg_price_units=1639,
             ),
         )
 

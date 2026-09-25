@@ -252,19 +252,19 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
                 confidence_level=1,
             )
 
-    def test_probability_endpoints_follow_canonical_bin_membership(self):
+    def test_supported_boundaries_follow_canonical_bin_membership(self):
         records = (
-            self._record("f-zero", "0"),
+            self._record("f-lower", "1e-15"),
             self._record(
-                "f-one",
-                "1",
+                "f-upper",
+                "0.999999999999999",
                 generated_at="2026-02-11T12:00:00+00:00",
                 input_cutoff="2026-02-11T11:59:00+00:00",
             ),
         )
         outcomes = (
-            ForecastOutcomeFact("f-zero", 0, "2026-02-10T14:00:00+00:00"),
-            ForecastOutcomeFact("f-one", 1, "2026-02-11T14:00:00+00:00"),
+            ForecastOutcomeFact("f-lower", 0, "2026-02-10T14:00:00+00:00"),
+            ForecastOutcomeFact("f-upper", 1, "2026-02-11T14:00:00+00:00"),
         )
         report = self._evaluate(
             records,
@@ -280,10 +280,10 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             ((0.0, 0.5, 1), (0.5, 1.0, 1)),
         )
 
-    def test_log_loss_endpoint_bound_matches_canonical_clipping(self):
+    def test_bounded_log_loss_matches_canonical_scoring_inside_support(self):
         cases = (
-            ("f-one-wrong", "1", 0),
-            ("f-zero-wrong", "0", 1),
+            ("f-upper-wrong", "0.999999999999999", 0),
+            ("f-lower-wrong", "1e-15", 1),
         )
         for forecast_id, probability, outcome in cases:
             with self.subTest(probability=probability, outcome=outcome):

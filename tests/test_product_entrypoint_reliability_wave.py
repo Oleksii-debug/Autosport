@@ -118,6 +118,19 @@ def test_product_stop_signals_add_sigbreak_without_duplicates(
     assert len(signals) == len(set(signals))
 
 
+def test_stop_request_latches_first_signal_identity() -> None:
+    request = entrypoint._SignalStopRequest()
+
+    request.handle(int(signal.SIGINT), None)
+    request.handle(int(signal.SIGTERM), None)
+
+    assert request.requested is True
+    assert request.signal_number == int(signal.SIGINT)
+    assert request.reason == "signal:SIGINT"
+    assert request.exit_code == 128 + int(signal.SIGINT)
+    assert request.wait(0) is True
+
+
 def test_signal_during_final_tick_wins_over_max_cycles_and_freezes_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

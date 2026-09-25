@@ -4,9 +4,11 @@ from collections.abc import Mapping
 from datetime import timedelta
 from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import autosport.trusted_runtime_code_profile as trusted_runtime_profile
 from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,
 )
@@ -122,6 +124,7 @@ def _bind_legacy_paper_value_execution_authority(request, monkeypatch, tmp_path)
 
     monkeypatch.setattr(module, "AgentContext", execution_bound_context)
 
+
 # These files predate the #662 product-semantic splice and exercise provider membership,
 # persistence/recovery, and PAPER transition behavior rather than semantic provenance.
 # Keep their old fixture path private and narrowly scoped; all other tests see the
@@ -196,3 +199,67 @@ def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
         return prepared
 
     monkeypatch.setattr(module, "_prepared", prepared_with_armed_stop)
+
+
+# #1891 makes a RUNNING closed-registry runtime profile an independent provider-write
+# prerequisite. The restored #1212 positive suites predate that authority. Give only
+# those exact suites a process-local test issuance for each workspace they prepare;
+# every other suite remains capable of proving that missing/stale profile authority
+# fails closed. This fixture never changes production code or persists authority.
+_BETFAIR_TRUSTED_PROFILE_MODULES = _RECOMPOSED_BETFAIR_PROVIDER_MODULES
+_PROFILE_FACTORY_SPEC = "autosport.product_source:create_parlay_product_source"
+_PROFILE_PROVIDER_SOURCE_ID = "parlayapi:table_tennis"
+
+
+class _BetfairFixtureRuntime:
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.manifest = SimpleNamespace(source_id=_PROFILE_PROVIDER_SOURCE_ID)
+
+
+@pytest.fixture(autouse=True)
+def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
+    module = request.module
+    if module is None:
+        return
+    module_name = module.__name__.rsplit(".", 1)[-1]
+    if module_name not in _BETFAIR_TRUSTED_PROFILE_MODULES:
+        return
+
+    original_prepared = getattr(module, "_prepared", None)
+    if not callable(original_prepared):
+        return
+
+    monkeypatch.setattr(
+        trusted_runtime_profile,
+        "AutonomousProductRuntime",
+        _BetfairFixtureRuntime,
+    )
+    issued_by_workspace: dict[str, tuple[_BetfairFixtureRuntime, object]] = {}
+
+    def ensure_profile(tmp: str | Path) -> None:
+        workspace = Path(tmp).resolve()
+        key = str(workspace)
+        if key in issued_by_workspace:
+            return
+        runtime = _BetfairFixtureRuntime(workspace)
+        trusted_runtime_profile._register_started_product_runtime_origin(
+            runtime,
+            source_factory=_PROFILE_FACTORY_SPEC,
+            expected_provider_source_id=_PROFILE_PROVIDER_SOURCE_ID,
+        )
+        profile = trusted_runtime_profile.issue_trusted_runtime_code_profile(runtime)
+        issued_by_workspace[key] = (runtime, profile)
+
+    def prepared_with_trusted_runtime(tmp, *args, **kwargs):
+        prepared = original_prepared(tmp, *args, **kwargs)
+        ensure_profile(tmp)
+        return prepared
+
+    monkeypatch.setattr(module, "_prepared", prepared_with_trusted_runtime)
+    try:
+        yield
+    finally:
+        for runtime, profile in tuple(issued_by_workspace.values()):
+            trusted_runtime_profile.revoke_trusted_runtime_code_profile(profile)
+            trusted_runtime_profile._clear_started_product_runtime_origin(runtime)

@@ -1,826 +1,549 @@
-"""Owner-approved, rollback-fenced local model-compute monetary tariff authority.
+"""Canonical import surface for the local-compute tariff authority.
 
-This module is a concrete product-owned source for the #732 prospective
-MODEL_COMPUTE_AI cost seam. It deliberately does not price provider/cloud
-compute and does not treat router estimated_cost as money.
-
-A tariff is an owner-created, immutable per-request costing contract for one
-exact LOCAL backend/model/config identity. It is bound to the current durable
-EconomicGoal currency and revision, a causally available allocation basis, and
-an effective interval. The whole tariff state is protected by the existing
-MonotonicWorkspaceAuthority so restoring/deleting an older workspace copy fails
-closed while the independent machine-state authority survives.
+The record/schema implementation remains byte-preserved in the internal module.
+This shim closes the runtime trust seams identified during #1859 review: tariff
+rollback operations are non-virtual, the exact constructor-owned #1864 basis
+store is sealed, and EconomicGoal identity is re-resolved only through that
+stronger canonical basis composition.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
-from enum import StrEnum
-import hashlib
-import json
-from pathlib import Path
-import re
-from typing import Final, Mapping
+import sys
+import weakref
 
-from .economic_goal_store import EconomicGoalStore, economic_goal_to_payload
-from .integrity import atomic_write_json, sha256_file
-from .json_integrity import strict_json_loads
-from .local_compute_allocation_basis import (
-    LocalComputeAllocationBasisAuthorityStore,
-    LocalComputeAllocationBasisRecord,
-    local_compute_monotonic_authority_root,
-)
-from .monotonic_workspace_authority import (
-    AuthorityPhase,
-    MonotonicWorkspaceAuthority,
-)
-from .workspace_lock import WorkspaceEconomicLock
+from . import _local_compute_tariff_authority_impl as _impl
 
 
-SCHEMA: Final = "autosport.local_compute_tariff_authority"
-SCHEMA_VERSION: Final = 1
-FILE_NAME: Final = "local-compute-tariffs.json"
-AUTHORITY_DOMAIN: Final = "autosport.local-compute-tariff.v1"
-AUTHORITY_KEY: Final = "owner-approved-local-compute-tariffs"
-_SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
-_CURRENCY_RE: Final = re.compile(r"^[A-Z]{3}$")
-_MAX_INTEGER_DIGITS: Final = 24
-_MAX_FRACTIONAL_DIGITS: Final = 18
+_Store = _impl.LocalComputeTariffAuthorityStore
+_BasisStore = _impl._CANONICAL_ALLOCATION_BASIS_STORE_CLASS
+_BasisResolveCurrent = _impl._CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT
+_BasisGetattribute = _BasisStore.__getattribute__
+_BasisInit = _BasisStore.__init__
+_Authority = _impl.MonotonicWorkspaceAuthority
+_AuthorityInit = _Authority.__init__
+_AuthorityPhase = _impl.AuthorityPhase
+_Lock = _impl.WorkspaceEconomicLock
+_Path = _impl.Path
+_root_resolver = _impl._CANONICAL_LOCAL_COMPUTE_MONOTONIC_AUTHORITY_ROOT
+_root_code = getattr(_root_resolver, "__code__", None)
+_root_closure = getattr(_root_resolver, "__closure__", None)
+try:
+    _root_closure_state = tuple(cell.cell_contents for cell in (_root_closure or ()))
+except ValueError as exc:  # pragma: no cover - import-time corruption
+    raise _impl.LocalComputeTariffError(
+        "canonical local-compute authority root closure is invalid"
+    ) from exc
 
-# Downstream tariff authority must consume the exact canonical allocation-basis
-# implementation and machine-root contract imported from its stack parent.
-_CANONICAL_ALLOCATION_BASIS_STORE_CLASS: Final = (
-    LocalComputeAllocationBasisAuthorityStore
-)
-_CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT: Final = (
-    LocalComputeAllocationBasisAuthorityStore.resolve_current
-)
-_CANONICAL_LOCAL_COMPUTE_MONOTONIC_AUTHORITY_ROOT: Final = (
-    local_compute_monotonic_authority_root
-)
-_CANONICAL_ECONOMIC_GOAL_STORE_CLASS: Final = EconomicGoalStore
-_CANONICAL_ECONOMIC_GOAL_STORE_LOAD: Final = EconomicGoalStore.load
-_CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD: Final = economic_goal_to_payload
+_load_records = _Store._load
+_product_utc_now = _impl._product_utc_now
+_text = _impl._text
+_sha = _impl._sha
+_currency = _impl._currency
+_time = _impl._time
+_instant = _impl._instant
+_state_payload = _impl._state_payload
+_canonical_bytes = _impl._canonical_bytes
+_digest = _impl._digest
+_intervals_overlap = _impl._intervals_overlap
+_atomic_write_json = _impl.atomic_write_json
+_sha256_file = _impl.sha256_file
+_hashlib = _impl.hashlib
+_Record = _impl.LocalComputeTariffRecord
+_Treatment = _impl.LocalComputeCostTreatment
+_Error = _impl.LocalComputeTariffError
+_file_name = _impl.FILE_NAME
+_authority_domain = _impl.AUTHORITY_DOMAIN
+_authority_key = _impl.AUTHORITY_KEY
 
+_authority_operations = {
+    name: getattr(_Authority, name)
+    for name in ("read_history", "recover", "prepare", "abort", "commit")
+}
+_authority_codes = {
+    name: getattr(method, "__code__", None)
+    for name, method in _authority_operations.items()
+}
 
-class LocalComputeTariffError(ValueError):
-    """The owner tariff input/state is malformed, ambiguous, or non-causal."""
-
-
-class LocalComputeCostTreatment(StrEnum):
-    """What the exact per-request amount represents."""
-
-    FULLY_ALLOCATED_PER_REQUEST = "FULLY_ALLOCATED_PER_REQUEST"
-
-
-def _text(value: object, field: str, *, limit: int = 512) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or "\x00" in value
-        or len(value) > limit
-    ):
-        raise LocalComputeTariffError(f"{field} must be canonical non-empty text")
-    try:
-        value.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise LocalComputeTariffError(f"{field} must be valid UTF-8") from exc
-    return value
-
-
-def _sha(value: object, field: str) -> str:
-    value = _text(value, field, limit=64)
-    if _SHA256_RE.fullmatch(value) is None:
-        raise LocalComputeTariffError(f"{field} must be lowercase SHA-256")
-    return value
-
-
-def _currency(value: object) -> str:
-    value = _text(value, "currency", limit=3)
-    if _CURRENCY_RE.fullmatch(value) is None:
-        raise LocalComputeTariffError("currency must be uppercase three-letter code")
-    return value
-
-
-def _instant(value: object, field: str) -> datetime:
-    raw = _text(value, field)
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise LocalComputeTariffError(f"{field} must be ISO-8601") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise LocalComputeTariffError(f"{field} must include timezone")
-    return parsed.astimezone(timezone.utc)
-
-
-def _time(value: object, field: str) -> str:
-    return _instant(value, field).isoformat().replace("+00:00", "Z")
-
-
-def _money(value: object, field: str) -> Decimal:
-    if type(value) is not Decimal or not value.is_finite() or value < 0:
-        raise LocalComputeTariffError(f"{field} must be a finite non-negative Decimal")
-    _sign, digits, exponent = value.as_tuple()
-    integer_digits = max(1, len(digits) + exponent)
-    fractional_digits = max(0, -exponent)
-    if integer_digits > _MAX_INTEGER_DIGITS or fractional_digits > _MAX_FRACTIONAL_DIGITS:
-        raise LocalComputeTariffError(
-            f"{field} exceeds supported exact monetary precision"
-        )
-    return value
-
-
-def _money_text(value: Decimal) -> str:
-    return format(_money(value, "amount_per_request"), "f")
-
-
-def _canonical_bytes(payload: object) -> bytes:
-    try:
-        return (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise LocalComputeTariffError("tariff state is outside canonical JSON domain") from exc
-
-
-def _digest(payload: object) -> str:
-    try:
-        raw = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise LocalComputeTariffError("tariff payload is outside canonical JSON domain") from exc
-    return hashlib.sha256(raw).hexdigest()
-
-
-def _goal_sha256(goal: object) -> str:
-    return _digest(
-        _CANONICAL_ECONOMIC_GOAL_TO_PAYLOAD(goal)  # type: ignore[arg-type]
-    )
-
-
-def _authoritative_utc_now() -> str:
-    """Read product-owned UTC wall time for tariff authority."""
-
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-_CANONICAL_AUTHORITY_NOW: Final = _authoritative_utc_now
-_CANONICAL_AUTHORITY_NOW_CODE: Final = _CANONICAL_AUTHORITY_NOW.__code__
-_CANONICAL_AUTHORITY_NOW_DATETIME: Final = datetime
-_CANONICAL_AUTHORITY_NOW_TIMEZONE: Final = timezone
-
-
-def _product_utc_now() -> datetime:
-    """Return current UTC only while the canonical clock executable is intact."""
-
-    clock_globals = getattr(_CANONICAL_AUTHORITY_NOW, "__globals__", {})
-    if (
-        _authoritative_utc_now is not _CANONICAL_AUTHORITY_NOW
-        or getattr(_CANONICAL_AUTHORITY_NOW, "__code__", None)
-        is not _CANONICAL_AUTHORITY_NOW_CODE
-        or clock_globals.get("datetime") is not _CANONICAL_AUTHORITY_NOW_DATETIME
-        or clock_globals.get("timezone") is not _CANONICAL_AUTHORITY_NOW_TIMEZONE
-    ):
-        raise LocalComputeTariffError("product clock authority changed")
-    return _instant(_CANONICAL_AUTHORITY_NOW(), "product_time")
+# No authority-bearing object is recovered from mutable instance attributes.
+# The public attributes remain inspectable for compatibility, but every trusted
+# operation first requires them to still be the exact constructor-owned objects.
+_sealed_state: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True, slots=True)
-class LocalComputeTariffRecord:
-    tariff_id: str
-    backend_id: str
-    model_id: str
-    config_sha256: str
-    amount_per_request: Decimal
+class _GoalProjection:
+    goal_id: str
+    revision: int
+    bankroll_id: str
     currency: str
-    effective_from: str
-    effective_until: str | None
-    allocation_treatment: LocalComputeCostTreatment
-    allocation_policy_id: str
-    allocation_basis_id: str
-    allocation_basis_sha256: str
-    basis_available_at: str
-    recorded_at: str
-    owner_goal_id: str
-    owner_goal_revision: int
-    owner_bankroll_id: str
-    owner_goal_sha256: str
-
-    def __post_init__(self) -> None:
-        _text(self.tariff_id, "tariff_id")
-        _text(self.backend_id, "backend_id")
-        _text(self.model_id, "model_id")
-        _sha(self.config_sha256, "config_sha256")
-        _money(self.amount_per_request, "amount_per_request")
-        _currency(self.currency)
-        start = _instant(self.effective_from, "effective_from")
-        end = None if self.effective_until is None else _instant(
-            self.effective_until, "effective_until"
-        )
-        if end is not None and end <= start:
-            raise LocalComputeTariffError("effective_until must be after effective_from")
-        if type(self.allocation_treatment) is not LocalComputeCostTreatment:
-            raise LocalComputeTariffError(
-                "allocation_treatment must be LocalComputeCostTreatment"
-            )
-        _text(self.allocation_policy_id, "allocation_policy_id")
-        _text(self.allocation_basis_id, "allocation_basis_id")
-        _sha(self.allocation_basis_sha256, "allocation_basis_sha256")
-        basis_at = _instant(self.basis_available_at, "basis_available_at")
-        recorded = _instant(self.recorded_at, "recorded_at")
-        if basis_at > recorded:
-            raise LocalComputeTariffError(
-                "allocation basis must be available before owner tariff publication"
-            )
-        _text(self.owner_goal_id, "owner_goal_id")
-        if (
-            type(self.owner_goal_revision) is not int
-            or isinstance(self.owner_goal_revision, bool)
-            or self.owner_goal_revision < 1
-        ):
-            raise LocalComputeTariffError("owner_goal_revision must be positive integer")
-        _text(self.owner_bankroll_id, "owner_bankroll_id")
-        _sha(self.owner_goal_sha256, "owner_goal_sha256")
-
-    def payload(self) -> dict[str, object]:
-        return {
-            "tariff_id": self.tariff_id,
-            "backend_id": self.backend_id,
-            "model_id": self.model_id,
-            "config_sha256": self.config_sha256,
-            "amount_per_request": _money_text(self.amount_per_request),
-            "currency": self.currency,
-            "effective_from": _time(self.effective_from, "effective_from"),
-            "effective_until": (
-                None
-                if self.effective_until is None
-                else _time(self.effective_until, "effective_until")
-            ),
-            "allocation_treatment": self.allocation_treatment.value,
-            "allocation_policy_id": self.allocation_policy_id,
-            "allocation_basis_id": self.allocation_basis_id,
-            "allocation_basis_sha256": self.allocation_basis_sha256,
-            "basis_available_at": _time(self.basis_available_at, "basis_available_at"),
-            "recorded_at": _time(self.recorded_at, "recorded_at"),
-            "owner_goal_id": self.owner_goal_id,
-            "owner_goal_revision": self.owner_goal_revision,
-            "owner_bankroll_id": self.owner_bankroll_id,
-            "owner_goal_sha256": self.owner_goal_sha256,
-        }
-
-    @property
-    def tariff_sha256(self) -> str:
-        return _digest(self.payload())
-
-    def to_dict(self) -> dict[str, object]:
-        return {**self.payload(), "tariff_sha256": self.tariff_sha256}
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, object]) -> "LocalComputeTariffRecord":
-        expected = {
-            "tariff_id",
-            "backend_id",
-            "model_id",
-            "config_sha256",
-            "amount_per_request",
-            "currency",
-            "effective_from",
-            "effective_until",
-            "allocation_treatment",
-            "allocation_policy_id",
-            "allocation_basis_id",
-            "allocation_basis_sha256",
-            "basis_available_at",
-            "recorded_at",
-            "owner_goal_id",
-            "owner_goal_revision",
-            "owner_bankroll_id",
-            "owner_goal_sha256",
-            "tariff_sha256",
-        }
-        if set(raw) != expected:
-            raise LocalComputeTariffError("tariff record fields do not match schema")
-        amount_raw = raw["amount_per_request"]
-        if type(amount_raw) is not str:
-            raise LocalComputeTariffError("amount_per_request must be Decimal text")
-        try:
-            amount = Decimal(amount_raw)
-        except (InvalidOperation, ValueError) as exc:
-            raise LocalComputeTariffError("amount_per_request is invalid Decimal") from exc
-        try:
-            treatment = LocalComputeCostTreatment(raw["allocation_treatment"])  # type: ignore[arg-type]
-        except (TypeError, ValueError) as exc:
-            raise LocalComputeTariffError("unknown allocation_treatment") from exc
-        item = cls(
-            tariff_id=raw["tariff_id"],  # type: ignore[arg-type]
-            backend_id=raw["backend_id"],  # type: ignore[arg-type]
-            model_id=raw["model_id"],  # type: ignore[arg-type]
-            config_sha256=raw["config_sha256"],  # type: ignore[arg-type]
-            amount_per_request=amount,
-            currency=raw["currency"],  # type: ignore[arg-type]
-            effective_from=raw["effective_from"],  # type: ignore[arg-type]
-            effective_until=raw["effective_until"],  # type: ignore[arg-type]
-            allocation_treatment=treatment,
-            allocation_policy_id=raw["allocation_policy_id"],  # type: ignore[arg-type]
-            allocation_basis_id=raw["allocation_basis_id"],  # type: ignore[arg-type]
-            allocation_basis_sha256=raw["allocation_basis_sha256"],  # type: ignore[arg-type]
-            basis_available_at=raw["basis_available_at"],  # type: ignore[arg-type]
-            recorded_at=raw["recorded_at"],  # type: ignore[arg-type]
-            owner_goal_id=raw["owner_goal_id"],  # type: ignore[arg-type]
-            owner_goal_revision=raw["owner_goal_revision"],  # type: ignore[arg-type]
-            owner_bankroll_id=raw["owner_bankroll_id"],  # type: ignore[arg-type]
-            owner_goal_sha256=raw["owner_goal_sha256"],  # type: ignore[arg-type]
-        )
-        if raw["tariff_sha256"] != item.tariff_sha256:
-            raise LocalComputeTariffError("tariff record digest mismatch")
-        return item
 
 
-def _state_payload(records: tuple[LocalComputeTariffRecord, ...]) -> dict[str, object]:
-    return {
-        "schema": SCHEMA,
-        "schema_version": SCHEMA_VERSION,
-        "records": [record.to_dict() for record in records],
-    }
-
-
-def _intervals_overlap(
-    left_start: datetime,
-    left_end: datetime | None,
-    right_start: datetime,
-    right_end: datetime | None,
-) -> bool:
-    left_before_right_end = right_end is None or left_start < right_end
-    right_before_left_end = left_end is None or right_start < left_end
-    return left_before_right_end and right_before_left_end
-
-
-def _build_tariff_store_init():
-    """Bind tariff and basis stores to one canonical LOCAL-compute root."""
-
-    root_resolver = _CANONICAL_LOCAL_COMPUTE_MONOTONIC_AUTHORITY_ROOT
-    root_code = getattr(root_resolver, "__code__", None)
-    root_closure = getattr(root_resolver, "__closure__", None)
+def _require_root() -> object:
+    if getattr(_root_resolver, "__code__", None) is not _root_code:
+        raise _Error("canonical local-compute authority root resolver code changed")
+    live_closure = getattr(_root_resolver, "__closure__", None)
     try:
-        root_closure_state = tuple(
-            cell.cell_contents for cell in (root_closure or ())
-        )
+        live_state = tuple(cell.cell_contents for cell in (live_closure or ()))
     except ValueError as exc:
-        raise LocalComputeTariffError(
-            "canonical local-compute authority root closure is invalid"
-        ) from exc
+        raise _Error("canonical local-compute authority root closure changed") from exc
+    if (
+        len(live_state) != len(_root_closure_state)
+        or any(current is not frozen for current, frozen in zip(live_state, _root_closure_state))
+    ):
+        raise _Error("canonical local-compute authority root closure changed")
+    return _root_resolver()
 
-    path_type = Path
-    basis_store_type = _CANONICAL_ALLOCATION_BASIS_STORE_CLASS
-    authority_type = MonotonicWorkspaceAuthority
-    lock_type = WorkspaceEconomicLock
-    file_name = FILE_NAME
-    authority_domain = AUTHORITY_DOMAIN
-    authority_key = AUTHORITY_KEY
-    error_type = LocalComputeTariffError
 
-    def sealed_init(self, workspace: str | Path) -> None:
-        if getattr(root_resolver, "__code__", None) is not root_code:
-            raise error_type(
-                "canonical local-compute authority root resolver code changed"
-            )
-        live_closure = getattr(root_resolver, "__closure__", None)
-        try:
-            live_closure_state = tuple(
-                cell.cell_contents for cell in (live_closure or ())
-            )
-        except ValueError as exc:
-            raise error_type(
-                "canonical local-compute authority root closure changed"
-            ) from exc
+def _require_authority_dispatch(authority: object) -> None:
+    if type(authority) is not _Authority:
+        raise _Error("local compute tariff authority object changed")
+    try:
+        instance_state = object.__getattribute__(authority, "__dict__")
+    except AttributeError:
+        instance_state = {}
+    for name, method in _authority_operations.items():
+        live = getattr(_Authority, name, None)
         if (
-            len(live_closure_state) != len(root_closure_state)
-            or any(
-                current is not frozen
-                for current, frozen in zip(
-                    live_closure_state,
-                    root_closure_state,
-                )
-            )
+            name in instance_state
+            or live is not method
+            or getattr(live, "__code__", None) is not _authority_codes[name]
         ):
-            raise error_type(
-                "canonical local-compute authority root closure changed"
-            )
+            raise _Error("local compute tariff authority dispatch changed")
 
-        self.workspace = path_type(workspace).absolute().resolve(strict=False)
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.path = self.workspace / file_name
-        self._basis_store = basis_store_type(self.workspace)
-        tariff_root = root_resolver()
-        if self._basis_store._authority.authority_root != tariff_root:
-            raise error_type(
-                "tariff and allocation basis authority roots differ"
-            )
-        self._authority = authority_type(
-            workspace=self.workspace,
-            domain=authority_domain,
-            key=authority_key,
-            authority_root=tariff_root,
+
+def _state(self):
+    try:
+        frozen = _sealed_state[self]
+    except (KeyError, TypeError) as exc:
+        raise _Error("local compute tariff runtime authority is not sealed") from exc
+    (
+        workspace,
+        path,
+        basis_store,
+        basis_workspace,
+        basis_path,
+        basis_authority,
+        authority,
+        authority_root,
+    ) = frozen
+    try:
+        live_workspace = object.__getattribute__(self, "workspace")
+        live_path = object.__getattribute__(self, "path")
+        live_basis = object.__getattribute__(self, "_basis_store")
+        live_authority = object.__getattribute__(self, "_authority")
+    except AttributeError as exc:
+        raise _Error("local compute tariff runtime authority changed") from exc
+    if (
+        live_workspace != workspace
+        or live_path != path
+        or live_basis is not basis_store
+        or live_authority is not authority
+    ):
+        raise _Error("local compute tariff runtime authority changed")
+    if type(basis_store) is not _BasisStore:
+        raise _Error("local compute allocation basis authority instance changed")
+    try:
+        live_basis_workspace = object.__getattribute__(basis_store, "workspace")
+        live_basis_path = object.__getattribute__(basis_store, "path")
+        live_basis_authority = object.__getattribute__(basis_store, "_authority")
+    except AttributeError as exc:
+        raise _Error("local compute allocation basis authority state changed") from exc
+    if (
+        live_basis_workspace != basis_workspace
+        or live_basis_path != basis_path
+        or live_basis_authority is not basis_authority
+        or basis_workspace != workspace
+    ):
+        raise _Error("local compute allocation basis authority state changed")
+    if (
+        _BasisStore.__getattribute__ is not _BasisGetattribute
+        or _BasisStore.__init__ is not _BasisInit
+        or _BasisStore.resolve_current is not _BasisResolveCurrent
+    ):
+        raise _Error("local compute allocation basis authority dispatch changed")
+    _require_authority_dispatch(authority)
+    if authority.authority_root != authority_root:
+        raise _Error("local compute tariff authority root changed")
+    if basis_authority.authority_root != authority_root:
+        raise _Error("tariff and allocation basis authority roots differ")
+    if _require_root() != authority_root:
+        raise _Error("canonical local-compute authority root changed")
+    return frozen
+
+
+def _observed(self) -> str | None:
+    _workspace, path, *_rest = _state(self)
+    return _sha256_file(path) if path.exists() else None
+
+
+def _sealed_recover(self) -> None:
+    frozen = _state(self)
+    authority = frozen[6]
+    observed = _observed(self)
+    history = _authority_operations["read_history"](authority)
+    if history and history[-1].phase is _AuthorityPhase.PREPARE:
+        pending = history[-1]
+        _authority_operations["recover"](
+            authority,
+            observed_state_sha256=observed,
+            tx_id=pending.tx_id,
+            semantic_binding_sha256=pending.semantic_binding_sha256,
         )
-        with lock_type(self.workspace):
-            self._recover()
-            self._records = self._load()
+        return
+    _authority_operations["recover"](
+        authority,
+        observed_state_sha256=observed,
+    )
 
-    return sealed_init
+
+def _basis_authority(self):
+    return _state(self)[2]
 
 
-class LocalComputeTariffAuthorityStore:
-    """Creation-only owner tariff store with independent rollback fencing."""
+def _current_goal(self):
+    basis_store = _basis_authority(self)
+    # #1864's custom __getattribute__ returns its closure-owned sealed current-goal
+    # resolver for this name. Calling the captured descriptor means a later class
+    # rebind cannot substitute a weaker EconomicGoalStore path.
+    current_goal = _BasisGetattribute(basis_store, "_current_goal")
+    values = current_goal()
+    if type(values) is not tuple or len(values) != 5:
+        raise _Error("canonical allocation basis current EconomicGoal projection changed")
+    goal_id, revision, bankroll_id, currency, goal_sha256 = values
+    if (
+        type(goal_id) is not str
+        or not goal_id
+        or type(revision) is not int
+        or isinstance(revision, bool)
+        or revision < 1
+        or type(bankroll_id) is not str
+        or not bankroll_id
+        or type(currency) is not str
+        or type(goal_sha256) is not str
+        or len(goal_sha256) != 64
+    ):
+        raise _Error("canonical allocation basis current EconomicGoal projection changed")
+    return _GoalProjection(goal_id, revision, bankroll_id, currency), goal_sha256
 
-    __init__ = _build_tariff_store_init()
 
-    def _observed_sha256(self) -> str | None:
-        return sha256_file(self.path) if self.path.exists() else None
+def _sealed_init(self, workspace) -> None:
+    authority_root = _require_root()
+    workspace_path = _Path(workspace).absolute().resolve(strict=False)
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    path = workspace_path / _file_name
 
-    def _recover(self) -> None:
-        observed = self._observed_sha256()
-        history = self._authority.read_history()
-        if history and history[-1].phase is AuthorityPhase.PREPARE:
-            pending = history[-1]
-            self._authority.recover(
-                observed_state_sha256=observed,
-                tx_id=pending.tx_id,
-                semantic_binding_sha256=pending.semantic_binding_sha256,
+    # Invoke the captured #1864 initializer on an exact object so rebinding its
+    # class constructor cannot redirect this tariff's dependency.
+    basis_store = object.__new__(_BasisStore)
+    _BasisInit(basis_store, workspace_path)
+    basis_workspace = object.__getattribute__(basis_store, "workspace")
+    basis_path = object.__getattribute__(basis_store, "path")
+    basis_authority = object.__getattribute__(basis_store, "_authority")
+    if basis_authority.authority_root != authority_root:
+        raise _Error("tariff and allocation basis authority roots differ")
+
+    if _Authority.__init__ is not _AuthorityInit:
+        raise _Error("local compute tariff authority constructor changed")
+    authority = object.__new__(_Authority)
+    _AuthorityInit(
+        authority,
+        workspace=workspace_path,
+        domain=_authority_domain,
+        key=_authority_key,
+        authority_root=authority_root,
+    )
+
+    object.__setattr__(self, "workspace", workspace_path)
+    object.__setattr__(self, "path", path)
+    object.__setattr__(self, "_basis_store", basis_store)
+    object.__setattr__(self, "_authority", authority)
+    _sealed_state[self] = (
+        workspace_path,
+        path,
+        basis_store,
+        basis_workspace,
+        basis_path,
+        basis_authority,
+        authority,
+        authority_root,
+    )
+    _state(self)
+    with _Lock(workspace_path):
+        _sealed_recover(self)
+        object.__setattr__(self, "_records", _load_records(self))
+
+
+def _recover(self) -> None:
+    _sealed_recover(self)
+
+
+def _publish_owner_tariff(
+    self,
+    *,
+    tariff_id: str,
+    backend_id: str,
+    model_id: str,
+    config_sha256: str,
+    effective_from: str,
+    effective_until: str | None,
+    allocation_policy_id: str,
+    allocation_basis_id: str,
+):
+    canonical_tariff_id = _text(tariff_id, "tariff_id")
+    canonical_backend = _text(backend_id, "backend_id")
+    canonical_model = _text(model_id, "model_id")
+    canonical_config = _sha(config_sha256, "config_sha256")
+    canonical_start = _time(effective_from, "effective_from")
+    canonical_end = None if effective_until is None else _time(
+        effective_until, "effective_until"
+    )
+    canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
+    canonical_basis_id = _text(allocation_basis_id, "allocation_basis_id")
+
+    goal_for_basis, _ = _current_goal(self)
+    basis = _BasisResolveCurrent(
+        _basis_authority(self),
+        basis_id=canonical_basis_id,
+        backend_id=canonical_backend,
+        model_id=canonical_model,
+        config_sha256=canonical_config,
+        allocation_policy_id=canonical_policy,
+        bankroll_id=goal_for_basis.bankroll_id,
+        currency=goal_for_basis.currency,
+    )
+    if basis is None:
+        raise _Error("product-owned allocation basis is missing or not causally available")
+    canonical_amount = basis.amount_per_request
+    canonical_basis = basis.basis_sha256
+    canonical_basis_at = basis.available_at
+
+    workspace = _state(self)[0]
+    with _Lock(workspace):
+        _sealed_recover(self)
+        records = _load_records(self)
+        object.__setattr__(self, "_records", records)
+        goal, goal_sha256 = _current_goal(self)
+        if (
+            basis.owner_goal_id != goal.goal_id
+            or basis.owner_goal_revision != goal.revision
+            or basis.owner_bankroll_id != goal.bankroll_id
+            or basis.owner_goal_sha256 != goal_sha256
+            or basis.currency != goal.currency
+        ):
+            raise _Error("allocation basis no longer matches the current EconomicGoal")
+
+        for existing in records:
+            if existing.tariff_id != canonical_tariff_id:
+                continue
+            same_request = (
+                existing.backend_id == canonical_backend
+                and existing.model_id == canonical_model
+                and existing.config_sha256 == canonical_config
+                and existing.amount_per_request == canonical_amount
+                and existing.currency == goal.currency
+                and existing.effective_from == canonical_start
+                and existing.effective_until == canonical_end
+                and existing.allocation_policy_id == canonical_policy
+                and existing.allocation_basis_id == canonical_basis_id
+                and existing.allocation_basis_sha256 == canonical_basis
+                and existing.basis_available_at == canonical_basis_at
+                and existing.owner_goal_id == goal.goal_id
+                and existing.owner_goal_revision == goal.revision
+                and existing.owner_bankroll_id == goal.bankroll_id
+                and existing.owner_goal_sha256 == goal_sha256
             )
-            return
-        self._authority.recover(observed_state_sha256=observed)
+            if same_request:
+                return existing
+            raise _Error("tariff_id is immutable")
 
-    def _load(self) -> tuple[LocalComputeTariffRecord, ...]:
-        if not self.path.exists():
-            return ()
-        try:
-            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise LocalComputeTariffError("local compute tariff state is unreadable") from exc
-        if not isinstance(raw, dict) or set(raw) != {"schema", "schema_version", "records"}:
-            raise LocalComputeTariffError("local compute tariff state fields are invalid")
-        if raw["schema"] != SCHEMA or raw["schema_version"] != SCHEMA_VERSION:
-            raise LocalComputeTariffError("unsupported local compute tariff state schema")
-        values = raw["records"]
-        if type(values) is not list:
-            raise LocalComputeTariffError("local compute tariff records must be a list")
-        records: list[LocalComputeTariffRecord] = []
-        ids: set[str] = set()
-        digests: set[str] = set()
-        for raw_record in values:
-            if not isinstance(raw_record, dict):
-                raise LocalComputeTariffError("tariff record must be an object")
-            record = LocalComputeTariffRecord.from_dict(raw_record)
-            if record.tariff_id in ids or record.tariff_sha256 in digests:
-                raise LocalComputeTariffError("duplicate tariff identity")
-            ids.add(record.tariff_id)
-            digests.add(record.tariff_sha256)
-            records.append(record)
-        return tuple(records)
-
-    def _current_goal(self):
-        try:
-            goal_store = _CANONICAL_ECONOMIC_GOAL_STORE_CLASS(self.workspace)
-            goal = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(goal_store)
-        except Exception as exc:
-            raise LocalComputeTariffError(
-                "current durable EconomicGoal is required for local compute tariff authority"
-            ) from exc
-        return goal, _goal_sha256(goal)
-
-    def _basis_authority(self) -> LocalComputeAllocationBasisAuthorityStore:
-        authority = self._basis_store
-        if type(authority) is not _CANONICAL_ALLOCATION_BASIS_STORE_CLASS:
-            raise LocalComputeTariffError(
-                "local compute allocation basis authority instance is not canonical"
-            )
-        return authority
-
-    def publish_owner_tariff(
-        self,
-        *,
-        tariff_id: str,
-        backend_id: str,
-        model_id: str,
-        config_sha256: str,
-        effective_from: str,
-        effective_until: str | None,
-        allocation_policy_id: str,
-        allocation_basis_id: str,
-    ) -> LocalComputeTariffRecord:
-        """Persist one tariff derived from an exact product-owned allocation basis."""
-
-        canonical_tariff_id = _text(tariff_id, "tariff_id")
-        canonical_backend = _text(backend_id, "backend_id")
-        canonical_model = _text(model_id, "model_id")
-        canonical_config = _sha(config_sha256, "config_sha256")
-        canonical_start = _time(effective_from, "effective_from")
-        canonical_end = (
-            None if effective_until is None else _time(effective_until, "effective_until")
+        current_time = _product_utc_now()
+        previous_recorded_at = max(
+            (_instant(item.recorded_at, "recorded_at") for item in records),
+            default=None,
         )
-        canonical_policy = _text(allocation_policy_id, "allocation_policy_id")
-        canonical_basis_id = _text(allocation_basis_id, "allocation_basis_id")
-        goal_for_basis, _ = self._current_goal()
-        basis = _CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT(
-            self._basis_authority(),
-            basis_id=canonical_basis_id,
+        if previous_recorded_at is not None and current_time <= previous_recorded_at:
+            raise _Error("product clock did not advance before tariff publication")
+        recorded_at = _time(current_time.isoformat(), "recorded_at")
+
+        record = _Record(
+            tariff_id=canonical_tariff_id,
             backend_id=canonical_backend,
             model_id=canonical_model,
             config_sha256=canonical_config,
+            amount_per_request=canonical_amount,
+            currency=goal.currency,
+            effective_from=canonical_start,
+            effective_until=canonical_end,
+            allocation_treatment=_Treatment.FULLY_ALLOCATED_PER_REQUEST,
             allocation_policy_id=canonical_policy,
-            bankroll_id=goal_for_basis.bankroll_id,
-            currency=goal_for_basis.currency,
+            allocation_basis_id=canonical_basis_id,
+            allocation_basis_sha256=canonical_basis,
+            basis_available_at=canonical_basis_at,
+            recorded_at=recorded_at,
+            owner_goal_id=goal.goal_id,
+            owner_goal_revision=goal.revision,
+            owner_bankroll_id=goal.bankroll_id,
+            owner_goal_sha256=goal_sha256,
         )
-        if basis is None:
-            raise LocalComputeTariffError(
-                "product-owned allocation basis is missing or not causally available"
-            )
-        canonical_amount = basis.amount_per_request
-        canonical_basis = basis.basis_sha256
-        canonical_basis_at = basis.available_at
-
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            self._records = self._load()
-            goal, goal_sha256 = self._current_goal()
+        new_start = _instant(record.effective_from, "effective_from")
+        new_end = None if record.effective_until is None else _instant(
+            record.effective_until, "effective_until"
+        )
+        for existing in records:
             if (
-                basis.owner_goal_id != goal.goal_id
-                or basis.owner_goal_revision != goal.revision
-                or basis.owner_bankroll_id != goal.bankroll_id
-                or basis.owner_goal_sha256 != goal_sha256
-                or basis.currency != goal.currency
+                existing.backend_id,
+                existing.model_id,
+                existing.config_sha256,
+                existing.owner_goal_sha256,
+            ) != (
+                record.backend_id,
+                record.model_id,
+                record.config_sha256,
+                record.owner_goal_sha256,
             ):
-                raise LocalComputeTariffError(
-                    "allocation basis no longer matches the current EconomicGoal"
-                )
-
-            for existing in self._records:
-                if existing.tariff_id != canonical_tariff_id:
-                    continue
-                same_request = (
-                    existing.backend_id == canonical_backend
-                    and existing.model_id == canonical_model
-                    and existing.config_sha256 == canonical_config
-                    and existing.amount_per_request == canonical_amount
-                    and existing.currency == goal.currency
-                    and existing.effective_from == canonical_start
-                    and existing.effective_until == canonical_end
-                    and existing.allocation_policy_id == canonical_policy
-                    and existing.allocation_basis_id == canonical_basis_id
-                    and existing.allocation_basis_sha256 == canonical_basis
-                    and existing.basis_available_at == canonical_basis_at
-                    and existing.owner_goal_id == goal.goal_id
-                    and existing.owner_goal_revision == goal.revision
-                    and existing.owner_bankroll_id == goal.bankroll_id
-                    and existing.owner_goal_sha256 == goal_sha256
-                )
-                if same_request:
-                    return existing
-                raise LocalComputeTariffError("tariff_id is immutable")
-
-            current_time = _product_utc_now()
-            previous_recorded_at = max(
-                (
-                    _instant(existing.recorded_at, "recorded_at")
-                    for existing in self._records
-                ),
-                default=None,
+                continue
+            old_start = _instant(existing.effective_from, "effective_from")
+            old_end = None if existing.effective_until is None else _instant(
+                existing.effective_until, "effective_until"
             )
-            if (
-                previous_recorded_at is not None
-                and current_time <= previous_recorded_at
-            ):
-                raise LocalComputeTariffError(
-                    "product clock did not advance before tariff publication"
-                )
-            recorded_at = _time(current_time.isoformat(), "recorded_at")
+            if _intervals_overlap(new_start, new_end, old_start, old_end):
+                raise _Error("same compute identity cannot have overlapping owner tariffs")
 
-            record = LocalComputeTariffRecord(
-                tariff_id=canonical_tariff_id,
-                backend_id=canonical_backend,
-                model_id=canonical_model,
-                config_sha256=canonical_config,
-                amount_per_request=canonical_amount,
-                currency=goal.currency,
-                effective_from=canonical_start,
-                effective_until=canonical_end,
-                allocation_treatment=LocalComputeCostTreatment.FULLY_ALLOCATED_PER_REQUEST,
-                allocation_policy_id=canonical_policy,
-                allocation_basis_id=canonical_basis_id,
-                allocation_basis_sha256=canonical_basis,
-                basis_available_at=canonical_basis_at,
-                recorded_at=recorded_at,
-                owner_goal_id=goal.goal_id,
-                owner_goal_revision=goal.revision,
-                owner_bankroll_id=goal.bankroll_id,
-                owner_goal_sha256=goal_sha256,
-            )
-
-            new_start = _instant(record.effective_from, "effective_from")
-            new_end = None if record.effective_until is None else _instant(
-                record.effective_until, "effective_until"
-            )
-            for existing in self._records:
-                if (
-                    existing.backend_id,
-                    existing.model_id,
-                    existing.config_sha256,
-                    existing.owner_goal_sha256,
-                ) != (
-                    record.backend_id,
-                    record.model_id,
-                    record.config_sha256,
-                    record.owner_goal_sha256,
-                ):
-                    continue
-                old_start = _instant(existing.effective_from, "effective_from")
-                old_end = None if existing.effective_until is None else _instant(
-                    existing.effective_until, "effective_until"
-                )
-                if _intervals_overlap(new_start, new_end, old_start, old_end):
-                    raise LocalComputeTariffError(
-                        "same compute identity cannot have overlapping owner tariffs"
-                    )
-
-            staged = (*self._records, record)
-            payload = _state_payload(staged)
-            intended = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
-            observed = self._observed_sha256()
-            binding = _digest(
-                {
-                    "kind": "OWNER_LOCAL_COMPUTE_TARIFF_PUBLISH",
-                    "tariff_sha256": record.tariff_sha256,
-                    "owner_goal_sha256": record.owner_goal_sha256,
-                    "observed_state_sha256": observed,
-                    "intended_state_sha256": intended,
-                }
-            )
-            tx_id = f"local-compute-tariff-{record.tariff_sha256}"
-            self._authority.prepare(
+        staged = (*records, record)
+        payload = _state_payload(staged)
+        intended = _hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+        observed = _observed(self)
+        binding = _digest(
+            {
+                "kind": "OWNER_LOCAL_COMPUTE_TARIFF_PUBLISH",
+                "tariff_sha256": record.tariff_sha256,
+                "owner_goal_sha256": record.owner_goal_sha256,
+                "observed_state_sha256": observed,
+                "intended_state_sha256": intended,
+            }
+        )
+        tx_id = f"local-compute-tariff-{record.tariff_sha256}"
+        authority = _state(self)[6]
+        _authority_operations["prepare"](
+            authority,
+            tx_id=tx_id,
+            observed_state_sha256=observed,
+            intended_state_sha256=intended,
+            semantic_binding_sha256=binding,
+        )
+        try:
+            _atomic_write_json(_state(self)[1], payload)
+        except Exception:
+            _authority_operations["abort"](
+                authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed,
-                intended_state_sha256=intended,
                 semantic_binding_sha256=binding,
             )
-            try:
-                atomic_write_json(self.path, payload)
-            except Exception:
-                self._authority.abort(
-                    tx_id=tx_id,
-                    observed_state_sha256=observed,
-                    semantic_binding_sha256=binding,
-                )
-                raise
-            published = self._observed_sha256()
-            if published != intended:
-                raise LocalComputeTariffError(
-                    "published tariff bytes do not match prepared monotonic state"
-                )
-            self._authority.commit(
-                tx_id=tx_id,
-                observed_state_sha256=published,
-                semantic_binding_sha256=binding,
-            )
-            self._records = staged
-            return record
-
-    def resolve_current(
-        self,
-        *,
-        backend_id: str,
-        model_id: str,
-        config_sha256: str,
-        bankroll_id: str,
-        currency: str,
-    ) -> LocalComputeTariffRecord | None:
-        """Resolve current tariff state for a new decision after this lookup.
-
-        This is deliberately not a historical-availability oracle. A successful
-        lookup proves that the exact tariff and allocation basis exist now under
-        the current EconomicGoal. Downstream decision authority must bind this
-        exact tariff identity before issuing the new decision.
-        """
-
-        canonical_backend = _text(backend_id, "backend_id")
-        canonical_model = _text(model_id, "model_id")
-        canonical_config = _sha(config_sha256, "config_sha256")
-        canonical_bankroll = _text(bankroll_id, "bankroll_id")
-        canonical_currency = _currency(currency)
-
-        with WorkspaceEconomicLock(self.workspace):
-            self._recover()
-            records = self._load()
-            goal, goal_sha256 = self._current_goal()
-            if goal.bankroll_id != canonical_bankroll or goal.currency != canonical_currency:
-                raise LocalComputeTariffError(
-                    "intent bankroll/currency does not match current owner EconomicGoal"
-                )
-            cutoff = _product_utc_now()
-
-            matches: list[LocalComputeTariffRecord] = []
-            for record in records:
-                if (
-                    record.backend_id,
-                    record.model_id,
-                    record.config_sha256,
-                ) != (canonical_backend, canonical_model, canonical_config):
-                    continue
-                if (
-                    record.owner_goal_id != goal.goal_id
-                    or record.owner_goal_revision != goal.revision
-                    or record.owner_bankroll_id != goal.bankroll_id
-                    or record.owner_goal_sha256 != goal_sha256
-                    or record.currency != goal.currency
-                ):
-                    continue
-                if _instant(record.recorded_at, "recorded_at") > cutoff:
-                    continue
-                if _instant(record.basis_available_at, "basis_available_at") > cutoff:
-                    continue
-                if cutoff < _instant(record.effective_from, "effective_from"):
-                    continue
-                if (
-                    record.effective_until is not None
-                    and cutoff >= _instant(record.effective_until, "effective_until")
-                ):
-                    continue
-                matches.append(record)
-
-            if len(matches) > 1:
-                raise LocalComputeTariffError(
-                    "ambiguous overlapping local compute tariff authority"
-                )
-            resolved = None if not matches else matches[0]
-
-        if resolved is None:
-            return None
-        basis = _CANONICAL_ALLOCATION_BASIS_RESOLVE_CURRENT(
-            self._basis_authority(),
-            basis_id=resolved.allocation_basis_id,
-            backend_id=resolved.backend_id,
-            model_id=resolved.model_id,
-            config_sha256=resolved.config_sha256,
-            allocation_policy_id=resolved.allocation_policy_id,
-            bankroll_id=resolved.owner_bankroll_id,
-            currency=resolved.currency,
+            raise
+        published = _observed(self)
+        if published != intended:
+            raise _Error("published tariff bytes do not match prepared monotonic state")
+        _authority_operations["commit"](
+            authority,
+            tx_id=tx_id,
+            observed_state_sha256=published,
+            semantic_binding_sha256=binding,
         )
-        if basis is None:
-            return None
-        if (
-            basis.basis_sha256 != resolved.allocation_basis_sha256
-            or basis.available_at != resolved.basis_available_at
-            or basis.amount_per_request != resolved.amount_per_request
-            or basis.currency != resolved.currency
-        ):
-            raise LocalComputeTariffError(
-                "resolved allocation basis no longer matches tariff authority"
-            )
-        return resolved
-
-    def resolve(
-        self,
-        *,
-        backend_id: str,
-        model_id: str,
-        config_sha256: str,
-        decision_at: str,
-        bankroll_id: str,
-        currency: str,
-    ) -> LocalComputeTariffRecord | None:
-        """Fail closed for timestamp-only historical decision-time resolution."""
-
-        _text(backend_id, "backend_id")
-        _text(model_id, "model_id")
-        _sha(config_sha256, "config_sha256")
-        _instant(decision_at, "decision_at")
-        _text(bankroll_id, "bankroll_id")
-        _currency(currency)
-        raise LocalComputeTariffError(
-            "timestamp-only historical local compute tariff resolution requires "
-            "durable causal decision authority"
-        )
+        object.__setattr__(self, "_records", staged)
+        return record
 
 
-__all__ = [
-    "LocalComputeAllocationBasisAuthorityStore",
-    "LocalComputeAllocationBasisRecord",
-    "LocalComputeCostTreatment",
-    "LocalComputeTariffAuthorityStore",
-    "LocalComputeTariffError",
-    "LocalComputeTariffRecord",
-]
+def _resolve_current(
+    self,
+    *,
+    backend_id: str,
+    model_id: str,
+    config_sha256: str,
+    bankroll_id: str,
+    currency: str,
+):
+    canonical_backend = _text(backend_id, "backend_id")
+    canonical_model = _text(model_id, "model_id")
+    canonical_config = _sha(config_sha256, "config_sha256")
+    canonical_bankroll = _text(bankroll_id, "bankroll_id")
+    canonical_currency = _currency(currency)
+
+    workspace = _state(self)[0]
+    with _Lock(workspace):
+        _sealed_recover(self)
+        records = _load_records(self)
+        goal, goal_sha256 = _current_goal(self)
+        if goal.bankroll_id != canonical_bankroll or goal.currency != canonical_currency:
+            raise _Error("intent bankroll/currency does not match current owner EconomicGoal")
+        cutoff = _product_utc_now()
+        matches = []
+        for record in records:
+            if (record.backend_id, record.model_id, record.config_sha256) != (
+                canonical_backend,
+                canonical_model,
+                canonical_config,
+            ):
+                continue
+            if (
+                record.owner_goal_id != goal.goal_id
+                or record.owner_goal_revision != goal.revision
+                or record.owner_bankroll_id != goal.bankroll_id
+                or record.owner_goal_sha256 != goal_sha256
+                or record.currency != goal.currency
+            ):
+                continue
+            if _instant(record.recorded_at, "recorded_at") > cutoff:
+                continue
+            if _instant(record.basis_available_at, "basis_available_at") > cutoff:
+                continue
+            if cutoff < _instant(record.effective_from, "effective_from"):
+                continue
+            if record.effective_until is not None and cutoff >= _instant(
+                record.effective_until, "effective_until"
+            ):
+                continue
+            matches.append(record)
+        if len(matches) > 1:
+            raise _Error("ambiguous overlapping local compute tariff authority")
+        resolved = None if not matches else matches[0]
+
+    if resolved is None:
+        return None
+    basis = _BasisResolveCurrent(
+        _basis_authority(self),
+        basis_id=resolved.allocation_basis_id,
+        backend_id=resolved.backend_id,
+        model_id=resolved.model_id,
+        config_sha256=resolved.config_sha256,
+        allocation_policy_id=resolved.allocation_policy_id,
+        bankroll_id=resolved.owner_bankroll_id,
+        currency=resolved.currency,
+    )
+    if basis is None:
+        return None
+    if (
+        basis.basis_sha256 != resolved.allocation_basis_sha256
+        or basis.available_at != resolved.basis_available_at
+        or basis.amount_per_request != resolved.amount_per_request
+        or basis.currency != resolved.currency
+    ):
+        raise _Error("resolved allocation basis no longer matches tariff authority")
+    return resolved
+
+
+# Install the hardening on the preserved implementation class. These assignments
+# happen once during canonical module import; authority-bearing methods themselves
+# never redispatch through mutable class members.
+_Store.__init__ = _sealed_init
+_Store._recover = _recover
+_Store._basis_authority = _basis_authority
+_Store._current_goal = _current_goal
+_Store.publish_owner_tariff = _publish_owner_tariff
+_Store.resolve_current = _resolve_current
+
+# Consumers (including existing tests) receive the preserved implementation module
+# object so all pre-existing private/public names remain available. The class above
+# is the same object, now with the sealed runtime boundary installed.
+sys.modules[__name__] = _impl

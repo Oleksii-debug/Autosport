@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .integrity import atomic_write_json, sha256_file
@@ -18,9 +19,13 @@ from .workspace_lock import (
 from .outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
+    TrustedOutcomeRevision,
     assert_compatible_outcome_lineages,
+    assert_outcome_availability_not_downgraded,
+    bind_outcome_lineage_availability,
     outcome_lineage_binding_from_payload,
     outcome_lineage_payload,
+    resolve_outcome_revision_as_of,
 )
 
 
@@ -68,6 +73,14 @@ _FIRST_OPEN_MAX_WAIT_SECONDS = 5.0
 _LEGACY_SCHEMA_VERSION = 1
 _LINEAGE_TRUST_SCHEMA_VERSION = 2
 _LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
+
+
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _is_canonical_sha256(value: object) -> bool:
@@ -944,6 +957,26 @@ class RunRegistry:
             raise ValueError("outcome lineage binding must be an OutcomeLineageBinding")
         self._assert_outcome_lineage_compatible_state(self._read(), binding)
 
+    def outcome_revision_as_of(
+        self,
+        *,
+        source_identity: str,
+        record_id: str,
+        cutoff: str,
+    ) -> TrustedOutcomeRevision | None:
+        """Resolve only revision truth that this product had accepted by cutoff."""
+
+        _require_nonempty_string("source_identity", source_identity)
+        _require_nonempty_string("record_id", record_id)
+        _require_nonempty_string("cutoff", cutoff)
+        state = self._read()
+        trusted = self._outcome_lineage_trust_bindings(state).get(
+            (source_identity, record_id)
+        )
+        if trusted is None:
+            return None
+        return resolve_outcome_revision_as_of(trusted, cutoff)
+
     def begin(
         self,
         market_sha256: str,
@@ -1023,8 +1056,14 @@ class RunRegistry:
             entry["base_paper_book_sha256"] = base_paper_book_sha256
             entry["base_decision_ledger_sha256"] = base_decision_ledger_sha256
         if outcome_lineage is not None:
-            self._record_outcome_lineage_trust_state(state, outcome_lineage)
-            entry["outcome_lineage"] = outcome_lineage_payload(outcome_lineage)
+            product_bound_lineage = self._record_outcome_lineage_trust_state(
+                state,
+                outcome_lineage,
+                accepted_at=_utc_now(),
+            )
+            entry["outcome_lineage"] = outcome_lineage_payload(
+                product_bound_lineage
+            )
         state["runs"][key] = entry
         self._validate_entry(key, entry)
         self._write(state)
@@ -1493,7 +1532,9 @@ class RunRegistry:
         cls,
         state: dict,
         incoming: OutcomeLineageBinding,
-    ) -> None:
+        *,
+        accepted_at: str,
+    ) -> OutcomeLineageBinding:
         if state.get("schema_version") == _LEGACY_SCHEMA_VERSION:
             if any("outcome_lineage" in item for item in state["runs"].values()):
                 raise ValueError(
@@ -1509,10 +1550,13 @@ class RunRegistry:
         trusted = bindings.get(identity)
         if trusted is not None:
             assert_compatible_outcome_lineages(trusted, incoming)
-            if len(incoming.revisions) <= len(trusted.revisions):
-                return
 
-        payload = outcome_lineage_payload(incoming)
+        product_bound = bind_outcome_lineage_availability(
+            incoming,
+            accepted_at=accepted_at,
+            trusted=trusted,
+        )
+        payload = outcome_lineage_payload(product_bound)
         raw_trust = state[_LINEAGE_TRUST_FIELD]
         if trusted is None:
             raw_trust.append(payload)
@@ -1528,6 +1572,7 @@ class RunRegistry:
             else:
                 raise ValueError("run registry lost an accepted outcome lineage trust binding")
         raw_trust.sort(key=lambda value: (value["source_identity"], value["record_id"]))
+        return product_bound
 
     @classmethod
     def _assert_outcome_lineage_compatible_state(
@@ -1741,6 +1786,10 @@ class RunRegistry:
                     )
                 try:
                     assert_compatible_outcome_lineages(trusted, durable)
+                    assert_outcome_availability_not_downgraded(
+                        trusted,
+                        durable,
+                    )
                 except OutcomeLineageTrustError as exc:
                     raise ValueError(
                         "run registry conflicts with lineage trust preserved by durable run summary"
@@ -1775,6 +1824,10 @@ class RunRegistry:
                         "run registry outcome lineage lacks registry-level trust binding"
                     )
                 assert_compatible_outcome_lineages(durable_trust, lineage)
+                assert_outcome_availability_not_downgraded(
+                    durable_trust,
+                    lineage,
+                )
                 if len(lineage.revisions) > len(durable_trust.revisions):
                     raise ValueError(
                         "run registry outcome lineage exceeds registry-level trust history"

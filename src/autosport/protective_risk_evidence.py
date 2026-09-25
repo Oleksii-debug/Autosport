@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Context, Decimal, DecimalException, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    Inexact,
+    InvalidOperation,
+    ROUND_HALF_EVEN,
+    Rounded,
+    localcontext,
+)
 from enum import StrEnum
 import hashlib
 import json
@@ -14,11 +23,35 @@ SCHEMA_VERSION = 1
 METHOD = "EXTERNAL_FLOW_NEUTRALIZED_EQUITY_V1"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
+# G13 is evidence-only, but the evidence itself is scientific/financial truth and
+# therefore must be reproducible under a declared finite resource domain. Event
+# money is deliberately much narrower than Decimal's implementation limits. With
+# <=10k events, <=48 coefficient digits and exponents in [-18, 18], aligning every
+# value to the smallest allowed scale and summing every flow needs <90 significant
+# digits. The 128-digit exact-money context therefore has explicit headroom; any
+# unexpected rounding is trapped rather than silently becoming evidence.
+_MAX_EVENTS = 10_000
+_MAX_EVENT_DECIMAL_DIGITS = 48
+_MIN_EVENT_DECIMAL_EXPONENT = -18
+_MAX_EVENT_DECIMAL_EXPONENT = 18
+_MAX_EVENT_DECIMAL_TEXT_CHARS = 80
+_MAX_DERIVED_DECIMAL_TEXT_CHARS = 192
+_MONEY_CONTEXT = Context(
+    prec=128,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-256,
+    Emax=256,
+    capitals=1,
+    clamp=0,
+)
+# Percentage evidence is intentionally rounded only here, under one canonical
+# context. Money add/sub never uses this rounding context.
 _DECIMAL_CONTEXT = Context(
     prec=60,
     rounding=ROUND_HALF_EVEN,
-    Emin=-999999,
-    Emax=999999,
+    Emin=-256,
+    Emax=256,
     capitals=1,
     clamp=0,
 )
@@ -97,9 +130,61 @@ def _finite_decimal(value: object, name: str, *, positive: bool = False) -> Deci
     return value
 
 
+def _fixed_decimal_text_length(value: Decimal) -> int:
+    """Return fixed-point render length without rendering/expanding the Decimal."""
+
+    finite = _finite_decimal(value, "decimal")
+    if finite.is_zero():
+        return 1
+    sign, digits, exponent = finite.as_tuple()
+    digit_count = max(1, len(digits))
+    if not isinstance(exponent, int):
+        raise _error("ARITHMETIC_UNREPRESENTABLE", "Decimal exponent is not finite")
+    if exponent >= 0:
+        body = digit_count + exponent
+    elif digit_count + exponent > 0:
+        body = digit_count + 1  # decimal point inside the coefficient
+    else:
+        body = 2 - exponent  # '0.' + leading fractional zeroes + coefficient
+    return body + int(bool(sign))
+
+
+def _event_money_decimal(
+    value: object,
+    name: str,
+    *,
+    positive: bool = False,
+) -> Decimal:
+    decimal_value = _finite_decimal(value, name, positive=positive)
+    _, digits, exponent = decimal_value.as_tuple()
+    if not isinstance(exponent, int):
+        raise _error(
+            "ARITHMETIC_UNREPRESENTABLE",
+            f"{name} Decimal exponent is outside the supported event-money domain",
+        )
+    if (
+        len(digits) > _MAX_EVENT_DECIMAL_DIGITS
+        or exponent < _MIN_EVENT_DECIMAL_EXPONENT
+        or exponent > _MAX_EVENT_DECIMAL_EXPONENT
+        or _fixed_decimal_text_length(decimal_value) > _MAX_EVENT_DECIMAL_TEXT_CHARS
+    ):
+        raise _error(
+            "ARITHMETIC_UNREPRESENTABLE",
+            f"{name} exceeds the supported event-money Decimal shape",
+        )
+    return decimal_value
+
+
 def _decimal_text(value: Decimal) -> str:
-    _finite_decimal(value, "decimal")
-    text = format(value, "f")
+    finite = _finite_decimal(value, "decimal")
+    if finite.is_zero():
+        return "0"
+    if _fixed_decimal_text_length(finite) > _MAX_DERIVED_DECIMAL_TEXT_CHARS:
+        raise _error(
+            "ARITHMETIC_UNREPRESENTABLE",
+            "derived Decimal exceeds canonical serialization bounds",
+        )
+    text = format(finite, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     if text in {"", "-0"}:
@@ -108,13 +193,24 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _parse_decimal(value: object, name: str) -> Decimal:
-    if type(value) is not str or not value:
-        raise _error("EVIDENCE_INTEGRITY", f"{name} must be a canonical decimal string")
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > _MAX_EVENT_DECIMAL_TEXT_CHARS
+    ):
+        raise _error("EVIDENCE_INTEGRITY", f"{name} must be a bounded canonical decimal string")
     try:
         parsed = Decimal(value)
     except (InvalidOperation, ValueError) as exc:
         raise _error("EVIDENCE_INTEGRITY", f"{name} is not a Decimal") from exc
-    if not parsed.is_finite() or _decimal_text(parsed) != value:
+    try:
+        _event_money_decimal(parsed, name)
+    except ProtectiveRiskEvidenceError as exc:
+        raise _error(
+            "EVIDENCE_INTEGRITY",
+            f"{name} exceeds the supported event-money Decimal shape",
+        ) from exc
+    if _decimal_text(parsed) != value:
         raise _error("EVIDENCE_INTEGRITY", f"{name} is not canonical finite Decimal text")
     return parsed
 
@@ -166,7 +262,7 @@ class ProtectiveRiskEvent:
         if self.kind is RiskEvidenceEventKind.VALUATION:
             if self.raw_equity is None:
                 raise _error("INVALID_EVENT", "VALUATION requires raw_equity")
-            _finite_decimal(self.raw_equity, "raw_equity")
+            _event_money_decimal(self.raw_equity, "raw_equity")
             if any(
                 value is not None
                 for value in (self.amount, self.source_scope_id, self.destination_scope_id)
@@ -180,7 +276,7 @@ class ProtectiveRiskEvent:
                 raise _error("INVALID_EVENT", "CAPITAL_FLOW must not carry raw_equity")
             if self.amount is None:
                 raise _error("INVALID_EVENT", "CAPITAL_FLOW requires amount")
-            _finite_decimal(self.amount, "amount", positive=True)
+            _event_money_decimal(self.amount, "amount", positive=True)
             if self.source_scope_id is None or self.destination_scope_id is None:
                 raise _error(
                     "FLOW_SCOPE_MISMATCH",
@@ -369,6 +465,11 @@ class ProtectiveRiskFlowEvidence:
         event_values = raw["events"]
         if type(event_values) is not list:
             raise _error("EVIDENCE_INTEGRITY", "events must be a list")
+        if len(event_values) > _MAX_EVENTS:
+            raise _error(
+                "EVIDENCE_RESOURCE_LIMIT",
+                "serialized event count exceeds the supported evidence domain",
+            )
         rebuilt = build_protective_risk_flow_evidence(
             campaign_id=_text(raw["campaign_id"], "campaign_id"),
             protocol_sha256=_text(raw["protocol_sha256"], "protocol_sha256"),
@@ -399,7 +500,7 @@ def _classify_external_flow(
     if source_inside and destination_inside:
         return Decimal("0")
     if source_inside:
-        return -event.amount
+        return event.amount.copy_negate()
     if destination_inside:
         return event.amount
     raise _error(
@@ -431,6 +532,11 @@ def build_protective_risk_flow_evidence(
 
     if isinstance(events, (str, bytes)) or not isinstance(events, Sequence):
         raise _error("INVALID_EVENT", "events must be an ordered sequence")
+    if len(events) > _MAX_EVENTS:
+        raise _error(
+            "EVIDENCE_RESOURCE_LIMIT",
+            "event count exceeds the supported evidence domain",
+        )
     canonical_events = tuple(events)
     if not canonical_events:
         raise _error("FLOW_ORDER_AMBIGUOUS", "at least one valuation is required")
@@ -483,6 +589,10 @@ def build_protective_risk_flow_evidence(
     percentage_status = PercentageEvidenceStatus.ACTIVE
 
     try:
+        with localcontext(_MONEY_CONTEXT) as money_context:
+            # Any accidental loss of exact money information is a correctness error.
+            money_context.traps[Inexact] = True
+            money_context.traps[Rounded] = True
             for event in canonical_events:
                 if event.kind is RiskEvidenceEventKind.CAPITAL_FLOW:
                     net_flow = _classify_external_flow(event, capital_scope_id)
@@ -491,9 +601,9 @@ def build_protective_risk_flow_evidence(
                             "RECAPITALIZATION_AFTER_RUIN",
                             "external inflow after nonpositive equity requires a new campaign",
                         )
-                    cumulative_external_flow += net_flow
+                    cumulative_external_flow = cumulative_external_flow + net_flow
                     continue
-    
+
                 assert event.raw_equity is not None
                 adjusted = event.raw_equity - cumulative_external_flow
                 if high_water is None or adjusted > high_water:
@@ -506,28 +616,29 @@ def build_protective_risk_flow_evidence(
                 minimum_equity = (
                     adjusted if minimum_equity is None else min(minimum_equity, adjusted)
                 )
-    
+
                 fraction: Decimal | None
                 if (
                     percentage_status is PercentageEvidenceStatus.ACTIVE
                     and high_water > 0
                     and adjusted > 0
                 ):
-                    fraction = drawdown_absolute / high_water
+                    with localcontext(_DECIMAL_CONTEXT):
+                        fraction = drawdown_absolute / high_water
                     maximum_drawdown_fraction_seen = max(
                         maximum_drawdown_fraction_seen,
                         fraction,
                     )
                 else:
                     fraction = None
-    
+
                 if adjusted <= 0 and ruin_event_id is None:
                     ruin_event_id = event.event_id
                     percentage_status = (
                         PercentageEvidenceStatus.TERMINATED_NONPOSITIVE_EQUITY
                     )
                     fraction = None
-    
+
                 points.append(
                     FlowAdjustedEquityPoint(
                         sequence=event.sequence,
@@ -541,7 +652,6 @@ def build_protective_risk_flow_evidence(
                         drawdown_fraction=fraction,
                     )
                 )
-    
     except DecimalException as exc:
         raise _error(
             "ARITHMETIC_UNREPRESENTABLE",

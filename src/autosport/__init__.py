@@ -150,6 +150,10 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.
 from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
 
+# Robust portfolio stakes are monetary grid values, not Decimal exponent values.
+# Install the exact arbitrary-quantum floor after the owning proposal implementation.
+from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
 # Registered-strategy model reconstruction is product-owned scientific authority.
 # Seal its positive runtime type/post-init dispatch before package callers can retain
 # a resolver reference that would otherwise follow a later module-global class rebind.

@@ -40,6 +40,7 @@ _SCHEMA_VERSION: Final = 1
 _AUTHORITY_DOMAIN: Final = "autosport.risk.randomization-precommit.v1"
 _ROOT_BYTES: Final = 32
 _HEX: Final = frozenset("0123456789abcdef")
+_PRODUCT_TOKEN_BYTES: Final = secrets.token_bytes
 
 
 class RiskRandomizationPrecommitError(RuntimeError):
@@ -465,8 +466,12 @@ def issue_risk_randomization_precommit(
                     "committed randomization state is missing from workspace"
                 )
 
+            if secrets.token_bytes is not _PRODUCT_TOKEN_BYTES:
+                raise RiskRandomizationPrecommitError(
+                    "randomization entropy source was rebound"
+                )
             randomization_root_sha256 = hashlib.sha256(
-                secrets.token_bytes(_ROOT_BYTES)
+                _PRODUCT_TOKEN_BYTES(_ROOT_BYTES)
             ).hexdigest()
             state = _state_template(
                 workspace_instance_id=authority.workspace_instance_id,

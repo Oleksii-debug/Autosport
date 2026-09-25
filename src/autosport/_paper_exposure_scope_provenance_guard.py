@@ -57,6 +57,8 @@ def _install_guard() -> None:
     current_mint = runtime_type._mint_prepared
     current_prepare = runtime_type.prepare
     current_prepare_paper_value = runtime_type.prepare_paper_value_action
+    current_execute = runtime_type.execute
+    current_execute_unlocked = runtime_type._execute_unlocked
     current_publish = runtime_type._publish_exposure_scope
     guarded = (
         current_append,
@@ -64,6 +66,8 @@ def _install_guard() -> None:
         current_mint,
         current_prepare,
         current_prepare_paper_value,
+        current_execute,
+        current_execute_unlocked,
         current_publish,
     )
     installed = tuple(
@@ -79,8 +83,9 @@ def _install_guard() -> None:
 
     original_prepare = current_prepare
     original_prepare_paper_value = current_prepare_paper_value
+    original_execute = current_execute
     original_require_minted = runtime_type._require_minted
-    original_execute_unlocked = runtime_type._execute_unlocked
+    original_execute_unlocked = current_execute_unlocked
     scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
     if not isinstance(scope_descriptor, classmethod):
         raise RuntimeError("canonical PAPER exposure-scope payload dispatch is unavailable")
@@ -97,6 +102,11 @@ def _install_guard() -> None:
     mint_token = object()
     mint_context: ContextVar[object | None] = ContextVar(
         "autosport_paper_exposure_scope_prepared_mint",
+        default=None,
+    )
+    execution_token = object()
+    execution_context: ContextVar[object | None] = ContextVar(
+        "autosport_paper_exposure_scope_execution",
         default=None,
     )
     getframe = sys._getframe
@@ -137,6 +147,7 @@ def _install_guard() -> None:
     original_prepare_paper_value_globals = snapshot_function_globals(
         original_prepare_paper_value
     )
+    original_execute_globals = snapshot_function_globals(original_execute)
     original_require_minted_globals = snapshot_function_globals(original_require_minted)
     original_execute_unlocked_globals = snapshot_function_globals(original_execute_unlocked)
     original_scope_payload_globals = snapshot_function_globals(original_scope_payload)
@@ -388,6 +399,57 @@ def _install_guard() -> None:
     owned_prepare = with_mint_authority(original_prepare)
     owned_prepare_paper_value = with_mint_authority(original_prepare_paper_value)
 
+    @wraps(original_execute)
+    def owned_execute(
+        self: PaperExecutionAdoptionRuntime,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if type(self) is not runtime_type:
+            raise adoption_error("canonical PAPER execution requires exact runtime")
+        if runtime_type.execute is not owned_execute:
+            raise adoption_error("canonical PAPER execution dispatch was rebound")
+        if runtime_type._execute_unlocked is not owned_execute_unlocked:
+            raise adoption_error("canonical PAPER unlocked execution dispatch was rebound")
+        if not function_globals_match(original_execute, original_execute_globals):
+            raise adoption_error("canonical PAPER execution globals were rebound")
+        marker = execution_context.set(execution_token)
+        try:
+            return original_execute(self, *args, **kwargs)
+        finally:
+            execution_context.reset(marker)
+
+    @wraps(original_execute_unlocked)
+    def owned_execute_unlocked(
+        self: PaperExecutionAdoptionRuntime,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if type(self) is not runtime_type:
+            raise adoption_error("canonical PAPER execution requires exact runtime")
+        if runtime_type.execute is not owned_execute:
+            raise adoption_error("canonical PAPER execution dispatch was rebound")
+        if runtime_type._execute_unlocked is not owned_execute_unlocked:
+            raise adoption_error("canonical PAPER unlocked execution dispatch was rebound")
+        if execution_context.get() is not execution_token:
+            raise adoption_error(
+                "unlocked PAPER execution is reserved for canonical execute authority"
+            )
+        caller = getframe(1)
+        if (
+            caller.f_code is not original_execute.__code__
+            or caller.f_globals is not original_execute.__globals__
+        ):
+            raise adoption_error(
+                "unlocked PAPER execution is reserved for canonical execute authority"
+            )
+        if not function_globals_match(
+            original_execute_unlocked,
+            original_execute_unlocked_globals,
+        ):
+            raise adoption_error("canonical PAPER unlocked execution globals were rebound")
+        return original_execute_unlocked(self, *args, **kwargs)
+
     def publish_owned_exposure_scope(
         self: PaperExecutionAdoptionRuntime,
         *,
@@ -398,9 +460,19 @@ def _install_guard() -> None:
             raise integrity_error(
                 "canonical PAPER exposure scope requires exact adoption runtime and ledger"
             )
-        if runtime_type._execute_unlocked is not original_execute_unlocked:
+        if runtime_type.execute is not owned_execute:
             raise integrity_error("canonical PAPER execution dispatch was rebound")
-        if getframe(1).f_code is not original_execute_unlocked.__code__:
+        if runtime_type._execute_unlocked is not owned_execute_unlocked:
+            raise integrity_error("canonical PAPER unlocked execution dispatch was rebound")
+        if execution_context.get() is not execution_token:
+            raise integrity_error(
+                "PAPER exposure-scope publication is reserved for canonical execution authority"
+            )
+        caller = getframe(1)
+        if (
+            caller.f_code is not original_execute_unlocked.__code__
+            or caller.f_globals is not original_execute_unlocked.__globals__
+        ):
             raise integrity_error(
                 "PAPER exposure-scope publication is reserved for canonical execution authority"
             )
@@ -472,6 +544,8 @@ def _install_guard() -> None:
         guarded_mint_prepared,
         owned_prepare,
         owned_prepare_paper_value,
+        owned_execute,
+        owned_execute_unlocked,
         publish_owned_exposure_scope,
     ):
         method._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
@@ -481,6 +555,8 @@ def _install_guard() -> None:
     runtime_type._mint_prepared = guarded_mint_prepared
     runtime_type.prepare = owned_prepare
     runtime_type.prepare_paper_value_action = owned_prepare_paper_value
+    runtime_type.execute = owned_execute
+    runtime_type._execute_unlocked = owned_execute_unlocked
     runtime_type._publish_exposure_scope = publish_owned_exposure_scope
 
 

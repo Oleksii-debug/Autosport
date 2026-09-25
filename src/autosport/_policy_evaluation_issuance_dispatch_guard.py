@@ -22,10 +22,10 @@ from . import strategy_model_factory as _factory_module
 class _DispatchState:
     """Keep predecessor entrypoints behind guard-enforcing methods.
 
-    Public wrapper closure cells intentionally capture only this state object, never
-    an unguarded predecessor FunctionType. Extracting the state through ordinary
-    closure reflection therefore still leaves the caller on guard-enforcing methods
-    rather than handing out a directly callable bypass.
+    Public wrapper closure cells intentionally capture only this sealed state
+    object, never an unguarded predecessor FunctionType. Extracting the state
+    through ordinary closure reflection therefore still leaves the caller on
+    guard-enforcing methods rather than handing out a directly callable bypass.
     """
 
     __slots__ = (
@@ -65,67 +65,78 @@ class _DispatchState:
         "_public_issue",
         "_public_resolve",
         "_public_verify",
+        "_sealed",
     )
 
     def __init__(self) -> None:
-        self._error_type = _issuance.ProductPolicyEvaluationIssuanceError
-        self.__original_open = _issuance._open_canonical_authorities
-        self.__original_issue = _issuance.issue_product_policy_evaluation
-        self.__original_resolve = _issuance.resolve_product_policy_evaluation
-        self.__original_verify = _issuance.verify_product_policy_evaluation
+        object.__setattr__(self, "_sealed", False)
+        object.__setattr__(self, "_error_type", _issuance.ProductPolicyEvaluationIssuanceError)
+        object.__setattr__(self, "_DispatchState__original_open", _issuance._open_canonical_authorities)
+        object.__setattr__(self, "_DispatchState__original_issue", _issuance.issue_product_policy_evaluation)
+        object.__setattr__(self, "_DispatchState__original_resolve", _issuance.resolve_product_policy_evaluation)
+        object.__setattr__(self, "_DispatchState__original_verify", _issuance.verify_product_policy_evaluation)
 
-        self._store_type = _issuance._STORE_TYPE
-        self._store_init = self._store_type.__init__
-        self._store_init_globals = self._store_init.__globals__
-        self._store_init_code = marshal.dumps(self._store_init.__code__)
-        self._factory_datetime = _factory_module.datetime
-        self._factory_timezone = _factory_module.timezone
+        store_type = _issuance._STORE_TYPE
+        store_init = store_type.__init__
+        object.__setattr__(self, "_store_type", store_type)
+        object.__setattr__(self, "_store_init", store_init)
+        object.__setattr__(self, "_store_init_globals", store_init.__globals__)
+        object.__setattr__(self, "_store_init_code", marshal.dumps(store_init.__code__))
+        object.__setattr__(self, "_factory_datetime", _factory_module.datetime)
+        object.__setattr__(self, "_factory_timezone", _factory_module.timezone)
 
-        self._target = _issuance._target
-        self._issuance_id = _issuance._issuance_id
-        self._require_source = _issuance._require_source_factory_evaluation
-        self._derive = _issuance._derive_policy_evaluation
-        self._registry_get = _issuance._registry_get
-        self._store_read = _issuance._store_read
-        self._store_materialize = _issuance._STORE_MATERIALIZE
-        self._store_receipt = _issuance._STORE_RECEIPT
-        self._registry_append = _issuance._REGISTRY_APPEND
-        self._canonical_bundle_sha256 = (
-            _issuance.canonical_product_policy_evaluation_bundle_sha256
+        object.__setattr__(self, "_target", _issuance._target)
+        object.__setattr__(self, "_issuance_id", _issuance._issuance_id)
+        object.__setattr__(self, "_require_source", _issuance._require_source_factory_evaluation)
+        object.__setattr__(self, "_derive", _issuance._derive_policy_evaluation)
+        object.__setattr__(self, "_registry_get", _issuance._registry_get)
+        object.__setattr__(self, "_store_read", _issuance._store_read)
+        object.__setattr__(self, "_store_materialize", _issuance._STORE_MATERIALIZE)
+        object.__setattr__(self, "_store_receipt", _issuance._STORE_RECEIPT)
+        object.__setattr__(self, "_registry_append", _issuance._REGISTRY_APPEND)
+        object.__setattr__(
+            self,
+            "_canonical_bundle_sha256",
+            _issuance.canonical_product_policy_evaluation_bundle_sha256,
         )
 
-        self._workspace_type = _issuance.ProductPolicyEvaluationWorkspace
-        self._ref_type = _issuance.IssuedPolicyEvaluationRef
-        self._policy_evaluation_type = _issuance.PolicyEvaluation
-        self._protocol_type = _issuance.FrozenBaselineProtocol
-        self._baseline_kind_type = _issuance.BaselineKind
-        self._bundle_type = _issuance.EvaluationBundleRef
+        object.__setattr__(self, "_workspace_type", _issuance.ProductPolicyEvaluationWorkspace)
+        object.__setattr__(self, "_ref_type", _issuance.IssuedPolicyEvaluationRef)
+        object.__setattr__(self, "_policy_evaluation_type", _issuance.PolicyEvaluation)
+        object.__setattr__(self, "_protocol_type", _issuance.FrozenBaselineProtocol)
+        object.__setattr__(self, "_baseline_kind_type", _issuance.BaselineKind)
+        object.__setattr__(self, "_bundle_type", _issuance.EvaluationBundleRef)
 
-        self._result_artifact_kind = _issuance._RESULT_ARTIFACT_KIND
-        self._bundle_id_prefix = _issuance._BUNDLE_ID_PREFIX
-        self._issuer_source_sha256 = _issuance._ISSUER_SOURCE_SHA256
+        object.__setattr__(self, "_result_artifact_kind", _issuance._RESULT_ARTIFACT_KIND)
+        object.__setattr__(self, "_bundle_id_prefix", _issuance._BUNDLE_ID_PREFIX)
+        object.__setattr__(self, "_issuer_source_sha256", _issuance._ISSUER_SOURCE_SHA256)
 
-        self._trusted_datetime = _datetime_type
-        self._trusted_utc = _timezone_type.utc
+        object.__setattr__(self, "_trusted_datetime", _datetime_type)
+        object.__setattr__(self, "_trusted_utc", _timezone_type.utc)
 
-        self._public_open = None
-        self._public_issue = None
-        self._public_resolve = None
-        self._public_verify = None
+        object.__setattr__(self, "_public_open", None)
+        object.__setattr__(self, "_public_issue", None)
+        object.__setattr__(self, "_public_resolve", None)
+        object.__setattr__(self, "_public_verify", None)
 
     def __getattribute__(self, name: str):
         if name.startswith("_DispatchState__original_"):
             raise AttributeError("unguarded predecessor entrypoints are not exposed")
         return object.__getattribute__(self, name)
 
-    def _predecessor(self, name: str):
-        return object.__getattribute__(self, f"_DispatchState__original_{name}")
+    def __setattr__(self, name: str, value) -> None:
+        if object.__getattribute__(self, "_sealed"):
+            raise AttributeError("policy issuance dispatch state is sealed")
+        object.__setattr__(self, name, value)
 
     def bind_public(self, open_fn, issue_fn, resolve_fn, verify_fn) -> None:
-        self._public_open = open_fn
-        self._public_issue = issue_fn
-        self._public_resolve = resolve_fn
-        self._public_verify = verify_fn
+        if object.__getattribute__(self, "_sealed"):
+            raise RuntimeError("policy issuance dispatch state is already sealed")
+        object.__setattr__(self, "_public_open", open_fn)
+        object.__setattr__(self, "_public_issue", issue_fn)
+        object.__setattr__(self, "_public_resolve", resolve_fn)
+        object.__setattr__(self, "_public_verify", verify_fn)
+        object.__setattr__(self, "_sealed", True)
 
     def _raise_rebound(self, detail: str) -> None:
         raise self._error_type(
@@ -155,7 +166,8 @@ class _DispatchState:
 
     def open(self, authority):
         self._require_store_constructor_authority()
-        registry, store = self._predecessor("open")(authority)
+        original_open = object.__getattribute__(self, "_DispatchState__original_open")
+        registry, store = original_open(authority)
         self._require_store_constructor_authority()
         if type(store) is not self._store_type:
             self._raise_rebound("canonical artifact store type")
@@ -204,7 +216,8 @@ class _DispatchState:
         baseline_kind=None,
     ):
         self._require_common_dispatch()
-        result = self._predecessor("issue")(
+        original_issue = object.__getattribute__(self, "_DispatchState__original_issue")
+        result = original_issue(
             authority,
             protocol,
             source_evaluation_bundle_id=source_evaluation_bundle_id,
@@ -215,18 +228,15 @@ class _DispatchState:
 
     def resolve(self, authority, protocol, reference):
         self._require_common_dispatch()
-        result = self._predecessor("resolve")(authority, protocol, reference)
+        original_resolve = object.__getattribute__(self, "_DispatchState__original_resolve")
+        result = original_resolve(authority, protocol, reference)
         self._require_common_dispatch()
         return result
 
     def verify(self, authority, protocol, reference, claimed):
         self._require_common_dispatch()
-        result = self._predecessor("verify")(
-            authority,
-            protocol,
-            reference,
-            claimed,
-        )
+        original_verify = object.__getattribute__(self, "_DispatchState__original_verify")
+        result = original_verify(authority, protocol, reference, claimed)
         self._require_common_dispatch()
         return result
 

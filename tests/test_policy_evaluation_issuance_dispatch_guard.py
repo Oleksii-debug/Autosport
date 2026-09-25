@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
+import autosport._policy_evaluation_issuance_dispatch_guard as guard_module
 import autosport.external_validity_policy_issuance as issuance
 import autosport.strategy_model_factory as factory_module
 from autosport.monotonic_workspace_binding import WorkspaceIdentityBinding
@@ -140,3 +142,89 @@ def test_product_issue_rejects_open_authority_helper_rebind_before_dispatch(
         )
 
     assert called is False
+
+
+def test_guard_module_issuer_proxy_cannot_hide_real_issuer_rebind(monkeypatch):
+    snapshot = SimpleNamespace(**vars(issuance))
+    monkeypatch.setattr(guard_module, "_issuance", snapshot)
+
+    def forged_derive(*args, **kwargs):
+        raise AssertionError("forged derive must not run")
+
+    monkeypatch.setattr(issuance, "_derive_policy_evaluation", forged_derive)
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="direct helper graph",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )
+
+
+def test_guard_module_factory_proxy_cannot_hide_real_clock_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    authority = _bound_workspace(tmp_path, monkeypatch)
+    snapshot = SimpleNamespace(**vars(factory_module))
+    monkeypatch.setattr(guard_module, "_factory_module", snapshot)
+
+    class ForgedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            del tz
+            return datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(factory_module, "datetime", ForgedDateTime)
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="FactoryArtifactStore constructor/clock dispatch",
+    ):
+        issuance._open_canonical_authorities(authority)
+
+
+def test_public_issue_dispatch_ignores_dispatch_state_class_rebind(monkeypatch):
+    called = False
+
+    def forged_issue(self, *args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("forged state issue must not run")
+
+    monkeypatch.setattr(guard_module._DispatchState, "issue", forged_issue)
+
+    with pytest.raises(issuance.ProductPolicyEvaluationIssuanceError):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )
+
+    assert called is False
+
+
+def test_pinned_common_guard_ignores_class_checker_rebind(monkeypatch):
+    monkeypatch.setattr(
+        guard_module._DispatchState,
+        "_require_common_dispatch",
+        lambda self: None,
+    )
+
+    def forged_derive(*args, **kwargs):
+        raise AssertionError("forged derive must not run")
+
+    monkeypatch.setattr(issuance, "_derive_policy_evaluation", forged_derive)
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="direct helper graph",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )

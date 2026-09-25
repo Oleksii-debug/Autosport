@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -173,32 +175,6 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
             voc_contradiction_state="none",
         )
         observation = slow_observation()
-        current_context = {
-            "request_id": request.request_id,
-            "decision_input_sha256": request.decision_input_sha256,
-            "task_class": request.required_capability,
-            "sport_id": observation.sport_id,
-            "league_id": observation.league_id,
-            "regime_id": request.voc_regime_id,
-            "urgency_id": request.voc_urgency_id,
-            "contradiction_state": request.voc_contradiction_state,
-        }
-        current_context_sha256 = restarted_ledger.append(
-            DecisionRecord(
-                replay_run_id="replay-voc-derived-next",
-                agent="voc-router-integration-test",
-                observed_ts=T_AS_OF,
-                action="VOC_ROUTE_CONTEXT",
-                payload={"voc_current_context": current_context},
-                context_hash=SHA_A,
-                decision_id="decision-voc-derived-next-context",
-                recorded_at=T_AS_OF,
-            )
-        )
-        request = replace(
-            request,
-            decision_evidence_sha256=current_context_sha256,
-        )
 
         candidates = (
             ComputeCandidate(
@@ -229,6 +205,46 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
             max_cloud_cost=Decimal("10"),
             voc_max_age_seconds=Decimal("30"),
             voc_min_effective_sample_size=2,
+        )
+        current_context = {
+            "request_id": request.request_id,
+            "decision_input_sha256": request.decision_input_sha256,
+            "task_class": request.required_capability,
+            "data_classification": request.data_classification.value,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": request.voc_regime_id,
+            "urgency_id": request.voc_urgency_id,
+            "contradiction_state": request.voc_contradiction_state,
+            "routing_policy_id": policy.policy_id,
+            "routing_policy_version": str(policy.policy_version),
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    policy.payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "cloud_permission": "ALLOW",
+            "cloud_backend_id": "cloud",
+        }
+        current_context_sha256 = restarted_ledger.append(
+            DecisionRecord(
+                replay_run_id="replay-voc-derived-next",
+                agent="voc-router-integration-test",
+                observed_ts=T_AS_OF,
+                action="VOC_ROUTE_CONTEXT",
+                payload={"voc_current_context": current_context},
+                context_hash=SHA_A,
+                decision_id="decision-voc-derived-next-context",
+                recorded_at=T_AS_OF,
+            )
+        )
+        request = replace(
+            request,
+            decision_evidence_sha256=current_context_sha256,
         )
         evidence = ValueOfComputationEvidence(
             evidence_id=paired.evaluation_id,

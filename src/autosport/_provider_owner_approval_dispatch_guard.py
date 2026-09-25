@@ -6,6 +6,10 @@ other class methods plus module helpers.  A later class/module rebind must not l
 an exact canonical store instance mint or resolve positive approval without the
 same durable validation path.
 
+The existing product-clock and atomic-publication seams remain intentionally
+patchable for deterministic fake-clock/crash tests; the guard seals the authority
+logic around them, not those test injection points.
+
 This guard does not interpret provider terms, authenticate a signer, or authorize
 provider writes, execution, settlement, or real money.
 """
@@ -65,7 +69,6 @@ def _install_guard() -> None:
     identity_names = (
         "OwnerApprovalResolution",
         "OwnerApprovalResolutionReason",
-        "atomic_write_json",
         "durable_path_lock",
         "strict_json_loads",
         "MonotonicWorkspaceAuthority",
@@ -80,7 +83,6 @@ def _install_guard() -> None:
         "_sha",
         "_dt",
         "_instant",
-        "_utc_now",
         "_now",
         "_reference",
         "_json_bytes",

@@ -54,7 +54,7 @@ def _frozen_implementation() -> FunctionType:
     closure = precommit.issue_risk_randomization_precommit.__closure__ or ()
     for cell in closure:
         value = cell.cell_contents
-        if type(value) is FunctionType and "_product_token_bytes" in value.__code__.co_varnames:
+        if type(value) is FunctionType and value.__name__ == "_issue_risk_randomization_precommit":
             return value
     raise AssertionError("sealed issuer does not retain its checked implementation")
 

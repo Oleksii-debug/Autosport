@@ -645,9 +645,10 @@ def test_decimal_evidence_and_report_identity_ignore_ambient_decimal_context():
         ("0.01", "0", "0.01", 0, 3, "0"),
         ("0", "-0.01", "0.01", 0, 3, "0"),
         ("0", "0", "0", 1, 2, "0"),
+        ("0", "0", "0", 0, 3, "0.01"),
     ),
 )
-def test_no_bet_wait_baseline_rejects_nonzero_action_evidence(
+def test_no_bet_wait_baseline_rejects_nonzero_action_or_economic_evidence(
     metric: str,
     low: str,
     high: str,

@@ -1033,30 +1033,25 @@ def _execute(
             suspended_action_ids=suspended_action_ids,
         )
 
-    # GENERAL risk admission/recovery verification and the resulting #623
-    # execution/materialization must observe one serialized PaperBook state.
-    # PaperExecutionAdoptionRuntime.execute() uses this same re-entrant lock, so
-    # canonical non-PaperValue executions cannot interleave after the witness.
-    with self._execution_lock:
-        authorized = _authorize_descriptor(
+    authorized = _authorize_descriptor(
+        self,
+        descriptor=prepared,
+        trigger_id=trigger_id,
+        started_at=started_at,
+    )
+    try:
+        return _ORIGINAL_EXECUTE(
             self,
-            descriptor=prepared,
+            prepared=authorized,
             trigger_id=trigger_id,
             started_at=started_at,
+            materialize_exposure=materialize_exposure,
+            observations=observations,
+            evidence_registry=evidence_registry,
+            suspended_action_ids=suspended_action_ids,
         )
-        try:
-            return _ORIGINAL_EXECUTE(
-                self,
-                prepared=authorized,
-                trigger_id=trigger_id,
-                started_at=started_at,
-                materialize_exposure=materialize_exposure,
-                observations=observations,
-                evidence_registry=evidence_registry,
-                suspended_action_ids=suspended_action_ids,
-            )
-        finally:
-            self._prepared_authorities.pop(id(authorized), None)
+    finally:
+        self._prepared_authorities.pop(id(authorized), None)
 
 
 def _on_market_event(self: PaperValueAgent, event, context) -> None:

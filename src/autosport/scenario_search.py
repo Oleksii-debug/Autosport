@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from .domain import PaperTicket, TicketStatus
 from .market_outcomes import MarketSettlementOutcomeAuthority
-from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
+from .portfolio import PortfolioEngine
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +104,7 @@ class ScenarioSearchEngine:
         self.seed = _require_integer(seed, field="seed")
 
     def analyse(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> ScenarioSearchReport:
-        open_tickets = _snapshot_open_tickets_for_analysis(tickets)
+        open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]
         if not open_tickets:
             zero = Decimal("0")
             return ScenarioSearchReport("exact", 1, 1, zero, zero, zero, zero, True, True, zero, "exact")
@@ -176,7 +176,9 @@ class ScenarioSearchEngine:
         for authority in ordered:
             authority.assert_available_as_of(decision_as_of)
 
-        open_tickets = _snapshot_open_tickets_for_analysis(tickets)
+        open_tickets = [
+            ticket for ticket in tickets if ticket.status is TicketStatus.OPEN
+        ]
         if not open_tickets:
             zero = Decimal("0")
             return ScenarioSearchReport(

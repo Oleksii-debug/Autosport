@@ -531,15 +531,7 @@ def materialize_trusted_verifier_snapshot(
         dir=destination_parent,
     )
     try:
-        try:
-            handle = os.fdopen(fd, "wb")
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-        with handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

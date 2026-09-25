@@ -6,7 +6,6 @@ import math
 import os
 import signal
 import sqlite3
-import sys
 import threading
 import time
 import uuid
@@ -439,12 +438,7 @@ def run_continuous_observation(
         raise
     finally:
         if store is not None:
-            primary_failure_active = sys.exc_info()[0] is not None
-            try:
-                store.close()
-            except Exception:
-                if not primary_failure_active:
-                    raise
+            store.close()
 
     publish("stopped" if terminal_exit == 0 else "failed", stop_reason=terminal_reason)
     return ContinuousObservationResult(

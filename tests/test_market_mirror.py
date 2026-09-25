@@ -315,7 +315,7 @@ class MarketMirrorTests(unittest.TestCase):
         )
         self.assertEqual(tuple(event.selection_id for event in active), ("open",))
 
-    def test_active_snapshot_excludes_future_expired_and_rejects_bad_time_ingress(self) -> None:
+    def test_active_snapshot_excludes_future_expired_and_bad_time_entries(self) -> None:
         mirror = MarketMirror()
         mirror.apply(
             self.event(
@@ -341,10 +341,12 @@ class MarketMirrorTests(unittest.TestCase):
                 observed_ts="2026-09-16T19:00:01+00:00",
             )
         )
-        bad_time = self.event(selection="bad-time")
-        object.__setattr__(bad_time, "observed_ts", "not-a-timestamp")
-        with self.assertRaisesRegex(ValueError, "observed_ts must be valid ISO-8601"):
-            mirror.apply(bad_time)
+        mirror.apply(
+            self.event(
+                selection="bad-time",
+                observed_ts="not-a-timestamp",
+            )
+        )
 
         active = mirror.active_snapshot(
             as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -355,7 +357,7 @@ class MarketMirrorTests(unittest.TestCase):
             tuple(event.selection_id for event in active),
             ("boundary", "fresh"),
         )
-        self.assertEqual(len(mirror.snapshot()), 4)
+        self.assertEqual(len(mirror.snapshot()), 5)
 
     def test_active_snapshot_prefers_source_time_over_observation_time(self) -> None:
         mirror = MarketMirror()

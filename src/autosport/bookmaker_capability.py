@@ -338,10 +338,6 @@ class BookmakerPositionObservation:
         _sha256(self.source_payload_sha256, "source_payload_sha256")
         if self.decimal_odds is not None:
             _money(self.decimal_odds, "decimal_odds", positive=True)
-            if self.decimal_odds <= Decimal("1"):
-                raise BookmakerCapabilityError(
-                    "decimal_odds must be greater than 1"
-                )
         if self.gross_return is not None:
             _money(self.gross_return, "gross_return")
         if self.external_receipt_id is not None:

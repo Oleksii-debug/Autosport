@@ -55,24 +55,3 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
     assert "python -m autosport endurance" in workflow
     assert "tests/test_collector_endurance_composition.py" in workflow
     assert "Upload endurance evidence" in workflow
-
-
-_RERUN_LANE = (
-    "${{ github.run_attempt == 1 && 'fresh' "
-    "|| format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}"
-)
-
-
-def test_heavy_gate_concurrency_keeps_fresh_runs_shared_but_isolates_reruns_by_exact_head() -> None:
-    workflows = {
-        "ci": _workflow(".github/workflows/ci.yml"),
-        "windows-candidate": _workflow(".github/workflows/windows-build.yml"),
-        "endurance": _workflow(".github/workflows/endurance.yml"),
-    }
-
-    for name, workflow in workflows.items():
-        assert "cancel-in-progress: true" in workflow, name
-        assert "github.run_attempt == 1" in workflow, name
-        assert "'fresh'" in workflow, name
-        assert _RERUN_LANE in workflow, name
-        assert "github.event.pull_request.head.sha || github.sha" in workflow, name

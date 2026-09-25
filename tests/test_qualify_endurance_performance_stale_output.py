@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 
 SOURCE_SHA = "a" * 40
@@ -61,18 +58,6 @@ def _run(
         text=True,
         check=False,
     )
-
-
-def _load_qualification_script(root: Path):
-    script = root / "scripts" / "qualify_endurance_performance.py"
-    spec = importlib.util.spec_from_file_location(
-        "_autosport_qualify_endurance_performance_test", script
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _write_stale_pass(path: Path) -> None:
@@ -193,26 +178,3 @@ def test_missing_required_option_cannot_leave_stale_pass_evidence(
     assert result.returncode == 2
     assert "--source-sha" in result.stderr
     assert not output_path.exists()
-
-
-def test_atomic_writer_closes_raw_fd_when_fdopen_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = Path(__file__).resolve().parents[1]
-    module = _load_qualification_script(root)
-    output_path = tmp_path / "qualification.json"
-    captured: dict[str, int] = {}
-
-    def fail_fdopen(fd: int, *args: object, **kwargs: object):
-        captured["fd"] = fd
-        raise OSError("fdopen sentinel failure")
-
-    monkeypatch.setattr(module.os, "fdopen", fail_fdopen)
-
-    with pytest.raises(OSError, match="fdopen sentinel failure"):
-        module._write_json_atomic(output_path, {"status": "PASS"})
-
-    with pytest.raises(OSError):
-        os.fstat(captured["fd"])
-    assert not output_path.exists()
-    assert list(tmp_path.iterdir()) == []

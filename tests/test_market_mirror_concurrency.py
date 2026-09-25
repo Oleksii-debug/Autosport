@@ -127,9 +127,13 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
             )
         )
         bad_time = self.event(selection_id="bad-time", source_ts=None)
-        object.__setattr__(bad_time, "observed_ts", "not-a-timestamp")
-        with self.assertRaisesRegex(ValueError, "observed_ts must be valid ISO-8601"):
-            mirror.apply(bad_time)
+        bad_time = MarketEvent.from_dict(
+            {
+                **bad_time.to_dict(),
+                "observed_ts": "not-a-timestamp",
+            }
+        )
+        mirror.apply(bad_time)
 
         audit = mirror.view(source_ids="provider-a")
         decision = mirror.active_view(
@@ -143,7 +147,7 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
             tuple(event.selection_id for event in decision.events),
             ("fresh",),
         )
-        self.assertEqual(len(audit.events), 4)
+        self.assertEqual(len(audit.events), 5)
 
     def test_active_view_validates_freshness_boundary_before_capture(self) -> None:
         mirror = MarketMirror()

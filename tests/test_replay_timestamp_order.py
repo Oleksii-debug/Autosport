@@ -40,8 +40,7 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         self.assertEqual(seen, ["earlier", "later"])
 
     def test_replay_rejects_naive_observed_timestamp_fail_closed(self):
-        event = self._event("naive", "2026-01-01T00:00:00+00:00", 1)
-        object.__setattr__(event, "observed_ts", "2026-01-01T00:00:00")
+        event = self._event("naive", "2026-01-01T00:00:00", 1)
         with self.assertRaisesRegex(ValueError, "must include timezone"):
             ReplayEngine([event])
 

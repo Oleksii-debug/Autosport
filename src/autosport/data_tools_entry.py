@@ -13,8 +13,6 @@ Usage:
   Autosport-Data.exe verify-dataset <dataset-path>
   Autosport-Data.exe walk-forward-evaluate <bundle.json> [--output report.json]
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
-  Autosport-Data.exe observe-continuous [autosport-observe-continuous arguments]
-  Autosport-Data.exe run-product [autosport-product arguments]
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -29,8 +27,6 @@ Commands:
   verify-dataset             Verify sealed hashes and historical governance without replay.
   walk-forward-evaluate      Run the canonical strict causal walk-forward evaluator and emit machine-readable evidence.
   compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
-  observe-continuous         Run the existing canonical bounded read-only observation service; network opt-in, environment credentials, durable status and stop semantics remain owned by autosport.continuous_observation.
-  run-product                Run the existing canonical autonomous product runtime through autosport.product_entrypoint; arguments and exit status are delegated unchanged.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.
   verify-evidence            Verify an exported evidence manifest against the current canonical workspace evidence.
@@ -82,14 +78,6 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.strategy_comparison import main as strategy_comparison_main
 
         return strategy_comparison_main(forwarded)
-    if command == "observe-continuous":
-        from autosport.continuous_observation import main as observation_main
-
-        return observation_main(forwarded)
-    if command == "run-product":
-        from autosport.product_entrypoint import main as product_main
-
-        return product_main(forwarded)
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

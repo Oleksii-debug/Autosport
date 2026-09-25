@@ -87,11 +87,10 @@ class MarketMirrorPersistenceTests(unittest.TestCase):
             selection_id=event.selection_id,
             decimal_odds=event.decimal_odds,
             observed_ts=event.observed_ts,
-            ingest_ts="2026-09-17T01:00:01+00:00",
+            ingest_ts="2026-09-17T01:00:01",
             source_id=event.source_id,
             sequence=event.sequence,
         )
-        object.__setattr__(naive_ingest, "ingest_ts", "2026-09-17T01:00:01")
 
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

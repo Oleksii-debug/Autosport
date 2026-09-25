@@ -102,10 +102,9 @@ class StoragePhysicalTimeTests(unittest.TestCase):
     def test_naive_timestamp_fails_closed_before_persistence(self):
         naive = self._event(
             odds="1.8",
-            observed_ts="2026-01-01T00:00:00+00:00",
+            observed_ts="2026-01-01T00:00:00",
             sequence=1,
         )
-        object.__setattr__(naive, "observed_ts", "2026-01-01T00:00:00")
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")
             with self.assertRaisesRegex(ValueError, "timezone-aware"):

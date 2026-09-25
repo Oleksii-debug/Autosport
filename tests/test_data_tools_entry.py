@@ -16,8 +16,6 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertIn("portable Windows historical-data tools", help_text)
         self.assertIn("walk-forward-evaluate", help_text)
         self.assertIn("import-betfair-historical", help_text)
-        self.assertIn("observe-continuous", help_text)
-        self.assertIn("run-product", help_text)
         self.assertIn("repair-workspace", help_text)
         self.assertIn("export-evidence", help_text)
         self.assertIn("verify-evidence", help_text)
@@ -70,42 +68,6 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 11)
         target.assert_called_once_with(
             ["walk-forward-evaluate", "evaluation.json", "--output", "report.json"]
-        )
-
-    def test_observe_continuous_delegates_exact_arguments_and_exit_status(self):
-        with patch("autosport.continuous_observation.main", return_value=18) as target:
-            result = data_tools_entry.main(
-                [
-                    "observe-continuous",
-                    r"C:\\Autosport\\state",
-                    "--enable-network-observation",
-                    "--max-cycles",
-                    "3",
-                ]
-            )
-        self.assertEqual(result, 18)
-        target.assert_called_once_with(
-            [
-                r"C:\\Autosport\\state",
-                "--enable-network-observation",
-                "--max-cycles",
-                "3",
-            ]
-        )
-
-    def test_run_product_delegates_exact_arguments_and_exit_status(self):
-        with patch("autosport.product_entrypoint.main", return_value=17) as target:
-            result = data_tools_entry.main(
-                [
-                    "run-product",
-                    "--workspace",
-                    r"C:\\Autosport\\state",
-                    "--once",
-                ]
-            )
-        self.assertEqual(result, 17)
-        target.assert_called_once_with(
-            ["--workspace", r"C:\\Autosport\\state", "--once"]
         )
 
     def test_repair_workspace_uses_canonical_fail_closed_cli_recovery(self):

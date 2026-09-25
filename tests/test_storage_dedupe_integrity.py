@@ -133,26 +133,21 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
         self._assert_invalid_event_not_persisted(invalid)
 
     def test_tuple_metadata_fails_before_json_type_drift_can_persist(self):
-        invalid = self._event()
-        object.__setattr__(
-            invalid,
-            "metadata",
-            {"coordinates": (1, 2)},  # type: ignore[dict-item]
+        invalid = replace(
+            self._event(),
+            metadata={"coordinates": (1, 2)},  # type: ignore[dict-item]
         )
         self._assert_invalid_event_not_persisted(invalid)
 
     def test_non_string_metadata_key_fails_before_json_key_coercion_can_persist(self):
-        invalid = self._event()
-        object.__setattr__(
-            invalid,
-            "metadata",
-            {7: "seven"},  # type: ignore[dict-item]
+        invalid = replace(
+            self._event(),
+            metadata={7: "seven"},  # type: ignore[dict-item]
         )
         self._assert_invalid_event_not_persisted(invalid)
 
     def test_non_finite_metadata_number_fails_before_persistence(self):
-        invalid = self._event()
-        object.__setattr__(invalid, "metadata", {"signal": float("inf")})
+        invalid = replace(self._event(), metadata={"signal": float("inf")})
         self._assert_invalid_event_not_persisted(invalid)
 
     def test_noncanonical_event_rolls_back_earlier_batch_insert(self):
@@ -173,11 +168,9 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
 
     def test_json_type_drift_event_rolls_back_earlier_batch_insert(self):
         valid = self._event(event_id="e2", sequence=2)
-        invalid = self._event(event_id="e3", sequence=3)
-        object.__setattr__(
-            invalid,
-            "metadata",
-            {"coordinates": (1, 2)},  # type: ignore[dict-item]
+        invalid = replace(
+            self._event(event_id="e3", sequence=3),
+            metadata={"coordinates": (1, 2)},  # type: ignore[dict-item]
         )
 
         with tempfile.TemporaryDirectory() as tmp:

@@ -44,9 +44,9 @@
           "generated_at": "2026-09-12T10:00:01+00:00",
           "uncertainty": "0.10",
           "evidence_hashes": [
-            "263e3ef3d0ee5757b8c31db02ecd5b9b4d8d89f67967f98992b25d878da0aa35"
+            "c37c2c87c6c3ca584bce93956348efbe96fa22bc44f22d697d82666227e6776f"
           ],
-          "market_snapshot_hash": "d9388b269f513cdfc1f137cf1ee8ee24554f0fabc3b46606e530043505fca487",
+          "market_snapshot_hash": "9cf322dc2b69b3d314a9b45d492af908a74f5c8cbdc2f1c3cc17456cf27cbc73",
           "provenance": {
             "source": "packaged-tt-demo-plan",
             "purpose": "deterministic-paper-replay-example"
@@ -61,9 +61,9 @@
           "observed_at": "2026-09-12T10:00:01+00:00",
           "available_at": "2026-09-12T10:00:01+00:00",
           "decimal_odds": "1.74",
-          "content_sha256": "263e3ef3d0ee5757b8c31db02ecd5b9b4d8d89f67967f98992b25d878da0aa35",
+          "content_sha256": "c37c2c87c6c3ca584bce93956348efbe96fa22bc44f22d697d82666227e6776f",
           "quality_flags": [],
-          "market_snapshot_hash": "d9388b269f513cdfc1f137cf1ee8ee24554f0fabc3b46606e530043505fca487"
+          "market_snapshot_hash": "9cf322dc2b69b3d314a9b45d492af908a74f5c8cbdc2f1c3cc17456cf27cbc73"
         }
       ]
     }

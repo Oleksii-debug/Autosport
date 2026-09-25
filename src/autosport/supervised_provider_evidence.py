@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -281,8 +282,8 @@ def _require_bound_profile(
     account_id: str,
     observed_at: str,
 ) -> None:
-    if not isinstance(profile, BookmakerCapabilityProfile):
-        raise ProviderEvidenceError("provider evidence requires canonical capability profile")
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise ProviderEvidenceError("provider evidence requires exact canonical capability profile")
     if (
         profile.venue_id != bookmaker_id
         or profile.account_id != account_id
@@ -304,7 +305,7 @@ def _require_bound_profile(
 _REQUIRED_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 
 
-def verify_betfair_provider_state(
+def _evaluate_betfair_provider_state_semantics(
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
     *,
@@ -312,20 +313,19 @@ def verify_betfair_provider_state(
     readback: BetfairExecutionReadbackEnvelope,
     expected_provider_order_ref: str | None = None,
 ) -> VerifiedProviderState:
-    """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
+    """Evaluate exact Betfair DTO semantics without granting provider authority.
 
-    if not isinstance(action, ExecutionAction):
-        raise ProviderEvidenceError("action must be canonical ExecutionAction")
-    if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+    This core exists for deterministic parser/semantic tests. Its return value is
+    deliberately outside the verified-provider issuance registry and therefore
+    cannot release UNKNOWN execution state or become transferable provider truth.
+    """
+
+    if type(action) is not ExecutionAction:
+        raise ProviderEvidenceError("action must be exact canonical ExecutionAction")
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
         raise ProviderEvidenceError(
-            "provider evidence requires canonical action-scoped readback envelope"
+            "provider evidence requires exact canonical action-scoped readback envelope"
         )
-    try:
-        readback.assert_authoritative()
-    except BetfairReadOnlyError as exc:
-        raise ProviderEvidenceError(
-            "provider evidence requires authoritative canonical readback capture"
-        ) from exc
     if (
         readback.venue_id != action.bookmaker_id
         or readback.account_id != action.account_id
@@ -423,11 +423,17 @@ def verify_betfair_provider_state(
         ]
     ] = []
     for order in current:
-        if order.customer_order_ref == provider_order_ref:
-            candidates.append(("current", None, order))
+        if order.customer_order_ref != provider_order_ref:
+            raise ProviderEvidenceError(
+                "current-order customerOrderRef conflicts with captured execution scope"
+            )
+        candidates.append(("current", None, order))
     for status, order in cleared:
-        if order.customer_order_ref == provider_order_ref:
-            candidates.append(("cleared", status, order))
+        if order.customer_order_ref != provider_order_ref:
+            raise ProviderEvidenceError(
+                "cleared-order customerOrderRef conflicts with captured execution scope"
+            )
+        candidates.append(("cleared", status, order))
 
     for kind, _, order in candidates:
         if (
@@ -438,12 +444,43 @@ def verify_betfair_provider_state(
             raise ProviderEvidenceError(
                 "provider order identity conflicts with execution action"
             )
+        if _time(order.placed_date, "provider order placed_date") < _time(
+            action.quote_observed_at, "execution quote_observed_at"
+        ):
+            raise ProviderEvidenceError(
+                "provider order placement predates execution action quote"
+            )
+        if kind == "current":
+            assert isinstance(order, BetfairCurrentOrderObservation)
+            if order.price is None or order.price != action.requested_odds:
+                raise ProviderEvidenceError(
+                    "provider current order requested price conflicts with execution action"
+                )
+            if (
+                order.requested_size is None
+                or order.requested_size != action.requested_stake
+            ):
+                raise ProviderEvidenceError(
+                    "provider current order requested stake conflicts with execution action"
+                )
         if kind == "cleared":
             assert isinstance(order, BetfairClearedOrderObservation)
             if order.event_id != action.event_id:
                 raise ProviderEvidenceError(
                     "provider cleared order event conflicts with execution action"
                 )
+            if order.price_requested != action.requested_odds:
+                raise ProviderEvidenceError(
+                    "provider cleared order requested price conflicts with execution action"
+                )
+    cleared_statuses_by_receipt: dict[str, set[str]] = {}
+    for status, order in cleared:
+        cleared_statuses_by_receipt.setdefault(order.bet_id, set()).add(status)
+    if any(len(statuses) > 1 for statuses in cleared_statuses_by_receipt.values()):
+        raise ProviderEvidenceError(
+            "provider receipt has contradictory cleared terminal statuses"
+        )
+
     receipt_ids = {order.bet_id for _, _, order in candidates}
     if len(receipt_ids) > 1:
         raise ProviderEvidenceError(
@@ -512,6 +549,14 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider order exists but matched execution economics remain unresolved"
         )
+    if action.side == "BACK" and accepted_odds < action.requested_odds:
+        raise ProviderEvidenceError(
+            "provider matched price is worse than submitted Betfair BACK limit"
+        )
+    if action.side == "LAY" and accepted_odds > action.requested_odds:
+        raise ProviderEvidenceError(
+            "provider matched price is worse than submitted Betfair LAY limit"
+        )
     if accepted_stake > action.requested_stake:
         raise ProviderEvidenceError("provider matched stake exceeds requested stake")
     status = (
@@ -568,14 +613,213 @@ def verify_betfair_provider_state(
         readback.provider_order_ref,
     )
 
+
+def verify_betfair_provider_state(
+    action: ExecutionAction,
+    profile: BookmakerCapabilityProfile,
+    *,
+    expected_profile_sha256: str,
+    readback: BetfairExecutionReadbackEnvelope,
+    expected_provider_order_ref: str | None = None,
+) -> VerifiedProviderState:
+    """Issue provider truth only from a production-authoritative Betfair capture."""
+
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
+        raise ProviderEvidenceError(
+            "provider evidence requires exact canonical action-scoped readback envelope"
+        )
+    try:
+        readback.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise ProviderEvidenceError(
+            "provider evidence requires authoritative canonical readback capture"
+        ) from exc
+    return _evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=expected_profile_sha256,
+        readback=readback,
+        expected_provider_order_ref=expected_provider_order_ref,
+    )
+
+
 # Verified provider state is an in-process capability, not a caller assertion.
-# The verifier issues object identities into a non-exported closure and reconciliation
-# rechecks that exact identity plus the immutable payload fingerprint before any ledger
-# transition. A public dataclass constructor or dataclasses.replace() therefore cannot
-# mint provider authority, and there is no importable sentinel/token to reuse.
+# The canonical verifier and its assertion boundary seal their executable dependency
+# graph at module initialization. Runtime rebinding of helpers/types/constants must
+# never strengthen evidence that can release an UNKNOWN execution state.
 def _install_verified_provider_evidence_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     raw_verify = verify_betfair_provider_state
+    raw_verify_code = raw_verify.__code__
+    sealed_effect_type = VerifiedProviderEffectEvidence
+    sealed_absence_type = VerifiedProviderAbsenceEvidence
+    sealed_fingerprint = _verified_provider_evidence_fingerprint
+    sealed_error = ProviderEvidenceError
+
+    def descriptor_code(value: object) -> object | None:
+        code = getattr(value, "__code__", None)
+        if code is not None:
+            return code
+        if isinstance(value, property) and value.fget is not None:
+            return getattr(value.fget, "__code__", None)
+        return None
+
+    sealed_readback_assertion = BetfairExecutionReadbackEnvelope.assert_authoritative
+    sealed_readback_assertion_code = descriptor_code(sealed_readback_assertion)
+    sealed_readback_fingerprint = BetfairExecutionReadbackEnvelope._authority_fingerprint
+    sealed_readback_fingerprint_code = descriptor_code(sealed_readback_fingerprint)
+    sealed_profile_descriptors = {
+        "profile_id": BookmakerCapabilityProfile.profile_id,
+        "to_canonical_dict": BookmakerCapabilityProfile.to_canonical_dict,
+        "state_of": BookmakerCapabilityProfile.state_of,
+        "require": BookmakerCapabilityProfile.require,
+    }
+    sealed_profile_descriptor_codes = {
+        name: descriptor_code(value)
+        for name, value in sealed_profile_descriptors.items()
+    }
+    timeout_absence_assertion: object | None = None
+    timeout_absence_assertion_code: object | None = None
+    missing = object()
+
+    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+        module_globals = globals()
+        sealed: dict[str, tuple[object, object | None]] = {}
+        pending = [root]
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            function_globals = getattr(function, "__globals__", None)
+            if code is None or function_globals is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed:
+                    continue
+                value = module_globals[name]
+                value_code = getattr(value, "__code__", None)
+                sealed[name] = (value, value_code)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return sealed
+
+    sealed_verify_graph = seal_function_graph(raw_verify)
+    sealed_wrapper_bindings = {
+        "BetfairExecutionReadbackEnvelope": BetfairExecutionReadbackEnvelope,
+        "VerifiedProviderEffectEvidence": sealed_effect_type,
+        "VerifiedProviderAbsenceEvidence": sealed_absence_type,
+        "_verified_provider_evidence_fingerprint": sealed_fingerprint,
+        "ProviderEvidenceError": sealed_error,
+    }
+
+    def assert_executable_authority_intact() -> None:
+        module_globals = globals()
+        if raw_verify.__code__ is not raw_verify_code:
+            raise sealed_error("provider verifier executable code changed")
+        for name, (expected, expected_code) in sealed_verify_graph.items():
+            current = module_globals.get(name, missing)
+            if current is not expected:
+                raise sealed_error(
+                    f"provider evidence executable authority changed: {name}"
+                )
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"provider evidence executable code changed: {name}"
+                )
+        for name, expected in sealed_wrapper_bindings.items():
+            if module_globals.get(name, missing) is not expected:
+                raise sealed_error(
+                    f"provider evidence authority binding changed: {name}"
+                )
+        current_readback_assertion = getattr(
+            sealed_wrapper_bindings["BetfairExecutionReadbackEnvelope"],
+            "assert_authoritative",
+            missing,
+        )
+        if (
+            current_readback_assertion is not sealed_readback_assertion
+            or descriptor_code(current_readback_assertion)
+            is not sealed_readback_assertion_code
+        ):
+            raise sealed_error(
+                "provider readback origin authority method changed"
+            )
+        current_readback_fingerprint = getattr(
+            BetfairExecutionReadbackEnvelope,
+            "_authority_fingerprint",
+            missing,
+        )
+        if (
+            current_readback_fingerprint is not sealed_readback_fingerprint
+            or descriptor_code(current_readback_fingerprint)
+            is not sealed_readback_fingerprint_code
+        ):
+            raise sealed_error(
+                "provider readback authority fingerprint method changed"
+            )
+        for name, expected in sealed_profile_descriptors.items():
+            current = getattr(BookmakerCapabilityProfile, name, missing)
+            if (
+                current is not expected
+                or descriptor_code(current)
+                is not sealed_profile_descriptor_codes[name]
+            ):
+                raise sealed_error(
+                    f"provider capability profile authority method changed: {name}"
+                )
+
+    def register_timeout_absence_authority(assertion: object) -> None:
+        nonlocal timeout_absence_assertion, timeout_absence_assertion_code
+        if not callable(assertion):
+            raise sealed_error("timeout absence authority assertion must be callable")
+
+        # This registrar is exposed only to break the provider-evidence/timeout
+        # import cycle; exposure must not become caller-mintable authority.  A
+        # foreign callback registered before the timeout module is imported could
+        # otherwise become the permanently captured absence assertion and turn
+        # generic complete-empty readback into retry-authoritative absence.
+        timeout_module_name = f"{__package__}.betfair_timeout_reconciliation"
+        timeout_module = sys.modules.get(timeout_module_name)
+        assertion_globals = getattr(assertion, "__globals__", None)
+        assertion_qualname = getattr(assertion, "__qualname__", None)
+        if (
+            getattr(assertion, "__module__", None) != timeout_module_name
+            or timeout_module is None
+            or assertion_globals is not vars(timeout_module)
+            or assertion_qualname
+            != (
+                "_install_betfair_timeout_absence_authority.<locals>."
+                "assert_betfair_timeout_absence_authoritative"
+            )
+        ):
+            raise sealed_error(
+                "timeout absence authority assertion origin is not canonical"
+            )
+
+        assertion_code = getattr(assertion, "__code__", None)
+        if assertion_code is None:
+            raise sealed_error(
+                "timeout absence authority assertion executable code is unavailable"
+            )
+        if timeout_absence_assertion is None:
+            timeout_absence_assertion = assertion
+            timeout_absence_assertion_code = assertion_code
+            return
+        if timeout_absence_assertion is not assertion:
+            raise sealed_error("timeout absence authority assertion is already registered")
+        if timeout_absence_assertion_code is not assertion_code:
+            raise sealed_error(
+                "timeout absence authority assertion executable code changed"
+            )
 
     def authoritative_verify(
         action: ExecutionAction,
@@ -585,6 +829,7 @@ def _install_verified_provider_evidence_authority() -> None:
         readback: BetfairExecutionReadbackEnvelope,
         expected_provider_order_ref: str | None = None,
     ) -> VerifiedProviderState:
+        assert_executable_authority_intact()
         evidence = raw_verify(
             action,
             profile,
@@ -592,6 +837,7 @@ def _install_verified_provider_evidence_authority() -> None:
             readback=readback,
             expected_provider_order_ref=expected_provider_order_ref,
         )
+        assert_executable_authority_intact()
         evidence_key = id(evidence)
 
         def forget(_weakref: object, *, key: int = evidence_key) -> None:
@@ -599,34 +845,65 @@ def _install_verified_provider_evidence_authority() -> None:
 
         issued[evidence_key] = (
             ref(evidence, forget),
-            _verified_provider_evidence_fingerprint(evidence),
+            sealed_fingerprint(evidence),
         )
         return evidence
 
     def assert_verified_provider_evidence_authoritative(
         evidence: VerifiedProviderState,
     ) -> None:
-        if not isinstance(
-            evidence,
-            (VerifiedProviderEffectEvidence, VerifiedProviderAbsenceEvidence),
-        ):
-            raise ProviderEvidenceError("provider evidence type is not canonical")
+        nonlocal timeout_absence_assertion
+        assert_executable_authority_intact()
+        if not isinstance(evidence, (sealed_effect_type, sealed_absence_type)):
+            raise sealed_error("provider evidence type is not canonical")
         record = issued.get(id(evidence))
         if record is None or record[0]() is not evidence:
-            raise ProviderEvidenceError(
+            raise sealed_error(
                 "verified provider evidence was not issued by canonical verifier"
             )
-        if record[1] != _verified_provider_evidence_fingerprint(evidence):
-            raise ProviderEvidenceError(
+        if record[1] != sealed_fingerprint(evidence):
+            raise sealed_error(
                 "verified provider evidence changed after canonical verification"
             )
+        if isinstance(evidence, sealed_absence_type):
+            # Import only for registration side effect. Consumption uses the exact
+            # closure-captured assertion registered by the timeout authority, never a
+            # later mutable module attribute.
+            if timeout_absence_assertion is None:
+                try:
+                    from . import betfair_timeout_reconciliation as _timeout_authority
+                    del _timeout_authority
+                except ImportError as exc:
+                    raise sealed_error(
+                        "verified provider absence lacks durable timeout-horizon authority"
+                    ) from exc
+            assertion = timeout_absence_assertion
+            assertion_code = timeout_absence_assertion_code
+            if assertion is None or assertion_code is None:
+                raise sealed_error(
+                    "verified provider absence lacks durable timeout-horizon authority"
+                )
+            if getattr(assertion, "__code__", None) is not assertion_code:
+                raise sealed_error(
+                    "timeout absence authority assertion executable code changed"
+                )
+            try:
+                assertion(evidence)
+            except Exception as exc:
+                # Preserve one stable provider-evidence boundary for downstream
+                # reconciliation without trusting a mutable timeout exception symbol.
+                raise sealed_error(
+                    "verified provider absence lacks durable timeout-horizon authority"
+                ) from exc
 
     globals()["verify_betfair_provider_state"] = authoritative_verify
     globals()[
         "assert_verified_provider_evidence_authoritative"
     ] = assert_verified_provider_evidence_authoritative
+    globals()[
+        "_register_betfair_timeout_absence_authority_assertion"
+    ] = register_timeout_absence_authority
 
 
 _install_verified_provider_evidence_authority()
 del _install_verified_provider_evidence_authority
-

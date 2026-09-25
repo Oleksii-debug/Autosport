@@ -10,7 +10,7 @@ from autosport.betfair_account_readonly import (
     ADAPTER_ID as BETFAIR_ADAPTER_ID,
     ADAPTER_VERSION as BETFAIR_ADAPTER_VERSION,
 )
-from autosport.real_execution_ledger import ExecutionAction
+from autosport.real_execution_ledger import ExecutionAction, RealExecutionLedger
 
 
 def _action(**changes) -> ExecutionAction:
@@ -73,6 +73,19 @@ def _capture(
     return capture, order
 
 
+def _require_owner(ledger: RealExecutionLedger) -> None:
+    action = _action()
+    capture, _ = _capture(action)
+    settlement._require_attempt_receipt_owner(
+        ledger,
+        plan_id="plan-1",
+        attempt_id="attempt-1",
+        action=action,
+        capture=capture,
+        external_bet_id="bet-1",
+    )
+
+
 def test_exact_provider_row_remains_accepted_by_existing_match_authority() -> None:
     action = _action()
     capture, order = _capture(action)
@@ -125,3 +138,42 @@ def test_partial_settlement_below_requested_stake_is_not_overconstrained() -> No
     # PARTIAL acknowledgement-to-final-settlement equality is a separate authority
     # and must not be invented here.
     assert settlement._match_order(action, capture) is order
+
+
+def test_ledger_subclass_cannot_mint_settlement_execution_authority(tmp_path) -> None:
+    class ForgedLedger(RealExecutionLedger):
+        def saga(self, plan_id):  # pragma: no cover - must never dispatch
+            raise AssertionError(plan_id)
+
+    ledger = ForgedLedger(tmp_path / "forged-execution.jsonl")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="exact RealExecutionLedger",
+    ):
+        _require_owner(ledger)
+
+
+def test_exact_ledger_instance_cannot_shadow_authority_methods(tmp_path) -> None:
+    ledger = RealExecutionLedger(tmp_path / "shadowed-execution.jsonl")
+    ledger.__dict__["_events"] = lambda: []
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="instance-shadowed: _events",
+    ):
+        _require_owner(ledger)
+
+
+def test_ledger_class_dispatch_rebind_fails_before_owner_resolution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+    monkeypatch.setattr(RealExecutionLedger, "saga", lambda self, plan_id: None)
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _require_owner(ledger)

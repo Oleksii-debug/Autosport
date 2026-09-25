@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
@@ -161,6 +162,11 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
+        # Serialize every canonical execution on this runtime. The PaperValue
+        # authority holds this same re-entrant lock across risk admission and
+        # execution so a second canonical allocation cannot change PaperBook
+        # between the bound risk witness and materialization.
+        self._execution_lock = RLock()
         # In-process capability registry. Object identity is intentional: serialized,
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
@@ -562,6 +568,28 @@ class PaperExecutionAdoptionRuntime:
             )
 
     def execute(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        started_at: str,
+        materialize_exposure: bool,
+        observations: Mapping[str, ObservedPaperExecution] | None = None,
+        evidence_registry: PaperExecutionEvidenceRegistry | None = None,
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> PaperExecutionAdoptionResult:
+        with self._execution_lock:
+            return self._execute_unlocked(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                started_at=started_at,
+                materialize_exposure=materialize_exposure,
+                observations=observations,
+                evidence_registry=evidence_registry,
+                suspended_action_ids=suspended_action_ids,
+            )
+
+    def _execute_unlocked(
         self,
         *,
         prepared: PreparedPaperExecution,

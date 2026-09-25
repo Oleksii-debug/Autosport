@@ -22,6 +22,11 @@ class ProviderSettlementRevisionError(ValueError):
     """Raised when a provider settlement correction chain is ambiguous or invalid."""
 
 
+_MAX_SETTLEMENT_DECIMAL_COEFFICIENT_DIGITS = 4096
+_MAX_SETTLEMENT_DECIMAL_ABS_EXPONENT = 4096
+_MAX_SETTLEMENT_DECIMAL_TEXT_LENGTH = 8192
+
+
 def _text(value: str, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ProviderSettlementRevisionError(
@@ -51,7 +56,25 @@ def _decimal_text(value: Decimal | None) -> str | None:
             "settlement decimal fields must be finite exact Decimal values"
         )
 
-    sign, raw_digits, exponent = value.as_tuple()
+    parts = value.as_tuple()
+    exponent = parts.exponent
+    raw_digits = parts.digits
+    if type(exponent) is not int:
+        raise ProviderSettlementRevisionError(
+            "settlement decimal exponent must be an integer"
+        )
+    if len(raw_digits) > _MAX_SETTLEMENT_DECIMAL_COEFFICIENT_DIGITS:
+        raise ProviderSettlementRevisionError(
+            "settlement decimal coefficient exceeds resource limit"
+        )
+    if abs(exponent) > _MAX_SETTLEMENT_DECIMAL_ABS_EXPONENT:
+        raise ProviderSettlementRevisionError(
+            "settlement decimal exponent exceeds resource limit"
+        )
+
+    # Validate shape before the zero shortcut: Decimal('0e1000000') must not use
+    # its numeric zero value to smuggle attacker-sized representation metadata.
+    sign = parts.sign
     digits = list(raw_digits)
     if not any(digits):
         return "0"
@@ -59,6 +82,23 @@ def _decimal_text(value: Decimal | None) -> str | None:
     while digits[-1] == 0:
         digits.pop()
         exponent += 1
+
+    coefficient_length = len(digits)
+    if exponent >= 0:
+        rendered_length = coefficient_length + exponent
+    else:
+        point = coefficient_length + exponent
+        rendered_length = (
+            coefficient_length + 1
+            if point > 0
+            else 2 + (-point) + coefficient_length
+        )
+    if sign:
+        rendered_length += 1
+    if rendered_length > _MAX_SETTLEMENT_DECIMAL_TEXT_LENGTH:
+        raise ProviderSettlementRevisionError(
+            "settlement decimal canonical text exceeds resource limit"
+        )
 
     coefficient = "".join(str(digit) for digit in digits)
     if exponent >= 0:

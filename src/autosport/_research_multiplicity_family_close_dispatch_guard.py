@@ -7,9 +7,8 @@ same module later performs ``require_current_*`` must not turn caller code into
 family-close authority.
 
 The canonical store constructor is authority-bearing too. Family-close
-re-resolution must not accept a class-level ``__init__`` replacement that keeps the
-exact store type/read/enrollment functions while redirecting the reconstructed
-instance to a sibling path or workspace.
+re-resolution must fail closed if class-level constructor dispatch changes while
+keeping the exact store type/read/enrollment functions.
 
 This guard adds no promotion authority. ``promotion_authorized`` remains false.
 """
@@ -67,9 +66,9 @@ def _install_guard() -> None:
     )
 
     store_type = _close._CANONICAL_STORE_TYPE
-    original_store_init = store_type.__init__
-    original_store_init_code = getattr(original_store_init, "__code__", None)
-    if original_store_init_code is None:
+    store_init = store_type.__init__
+    store_init_code = getattr(store_init, "__code__", None)
+    if store_init_code is None:
         raise error_type("canonical multiplicity store constructor code is unavailable")
 
     identity_names = (
@@ -103,43 +102,6 @@ def _install_guard() -> None:
     hashlib_sha256 = _close.hashlib.sha256
     json_dumps = _close.json.dumps
 
-    def guarded_store_init(
-        self,
-        path,
-        *,
-        workspace_root=None,
-    ) -> None:
-        if store_type.__init__ is not guarded_store_init:
-            raise error_type("canonical multiplicity store constructor dispatch changed")
-        if getattr(original_store_init, "__code__", None) is not original_store_init_code:
-            raise error_type("canonical multiplicity store constructor code changed")
-        if type(self) is not store_type:
-            raise error_type("canonical multiplicity store constructor received non-canonical type")
-
-        try:
-            requested_path = _close.Path(path).resolve(strict=False)
-            requested_workspace = (
-                None
-                if workspace_root is None
-                else _close.Path(workspace_root).resolve(strict=False)
-            )
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise error_type("canonical multiplicity store location is invalid") from exc
-
-        original_store_init(self, path, workspace_root=workspace_root)
-
-        if getattr(original_store_init, "__code__", None) is not original_store_init_code:
-            raise error_type("canonical multiplicity store constructor code changed")
-        try:
-            actual_path = _close.Path(self.path).resolve(strict=False)
-            actual_workspace = _close.Path(self.workspace_root).resolve(strict=False)
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise error_type("canonical multiplicity store constructor lost location binding") from exc
-        if actual_path != requested_path:
-            raise error_type("canonical multiplicity store constructor redirected path")
-        if requested_workspace is not None and actual_workspace != requested_workspace:
-            raise error_type("canonical multiplicity store constructor redirected workspace")
-
     def require_dispatch() -> None:
         if (
             _close.MultiplicityFamilyCloseError is not error_type
@@ -151,8 +113,8 @@ def _install_guard() -> None:
             raise error_type("multiplicity family-close public authority changed")
 
         if (
-            store_type.__init__ is not guarded_store_init
-            or getattr(original_store_init, "__code__", None) is not original_store_init_code
+            store_type.__init__ is not store_init
+            or getattr(store_init, "__code__", None) is not store_init_code
         ):
             raise error_type("canonical multiplicity store constructor dispatch changed")
 
@@ -245,7 +207,6 @@ def _install_guard() -> None:
     guarded_require_current.__doc__ = require_current.__doc__
     guarded_require_current.__module__ = require_current.__module__
 
-    store_type.__init__ = guarded_store_init
     _close.derive_multiplicity_family_close = guarded_derive
     _close.require_current_multiplicity_family_close = guarded_require_current
 

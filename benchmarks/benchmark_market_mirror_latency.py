@@ -11,6 +11,8 @@ from time import perf_counter_ns
 from typing import Sequence
 
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror import MarketMirror
+from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import CanonicalNormalizer, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
@@ -97,7 +99,10 @@ def run_latency_benchmark(
         store = SQLiteMarketStore(Path(tmp) / "market-mirror-latency.db")
         try:
             normalizer = CanonicalNormalizer()
+            mirror = MarketMirror()
+            invalidations = BoundedMirrorInvalidationBuffer(mirror)
             bus = MarketEventBus(store)
+            bus.subscribe(invalidations.accept_persisted)
             total = warmup + count
             for index in range(total):
                 quote = _build_quote(index, quote_keys)
@@ -117,6 +122,16 @@ def run_latency_benchmark(
                     raise RuntimeError("latency clock did not advance for a measured event")
                 samples_ns.append(elapsed_ns)
                 accepted += 1
+
+            mirror_view = mirror.view()
+            expected_quote_keys = min(total, quote_keys)
+            if mirror_view.revision != total or len(mirror_view.events) != expected_quote_keys:
+                raise RuntimeError(
+                    "market mirror benchmark workload did not fully apply: "
+                    f"expected_revision={total} actual_revision={mirror_view.revision} "
+                    f"expected_quote_keys={expected_quote_keys} "
+                    f"actual_quote_keys={len(mirror_view.events)}"
+                )
         finally:
             store.close()
 

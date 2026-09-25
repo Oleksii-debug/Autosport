@@ -205,8 +205,11 @@ def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
 # prerequisite. The restored #1212 positive suites predate that authority. Give only
 # those exact suites a process-local test issuance for each workspace they prepare;
 # every other suite remains capable of proving that missing/stale profile authority
-# fails closed. This fixture never changes production code or persists authority.
-_BETFAIR_TRUSTED_PROFILE_MODULES = _RECOMPOSED_BETFAIR_PROVIDER_MODULES
+# fails closed. The STOP-ledger falsifier gets only this profile prerequisite so it
+# can still isolate missing STOP as the deterministic denial under test.
+_BETFAIR_TRUSTED_PROFILE_MODULES = _RECOMPOSED_BETFAIR_PROVIDER_MODULES | {
+    "test_betfair_stop_ledger_boundary"
+}
 _PROFILE_FACTORY_SPEC = "autosport.product_source:create_parlay_product_source"
 _PROFILE_PROVIDER_SOURCE_ID = "parlayapi:table_tennis"
 
@@ -226,8 +229,12 @@ def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
     if module_name not in _BETFAIR_TRUSTED_PROFILE_MODULES:
         return
 
-    original_prepared = getattr(module, "_prepared", None)
+    prepared_owner = module
+    original_prepared = getattr(prepared_owner, "_prepared", None)
     if not callable(original_prepared):
+        prepared_owner = getattr(module, "provider_tests", None)
+        original_prepared = getattr(prepared_owner, "_prepared", None)
+    if prepared_owner is None or not callable(original_prepared):
         return
 
     monkeypatch.setattr(
@@ -256,7 +263,7 @@ def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
         ensure_profile(tmp)
         return prepared
 
-    monkeypatch.setattr(module, "_prepared", prepared_with_trusted_runtime)
+    monkeypatch.setattr(prepared_owner, "_prepared", prepared_with_trusted_runtime)
     try:
         yield
     finally:

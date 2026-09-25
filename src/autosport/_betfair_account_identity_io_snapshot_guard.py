@@ -7,23 +7,29 @@ callables retained by a composition wrapper.  A wrapper-only snapshot is
 therefore insufficient: invoking the predecessor resolver directly can bypass
 it.
 
-This guard snapshots the exact canonical client's credential/transport/clock
-inputs when the client itself is constructed, installs a sealed
-``read_account_details`` implementation, and retargets the existing K07
-factory's captured canonical dispatch cells to those guarded callables.  The
-underlying resolver is therefore safe even when obtained through ``__closure__``
-and invoked directly.
+This guard uses the existing K07 origin/context authority rather than creating a
+second mutable client snapshot registry.  The K07 factory seals its product
+clock before returning a client and rewrites its already-canonical origin to the
+same sealed clock.  Account-detail acquisition then consumes the exact origin
+held by the active K07 context, so live-client mutate/restore races and metadata
+access cannot redirect the accepted provider observation to a sibling snapshot.
 
-All authority-bearing cloned functions carry an identity snapshot of every
-directly-read global binding plus ``__builtins__``.  The private JSON facade is
-also checked before build/read/resolve.  No stable account identity, provider
-write, funds, execution, or real-money authority is introduced.
+RPC/parser/transport clones are retained only as verified import-time templates.
+Each authority-bearing read copies them into fresh per-call functions before
+provider I/O and verifies the copies against the frozen template identities.
+Consequently a transient mutation of an inspectable template while network I/O
+is in flight cannot redirect response parsing and then disappear before the
+post-acquisition checks.
+
+All persistent authority-bearing cloned functions carry an identity snapshot of
+every directly-read global binding plus ``__builtins__``.  The private JSON
+facade is also checked before build/read/resolve.  No stable account identity,
+provider write, funds, execution, or real-money authority is introduced.
 """
 from __future__ import annotations
 
 import json
 from types import FunctionType, MethodType, SimpleNamespace
-from weakref import WeakKeyDictionary
 
 from . import betfair_account_identity as _identity
 from . import betfair_account_readonly as _readonly
@@ -36,8 +42,11 @@ def _install_guard() -> None:
     rpc_result_type = _readonly._RpcResult
     evidence_type = _readonly.BetfairEvidence
     details_type = _readonly.BetfairAccountDetailsObservation
+    context_record_type = _identity._ClientContextRecord
+    origin_type = _identity._CanonicalClientOrigin
     identity_error = _identity.BetfairAccountIdentityError
     account_details_rpc = _readonly._GET_ACCOUNT_DETAILS
+    venue_id = _identity.VENUE_ID
 
     original_build = _identity.build_betfair_authenticated_client
     original_resolve = _identity.resolve_betfair_authenticated_account_identity
@@ -53,7 +62,6 @@ def _install_guard() -> None:
     canonical_json_loads = json.loads
     canonical_json_decode_error = json.JSONDecodeError
 
-    snapshots: WeakKeyDictionary = WeakKeyDictionary()
     missing = object()
 
     def clone_function(
@@ -91,9 +99,13 @@ def _install_guard() -> None:
         function: FunctionType,
         snapshot: tuple[tuple[str, object], ...],
         label: str,
+        *,
+        overrides: dict[str, object] | None = None,
     ) -> None:
+        expected_overrides = overrides or {}
         for name, expected in snapshot:
-            if function.__globals__.get(name, missing) is not expected:
+            required = expected_overrides.get(name, expected)
+            if function.__globals__.get(name, missing) is not required:
                 raise identity_error(f"frozen {label} global {name!r} was rebound")
 
     sealed_json = SimpleNamespace(
@@ -194,6 +206,13 @@ def _install_guard() -> None:
             )
         return matches[0]
 
+    def _freevar_value(function: FunctionType, name: str) -> object:
+        closure = function.__closure__
+        if closure is None or name not in function.__code__.co_freevars:
+            raise identity_error(f"canonical K07 closure is missing {name!r}")
+        index = function.__code__.co_freevars.index(name)
+        return closure[index].cell_contents
+
     def _set_freevar(function: FunctionType, name: str, value: object) -> None:
         closure = function.__closure__
         if closure is None or name not in function.__code__.co_freevars:
@@ -201,88 +220,182 @@ def _install_guard() -> None:
         index = function.__code__.co_freevars.index(name)
         closure[index].cell_contents = value
 
+    context_for = _reachable_named(original_resolve, "context_for")
+    canonical_origins = _freevar_value(original_build, "canonical_client_origins")
+    context_origins = _freevar_value(context_for, "canonical_client_origins")
+    client_contexts = _freevar_value(context_for, "client_contexts")
+    if canonical_origins is not context_origins:
+        raise identity_error("K07 builder/context do not share one canonical origin registry")
+    if not hasattr(canonical_origins, "get") or not isinstance(client_contexts, dict):
+        raise identity_error("canonical K07 authority registries are not available")
+
+    def sealed_product_clock(clock: object) -> FunctionType:
+        clock_clone = clone_function(clock, label="Betfair product clock")
+        clock_snapshot = snapshot_globals(clock_clone)
+
+        def product_clock():
+            require_snapshot(clock_clone, clock_snapshot, "K07 Betfair product clock")
+            return clock_clone()
+
+        product_clock._autosport_k07_clock_sealed = True
+        return product_clock
+
+    def fresh_call_clones() -> tuple[FunctionType, FunctionType, FunctionType, FunctionType]:
+        """Copy verified templates before I/O so later metadata mutation is irrelevant."""
+
+        require_static_snapshot()
+        local_json = SimpleNamespace(
+            dumps=canonical_json_dumps,
+            loads=canonical_json_loads,
+            JSONDecodeError=canonical_json_decode_error,
+        )
+        local_decode = clone_function(
+            sealed_decode_json,
+            label="per-call Betfair JSON decoder",
+            globals_overrides={"json": local_json},
+        )
+        local_rpc = clone_function(
+            sealed_rpc,
+            label="per-call Betfair RPC",
+            globals_overrides={
+                "json": local_json,
+                "_decode_json": local_decode,
+            },
+        )
+        local_next_request_id = clone_function(
+            sealed_next_request_id,
+            label="per-call Betfair request-id allocator",
+        )
+        local_observed_at = clone_function(
+            sealed_observed_at,
+            label="per-call Betfair observation clock adapter",
+        )
+        local_transport_post = clone_function(
+            sealed_transport_post,
+            label="per-call Betfair HTTP transport",
+        )
+
+        # Validate what was copied, not only the persistent templates.  A transient
+        # rebind between the pre-copy check and FunctionType construction therefore
+        # cannot be captured and then restored before the next public check.
+        require_snapshot(
+            local_decode,
+            decode_snapshot,
+            "per-call K07 Betfair JSON decoder",
+            overrides={"json": local_json},
+        )
+        require_snapshot(
+            local_rpc,
+            rpc_snapshot,
+            "per-call K07 Betfair RPC",
+            overrides={"json": local_json, "_decode_json": local_decode},
+        )
+        require_snapshot(
+            local_next_request_id,
+            request_id_snapshot,
+            "per-call K07 Betfair request-id allocator",
+        )
+        require_snapshot(
+            local_observed_at,
+            observed_at_snapshot,
+            "per-call K07 Betfair observation clock adapter",
+        )
+        require_snapshot(
+            local_transport_post,
+            transport_snapshot,
+            "per-call K07 Betfair HTTP transport",
+        )
+        require_static_snapshot()
+        return (
+            local_rpc,
+            local_next_request_id,
+            local_observed_at,
+            local_transport_post,
+        )
+
     def guarded_client_init(self, *args, **kwargs) -> None:
         require_static_snapshot()
         original_client_init(self, *args, **kwargs)
-        state = original_getattribute(self, "__dict__")
-        credentials = state.get("_credentials")
-        transport = state.get("_transport")
-        clock = state.get("_clock")
-        timeout_seconds = state.get("_timeout_seconds")
-        venue_id = state.get("_venue_id")
-        account_id = state.get("_account_id")
 
-        # Noncanonical/custom transports are legitimate for the ordinary read-only
-        # adapter and tests, but they can never become K07 positive origin.  Leave
-        # those reads on the original adapter path.  K07's own builder requires the
-        # exact canonical transport and will therefore always receive a snapshot.
-        if type(transport) is not transport_type or type(clock) is not FunctionType:
-            snapshots.pop(self, None)
-            return
-        max_response_bytes = original_getattribute(transport, "_max_response_bytes")
+    def guarded_read_account_details(client):
+        require_static_snapshot()
+
+        # Identity issuance creates/validates this context immediately before the
+        # canonical read.  Ordinary direct read-only clients have no such record and
+        # continue through the unmodified adapter path.
+        context = client_contexts.get(id(client))
+        if (
+            type(context) is not context_record_type
+            or context.client_ref() is not client
+            or context.revoked
+        ):
+            return original_read_account_details(client)
+        origin = context.origin
+        if type(origin) is not origin_type:
+            raise identity_error("K07 active context has non-canonical origin")
+
+        try:
+            state = original_getattribute(client, "__dict__")
+        except BaseException as exc:
+            raise identity_error("K07 client state is not canonical") from exc
+        if type(state) is not dict:
+            raise identity_error("K07 client state is not canonical")
+        if (
+            state.get("_credentials") is not origin.credentials
+            or state.get("_transport") is not origin.transport
+            or state.get("_clock") is not origin.clock
+        ):
+            raise identity_error("K07 active context diverged before sealed read")
+
+        credentials = origin.credentials
+        transport = origin.transport
+        clock = origin.clock
+        timeout_seconds = state.get("_timeout_seconds")
+        account_id = state.get("_account_id")
+        try:
+            max_response_bytes = object.__getattribute__(transport, "_max_response_bytes")
+        except BaseException as exc:
+            raise identity_error("K07 canonical transport lost response-size authority") from exc
         if (
             type(credentials) is not credentials_type
+            or type(transport) is not transport_type
+            or type(clock) is not FunctionType
+            or not getattr(clock, "_autosport_k07_clock_sealed", False)
             or type(max_response_bytes) is not int
             or max_response_bytes <= 0
             or type(timeout_seconds) is not float
-            or type(venue_id) is not str
             or type(account_id) is not str
         ):
-            snapshots.pop(self, None)
-            return
+            raise identity_error("K07 active context is not a sealed canonical origin")
 
+        (
+            local_rpc,
+            local_next_request_id,
+            local_observed_at,
+            local_transport_post,
+        ) = fresh_call_clones()
         sealed_credentials = credentials_type(
             credentials.application_key,
             credentials.session_token,
         )
-        sealed_clock = clone_function(clock, label="Betfair product clock")
-        clock_snapshot = snapshot_globals(sealed_clock)
-        snapshots[self] = (
-            sealed_credentials,
-            sealed_clock,
-            clock_snapshot,
-            max_response_bytes,
-            timeout_seconds,
-            venue_id,
-            account_id,
-        )
-
-    def guarded_read_account_details(client):
-        require_static_snapshot()
-        record = snapshots.get(client)
-        if record is None:
-            return original_read_account_details(client)
-        (
-            sealed_credentials,
-            sealed_clock,
-            clock_snapshot,
-            max_response_bytes,
-            timeout_seconds,
-            venue_id,
-            account_id,
-        ) = record
-        require_snapshot(sealed_clock, clock_snapshot, "K07 Betfair product clock")
-
         sealed_transport = transport_type(max_response_bytes=max_response_bytes)
-        sealed_transport.post = MethodType(sealed_transport_post, sealed_transport)
+        sealed_transport.post = MethodType(local_transport_post, sealed_transport)
         shadow = object.__new__(client_type)
         original_client_init(
             shadow,
             sealed_credentials,
             transport=sealed_transport,
             timeout_seconds=timeout_seconds,
-            clock=sealed_clock,
+            clock=clock,
             venue_id=venue_id,
             account_id=account_id,
         )
-        shadow._next_request_id = MethodType(sealed_next_request_id, shadow)
-        shadow._observed_at = MethodType(sealed_observed_at, shadow)
+        shadow._next_request_id = MethodType(local_next_request_id, shadow)
+        shadow._observed_at = MethodType(local_observed_at, shadow)
 
         captured: list[object] = []
 
         def snapshot_rpc(method: str, params):
-            require_static_snapshot()
-            require_snapshot(sealed_clock, clock_snapshot, "K07 Betfair product clock")
             if method != account_details_rpc or type(params) is not dict or params:
                 raise identity_error(
                     "K07 acquisition attempted a non-canonical account-details RPC"
@@ -291,14 +404,13 @@ def _install_guard() -> None:
                 raise identity_error(
                     "K07 acquisition produced multiple account-details RPC results"
                 )
-            result = sealed_rpc(shadow, method, params)
+            result = local_rpc(shadow, method, params)
             captured.append(result)
             return result
 
         shadow._rpc = snapshot_rpc
         details = original_read_account_details(shadow)
         require_static_snapshot()
-        require_snapshot(sealed_clock, clock_snapshot, "K07 Betfair product clock")
         if type(details) is not details_type or len(captured) != 1:
             raise identity_error(
                 "K07 identity is not bound to one captured account-details result"
@@ -371,8 +483,34 @@ def _install_guard() -> None:
             timeout_seconds=timeout_seconds,
             account_label=account_label,
         )
-        if snapshots.get(client) is None:
-            raise identity_error("canonical K07 client lacks construction-time IO snapshot")
+        origin = canonical_origins.get(client)
+        if (
+            type(origin) is not origin_type
+            or origin.credentials is not client._credentials
+            or origin.transport is not client._transport
+            or origin.clock is not client._clock
+        ):
+            raise identity_error("canonical K07 builder lost its registered origin")
+
+        # Seal the exact clock before the client escapes to callers, then update the
+        # existing K07 origin to that same object.  This is not a sibling registry:
+        # context_for() and the read guard consume this one canonical origin.
+        clock = sealed_product_clock(origin.clock)
+        client._clock = clock
+        canonical_origins[client] = origin_type(
+            transport=origin.transport,
+            clock=clock,
+            credentials=origin.credentials,
+            credential_binding=origin.credential_binding,
+        )
+        sealed_origin = canonical_origins.get(client)
+        if (
+            type(sealed_origin) is not origin_type
+            or sealed_origin.clock is not client._clock
+            or sealed_origin.credentials is not client._credentials
+            or sealed_origin.transport is not client._transport
+        ):
+            raise identity_error("canonical K07 sealed origin publication failed")
         return client
 
     def resolve_identity(

@@ -209,6 +209,61 @@ def test_caller_mutation_after_snapshot_cannot_change_sent_filter_or_authority(
     subscription.assert_issued()
 
 
+@pytest.mark.parametrize("bypass", ["original_alias", "wrapped_alias"])
+def test_direct_pre_guard_aliases_cannot_bypass_intrinsic_filter_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    bypass: str,
+) -> None:
+    transport, fake = _transport(monkeypatch)
+    caller_filter = {
+        "marketIds": ["1.A"],
+        "marketTypeCodes": ["MATCH_ODDS"],
+    }
+    before = json.dumps(
+        caller_filter,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    original_canonicalizer = auth._canonical_json_bytes
+    mutated = False
+
+    def mutate_after_issuer_snapshot(value):
+        nonlocal mutated
+        payload = original_canonicalizer(value)
+        if value is caller_filter and not mutated:
+            mutated = True
+            caller_filter["marketIds"][0] = "9.MUTATED"
+            caller_filter["marketTypeCodes"].append("OVER_UNDER_25")
+        return payload
+
+    monkeypatch.setattr(auth, "_canonical_json_bytes", mutate_after_issuer_snapshot)
+    if bypass == "original_alias":
+        issuer = filter_guard._ORIGINAL_OPEN
+    else:
+        issuer = auth.open_authenticated_market_subscription.__wrapped__
+
+    subscription = issuer(
+        transport,
+        provider_request_id=7,
+        market_filter=caller_filter,
+        market_data_fields=("EX_LTP",),
+        ladder_levels=None,
+        heartbeat_ms=5000,
+        conflate_ms=0,
+    )
+
+    assert mutated
+    sent = json.loads(fake.sent[-1].decode("utf-8"))
+    assert sent["marketFilter"] == {
+        "marketIds": ["1.A"],
+        "marketTypeCodes": ["MATCH_ODDS"],
+    }
+    assert subscription.market_filter_sha256 == sha256(before).hexdigest()
+    subscription.assert_issued()
+
+
 def test_snapshot_guard_is_installed_on_public_subscription_issuer() -> None:
     assert getattr(
         auth.open_authenticated_market_subscription,

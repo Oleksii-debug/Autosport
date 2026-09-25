@@ -210,7 +210,7 @@ class MultiplicityFamilyCloseEvidence:
         if type(self.terminal_members) is not tuple or not self.terminal_members:
             raise ValueError("terminal_members must be a non-empty tuple")
         if any(
-            not isinstance(member, TerminalMultiplicityMemberEvidence)
+            type(member) is not TerminalMultiplicityMemberEvidence
             for member in self.terminal_members
         ):
             raise ValueError(

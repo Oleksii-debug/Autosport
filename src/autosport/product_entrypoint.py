@@ -5,12 +5,26 @@ import json
 import math
 import signal
 import time
+import unicodedata
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .collector_service import _load_source_factory
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+
+
+_OUTPUT_FORMATS = frozenset({"json", "text"})
+_TEXT_FIELD_ORDER = (
+    "kind",
+    "paper_only",
+    "real_money_execution",
+    "source_id",
+    "workspace",
+    "error_code",
+    "error_type",
+    "value",
+)
 
 
 class ProductEntrypointError(RuntimeError):
@@ -91,17 +105,125 @@ def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
     return source
 
 
-def _print_record(kind: str, *, runtime: AutonomousProductRuntime, value: object) -> None:
+def _validated_output_format(output_format: str) -> str:
+    if output_format not in _OUTPUT_FORMATS:
+        raise ValueError("output_format must be one of: json, text")
+    return output_format
+
+
+def _text_atom(value: object) -> str:
+    """Render one value without allowing terminal-shaping Unicode controls through."""
+
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    safe: list[str] = []
+    for character in rendered:
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in {"Zl", "Zp"}:
+            codepoint = ord(character)
+            if codepoint <= 0xFFFF:
+                safe.append(f"\\u{codepoint:04x}")
+            else:
+                safe.append(f"\\U{codepoint:08x}")
+        else:
+            safe.append(character)
+    return "".join(safe)
+
+
+def _text_mapping_key_identity(key: object) -> tuple[str, str]:
+    """Return a deterministic identity for JSON-object-compatible mapping keys."""
+
+    if type(key) is str:
+        return ("str", key)
+    if type(key) is bool:
+        return ("bool", "true" if key else "false")
+    if type(key) is int:
+        return ("int", str(key))
+    if type(key) is float:
+        if not math.isfinite(key):
+            raise ValueError("text output mapping float keys must be finite")
+        return (
+            "float",
+            json.dumps(
+                key,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            ),
+        )
+    if key is None:
+        return ("null", "")
+    raise TypeError(
+        "text output mapping keys must be str, bool, int, finite float, or None"
+    )
+
+
+def _text_label_child(prefix: str, key: object) -> str:
+    """Append one collision-free mapping-key path component."""
+
+    kind, component = _text_mapping_key_identity(key)
+    if kind == "str":
+        if component and all(
+            character.isalnum() or character in "_-" for character in component
+        ):
+            return f"{prefix}.{component}" if prefix else component
+
+        encoded = _text_atom(component)
+        return f"{prefix}[{encoded}]" if prefix else f"[{encoded}]"
+
+    encoded = "null" if kind == "null" else f"{kind}={component}"
+    return f"{prefix}[{encoded}]" if prefix else f"[{encoded}]"
+
+
+def _append_text_lines(lines: list[str], prefix: str, value: object) -> None:
+    if isinstance(value, Mapping):
+        if not value:
+            lines.append(f"{prefix}: empty mapping")
+            return
+        for key in sorted(value, key=_text_mapping_key_identity):
+            _append_text_lines(lines, _text_label_child(prefix, key), value[key])
+        return
+    if isinstance(value, (list, tuple)):
+        if not value:
+            lines.append(f"{prefix}: empty list")
+            return
+        for index, item in enumerate(value):
+            _append_text_lines(lines, f"{prefix}[{index}]", item)
+        return
+    lines.append(f"{prefix}: {_text_atom(value)}")
+
+
+def _format_text_record(record: Mapping[str, object]) -> str:
+    """Return a stable line-oriented record suitable for keyboard/screen-reader use.
+
+    Every semantic value is paired with a textual label and strings are JSON-escaped,
+    so provider-controlled control characters cannot become ANSI/terminal commands.
+    """
+
+    lines = ["AUTOSPORT RECORD"]
+    handled: set[str] = set()
+    for field in _TEXT_FIELD_ORDER:
+        if field in record:
+            _append_text_lines(lines, field, record[field])
+            handled.add(field)
+    for field in sorted(set(record) - handled):
+        _append_text_lines(lines, field, record[field])
+    lines.append("END AUTOSPORT RECORD")
+    return "\n".join(lines)
+
+
+def _print_payload(record: Mapping[str, object], *, output_format: str) -> None:
+    output_format = _validated_output_format(output_format)
+    if output_format == "text":
+        print(_format_text_record(record))
+        return
     print(
         json.dumps(
-            {
-                "kind": kind,
-                "paper_only": True,
-                "real_money_execution": False,
-                "source_id": runtime.manifest.source_id,
-                "workspace": str(runtime.workspace),
-                "value": asdict(value),
-            },
+            record,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -109,20 +231,42 @@ def _print_record(kind: str, *, runtime: AutonomousProductRuntime, value: object
     )
 
 
-def _print_failure(*, kind: str, error_code: str, error_type: str) -> None:
-    print(
-        json.dumps(
-            {
-                "kind": kind,
-                "paper_only": True,
-                "real_money_execution": False,
-                "error_code": error_code,
-                "error_type": error_type,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+def _print_record(
+    kind: str,
+    *,
+    runtime: AutonomousProductRuntime,
+    value: object,
+    output_format: str = "json",
+) -> None:
+    _print_payload(
+        {
+            "kind": kind,
+            "paper_only": True,
+            "real_money_execution": False,
+            "source_id": runtime.manifest.source_id,
+            "workspace": str(runtime.workspace),
+            "value": asdict(value),
+        },
+        output_format=output_format,
+    )
+
+
+def _print_failure(
+    *,
+    kind: str,
+    error_code: str,
+    error_type: str,
+    output_format: str = "json",
+) -> None:
+    _print_payload(
+        {
+            "kind": kind,
+            "paper_only": True,
+            "real_money_execution": False,
+            "error_code": error_code,
+            "error_type": error_type,
+        },
+        output_format=output_format,
     )
 
 
@@ -133,6 +277,7 @@ def run_product(
     initial_bankroll: str = "10000",
     max_cycles: int | None = None,
     poll_seconds: float = 30.0,
+    output_format: str = "json",
     sleep: Callable[[float], None] = time.sleep,
     install_signal_handlers: bool = True,
 ) -> int:
@@ -144,6 +289,7 @@ def run_product(
     its canonical ticks.
     """
 
+    output_format = _validated_output_format(output_format)
     if max_cycles is not None and (
         isinstance(max_cycles, bool)
         or not isinstance(max_cycles, int)
@@ -183,7 +329,12 @@ def run_product(
     try:
         start_status = runtime.start()
         started = True
-        _print_record("product_status", runtime=runtime, value=start_status)
+        _print_record(
+            "product_status",
+            runtime=runtime,
+            value=start_status,
+            output_format=output_format,
+        )
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
@@ -191,18 +342,25 @@ def run_product(
                     "product_status",
                     runtime=runtime,
                     value=runtime.stop(stop_request.reason),
+                    output_format=output_format,
                 )
                 break
 
             result = runtime.tick()
             cycles += 1
-            _print_record("product_tick", runtime=runtime, value=result)
+            _print_record(
+                "product_tick",
+                runtime=runtime,
+                value=result,
+                output_format=output_format,
+            )
 
             if max_cycles is not None and cycles >= max_cycles:
                 _print_record(
                     "product_status",
                     runtime=runtime,
                     value=runtime.stop("max_cycles_reached"),
+                    output_format=output_format,
                 )
                 break
             if stop_request.requested:
@@ -210,6 +368,7 @@ def run_product(
                     "product_status",
                     runtime=runtime,
                     value=runtime.stop(stop_request.reason),
+                    output_format=output_format,
                 )
                 break
             sleep(float(poll_seconds))
@@ -239,6 +398,7 @@ def run_product_command(
     initial_bankroll: str,
     max_cycles: int | None,
     poll_seconds: float,
+    output_format: str = "json",
 ) -> int:
     try:
         return run_product(
@@ -247,12 +407,14 @@ def run_product_command(
             initial_bankroll=initial_bankroll,
             max_cycles=max_cycles,
             poll_seconds=poll_seconds,
+            output_format=output_format,
         )
     except ProductRuntimeError as exc:
         _print_failure(
             kind="product_runtime_failure",
             error_code="product_runtime_failed",
             error_type=exc.error_type,
+            output_format=output_format,
         )
         return 4
     except Exception as exc:
@@ -260,10 +422,15 @@ def run_product_command(
         # messages may contain provider credentials, response bodies or other secrets,
         # so only stable classification is emitted here. Detailed diagnostics belong
         # behind an explicitly secret-safe internal logging boundary.
+        try:
+            output_format = _validated_output_format(output_format)
+        except ValueError:
+            output_format = "json"
         _print_failure(
             kind="product_start_failure",
             error_code="product_start_failed",
             error_type=type(exc).__name__,
+            output_format=output_format,
         )
         return 3
 
@@ -290,6 +457,16 @@ def _parser() -> argparse.ArgumentParser:
         help="optional bounded cycle count for qualification/supervised runs",
     )
     parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=sorted(_OUTPUT_FORMATS),
+        default="json",
+        help=(
+            "stdout format: json preserves the machine-readable contract; text emits "
+            "stable labelled records for keyboard/screen-reader operator use"
+        ),
+    )
     return parser
 
 
@@ -301,6 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         initial_bankroll=args.bankroll,
         max_cycles=args.max_cycles,
         poll_seconds=args.poll_seconds,
+        output_format=args.output_format,
     )
 
 

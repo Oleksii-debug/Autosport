@@ -84,13 +84,13 @@ class ReleaseTruthAuditInput:
         )
         if type(self.machine_proofs) is not tuple:
             raise ValueError("machine_proofs must be a tuple")
-        if not all(isinstance(item, MachineReleaseProof) for item in self.machine_proofs):
-            raise ValueError("machine_proofs must contain MachineReleaseProof values")
+        if not all(type(item) is MachineReleaseProof for item in self.machine_proofs):
+            raise ValueError("machine_proofs must contain exact MachineReleaseProof values")
         keys = [item.key for item in self.machine_proofs]
         if len(keys) != len(set(keys)):
             raise ValueError("machine proof keys must be unique")
-        if not isinstance(self.claims, ReleaseTruthClaims):
-            raise ValueError("claims must be ReleaseTruthClaims")
+        if type(self.claims) is not ReleaseTruthClaims:
+            raise ValueError("claims must be the exact ReleaseTruthClaims type")
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -229,8 +229,8 @@ def audit_release_truth(audit_input: ReleaseTruthAuditInput) -> ReleaseTruthAudi
     nor execution authority.
     """
 
-    if not isinstance(audit_input, ReleaseTruthAuditInput):
-        raise ValueError("audit_input must be a ReleaseTruthAuditInput")
+    if type(audit_input) is not ReleaseTruthAuditInput:
+        raise ValueError("audit_input must be the exact ReleaseTruthAuditInput type")
 
     proof_by_key = {proof.key: proof for proof in audit_input.machine_proofs}
     required_keys = tuple(sorted(audit_input.required_machine_proof_keys))

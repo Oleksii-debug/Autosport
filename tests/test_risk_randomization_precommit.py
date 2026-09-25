@@ -73,6 +73,46 @@ def test_issuer_surface_accepts_no_caller_seed_or_root() -> None:
     assert "randomization_root" not in parameters
     assert "randomization_root_sha256" not in parameters
     assert "entropy" not in parameters
+    assert "_product_token_bytes" not in parameters
+
+
+def test_simultaneous_entropy_dispatch_rebinding_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    membership = _membership_receipt()
+    _install_membership(monkeypatch, membership)
+    attacker_called = False
+
+    def forged_token_bytes(size: int) -> bytes:
+        nonlocal attacker_called
+        attacker_called = True
+        return b"\x00" * size
+
+    monkeypatch.setattr(precommit.secrets, "token_bytes", forged_token_bytes)
+    # Recreate the predecessor's private module token too.  The public issuer's
+    # entropy source is closure-sealed and must not late-read either surface.
+    monkeypatch.setattr(
+        precommit,
+        "_PRODUCT_TOKEN_BYTES",
+        forged_token_bytes,
+        raising=False,
+    )
+
+    with pytest.raises(
+        precommit.RiskRandomizationPrecommitError,
+        match="entropy source was rebound",
+    ):
+        precommit.issue_risk_randomization_precommit(
+            registry,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            experiment_id="experiment-001",
+            authority_root=authority_root,
+        )
+
+    assert attacker_called is False
 
 
 def test_issue_retry_restart_resolves_exact_same_product_root(

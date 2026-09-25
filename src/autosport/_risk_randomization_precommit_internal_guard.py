@@ -286,6 +286,35 @@ def _install_guard() -> None:
     )
     implementation_snapshot = snapshot_globals(frozen_implementation)
 
+    class CheckedImplementation:
+        """Callable boundary that keeps raw issuer FunctionType out of function metadata."""
+
+        __slots__ = ("_function", "_snapshot")
+
+        def __init__(
+            self,
+            function: FunctionType,
+            snapshot: tuple[tuple[str, object], ...],
+        ) -> None:
+            self._function = function
+            self._snapshot = snapshot
+
+        def __call__(self, *args, **kwargs):
+            require_private_facades()
+            require_snapshot(
+                self._function,
+                self._snapshot,
+                "randomization implementation",
+            )
+            return self._function(*args, **kwargs)
+
+    checked_implementation = CheckedImplementation(
+        frozen_implementation,
+        implementation_snapshot,
+    )
+    del frozen_implementation
+    del implementation_snapshot
+
     frozen_resolver = _clone_function(
         public_resolver,
         globals_overrides=common_overrides,
@@ -314,12 +343,7 @@ def _install_guard() -> None:
         require_membership_resolver()
         require_public_crypto_dispatch()
         require_private_facades()
-        require_snapshot(
-            frozen_implementation,
-            implementation_snapshot,
-            "randomization implementation",
-        )
-        return frozen_implementation(
+        return checked_implementation(
             registry_path,
             workspace=workspace,
             research_protocol_id=research_protocol_id,

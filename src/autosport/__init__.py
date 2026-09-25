@@ -56,7 +56,7 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
 # Install the fail-closed predictive runtime authority bridge before callers import
-# decision modules.  The import is intentionally private; public APIs remain in the
+# decision modules. The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
@@ -153,3 +153,7 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Positive Historical Data provenance must use a closure-hidden canonical urllib
+# dispatch snapshot; structural/synthetic transports remain explicitly non-authority.
+from . import _betfair_historical_entitlement_io_snapshot_guard as _betfair_historical_entitlement_io_snapshot_guard  # noqa: F401,E402

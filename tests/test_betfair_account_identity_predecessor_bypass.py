@@ -6,8 +6,11 @@ from threading import Event, Thread
 from types import FunctionType
 import urllib.request as _urllib_request
 
+import pytest
+
 from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
+    BetfairAccountIdentityError,
     build_betfair_authenticated_client,
     is_authoritative_betfair_account_identity,
     resolve_betfair_authenticated_account_identity,
@@ -53,6 +56,39 @@ def _predecessor_resolver() -> FunctionType:
     ]
     assert len(matches) == 1, [function.__name__ for function in matches]
     return matches[0]
+
+
+def test_recovered_predecessor_resolver_rejects_read_cell_rebinding() -> None:
+    """A recovered predecessor cannot be rewired back to the unguarded read seam."""
+
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token")
+    )
+    predecessor = _predecessor_resolver()
+    freevars = predecessor.__code__.co_freevars
+    assert "canonical_read_account_details" in freevars
+    read_cell = predecessor.__closure__[
+        freevars.index("canonical_read_account_details")
+    ]
+    guarded_read = read_cell.cell_contents
+
+    original_reads = [
+        function
+        for function in _reachable_functions(resolve_betfair_authenticated_account_identity)
+        if function.__name__ == "read_account_details"
+        and function is not guarded_read
+    ]
+    assert len(original_reads) == 1, [function.__name__ for function in original_reads]
+
+    read_cell.cell_contents = original_reads[0]
+    try:
+        with pytest.raises(
+            BetfairAccountIdentityError,
+            match="canonical Betfair account-details read authority changed",
+        ):
+            predecessor(client)
+    finally:
+        read_cell.cell_contents = guarded_read
 
 
 def test_recovered_predecessor_resolver_uses_construction_time_snapshot(

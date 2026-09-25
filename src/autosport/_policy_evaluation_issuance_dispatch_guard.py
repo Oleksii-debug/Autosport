@@ -29,6 +29,9 @@ class _DispatchState:
     """
 
     __slots__ = (
+        "_issuance_module",
+        "_factory_module",
+        "_marshal_dumps",
         "_error_type",
         "__original_open",
         "__original_issue",
@@ -70,46 +73,80 @@ class _DispatchState:
 
     def __init__(self) -> None:
         object.__setattr__(self, "_sealed", False)
-        object.__setattr__(self, "_error_type", _issuance.ProductPolicyEvaluationIssuanceError)
-        object.__setattr__(self, "_DispatchState__original_open", _issuance._open_canonical_authorities)
-        object.__setattr__(self, "_DispatchState__original_issue", _issuance.issue_product_policy_evaluation)
-        object.__setattr__(self, "_DispatchState__original_resolve", _issuance.resolve_product_policy_evaluation)
-        object.__setattr__(self, "_DispatchState__original_verify", _issuance.verify_product_policy_evaluation)
+        issuance_module = _issuance
+        factory_module = _factory_module
+        marshal_dumps = marshal.dumps
+        object.__setattr__(self, "_issuance_module", issuance_module)
+        object.__setattr__(self, "_factory_module", factory_module)
+        object.__setattr__(self, "_marshal_dumps", marshal_dumps)
+        object.__setattr__(
+            self,
+            "_error_type",
+            issuance_module.ProductPolicyEvaluationIssuanceError,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_open",
+            issuance_module._open_canonical_authorities,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_issue",
+            issuance_module.issue_product_policy_evaluation,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_resolve",
+            issuance_module.resolve_product_policy_evaluation,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_verify",
+            issuance_module.verify_product_policy_evaluation,
+        )
 
-        store_type = _issuance._STORE_TYPE
+        store_type = issuance_module._STORE_TYPE
         store_init = store_type.__init__
         object.__setattr__(self, "_store_type", store_type)
         object.__setattr__(self, "_store_init", store_init)
         object.__setattr__(self, "_store_init_globals", store_init.__globals__)
-        object.__setattr__(self, "_store_init_code", marshal.dumps(store_init.__code__))
-        object.__setattr__(self, "_factory_datetime", _factory_module.datetime)
-        object.__setattr__(self, "_factory_timezone", _factory_module.timezone)
+        object.__setattr__(self, "_store_init_code", marshal_dumps(store_init.__code__))
+        object.__setattr__(self, "_factory_datetime", factory_module.datetime)
+        object.__setattr__(self, "_factory_timezone", factory_module.timezone)
 
-        object.__setattr__(self, "_target", _issuance._target)
-        object.__setattr__(self, "_issuance_id", _issuance._issuance_id)
-        object.__setattr__(self, "_require_source", _issuance._require_source_factory_evaluation)
-        object.__setattr__(self, "_derive", _issuance._derive_policy_evaluation)
-        object.__setattr__(self, "_registry_get", _issuance._registry_get)
-        object.__setattr__(self, "_store_read", _issuance._store_read)
-        object.__setattr__(self, "_store_materialize", _issuance._STORE_MATERIALIZE)
-        object.__setattr__(self, "_store_receipt", _issuance._STORE_RECEIPT)
-        object.__setattr__(self, "_registry_append", _issuance._REGISTRY_APPEND)
+        object.__setattr__(self, "_target", issuance_module._target)
+        object.__setattr__(self, "_issuance_id", issuance_module._issuance_id)
+        object.__setattr__(
+            self,
+            "_require_source",
+            issuance_module._require_source_factory_evaluation,
+        )
+        object.__setattr__(self, "_derive", issuance_module._derive_policy_evaluation)
+        object.__setattr__(self, "_registry_get", issuance_module._registry_get)
+        object.__setattr__(self, "_store_read", issuance_module._store_read)
+        object.__setattr__(self, "_store_materialize", issuance_module._STORE_MATERIALIZE)
+        object.__setattr__(self, "_store_receipt", issuance_module._STORE_RECEIPT)
+        object.__setattr__(self, "_registry_append", issuance_module._REGISTRY_APPEND)
         object.__setattr__(
             self,
             "_canonical_bundle_sha256",
-            _issuance.canonical_product_policy_evaluation_bundle_sha256,
+            issuance_module.canonical_product_policy_evaluation_bundle_sha256,
         )
 
-        object.__setattr__(self, "_workspace_type", _issuance.ProductPolicyEvaluationWorkspace)
-        object.__setattr__(self, "_ref_type", _issuance.IssuedPolicyEvaluationRef)
-        object.__setattr__(self, "_policy_evaluation_type", _issuance.PolicyEvaluation)
-        object.__setattr__(self, "_protocol_type", _issuance.FrozenBaselineProtocol)
-        object.__setattr__(self, "_baseline_kind_type", _issuance.BaselineKind)
-        object.__setattr__(self, "_bundle_type", _issuance.EvaluationBundleRef)
+        object.__setattr__(
+            self,
+            "_workspace_type",
+            issuance_module.ProductPolicyEvaluationWorkspace,
+        )
+        object.__setattr__(self, "_ref_type", issuance_module.IssuedPolicyEvaluationRef)
+        object.__setattr__(self, "_policy_evaluation_type", issuance_module.PolicyEvaluation)
+        object.__setattr__(self, "_protocol_type", issuance_module.FrozenBaselineProtocol)
+        object.__setattr__(self, "_baseline_kind_type", issuance_module.BaselineKind)
+        object.__setattr__(self, "_bundle_type", issuance_module.EvaluationBundleRef)
 
-        object.__setattr__(self, "_result_artifact_kind", _issuance._RESULT_ARTIFACT_KIND)
-        object.__setattr__(self, "_bundle_id_prefix", _issuance._BUNDLE_ID_PREFIX)
-        object.__setattr__(self, "_issuer_source_sha256", _issuance._ISSUER_SOURCE_SHA256)
+        object.__setattr__(self, "_result_artifact_kind", issuance_module._RESULT_ARTIFACT_KIND)
+        object.__setattr__(self, "_bundle_id_prefix", issuance_module._BUNDLE_ID_PREFIX)
+        object.__setattr__(self, "_issuer_source_sha256", issuance_module._ISSUER_SOURCE_SHA256)
 
         object.__setattr__(self, "_trusted_datetime", _datetime_type)
         object.__setattr__(self, "_trusted_utc", _timezone_type.utc)
@@ -144,18 +181,20 @@ class _DispatchState:
         )
 
     def _require_store_constructor_authority(self) -> None:
+        issuance_module = self._issuance_module
+        factory_module = self._factory_module
         candidate_init = self._store_type.__init__
         candidate_code = getattr(candidate_init, "__code__", None)
         if (
-            _factory_module.FactoryArtifactStore is not self._store_type
-            or _issuance.FactoryArtifactStore is not self._store_type
+            factory_module.FactoryArtifactStore is not self._store_type
+            or issuance_module.FactoryArtifactStore is not self._store_type
             or candidate_init is not self._store_init
             or getattr(candidate_init, "__globals__", None)
             is not self._store_init_globals
             or candidate_code is None
-            or marshal.dumps(candidate_code) != self._store_init_code
-            or _factory_module.datetime is not self._factory_datetime
-            or _factory_module.timezone is not self._factory_timezone
+            or self._marshal_dumps(candidate_code) != self._store_init_code
+            or factory_module.datetime is not self._factory_datetime
+            or factory_module.timezone is not self._factory_timezone
             or self._store_init_globals.get("datetime") is not self._factory_datetime
             or self._store_init_globals.get("timezone") is not self._factory_timezone
         ):
@@ -178,31 +217,32 @@ class _DispatchState:
         return registry, store
 
     def _require_common_dispatch(self) -> None:
+        issuance_module = self._issuance_module
         if (
-            _issuance._open_canonical_authorities is not self._public_open
-            or _issuance.issue_product_policy_evaluation is not self._public_issue
-            or _issuance.resolve_product_policy_evaluation is not self._public_resolve
-            or _issuance.verify_product_policy_evaluation is not self._public_verify
-            or _issuance._target is not self._target
-            or _issuance._issuance_id is not self._issuance_id
-            or _issuance._require_source_factory_evaluation is not self._require_source
-            or _issuance._derive_policy_evaluation is not self._derive
-            or _issuance._registry_get is not self._registry_get
-            or _issuance._store_read is not self._store_read
-            or _issuance._STORE_MATERIALIZE is not self._store_materialize
-            or _issuance._STORE_RECEIPT is not self._store_receipt
-            or _issuance._REGISTRY_APPEND is not self._registry_append
-            or _issuance.canonical_product_policy_evaluation_bundle_sha256
+            issuance_module._open_canonical_authorities is not self._public_open
+            or issuance_module.issue_product_policy_evaluation is not self._public_issue
+            or issuance_module.resolve_product_policy_evaluation is not self._public_resolve
+            or issuance_module.verify_product_policy_evaluation is not self._public_verify
+            or issuance_module._target is not self._target
+            or issuance_module._issuance_id is not self._issuance_id
+            or issuance_module._require_source_factory_evaluation is not self._require_source
+            or issuance_module._derive_policy_evaluation is not self._derive
+            or issuance_module._registry_get is not self._registry_get
+            or issuance_module._store_read is not self._store_read
+            or issuance_module._STORE_MATERIALIZE is not self._store_materialize
+            or issuance_module._STORE_RECEIPT is not self._store_receipt
+            or issuance_module._REGISTRY_APPEND is not self._registry_append
+            or issuance_module.canonical_product_policy_evaluation_bundle_sha256
             is not self._canonical_bundle_sha256
-            or _issuance.ProductPolicyEvaluationWorkspace is not self._workspace_type
-            or _issuance.IssuedPolicyEvaluationRef is not self._ref_type
-            or _issuance.PolicyEvaluation is not self._policy_evaluation_type
-            or _issuance.FrozenBaselineProtocol is not self._protocol_type
-            or _issuance.BaselineKind is not self._baseline_kind_type
-            or _issuance.EvaluationBundleRef is not self._bundle_type
-            or _issuance._RESULT_ARTIFACT_KIND != self._result_artifact_kind
-            or _issuance._BUNDLE_ID_PREFIX != self._bundle_id_prefix
-            or _issuance._ISSUER_SOURCE_SHA256 != self._issuer_source_sha256
+            or issuance_module.ProductPolicyEvaluationWorkspace is not self._workspace_type
+            or issuance_module.IssuedPolicyEvaluationRef is not self._ref_type
+            or issuance_module.PolicyEvaluation is not self._policy_evaluation_type
+            or issuance_module.FrozenBaselineProtocol is not self._protocol_type
+            or issuance_module.BaselineKind is not self._baseline_kind_type
+            or issuance_module.EvaluationBundleRef is not self._bundle_type
+            or issuance_module._RESULT_ARTIFACT_KIND != self._result_artifact_kind
+            or issuance_module._BUNDLE_ID_PREFIX != self._bundle_id_prefix
+            or issuance_module._ISSUER_SOURCE_SHA256 != self._issuer_source_sha256
         ):
             self._raise_rebound("direct helper graph")
         self._require_store_constructor_authority()

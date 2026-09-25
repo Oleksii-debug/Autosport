@@ -40,7 +40,6 @@ _SCHEMA_VERSION: Final = 1
 _AUTHORITY_DOMAIN: Final = "autosport.risk.randomization-precommit.v1"
 _ROOT_BYTES: Final = 32
 _HEX: Final = frozenset("0123456789abcdef")
-_PRODUCT_TOKEN_BYTES: Final = secrets.token_bytes
 
 
 class RiskRandomizationPrecommitError(RuntimeError):
@@ -366,7 +365,7 @@ def _receipt(
     )
 
 
-def issue_risk_randomization_precommit(
+def _issue_risk_randomization_precommit(
     registry_path: str | Path,
     *,
     workspace: str | Path,
@@ -374,13 +373,9 @@ def issue_risk_randomization_precommit(
     dataset_snapshot_id: str,
     experiment_id: str,
     authority_root: str | Path | None = None,
+    _product_token_bytes,
 ) -> RiskRandomizationPrecommitReceipt:
-    """Create-or-recover one product-generated randomization root.
-
-    There is intentionally no caller-supplied root/seed argument.  The existing
-    fixed-N membership publication is freshly re-resolved before every issue or
-    retry, so a caller cannot bind a root to a self-asserted membership receipt.
-    """
+    """Implementation for one hard-sealed product-generated randomization root."""
 
     experiment_id = _text(experiment_id, "experiment_id")
     workspace_path = _workspace_path(workspace)
@@ -466,12 +461,12 @@ def issue_risk_randomization_precommit(
                     "committed randomization state is missing from workspace"
                 )
 
-            if secrets.token_bytes is not _PRODUCT_TOKEN_BYTES:
+            if secrets.token_bytes is not _product_token_bytes:
                 raise RiskRandomizationPrecommitError(
                     "randomization entropy source was rebound"
                 )
             randomization_root_sha256 = hashlib.sha256(
-                _PRODUCT_TOKEN_BYTES(_ROOT_BYTES)
+                _product_token_bytes(_ROOT_BYTES)
             ).hexdigest()
             state = _state_template(
                 workspace_instance_id=authority.workspace_instance_id,
@@ -520,6 +515,44 @@ def issue_risk_randomization_precommit(
         raise RiskRandomizationPrecommitError(
             "randomization precommit failed closed"
         ) from exc
+
+
+def _bind_product_entropy_issuer(issue_impl, product_token_bytes):
+    def issue_risk_randomization_precommit(
+        registry_path: str | Path,
+        *,
+        workspace: str | Path,
+        research_protocol_id: str,
+        dataset_snapshot_id: str,
+        experiment_id: str,
+        authority_root: str | Path | None = None,
+    ) -> RiskRandomizationPrecommitReceipt:
+        """Create-or-recover one product-generated randomization root.
+
+        The entropy callable is captured outside module-global dispatch, so
+        rebinding both ``secrets.token_bytes`` and any module token cannot mint
+        a product-issued root. There is no caller-supplied seed/root/entropy
+        argument.
+        """
+
+        return issue_impl(
+            registry_path,
+            workspace=workspace,
+            research_protocol_id=research_protocol_id,
+            dataset_snapshot_id=dataset_snapshot_id,
+            experiment_id=experiment_id,
+            authority_root=authority_root,
+            _product_token_bytes=product_token_bytes,
+        )
+
+    return issue_risk_randomization_precommit
+
+
+issue_risk_randomization_precommit = _bind_product_entropy_issuer(
+    _issue_risk_randomization_precommit,
+    secrets.token_bytes,
+)
+del _bind_product_entropy_issuer
 
 
 def resolve_risk_randomization_precommit(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from hashlib import sha256
 import json
 
@@ -9,6 +10,12 @@ from autosport import _betfair_authenticated_stream_filter_snapshot as filter_gu
 from autosport import betfair_authenticated_stream as auth
 from autosport import betfair_stream_transport as stream
 from autosport.betfair_account_readonly import BetfairSessionCredentials
+from autosport.betfair_stream_codec import (
+    BETFAIR_STREAM_SOURCE_ID,
+    BetfairQuoteIdentity,
+    BetfairQuoteSide,
+)
+from autosport.betfair_stream_publish_freshness import BetfairStreamFreshnessPolicy
 
 
 class FakeSocket:
@@ -72,10 +79,47 @@ def _subscription_status() -> bytes:
     )
 
 
+def _mcm(*, publish_time_ms: int = 1000) -> bytes:
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": True,
+                "con": False,
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.0}],
+            }
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+
+
+def _identity() -> BetfairQuoteIdentity:
+    return BetfairQuoteIdentity(
+        BETFAIR_STREAM_SOURCE_ID,
+        "1.A",
+        1,
+        Decimal("0"),
+        BetfairQuoteSide.LAST_TRADED,
+        None,
+    )
+
+
 def _transport(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    tail: bytes = b"",
 ) -> tuple[stream.BetfairStreamTlsTransport, FakeSocket]:
-    fake = FakeSocket([_connection(), _auth_status() + _subscription_status()])
+    fake = FakeSocket(
+        [_connection(), _auth_status() + _subscription_status() + tail]
+    )
     monkeypatch.setattr(
         stream,
         "_open_verified_tls_socket",
@@ -92,6 +136,20 @@ def _transport(
     )
     assert transport.connect() == "conn-1"
     return transport, fake
+
+
+def _open_subscription(
+    transport: stream.BetfairStreamTlsTransport,
+) -> auth.BetfairAuthenticatedMarketSubscription:
+    return auth.open_authenticated_market_subscription(
+        transport,
+        provider_request_id=7,
+        market_filter={"marketIds": ["1.A"]},
+        market_data_fields=("EX_LTP",),
+        ladder_levels=None,
+        heartbeat_ms=5000,
+        conflate_ms=0,
+    )
 
 
 def test_caller_mutation_after_snapshot_cannot_change_sent_filter_or_authority(
@@ -157,3 +215,63 @@ def test_snapshot_guard_is_installed_on_public_subscription_issuer() -> None:
         "_autosport_market_filter_snapshot_guard",
         False,
     )
+
+
+def test_late_time_ns_rebind_cannot_refresh_stale_runtime_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    product_clock_ns = [1_100_000_000]
+    monkeypatch.setattr(auth.time, "time_ns", lambda: product_clock_ns[0])
+    transport, _fake = _transport(monkeypatch, tail=_mcm())
+    subscription = _open_subscription(transport)
+    runtime = auth.BetfairAuthenticatedStreamFreshnessRuntime(
+        transport,
+        subscription,
+    )
+
+    # A transient late rebind would make pt=1000 look 10ms old under the previous
+    # implementation. The admitted runtime must retain its 1100ms product clock.
+    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+    evidence = runtime.read_and_ingest()
+    assert len(evidence) == 1
+    assert evidence[0].received_time_ms == 1100
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+    )
+    assert (
+        decision.verdict
+        is auth.BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert not decision.decision_eligible
+
+
+def test_late_time_ns_rebind_cannot_revive_expired_positive_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    product_clock_ns = [1_010_000_000]
+    monkeypatch.setattr(auth.time, "time_ns", lambda: product_clock_ns[0])
+    transport, _fake = _transport(monkeypatch, tail=_mcm())
+    subscription = _open_subscription(transport)
+    runtime = auth.BetfairAuthenticatedStreamFreshnessRuntime(
+        transport,
+        subscription,
+    )
+    runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+    )
+    assert (
+        decision.verdict
+        is auth.BetfairAuthenticatedFreshnessVerdict.FRESH_AUTHENTICATED_PROVIDER_PUBLISH
+    )
+    assert decision.decision_eligible
+
+    product_clock_ns[0] = 1_100_000_000
+    assert not decision.decision_eligible
+
+    # Rebinding the module clock back into the original freshness window must not
+    # replace the callable captured by this already-admitted runtime.
+    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+    assert not decision.decision_eligible

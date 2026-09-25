@@ -17,6 +17,11 @@ from typing import Any, Iterable
 
 from .integrity import atomic_write_json, durable_path_lock, sha256_file
 from .learning_environment import EvidenceTruth
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .participant_identity import (
     EntityKind,
     IdentityView,
@@ -25,6 +30,7 @@ from .participant_identity import (
 
 _SCHEMA = "autosport.opponent_intelligence"
 _VERSION = 1
+_ORIGIN_AUTHORITY_DOMAIN = "autosport.opponent-intelligence.v1"
 
 
 class OpponentIntelligenceError(ValueError):
@@ -108,6 +114,40 @@ def _digest(payload: object) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _durable_state_bytes(payload: dict[str, Any]) -> bytes:
+    """Mirror atomic_write_json bytes so authority can bind the intended image."""
+
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _origin_authority_binding(
+    path: Path,
+    observed_state_sha256: str | None,
+    intended_state_sha256: str,
+    *,
+    kind: str,
+) -> str:
+    material = "\0".join(
+        (
+            _ORIGIN_AUTHORITY_DOMAIN,
+            kind,
+            path.name,
+            observed_state_sha256 or "<PRISTINE>",
+            intended_state_sha256,
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +437,227 @@ class OpponentIntelligenceStore:
             )
         store._persist()
         return store
+
+    def _origin_authority(self) -> MonotonicWorkspaceAuthority:
+        path = getattr(self, "path", None)
+        if not isinstance(path, Path):
+            raise OpponentIntelligenceError(
+                "product-owned durable store origin authority is unavailable"
+            )
+        try:
+            workspace = path.parent.resolve(strict=False)
+            return MonotonicWorkspaceAuthority(
+                workspace=workspace,
+                domain=_ORIGIN_AUTHORITY_DOMAIN,
+                key=path.name,
+            )
+        except (MonotonicWorkspaceAuthorityError, OSError) as exc:
+            raise OpponentIntelligenceError(
+                "product-owned durable store origin authority is unavailable"
+            ) from exc
+
+    def _recover_origin_authority(
+        self,
+        observed_state_sha256: str | None,
+        *,
+        allow_bootstrap: bool,
+    ) -> MonotonicWorkspaceAuthority:
+        authority = self._origin_authority()
+        try:
+            history = authority.read_history()
+            if not history:
+                if observed_state_sha256 is None:
+                    return authority
+                if not allow_bootstrap:
+                    raise OpponentIntelligenceError(
+                        "product-owned durable store origin authority is missing"
+                    )
+                binding = _origin_authority_binding(
+                    self.path,
+                    None,
+                    observed_state_sha256,
+                    kind="BOOTSTRAP",
+                )
+                tx_id = f"opponent-bootstrap-{observed_state_sha256}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed_state_sha256,
+                    semantic_binding_sha256=binding,
+                )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed_state_sha256,
+                    semantic_binding_sha256=binding,
+                )
+                return authority
+
+            pending = (
+                history[-1]
+                if history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            recovery = authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=None if pending is None else pending.tx_id,
+                semantic_binding_sha256=(
+                    None if pending is None else pending.semantic_binding_sha256
+                ),
+            )
+            if recovery.committed_state_sha256 != observed_state_sha256:
+                raise OpponentIntelligenceError(
+                    "product-owned durable store origin authority does not "
+                    "match current durable state"
+                )
+            return authority
+        except OpponentIntelligenceError:
+            raise
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise OpponentIntelligenceError(
+                "product-owned durable store origin authority rejected state"
+            ) from exc
+
+    def _verified_durable_state(self) -> dict[str, Any]:
+        path = getattr(self, "path", None)
+        expected_root = getattr(self, "_durable_root_sha256", None)
+        if (
+            not isinstance(path, Path)
+            or type(expected_root) is not str
+            or len(expected_root) != 64
+        ):
+            raise OpponentIntelligenceError(
+                "product-owned durable store origin authority is missing"
+            )
+        with durable_path_lock(path):
+            try:
+                raw_bytes = path.read_bytes()
+            except OSError as exc:
+                raise OpponentIntelligenceError(
+                    "product-owned durable store origin authority cannot read store"
+                ) from exc
+            observed_root = hashlib.sha256(raw_bytes).hexdigest()
+            if observed_root != expected_root:
+                raise OpponentIntelligenceError(
+                    "product-owned durable store changed; reopen before resolving"
+                )
+            self._recover_origin_authority(
+                observed_root,
+                allow_bootstrap=False,
+            )
+            try:
+                raw = json.loads(raw_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise OpponentIntelligenceError(
+                    "product-owned durable store is unreadable"
+                ) from exc
+            if (
+                type(raw) is not dict
+                or raw.get("schema") != _SCHEMA
+                or raw.get("version") != _VERSION
+            ):
+                raise OpponentIntelligenceError(
+                    "product-owned durable store schema is invalid"
+                )
+            return raw
+
+    def resolve_rating_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        as_of: str,
+    ) -> RatingSnapshot:
+        """Re-resolve one rating from origin-bound durable product state."""
+
+        key = _sha256("snapshot_id", snapshot_id)
+        decision = _instant("as_of", as_of)
+        raw = self._verified_durable_state()
+        rating_items = raw.get("rating_snapshots")
+        if type(rating_items) is not list:
+            raise OpponentIntelligenceError(
+                "product-owned durable store rating surface is invalid"
+            )
+        matches = [
+            item
+            for item in rating_items
+            if type(item) is dict and item.get("snapshot_id") == key
+        ]
+        if len(matches) != 1:
+            raise OpponentIntelligenceError(
+                "rating snapshot is not present exactly once in the "
+                "product-owned durable store"
+            )
+        item = matches[0]
+        try:
+            snapshot = RatingSnapshot(
+                item["snapshot_id"],
+                item["participant_entity_id"],
+                item["sport_id"],
+                item["league_id"],
+                item["market_context_id"],
+                IdentityView(item["view"]),
+                item["causal_cutoff"],
+                item["published_at"],
+                item["algorithm_family"],
+                item["algorithm_version"],
+                item["config_sha256"],
+                item["min_support"],
+                item["max_age_seconds"],
+                item["code_sha256"],
+                item["dependency_sha256"],
+                tuple(item["predecessor_snapshot_ids"]),
+                tuple(item["input_performance_ids"]),
+                item["input_digest"],
+                item["support"],
+                item["effective_sample"],
+                item["opponent_count"],
+                item["rating"],
+                item["uncertainty"],
+                SnapshotState(item["state"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise OpponentIntelligenceError(
+                "product-owned durable rating snapshot is invalid"
+            ) from exc
+        if _digest(snapshot.payload(include_id=False)) != snapshot.snapshot_id:
+            raise OpponentIntelligenceError(
+                "product-owned durable rating snapshot digest mismatch"
+            )
+        in_memory = getattr(self, "_ratings", None)
+        if type(in_memory) is not dict or in_memory.get(key) != snapshot:
+            raise OpponentIntelligenceError(
+                "in-memory rating state diverged from product-owned durable authority"
+            )
+        if _instant("rating snapshot published_at", snapshot.published_at) > decision:
+            raise OpponentIntelligenceError(
+                "rating snapshot was not published by the decision time"
+            )
+
+        invalidation_items = raw.get("invalidations")
+        if type(invalidation_items) is not list:
+            raise OpponentIntelligenceError(
+                "product-owned durable store invalidation surface is invalid"
+            )
+        for invalidation in invalidation_items:
+            if type(invalidation) is not dict:
+                raise OpponentIntelligenceError(
+                    "product-owned durable invalidation is invalid"
+                )
+            if (
+                invalidation.get("target_kind")
+                == InvalidationTarget.RATING_SNAPSHOT.value
+                and invalidation.get("target_id") == key
+                and invalidation.get("recompute_status")
+                == RecomputeStatus.REQUIRED.value
+                and _instant(
+                    "rating snapshot invalidation detected_at",
+                    invalidation.get("detected_at"),
+                )
+                <= decision
+            ):
+                raise OpponentIntelligenceError(
+                    "rating snapshot was invalidated by the decision time"
+                )
+        return snapshot
 
     def record_performance(
         self,
@@ -1353,6 +1614,7 @@ class OpponentIntelligenceStore:
                 )
             ],
         }
+        intended_root = hashlib.sha256(_durable_state_bytes(payload)).hexdigest()
         with durable_path_lock(self.path):
             current_root = (
                 sha256_file(self.path)
@@ -1363,8 +1625,50 @@ class OpponentIntelligenceStore:
                 raise OpponentIntelligenceError(
                     "durable root changed; reopen before writing"
                 )
-            atomic_write_json(self.path, payload)
-            self._durable_root_sha256 = sha256_file(self.path)
+            authority = self._recover_origin_authority(
+                current_root,
+                allow_bootstrap=current_root is not None,
+            )
+            if current_root == intended_root:
+                return
+            binding = _origin_authority_binding(
+                self.path,
+                current_root,
+                intended_root,
+                kind="PUBLISH",
+            )
+            tx_material = "\0".join(
+                (
+                    self.path.name,
+                    current_root or "<PRISTINE>",
+                    intended_root,
+                )
+            ).encode("utf-8")
+            tx_id = f"opponent-{hashlib.sha256(tx_material).hexdigest()}"
+            try:
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=current_root,
+                    intended_state_sha256=intended_root,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(self.path, payload)
+                published_root = sha256_file(self.path)
+                if published_root != intended_root:
+                    raise OpponentIntelligenceError(
+                        "published opponent intelligence bytes do not match "
+                        "prepared durable authority digest"
+                    )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published_root,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise OpponentIntelligenceError(
+                    "product-owned durable store origin authority rejected write"
+                ) from exc
+            self._durable_root_sha256 = published_root
 
     def _persist(self) -> None:
         self._persist_state()
@@ -1716,4 +2020,14 @@ class OpponentIntelligenceStore:
         self._ratings = ratings
         self._features = features
         self._invalidations = invalidations
-        self._durable_root_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        validated_root = hashlib.sha256(raw_bytes).hexdigest()
+        with durable_path_lock(self.path):
+            if sha256_file(self.path) != validated_root:
+                raise OpponentIntelligenceError(
+                    "opponent intelligence store changed during validated load"
+                )
+            self._recover_origin_authority(
+                validated_root,
+                allow_bootstrap=True,
+            )
+            self._durable_root_sha256 = validated_root

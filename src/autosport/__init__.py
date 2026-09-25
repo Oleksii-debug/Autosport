@@ -153,3 +153,7 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# Lawful-use composition depends on exact durable owner-approval semantics. Seal
+# internal store dispatch before downstream governance captures its resolver.
+from . import _provider_owner_approval_dispatch_guard as _provider_owner_approval_dispatch_guard  # noqa: F401,E402

@@ -1,17 +1,15 @@
-"""Seal the public Betfair placeOrders surface to product-owned transport truth.
+"""Seal the public Betfair placeOrders surface to product-owned execution truth.
 
-The canonical provider-write implementation still needs one private pre-transport
-callback so ``execute_betfair_supervised_action`` can cross the durable SUBMITTED
-boundary after STOP admission and immediately before the irreversible POST. That
-private seam must not be caller authority.
+The irreversible provider primitive is intentionally non-public.  The canonical
+high-level ``execute_betfair_supervised_action`` path is the only product entrypoint
+allowed to obtain it, after approval/ledger reservation and before its durable
+STOP/SUBMITTED ordering.  Ordinary callers still see a narrow ``place_action``
+signature for compatibility, but that surface is fail-closed and can never create
+a provider effect.
 
-This composition guard keeps the already-qualified canonical private primitive
-untouched. A caller-code-sensitive descriptor returns that primitive only to the
-exact canonical high-level execution code object. Every ordinary class or instance
-access receives a narrow public function exposing product inputs only. The public
-function delegates to the frozen canonical primitive with the product-owned HTTPS
-POST, response parser, and observation clock explicitly bound; callers cannot
-replace those authorities.
+This boundary also prevents caller substitution of transport/parser/clock seams.
+Those deterministic seams remain available only to the captured private primitive
+used by the exact canonical high-level execution code object.
 """
 
 from __future__ import annotations
@@ -52,7 +50,7 @@ if (
     raise RuntimeError("canonical Betfair provider-write dispatch is unavailable")
 
 
-def _canonical_public_dispatch_unchanged() -> bool:
+def _canonical_internal_dispatch_unchanged() -> bool:
     return (
         _CLIENT_TYPE is _impl.BetfairSupervisedPlaceOrdersClient
         and _CANONICAL_TRANSPORT_TYPE is _impl.UrllibBetfairHttpTransport
@@ -89,30 +87,11 @@ def _public_place_action(
     provider_order_ref: str,
     execution_workspace: Path,
 ) -> _impl.BetfairPlaceExecutionReport:
-    """Dispatch a narrow public write through product-owned provider authorities."""
+    """Fail closed: provider effects require the canonical approval/ledger path."""
 
-    if type(self) is not _CLIENT_TYPE:
-        raise _impl.BetfairSupervisedExecutionError(
-            "public Betfair provider write requires the exact canonical client"
-        )
-    if type(self._transport) is not _CANONICAL_TRANSPORT_TYPE:
-        raise _impl.BetfairSupervisedExecutionError(
-            "public Betfair provider write requires canonical HTTPS transport state"
-        )
-    if not _canonical_public_dispatch_unchanged():
-        raise _impl.BetfairSupervisedExecutionError(
-            "canonical Betfair public provider-write authority changed"
-        )
-    return _PRIVATE_PLACE_ACTION(
-        self,
-        action,
-        profile=profile,
-        bound=bound,
-        provider_order_ref=provider_order_ref,
-        execution_workspace=execution_workspace,
-        _transport_post=_PROVIDER_HTTP_POST,
-        _response_parser=_RESPONSE_PARSER,
-        _observation_clock=_OBSERVATION_CLOCK,
+    raise _impl.BetfairSupervisedExecutionError(
+        "direct public Betfair provider write is disabled; "
+        "use execute_betfair_supervised_action"
     )
 
 
@@ -122,7 +101,7 @@ _public_place_action.__module__ = _impl.__name__
 
 
 class _PlaceActionBoundary:
-    """Expose public or private dispatch according to exact caller code authority."""
+    """Expose the private provider primitive only to the exact canonical executor."""
 
     __slots__ = ()
 
@@ -131,11 +110,16 @@ class _PlaceActionBoundary:
             caller_code = sys._getframe(1).f_code
         except (AttributeError, ValueError):
             caller_code = None
-        dispatch = (
-            _PRIVATE_PLACE_ACTION
-            if caller_code is _CANONICAL_EXECUTE_CODE
-            else _public_place_action
-        )
+
+        if caller_code is _CANONICAL_EXECUTE_CODE:
+            if not _canonical_internal_dispatch_unchanged():
+                raise _impl.BetfairSupervisedExecutionError(
+                    "canonical Betfair internal provider-write authority changed"
+                )
+            dispatch = _PRIVATE_PLACE_ACTION
+        else:
+            dispatch = _public_place_action
+
         if instance is None:
             return dispatch
         return dispatch.__get__(instance, owner or _CLIENT_TYPE)

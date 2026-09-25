@@ -153,3 +153,7 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# A supported START is not caller-visible until the exact durable activation bytes
+# have been re-read against the already-committed monotonic witness.
+from . import _product_decision_activation_commit_return_guard as _product_decision_activation_commit_return_guard  # noqa: F401,E402

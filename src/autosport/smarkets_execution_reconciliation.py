@@ -15,6 +15,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -921,11 +922,99 @@ def _validated_effect_record(
     )
 
 
+_SMARKETS_JOURNAL_MAX_BYTES = 64 * 1024 * 1024
+_SMK_JOURNAL_MAX_LINE_BYTES = 1024 * 1024
+_SMK_JOURNAL_MAX_RECORDS = 100_000
+
+
 class SmarketsReconciliationJournal:
     """Small append-only hash-chain for restart-safe verified readback evidence."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+
+    @staticmethod
+    def _file_identity(value: os.stat_result) -> tuple[int, int]:
+        return (value.st_dev, value.st_ino)
+
+    def _bounded_lines(self) -> list[str]:
+        """Read a stable regular journal through explicit finite resource envelopes."""
+
+        try:
+            before = self.path.lstat()
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise SmarketsReconciliationError("cannot inspect Smarkets journal") from exc
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise SmarketsReconciliationError(
+                "Smarkets journal must be a regular non-symlink file"
+            )
+        if before.st_size > _SMARKETS_JOURNAL_MAX_BYTES:
+            raise SmarketsReconciliationError("Smarkets journal exceeds byte limit")
+
+        lines: list[str] = []
+        total_bytes = 0
+        try:
+            with self.path.open("rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    raise SmarketsReconciliationError(
+                        "Smarkets journal must remain a regular file"
+                    )
+                if self._file_identity(opened) != self._file_identity(before):
+                    raise SmarketsReconciliationError(
+                        "Smarkets journal path changed during open"
+                    )
+                while True:
+                    raw = handle.readline(_SMK_JOURNAL_MAX_LINE_BYTES + 1)
+                    if not raw:
+                        break
+                    total_bytes += len(raw)
+                    if total_bytes > _SMARKETS_JOURNAL_MAX_BYTES:
+                        raise SmarketsReconciliationError(
+                            "Smarkets journal exceeds byte limit"
+                        )
+                    if len(raw) > _SMK_JOURNAL_MAX_LINE_BYTES:
+                        raise SmarketsReconciliationError(
+                            "Smarkets journal record exceeds line limit"
+                        )
+                    if len(lines) >= _SMK_JOURNAL_MAX_RECORDS:
+                        raise SmarketsReconciliationError(
+                            "Smarkets journal exceeds record limit"
+                        )
+                    if raw.endswith(b"\n"):
+                        raw = raw[:-1]
+                        if raw.endswith(b"\r"):
+                            raw = raw[:-1]
+                    try:
+                        lines.append(raw.decode("utf-8"))
+                    except UnicodeDecodeError as exc:
+                        raise SmarketsReconciliationError(
+                            "cannot read Smarkets journal"
+                        ) from exc
+                after = os.fstat(handle.fileno())
+            final = self.path.lstat()
+        except FileNotFoundError as exc:
+            raise SmarketsReconciliationError(
+                "Smarkets journal path changed during read"
+            ) from exc
+        except OSError as exc:
+            raise SmarketsReconciliationError("cannot read Smarkets journal") from exc
+
+        opened_identity = self._file_identity(opened)
+        if (
+            self._file_identity(after) != opened_identity
+            or self._file_identity(final) != opened_identity
+            or not stat.S_ISREG(final.st_mode)
+            or stat.S_ISLNK(final.st_mode)
+            or after.st_size != total_bytes
+            or final.st_size != total_bytes
+        ):
+            raise SmarketsReconciliationError(
+                "Smarkets journal changed during bounded read"
+            )
+        return lines
 
     @staticmethod
     def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -937,12 +1026,7 @@ class SmarketsReconciliationJournal:
         return result
 
     def _load_rows(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        try:
-            raw_lines = self.path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError) as exc:
-            raise SmarketsReconciliationError("cannot read Smarkets journal") from exc
+        raw_lines = self._bounded_lines()
         rows: list[dict[str, Any]] = []
         previous = "0" * 64
         for index, raw in enumerate(raw_lines, start=1):

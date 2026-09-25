@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import autosport._risk_randomization_precommit_internal_guard as dispatch_guard
 from autosport.risk_membership_publication import RiskMembershipPublicationReceipt
 import autosport.risk_randomization_precommit as precommit
 
@@ -47,6 +48,10 @@ def _install_membership(monkeypatch) -> RiskMembershipPublicationReceipt:
         lambda *_args, **_kwargs: receipt,
     )
     return receipt
+
+
+def test_guard_does_not_expose_mutable_target_module_binding() -> None:
+    assert not hasattr(dispatch_guard, "_precommit")
 
 
 def test_hashlib_module_rebinding_fails_before_randomization_publication(

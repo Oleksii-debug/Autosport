@@ -155,6 +155,23 @@ def test_distinct_manifests_without_bilateral_membership_fail_closed(
     )
 
 
+def test_empty_membership_is_not_disjointness_evidence() -> None:
+    prior, current = _prior_current()
+    registry = _MembershipRegistry(
+        {
+            "dataset-prior": (SHA_A, ()),
+            "dataset-current": (SHA_B, (OBS_C, OBS_D)),
+        }
+    )
+
+    with pytest.raises(ValueError, match="must be a non-empty JSON list"):
+        guard._holdout_consumed_by_physical_evidence(
+            (prior,),
+            same_attempt_identity=current,
+            registry=registry,
+        )
+
+
 def test_duplicate_membership_identity_is_rejected() -> None:
     prior, current = _prior_current()
     registry = _MembershipRegistry(

@@ -25,6 +25,14 @@ from .real_execution_ledger import (
 
 
 SCHEMA_VERSION = 1
+_LEDGER_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
+_LEDGER_SAGA = RealExecutionLedger.saga
+_LEDGER_PROVIDER_ORDER_REFERENCE = RealExecutionLedger.provider_order_reference
+_LEDGER_READ_SURFACES = (
+    ("verified_snapshot", _LEDGER_VERIFIED_SNAPSHOT),
+    ("saga", _LEDGER_SAGA),
+    ("provider_order_reference", _LEDGER_PROVIDER_ORDER_REFERENCE),
+)
 
 
 class RealizedMatchEvidenceError(RuntimeError):
@@ -192,6 +200,12 @@ class BetfairRealizedMatchEvidence:
             "finalized": self.finalized,
         }
 
+    def _identity_payload(self) -> dict[str, object]:
+        """Return stable historical identity, excluding mutable ledger-tail audit state."""
+        payload = self._payload()
+        payload.pop("ledger_snapshot_sha256")
+        return payload
+
     def to_dict(self) -> dict[str, object]:
         payload = self._payload()
         payload["evidence_id"] = self.evidence_id
@@ -210,7 +224,7 @@ class BetfairRealizedMatchEvidence:
             raise RealizedMatchEvidenceError(
                 "unsupported realized match evidence schema"
             )
-        if self.evidence_id != _sha256(self._payload()):
+        if self.evidence_id != _sha256(self._identity_payload()):
             raise RealizedMatchEvidenceError(
                 "realized match evidence digest mismatch"
             )
@@ -270,16 +284,27 @@ def _attempt_binding(
 ) -> _AttemptBinding:
     if not isinstance(plan, ExecutionPlan):
         raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(ledger, RealExecutionLedger):
-        raise TypeError("ledger must be RealExecutionLedger")
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
     if type(attempt_id) is not str or not attempt_id.strip():
         raise RealizedMatchEvidenceError(
             "attempt_id must be non-empty text"
         )
 
+    instance_state = getattr(ledger, "__dict__", {})
+    for method_name, canonical_method in _LEDGER_READ_SURFACES:
+        if method_name in instance_state:
+            raise RealizedMatchEvidenceError(
+                "execution ledger read authority is rebound on the instance"
+            )
+        if getattr(RealExecutionLedger, method_name, None) is not canonical_method:
+            raise RealizedMatchEvidenceError(
+                "canonical execution ledger read authority changed"
+            )
+
     try:
-        before = ledger.verified_snapshot()
-        saga = ledger.saga(plan.plan_id)
+        before = _LEDGER_VERIFIED_SNAPSHOT(ledger)
+        saga = _LEDGER_SAGA(ledger, plan.plan_id)
         if saga.plan_fingerprint != _exact_plan_fingerprint(plan):
             raise RealizedMatchEvidenceError(
                 "caller plan does not match durable execution plan fingerprint"
@@ -298,7 +323,8 @@ def _attempt_binding(
                 "durable attempt action cannot be resolved uniquely"
             )
         action = actions[0]
-        provider_order_ref = ledger.provider_order_reference(
+        provider_order_ref = _LEDGER_PROVIDER_ORDER_REFERENCE(
+            ledger,
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
@@ -306,7 +332,7 @@ def _attempt_binding(
             raise RealizedMatchEvidenceError(
                 "attempt lacks durable provider order reference"
             )
-        after = ledger.verified_snapshot()
+        after = _LEDGER_VERIFIED_SNAPSHOT(ledger)
     except RealizedMatchEvidenceError:
         raise
     except (ExecutionLedgerError, KeyError, OSError) as exc:
@@ -478,7 +504,7 @@ def _make_evidence(
     )
     return replace(
         draft,
-        evidence_id=_sha256(draft._payload()),
+        evidence_id=_sha256(draft._identity_payload()),
     )
 
 
@@ -735,7 +761,7 @@ def validate_betfair_realized_match_revision(
 
 
 def _install_realized_match_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
+    issued: dict[int, tuple[object, str, str]] = {}
     raw_resolve = resolve_betfair_realized_match
     validate_integrity = BetfairRealizedMatchEvidence._validate_integrity
 
@@ -760,6 +786,7 @@ def _install_realized_match_authority() -> None:
         issued[evidence_id] = (
             ref(evidence, forget),
             evidence.evidence_id,
+            _sha256(evidence._payload()),
         )
         return evidence
 
@@ -775,6 +802,10 @@ def _install_realized_match_authority() -> None:
         if record[1] != self.evidence_id:
             raise RealizedMatchEvidenceError(
                 "realized match evidence changed after canonical resolution"
+            )
+        if record[2] != _sha256(self._payload()):
+            raise RealizedMatchEvidenceError(
+                "realized match evidence payload changed after canonical resolution"
             )
 
     globals()["resolve_betfair_realized_match"] = authoritative_resolve

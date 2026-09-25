@@ -144,8 +144,8 @@ class ProductPaperDecisionCycle:
             raise TypeError("runtime must be the canonical AutonomousProductRuntime")
         if type(loop_id) is not str or not loop_id or loop_id.strip() != loop_id:
             raise ValueError("loop_id must be non-empty trimmed text")
-        if not isinstance(authority, EconomicDecisionAuthority):
-            raise TypeError("authority must be EconomicDecisionAuthority")
+        if type(authority) is not EconomicDecisionAuthority:
+            raise TypeError("authority must be the canonical EconomicDecisionAuthority")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
         strategy_version_id = getattr(intent_factory, "strategy_version_id", None)

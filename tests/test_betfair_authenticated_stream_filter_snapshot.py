@@ -272,11 +272,27 @@ def test_snapshot_guard_is_installed_on_public_subscription_issuer() -> None:
     )
 
 
-def test_late_time_ns_rebind_cannot_refresh_stale_runtime_evidence(
+def test_time_ns_rebind_before_runtime_admission_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    product_clock_ns = [1_100_000_000]
-    monkeypatch.setattr(auth.time, "time_ns", lambda: product_clock_ns[0])
+    transport, _fake = _transport(monkeypatch)
+    subscription = _open_subscription(transport)
+
+    monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+
+    with pytest.raises(
+        auth.BetfairAuthenticatedStreamError,
+        match="product wall-clock dispatch changed",
+    ):
+        auth.BetfairAuthenticatedStreamFreshnessRuntime(
+            transport,
+            subscription,
+        )
+
+
+def test_time_ns_rebind_after_runtime_admission_fails_closed_on_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     transport, _fake = _transport(monkeypatch, tail=_mcm())
     subscription = _open_subscription(transport)
     runtime = auth.BetfairAuthenticatedStreamFreshnessRuntime(
@@ -284,29 +300,23 @@ def test_late_time_ns_rebind_cannot_refresh_stale_runtime_evidence(
         subscription,
     )
 
-    # A transient late rebind would make pt=1000 look 10ms old under the previous
-    # implementation. The admitted runtime must retain its 1100ms product clock.
     monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
-    evidence = runtime.read_and_ingest()
-    assert len(evidence) == 1
-    assert evidence[0].received_time_ms == 1100
-    decision = runtime.evaluate(
-        _identity(),
-        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
-    )
-    assert (
-        decision.verdict
-        is auth.BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
-    )
-    assert not decision.decision_eligible
+
+    with pytest.raises(
+        auth.BetfairAuthenticatedStreamError,
+        match="product wall-clock dispatch changed",
+    ):
+        runtime.read_and_ingest()
 
 
-def test_late_time_ns_rebind_cannot_revive_expired_positive_decision(
+def test_time_ns_rebind_after_positive_decision_revokes_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    product_clock_ns = [1_010_000_000]
-    monkeypatch.setattr(auth.time, "time_ns", lambda: product_clock_ns[0])
-    transport, _fake = _transport(monkeypatch, tail=_mcm())
+    publish_time_ms = auth.time.time_ns() // 1_000_000
+    transport, _fake = _transport(
+        monkeypatch,
+        tail=_mcm(publish_time_ms=publish_time_ms),
+    )
     subscription = _open_subscription(transport)
     runtime = auth.BetfairAuthenticatedStreamFreshnessRuntime(
         transport,
@@ -315,7 +325,7 @@ def test_late_time_ns_rebind_cannot_revive_expired_positive_decision(
     runtime.read_and_ingest()
     decision = runtime.evaluate(
         _identity(),
-        policy=BetfairStreamFreshnessPolicy(max_age_ms=20),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=60_000),
     )
     assert (
         decision.verdict
@@ -323,10 +333,6 @@ def test_late_time_ns_rebind_cannot_revive_expired_positive_decision(
     )
     assert decision.decision_eligible
 
-    product_clock_ns[0] = 1_100_000_000
-    assert not decision.decision_eligible
-
-    # Rebinding the module clock back into the original freshness window must not
-    # replace the callable captured by this already-admitted runtime.
     monkeypatch.setattr(auth.time, "time_ns", lambda: 1_010_000_000)
+
     assert not decision.decision_eligible

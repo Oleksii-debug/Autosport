@@ -149,3 +149,8 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.
 from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
+
+# Caller-owned market-filter containers cannot remain authority-bearing after the
+# authenticated Betfair subscription starts. Snapshot once, then let the canonical
+# existing issuer hash and send only that detached product-owned value.
+from . import _betfair_authenticated_stream_filter_snapshot as _betfair_authenticated_stream_filter_snapshot  # noqa: F401,E402

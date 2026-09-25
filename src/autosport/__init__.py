@@ -149,3 +149,8 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.
 from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
+
+# Registered-strategy model reconstruction is product-owned scientific authority.
+# Seal its positive runtime type/post-init dispatch before package callers can retain
+# a resolver reference that would otherwise follow a later module-global class rebind.
+from . import _registered_strategy_model_runtime_issuance_guard as _registered_strategy_model_runtime_issuance_guard  # noqa: F401,E402

@@ -450,6 +450,103 @@ def _flatten_rows(
     return current, cleared
 
 
+def _cleared_source_digest(
+    cleared: tuple[BetfairClearedOrderObservation, ...],
+) -> str:
+    if len(cleared) == 1:
+        return cleared[0].evidence.source_payload_sha256
+    rows = [
+        {
+            "bet_id": row.bet_id,
+            "bet_status": row.bet_status,
+            "placed_date": row.placed_date,
+            "settled_date": row.settled_date,
+            "price_requested": _decimal_text(row.price_requested),
+            "price_matched": _decimal_text(row.price_matched),
+            "size_settled": _decimal_text(row.size_settled),
+            "source_payload_sha256": row.evidence.source_payload_sha256,
+            "observed_at": row.evidence.observed_at,
+        }
+        for row in cleared
+    ]
+    rows.sort(key=_canonical)
+    return _sha256(
+        {
+            "schema": "autosport.betfair_realized_match.cleared_source_set",
+            "schema_version": 1,
+            "rows": rows,
+        }
+    )
+
+
+def _resolve_cleared_economics(
+    cleared: tuple[BetfairClearedOrderObservation, ...],
+    *,
+    action: ExecutionAction,
+) -> tuple[
+    str,
+    Decimal | None,
+    Decimal,
+    str,
+    str,
+    str,
+]:
+    positive: dict[tuple[Decimal, Decimal], BetfairClearedOrderObservation] = {}
+    for row in cleared:
+        if row.price_requested != action.requested_odds:
+            raise RealizedMatchEvidenceError(
+                "cleared BET requested price differs from execution action"
+            )
+        if row.size_settled > action.requested_stake:
+            raise RealizedMatchEvidenceError(
+                "cleared BET settled size exceeds requested stake"
+            )
+        if row.size_settled > 0:
+            if row.price_matched <= 0:
+                raise RealizedMatchEvidenceError(
+                    "cleared BET matched stake lacks a positive matched price"
+                )
+            positive.setdefault((row.size_settled, row.price_matched), row)
+        elif row.price_matched != 0:
+            raise RealizedMatchEvidenceError(
+                "cleared BET zero settled size has a non-zero matched price"
+            )
+
+    if len(positive) > 1:
+        raise RealizedMatchEvidenceError(
+            "provider readback contains ambiguous cleared BET economics"
+        )
+    if positive:
+        (matched_stake, matched_odds), representative = next(iter(positive.items()))
+    else:
+        if len(cleared) != 1:
+            raise RealizedMatchEvidenceError(
+                "provider readback contains ambiguous zero cleared BET states"
+            )
+        representative = cleared[0]
+        matched_stake = Decimal("0")
+        matched_odds = None
+
+    statuses = sorted({row.bet_status for row in cleared})
+    provider_status = statuses[0] if len(statuses) == 1 else "+".join(statuses)
+    latest_observed = max(
+        cleared,
+        key=lambda row: _timestamp(row.evidence.observed_at, "cleared observed_at"),
+    ).evidence.observed_at
+    latest_settled = max(
+        cleared,
+        key=lambda row: _timestamp(row.settled_date, "cleared settled_date"),
+    ).settled_date
+    return (
+        representative.bet_id,
+        matched_odds,
+        matched_stake,
+        provider_status,
+        latest_observed,
+        latest_settled,
+    )
+
+
 def _make_evidence(
     *,
     source: RealizedMatchSource,
@@ -555,46 +652,27 @@ def _resolve_betfair_realized_match(
         )
 
     if cleared:
-        if len(cleared) != 1:
-            raise RealizedMatchEvidenceError(
-                "provider readback contains multiple cleared BET rows"
-            )
-        row = cleared[0]
-        if current and any(item.bet_id != row.bet_id for item in current):
-            raise RealizedMatchEvidenceError(
-                "current and cleared provider identities conflict"
-            )
-        if row.price_requested != action.requested_odds:
-            raise RealizedMatchEvidenceError(
-                "cleared BET requested price differs from execution action"
-            )
-        if row.size_settled > action.requested_stake:
-            raise RealizedMatchEvidenceError(
-                "cleared BET settled size exceeds requested stake"
-            )
-        if row.size_settled > 0 and row.price_matched <= 0:
-            raise RealizedMatchEvidenceError(
-                "cleared BET matched stake lacks a positive matched price"
-            )
-        if row.size_settled == 0 and row.price_matched != 0:
-            raise RealizedMatchEvidenceError(
-                "cleared BET zero settled size has a non-zero matched price"
-            )
+        (
+            bet_id,
+            matched_odds,
+            matched_stake,
+            provider_status,
+            provider_observed_at,
+            provider_settled_at,
+        ) = _resolve_cleared_economics(cleared, action=action)
         return _make_evidence(
             source=RealizedMatchSource.CLEARED_BET,
             plan=plan,
             binding=binding,
             attempt_id=attempt_id,
             readback=readback,
-            bet_id=row.bet_id,
-            provider_matched_odds=(
-                row.price_matched if row.size_settled > 0 else None
-            ),
-            provider_matched_stake=row.size_settled,
-            provider_status=row.bet_status,
-            provider_observed_at=row.evidence.observed_at,
-            provider_settled_at=row.settled_date,
-            source_payload_sha256=row.evidence.source_payload_sha256,
+            bet_id=bet_id,
+            provider_matched_odds=matched_odds,
+            provider_matched_stake=matched_stake,
+            provider_status=provider_status,
+            provider_observed_at=provider_observed_at,
+            provider_settled_at=provider_settled_at,
+            source_payload_sha256=_cleared_source_digest(cleared),
             finalized=True,
         )
 
@@ -690,13 +768,11 @@ def validate_betfair_realized_match_revision(
     previous: BetfairRealizedMatchEvidence,
     current: BetfairRealizedMatchEvidence,
 ) -> BetfairRealizedMatchEvidence:
-    """Reject stale/regressive realized-match projections."""
-    if not isinstance(previous, BetfairRealizedMatchEvidence):
-        raise TypeError("previous must be BetfairRealizedMatchEvidence")
-    if not isinstance(current, BetfairRealizedMatchEvidence):
-        raise TypeError("current must be BetfairRealizedMatchEvidence")
-    previous.assert_authoritative()
-    current.assert_authoritative()
+    """Validate fields after the installed origin-aware wrapper authenticates both values."""
+    if type(previous) is not BetfairRealizedMatchEvidence:
+        raise TypeError("previous must be exact BetfairRealizedMatchEvidence")
+    if type(current) is not BetfairRealizedMatchEvidence:
+        raise TypeError("current must be exact BetfairRealizedMatchEvidence")
 
     immutable_fields = (
         "plan_id",
@@ -750,9 +826,15 @@ def validate_betfair_realized_match_revision(
             and current.provider_matched_odds
             != previous.provider_matched_odds
         ):
-            raise RealizedMatchEvidenceError(
-                "realized match revision changes matched odds without new matched stake"
+            final_provider_correction = (
+                previous.source is RealizedMatchSource.CURRENT_ORDER
+                and current.source is RealizedMatchSource.CLEARED_BET
+                and current.finalized
             )
+            if not final_provider_correction:
+                raise RealizedMatchEvidenceError(
+                    "realized match revision changes matched odds without new matched stake"
+                )
     if previous.finalized and not current.finalized:
         raise RealizedMatchEvidenceError(
             "realized match revision reopens finalized provider evidence"
@@ -763,6 +845,7 @@ def validate_betfair_realized_match_revision(
 def _install_realized_match_authority() -> None:
     issued: dict[int, tuple[object, str, str]] = {}
     raw_resolve = resolve_betfair_realized_match
+    raw_validate_revision = validate_betfair_realized_match_revision
     validate_integrity = BetfairRealizedMatchEvidence._validate_integrity
 
     def authoritative_resolve(
@@ -793,6 +876,8 @@ def _install_realized_match_authority() -> None:
     def assert_authoritative(
         self: BetfairRealizedMatchEvidence,
     ) -> None:
+        if type(self) is not BetfairRealizedMatchEvidence:
+            raise TypeError("evidence must be exact BetfairRealizedMatchEvidence")
         validate_integrity(self)
         record = issued.get(id(self))
         if record is None or record[0]() is not self:
@@ -808,7 +893,22 @@ def _install_realized_match_authority() -> None:
                 "realized match evidence payload changed after canonical resolution"
             )
 
+    def authoritative_validate_revision(
+        previous: BetfairRealizedMatchEvidence,
+        current: BetfairRealizedMatchEvidence,
+    ) -> BetfairRealizedMatchEvidence:
+        if BetfairRealizedMatchEvidence.assert_authoritative is not assert_authoritative:
+            raise RealizedMatchEvidenceError(
+                "canonical realized match evidence authority changed"
+            )
+        assert_authoritative(previous)
+        assert_authoritative(current)
+        return raw_validate_revision(previous, current)
+
     globals()["resolve_betfair_realized_match"] = authoritative_resolve
+    globals()["validate_betfair_realized_match_revision"] = (
+        authoritative_validate_revision
+    )
     BetfairRealizedMatchEvidence.assert_authoritative = assert_authoritative
 
 

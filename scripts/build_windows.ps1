@@ -648,6 +648,13 @@ foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entr
 $trustedBuildSrc = Join-Path $trustedBuildRoot 'src'
 $trustedGuiEntry = Join-Path $trustedBuildRoot 'src/autosport/windows_entry.py'
 $trustedDataEntry = Join-Path $trustedBuildRoot 'src/autosport/data_tools_entry.py'
+$trustedWebAssets = Join-Path $trustedBuildRoot 'src/autosport/windows_web'
+if (-not (Test-Path -LiteralPath (Join-Path $trustedWebAssets 'index.html') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $trustedWebAssets 'app.js') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $trustedWebAssets 'styles.css') -PathType Leaf)) {
+  throw 'Exact build source snapshot is missing semantic WebView2 shell assets'
+}
+$trustedWebAssetsSpec = "$trustedWebAssets;autosport/windows_web"
 $pyInstallerOutputRoot = Join-Path $boundArtifactRoot 'pyinstaller-output'
 $pyInstallerDist = Join-Path $pyInstallerOutputRoot 'dist'
 $pyInstallerWork = Join-Path $pyInstallerOutputRoot 'build'
@@ -800,7 +807,7 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
-  & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
+  & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
   if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
   $builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'
   python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath

@@ -7,6 +7,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .risk_of_ruin_evaluator import (
+    IssuedRiskOfRuinResult,
+    ProductRiskOfRuinEvaluator,
+    RiskOfRuinIssuanceError,
+    RiskTargetKind,
+)
 from .scientific_registry import RegistryEntry, ScientificRegistry
 
 
@@ -22,6 +28,15 @@ _CONFIDENCE_SEMANTICS = "protocol_defined_upper_bound"
 _SCIENTIFIC_REGISTRY_GET = ScientificRegistry.get
 _SCIENTIFIC_REGISTRY_READ = ScientificRegistry._read
 _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY = ScientificRegistry._validate_entry
+
+# The financial consumer must resolve the *canonical* product evaluator, not a
+# caller-swapped object with the same public method names. Capture the exact
+# constructor/resolve implementation once and invoke those captured callables
+# directly. This bridge grants no authority while ProductRiskOfRuinEvaluator
+# itself remains fail-closed; it merely removes the future second-consumer seam.
+_PRODUCT_EVALUATOR_CLASS = ProductRiskOfRuinEvaluator
+_PRODUCT_EVALUATOR_INIT = ProductRiskOfRuinEvaluator.__init__
+_PRODUCT_EVALUATOR_RESOLVE = ProductRiskOfRuinEvaluator.resolve
 
 
 def _canonical_decimal(value: Decimal) -> str:
@@ -188,6 +203,92 @@ def _entry_from_state(
     return None
 
 
+def _resolve_product_evaluator_result(
+    workspace: Path,
+    result_id: str,
+) -> IssuedRiskOfRuinResult:
+    """Resolve through captured product-evaluator dispatch only."""
+
+    if (
+        ProductRiskOfRuinEvaluator is not _PRODUCT_EVALUATOR_CLASS
+        or ProductRiskOfRuinEvaluator.__init__ is not _PRODUCT_EVALUATOR_INIT
+        or ProductRiskOfRuinEvaluator.resolve is not _PRODUCT_EVALUATOR_RESOLVE
+    ):
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin product evaluator executable authority was rebound"
+        )
+    evaluator = object.__new__(_PRODUCT_EVALUATOR_CLASS)
+    _PRODUCT_EVALUATOR_INIT(evaluator, workspace=workspace)
+    result = _PRODUCT_EVALUATOR_RESOLVE(evaluator, result_id)
+    if type(result) is not IssuedRiskOfRuinResult:
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin product evaluator returned unsupported result type"
+        )
+    if (
+        ProductRiskOfRuinEvaluator.__init__ is not _PRODUCT_EVALUATOR_INIT
+        or ProductRiskOfRuinEvaluator.resolve is not _PRODUCT_EVALUATOR_RESOLVE
+    ):
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin product evaluator dispatch changed during resolution"
+        )
+    return result
+
+
+def _product_result_matches_evidence(
+    result: IssuedRiskOfRuinResult,
+    evidence: object,
+    *,
+    kind: str,
+    available_by: str,
+    evaluation_available_at: str,
+    dataset_snapshot_id: str,
+    dataset_manifest_sha256: str,
+    evaluator_source_sha256: str,
+    effective_sample_size: int,
+) -> bool:
+    """Bind the exact product result to the public risk-policy witness."""
+
+    expected_kind = RiskTargetKind.SINGLE if kind == "single" else RiskTargetKind.VECTOR
+    if result.target_kind is not expected_kind:
+        return False
+    if result.result_id != getattr(evidence, "evidence_id"):
+        return False
+    if (
+        result.research_protocol_sha256
+        != getattr(evidence, "research_protocol_sha256").lower()
+        or result.reproducibility_bundle_sha256
+        != getattr(evidence, "reproducibility_bundle_sha256").lower()
+        or result.producer_identity != getattr(evidence, "producer_identity")
+        or result.bankroll_id != getattr(evidence, "bankroll_id")
+        or result.currency != getattr(evidence, "currency")
+        or result.base_portfolio_sha256
+        != getattr(evidence, "base_portfolio_sha256").lower()
+        or result.causal_cutoff != _instant(getattr(evidence, "causal_cutoff")).isoformat()
+        or result.evaluated_at != _instant(getattr(evidence, "evaluated_at")).isoformat()
+        or result.upper_bound != getattr(evidence, "upper_bound")
+        or result.dataset_snapshot_id != dataset_snapshot_id
+        or result.dataset_manifest_sha256 != dataset_manifest_sha256.lower()
+        or result.evaluator_source_sha256 != evaluator_source_sha256.lower()
+        or result.independent_units != effective_sample_size
+        or _instant(result.issued_at) != _instant(evaluation_available_at)
+        or _instant(result.issued_at) > _instant(available_by)
+    ):
+        return False
+
+    if kind == "single":
+        return (
+            result.target_sha256 == getattr(evidence, "candidate_sha256").lower()
+            and result.evaluated_stakes == (getattr(evidence, "evaluated_stake"),)
+        )
+    if kind == "vector":
+        return (
+            result.target_sha256
+            == getattr(evidence, "candidate_vector_sha256").lower()
+            and result.evaluated_stakes == getattr(evidence, "evaluated_stakes")
+        )
+    return False
+
+
 def verify_risk_of_ruin_authority(
     registry_path: str | Path | None,
     evidence: object,
@@ -201,7 +302,10 @@ def verify_risk_of_ruin_authority(
     if registry_path is None:
         return False, f"{prefix} risk-of-ruin evidence lacks product-issued durable authority"
     try:
-        registry = ScientificRegistry(registry_path)
+        resolved_registry_path = Path(registry_path).expanduser().resolve(strict=True)
+        if not resolved_registry_path.is_file():
+            raise ValueError("risk-of-ruin registry path must be a regular file")
+        registry = ScientificRegistry(resolved_registry_path)
         state = _read_exact_registry_state(registry)
         evidence_id = getattr(evidence, "evidence_id")
         entry = _entry_from_state(state, "EvaluationBundle", evidence_id)
@@ -284,15 +388,40 @@ def verify_risk_of_ruin_authority(
     except (AttributeError, OSError, TypeError, ValueError):
         return False, f"{prefix} risk-of-ruin durable authority is invalid"
 
-    # A generic ScientificRegistry row proves durable provenance and integrity,
-    # not product issuance. The public registry constructor/append APIs are
-    # deliberately usable by ordinary callers, so accepting registry membership
-    # here would recreate the caller-minting defect this gate exists to prevent.
-    #
-    # Positive financial authority can be enabled only when an independent,
-    # durable product-owned risk evaluator/issuer is available and this verifier
-    # can re-resolve that issuer identity in addition to the scientific lineage.
-    return (
-        False,
-        f"{prefix} risk-of-ruin evidence lacks canonical product-issued evaluator authority",
-    )
+    # Generic ScientificRegistry rows prove scientific provenance/integrity only.
+    # Positive financial authority additionally requires the canonical durable
+    # product evaluator result from the same protected workspace. The current
+    # ProductRiskOfRuinEvaluator intentionally keeps resolve() closed until its
+    # observation/dataset/IID inputs gain product-owned authority, so this bridge
+    # cannot accidentally open the positive path early.
+    try:
+        product_result = _resolve_product_evaluator_result(
+            resolved_registry_path.parent,
+            getattr(evidence, "evidence_id"),
+        )
+    except (AttributeError, OSError, TypeError, ValueError, RiskOfRuinIssuanceError):
+        return (
+            False,
+            f"{prefix} risk-of-ruin evidence lacks canonical product-issued evaluator authority",
+        )
+
+    try:
+        matches = _product_result_matches_evidence(
+            product_result,
+            evidence,
+            kind=kind,
+            available_by=available_by,
+            evaluation_available_at=entry.available_at,
+            dataset_snapshot_id=dataset_id,
+            dataset_manifest_sha256=manifest_sha256,
+            evaluator_source_sha256=evaluator_source_sha256,
+            effective_sample_size=effective_sample_size,
+        )
+    except (AttributeError, ArithmeticError, TypeError, ValueError):
+        matches = False
+    if not matches:
+        return (
+            False,
+            f"{prefix} risk-of-ruin product evaluator result does not match exact policy evidence",
+        )
+    return True, f"{prefix} risk-of-ruin product evaluator authority verified"

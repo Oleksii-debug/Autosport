@@ -101,7 +101,7 @@ def _timestamp(value: str, name: str) -> datetime:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    if isinstance(value, Decimal):
+    if type(value) is Decimal:
         parsed = value
     elif type(value) is str:
         try:

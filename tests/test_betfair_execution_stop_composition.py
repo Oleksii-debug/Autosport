@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import autosport.betfair_supervised_execution as betfair_execution
+from autosport import _betfair_supervised_public_transport_boundary as write_boundary
 from autosport.betfair_account_readonly import BetfairSessionCredentials
 from autosport.betfair_supervised_execution import (
     BetfairSupervisedExecutionGate,
@@ -219,62 +220,60 @@ def _client_and_bound(workspace: Path, *, transport=None):
     return client, bound, profile, transport
 
 
-def _call_place_action(workspace: Path):
-    client, bound, profile, transport = _client_and_bound(workspace)
-    report = client.place_action(
+def _private_place_action(
+    client: BetfairSupervisedPlaceOrdersClient,
+    workspace: Path,
+    *,
+    bound,
+    profile: BookmakerCapabilityProfile,
+    provider_order_ref: str,
+):
+    """Unit-test the pre-composition STOP primitive, never the public product API."""
+
+    return write_boundary._PRIVATE_PLACE_ACTION(
+        client,
         _action(),
         profile=profile,
         bound=bound,
-        provider_order_ref="a" * 16,
+        provider_order_ref=provider_order_ref,
         execution_workspace=workspace,
     )
-    return report, transport
 
 
 def _assert_provider_write_denied(workspace: Path) -> None:
     client, bound, profile, transport = _client_and_bound(workspace)
-    try:
-        client.place_action(
-            _action(),
-            profile=profile,
+    with pytest.raises(Exception):
+        _private_place_action(
+            client,
+            workspace,
             bound=bound,
+            profile=profile,
             provider_order_ref="a" * 16,
-            execution_workspace=workspace,
         )
-    except Exception:
-        # Repair-mechanism neutral: the product may normalize STOP authority
-        # errors at the Betfair seam or surface the canonical authority error.
-        # The observable safety invariant is zero provider transport calls.
-        pass
-    else:
-        pytest.fail("provider write was reachable without positive STOP authority")
     assert transport.calls == []
 
 
-def test_missing_execution_stop_authority_denies_provider_write(tmp_path: Path) -> None:
-    """A missing independent STOP authority must fail closed before transport."""
-
+def test_missing_execution_stop_authority_denies_private_provider_primitive(
+    tmp_path: Path,
+) -> None:
     _assert_provider_write_denied(tmp_path)
 
 
-def test_durable_stopped_execution_authority_denies_provider_write(
+def test_durable_stopped_execution_authority_denies_private_provider_primitive(
     tmp_path: Path,
 ) -> None:
-    """Persisted STOPPED state must override otherwise valid EconomicGoal authority."""
-
     authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
     authority.initialize_stopped(
         operator_id="owner",
         reason="operator STOP",
         command_id="stop-composition-init",
     )
-
     _assert_provider_write_denied(tmp_path)
 
 
-def test_corrupt_execution_stop_authority_denies_provider_write(tmp_path: Path) -> None:
-    """Corrupt STOP evidence must never be treated as implicit ARMED authority."""
-
+def test_corrupt_execution_stop_authority_denies_private_provider_primitive(
+    tmp_path: Path,
+) -> None:
     authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
     authority.initialize_stopped(
         operator_id="owner",
@@ -282,17 +281,12 @@ def test_corrupt_execution_stop_authority_denies_provider_write(tmp_path: Path) 
         command_id="stop-composition-corrupt-init",
     )
     authority.anchor_path.write_text("{}\n", encoding="utf-8")
-
     _assert_provider_write_denied(tmp_path)
 
 
-def test_explicit_armed_execution_stop_authority_keeps_bounded_write_reachable(
-    tmp_path: Path,
-) -> None:
-    """Positive control: explicit durable ARM preserves the existing bounded seam."""
-
+def test_explicit_armed_stop_keeps_private_primitive_reachable(tmp_path: Path) -> None:
     authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
-    authority.initialize_stopped(
+    stopped = authority.initialize_stopped(
         operator_id="owner",
         reason="safe initialization",
         command_id="stop-composition-arm-init",
@@ -301,18 +295,24 @@ def test_explicit_armed_execution_stop_authority_keeps_bounded_write_reachable(
         operator_id="owner",
         reason="supervised write explicitly armed",
         confirmation_id="stop-composition-confirmation",
-        expected_revision=1,
+        expected_revision=stopped.revision,
         command_id="stop-composition-arm",
     )
+    client, bound, profile, transport = _client_and_bound(tmp_path)
 
-    report, transport = _call_place_action(tmp_path)
+    report = _private_place_action(
+        client,
+        tmp_path,
+        bound=bound,
+        profile=profile,
+        provider_order_ref="a" * 16,
+    )
 
     assert report.instruction.bet_id == "bet-stop-composition"
     assert len(transport.calls) == 1
 
 
-
-def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
+def test_inflight_private_provider_primitive_holds_stop_until_transport_exits(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -330,10 +330,7 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
         command_id="stop-composition-race-arm",
     )
     transport = _BlockingRecordingTransport()
-    client, bound, profile, _ = _client_and_bound(
-        tmp_path,
-        transport=transport,
-    )
+    client, bound, profile, _ = _client_and_bound(tmp_path, transport=transport)
     stop_lock_attempted = Event()
     original_authority_lock = authority._authority_operation_lock
 
@@ -343,19 +340,15 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
         with original_authority_lock():
             yield
 
-    monkeypatch.setattr(
-        authority,
-        "_authority_operation_lock",
-        observed_authority_lock,
-    )
+    monkeypatch.setattr(authority, "_authority_operation_lock", observed_authority_lock)
 
     def place():
-        return client.place_action(
-            _action(),
-            profile=profile,
+        return _private_place_action(
+            client,
+            tmp_path,
             bound=bound,
+            profile=profile,
             provider_order_ref="b" * 16,
-            execution_workspace=tmp_path,
         )
 
     def stop():
@@ -372,7 +365,6 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
         stop_future = pool.submit(stop)
         assert stop_lock_attempted.wait(timeout=5)
         assert not stop_future.done()
-
         transport.release.set()
         report = place_future.result(timeout=5)
         stopped_after_call = stop_future.result(timeout=5)
@@ -381,21 +373,8 @@ def test_inflight_provider_write_holds_stop_linearization_until_transport_exits(
     assert len(transport.calls) == 1
     assert stopped_after_call.mode.value == "STOPPED"
 
-    denied_client, denied_bound, denied_profile, denied_transport = _client_and_bound(
-        tmp_path
-    )
-    with pytest.raises(Exception):
-        denied_client.place_action(
-            _action(),
-            profile=denied_profile,
-            bound=denied_bound,
-            provider_order_ref="c" * 16,
-            execution_workspace=tmp_path,
-        )
-    assert denied_transport.calls == []
 
-
-def test_stop_authority_global_rebind_cannot_bypass_provider_fence(
+def test_stop_authority_global_rebind_cannot_bypass_private_fence(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -412,25 +391,20 @@ def test_stop_authority_global_rebind_cannot_bypass_provider_fence(
         def admission_lease(self):
             yield None
 
-    monkeypatch.setattr(
-        betfair_execution,
-        "ExecutionStopAuthority",
-        _BypassAuthority,
-    )
+    monkeypatch.setattr(betfair_execution, "ExecutionStopAuthority", _BypassAuthority)
 
     with pytest.raises(Exception, match="STOP admission authority changed"):
-        client.place_action(
-            _action(),
-            profile=profile,
+        _private_place_action(
+            client,
+            tmp_path,
             bound=bound,
+            profile=profile,
             provider_order_ref="e" * 16,
-            execution_workspace=tmp_path,
         )
-
     assert transport.calls == []
 
 
-def test_transport_exception_releases_stop_admission_lease(tmp_path: Path) -> None:
+def test_transport_exception_releases_private_stop_admission_lease(tmp_path: Path) -> None:
     authority = ExecutionStopAuthority(tmp_path / STOP_PATH)
     stopped = authority.initialize_stopped(
         operator_id="owner",
@@ -445,18 +419,15 @@ def test_transport_exception_releases_stop_admission_lease(tmp_path: Path) -> No
         command_id="stop-composition-error-arm",
     )
     transport = _FailingTransport()
-    client, bound, profile, _ = _client_and_bound(
-        tmp_path,
-        transport=transport,
-    )
+    client, bound, profile, _ = _client_and_bound(tmp_path, transport=transport)
 
     with pytest.raises(Exception, match="ambiguous"):
-        client.place_action(
-            _action(),
-            profile=profile,
+        _private_place_action(
+            client,
+            tmp_path,
             bound=bound,
+            profile=profile,
             provider_order_ref="d" * 16,
-            execution_workspace=tmp_path,
         )
 
     stopped_after_error = authority.stop(

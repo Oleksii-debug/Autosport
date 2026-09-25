@@ -60,6 +60,10 @@ from . import _provider_observation_payload_strictness as _provider_observation_
 # owning opportunity/predictive modules.
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
+# A bare ForecastRecord.uncertainty scalar is not self-describing authority. Positive
+# predictive allocation requires the exact absolute-probability-radius semantics;
+# descriptive rating radii and legacy omitted/default-zero values remain audit-only.
+from . import _predictive_uncertainty_semantics_guard as _predictive_uncertainty_semantics_guard  # noqa: E402,F401
 
 # Sport-memory durable positive materialization is a product composition authority,
 # not a caller-mintable generation digest. Install the public authority guard first,

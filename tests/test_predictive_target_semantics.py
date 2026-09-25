@@ -51,6 +51,23 @@ def _payload_sha(record) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _registry_record_sha(record) -> str:
+    envelope = {
+        "record_type": record.record_type,
+        "record_id": record.record_id,
+        "available_at": record.available_at,
+        "payload": record.to_payload(),
+    }
+    encoded = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _contract(
     *,
     contract_id: str = "binary-settlement-target-v1",
@@ -239,6 +256,8 @@ def _manifest(
         evaluator_source_sha256=SHA_B,
         environment_sha256=SHA_C,
         seed=7,
+        research_protocol_record_sha256=_registry_record_sha(protocol),
+        research_protocol_available_at=protocol.available_at,
     )
 
 
@@ -262,6 +281,7 @@ def test_binary_target_resolution_requires_exact_preregistered_population(
     assert resolved.training_points_manifest_sha256 == (
         training_points_manifest_sha256(points)
     )
+    assert resolved.research_protocol_record_sha256 == _registry_record_sha(protocol)
     assert resolved.input_count == 3
     assert resolved.positive_count == 2
     assert resolved.negative_count == 1
@@ -443,3 +463,114 @@ def test_contract_token_is_hash_stable_and_namespaced() -> None:
         PREDICTIVE_TARGET_ARTIFACT_PREFIX + contract.contract_sha256
     )
     assert len(contract.contract_sha256) == 64
+
+
+def test_bound_manifest_round_trip_preserves_protocol_envelope_identity(tmp_path) -> None:
+    contract = _contract()
+    points = _points()
+    _registry_value, protocol = _registry_and_protocol(tmp_path, contract)
+    manifest = _manifest(points, protocol)
+
+    restored = FactoryReproducibilityManifest.from_envelope(manifest.to_envelope())
+
+    assert type(restored) is FactoryReproducibilityManifest
+    assert restored.research_protocol_record_sha256 == _registry_record_sha(protocol)
+    assert restored.research_protocol_available_at == protocol.available_at
+    assert restored.manifest_sha256 == manifest.manifest_sha256
+
+
+def test_legacy_unbound_manifest_cannot_mint_target_authority(tmp_path) -> None:
+    contract = _contract()
+    points = _points()
+    registry, protocol = _registry_and_protocol(tmp_path, contract)
+    manifest = _manifest(points, protocol)
+    legacy = replace(
+        manifest,
+        research_protocol_record_sha256=None,
+        research_protocol_available_at=None,
+    )
+
+    with pytest.raises(
+        PredictiveTargetSemanticsError,
+        match="lacks precommitted ResearchProtocol envelope authority",
+    ):
+        resolve_preregistered_binary_target_population(
+            registry, legacy, contract, points, as_of=T4
+        )
+
+
+def test_scientific_registry_get_rebind_fails_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    contract = _contract()
+    points = _points()
+    registry, protocol = _registry_and_protocol(tmp_path, contract)
+    manifest = _manifest(points, protocol)
+
+    monkeypatch.setattr(ScientificRegistry, "get", lambda *_args, **_kwargs: None)
+    with pytest.raises(
+        PredictiveTargetSemanticsError,
+        match="read authority is not canonical",
+    ):
+        resolve_preregistered_binary_target_population(
+            registry, manifest, contract, points, as_of=T4
+        )
+
+
+def test_scientific_registry_instance_read_shadow_fails_closed(tmp_path) -> None:
+    contract = _contract()
+    points = _points()
+    registry, protocol = _registry_and_protocol(tmp_path, contract)
+    manifest = _manifest(points, protocol)
+    registry._read = lambda: {"schema_version": 1, "records": []}
+
+    with pytest.raises(
+        PredictiveTargetSemanticsError,
+        match="instance read dispatch is shadowed",
+    ):
+        resolve_preregistered_binary_target_population(
+            registry, manifest, contract, points, as_of=T4
+        )
+
+
+def test_copied_protocol_with_backdated_envelope_cannot_reuse_manifest(tmp_path) -> None:
+    contract = _contract()
+    points = _points()
+    original_registry, original_protocol = _registry_and_protocol(
+        tmp_path / "original",
+        contract,
+        protocol_available_at=T0A,
+    )
+    manifest = _manifest(points, original_protocol)
+    copied_registry, copied_protocol = _registry_and_protocol(
+        tmp_path / "copy",
+        contract,
+        protocol_available_at=T0,
+    )
+    assert copied_protocol.to_payload() == original_protocol.to_payload() | {
+        "available_at_utc": T0
+    } if "available_at_utc" in copied_protocol.to_payload() else copied_protocol.to_payload()
+
+    resolved = resolve_preregistered_binary_target_population(
+        original_registry,
+        manifest,
+        contract,
+        points,
+        as_of=T4,
+    )
+    assert resolved.research_protocol_record_sha256 == _registry_record_sha(
+        original_protocol
+    )
+
+    with pytest.raises(
+        PredictiveTargetSemanticsError,
+        match="registry record identity does not match reproducibility manifest|durable availability does not match",
+    ):
+        resolve_preregistered_binary_target_population(
+            copied_registry,
+            manifest,
+            contract,
+            points,
+            as_of=T4,
+        )

@@ -80,13 +80,16 @@ def _auth_status() -> bytes:
 
 
 def _subscription_status(*, request_id: int = 7, success: bool = True) -> bytes:
-    status = "SUCCESS" if success else "FAILURE"
-    error = "false" if success else '"INVALID_INPUT"'
-    return (
-        f'{{"op":"status","id":{request_id},"statusCode":"{status}",'
-        f'"error":{error}}}\r\n'
-    ).encode("utf-8")
-
+    payload: dict[str, object] = {
+        "op": "status",
+        "id": request_id,
+        "statusCode": "SUCCESS" if success else "FAILURE",
+        "connectionClosed": False,
+    }
+    if not success:
+        payload["errorCode"] = "INVALID_INPUT"
+        payload["errorMessage"] = "invalid market subscription"
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
 
 def _mcm(
     *,
@@ -305,6 +308,37 @@ def test_subscription_provider_failure_never_issues_authority_and_closes(
     transport, fake = _transport(monkeypatch, _subscription_status(success=False))
     with pytest.raises(BetfairAuthenticatedStreamError, match="not acknowledged SUCCESS"):
         _open(transport)
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"connectionClosed": True},
+        {"errorCode": "INVALID_INPUT"},
+        {"errorMessage": "invalid market subscription"},
+        {"error": True},
+        {"error": "INVALID_INPUT"},
+    ],
+)
+def test_success_with_failure_indicators_never_issues_authority_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    extra: dict[str, object],
+) -> None:
+    payload: dict[str, object] = {
+        "op": "status",
+        "id": 7,
+        "statusCode": "SUCCESS",
+        "connectionClosed": False,
+    }
+    payload.update(extra)
+    tail = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(monkeypatch, tail)
+
+    with pytest.raises(BetfairAuthenticatedStreamError, match="not acknowledged SUCCESS"):
+        _open(transport)
+
     assert fake.closed
     assert not transport.is_authenticated
 

@@ -32,16 +32,30 @@ class _HealthProjectionFailure:
     def get(self, source_id: str) -> SourceHealthState:
         return SourceHealthState(source_id=source_id)
 
-    def record_failure(self, source_id: str, *, now: str, error: BaseException):
+    def record_failure(
+        self,
+        source_id: str,
+        *,
+        now: str,
+        error: BaseException,
+        failure_kind: str | None = None,
+    ):
         raise OSError("health failure publication failed")
 
 
 class _CapturingFailureHealth:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, BaseException]] = []
+        self.calls: list[tuple[str, str, BaseException, str | None]] = []
 
-    def record_failure(self, source_id: str, *, now: str, error: BaseException):
-        self.calls.append((source_id, now, error))
+    def record_failure(
+        self,
+        source_id: str,
+        *,
+        now: str,
+        error: BaseException,
+        failure_kind: str | None = None,
+    ):
+        self.calls.append((source_id, now, error, failure_kind))
         return None
 
 
@@ -85,10 +99,11 @@ class ProviderFailureEvidenceTests(unittest.TestCase):
 
         self.assertEqual(provider.source_id_reads, 1)
         self.assertEqual(len(health.calls), 1)
-        source_id, now, recorded_error = health.calls[0]
+        source_id, now, recorded_error, failure_kind = health.calls[0]
         self.assertEqual(source_id, "source")
         self.assertEqual(now, "2026-09-14T08:00:00+00:00")
         self.assertIs(recorded_error, raised.exception)
+        self.assertEqual(failure_kind, "provider_or_validation")
 
 
 if __name__ == "__main__":

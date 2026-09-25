@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 
 import pytest
 
@@ -48,6 +48,15 @@ def _install_membership(monkeypatch) -> RiskMembershipPublicationReceipt:
         lambda *_args, **_kwargs: receipt,
     )
     return receipt
+
+
+def _frozen_implementation() -> FunctionType:
+    closure = precommit.issue_risk_randomization_precommit.__closure__ or ()
+    for cell in closure:
+        value = cell.cell_contents
+        if type(value) is FunctionType and "_product_token_bytes" in value.__code__.co_varnames:
+            return value
+    raise AssertionError("sealed issuer does not retain its checked implementation")
 
 
 def test_guard_does_not_expose_mutable_target_module_binding() -> None:
@@ -103,6 +112,59 @@ def test_root_size_rebinding_fails_before_randomization_publication(
             research_protocol_id=membership.research_protocol_id,
             dataset_snapshot_id=membership.dataset_snapshot_id,
             experiment_id="experiment-root-size-rebind",
+            authority_root=authority_root,
+        )
+
+    assert not list(workspace.glob(".risk-randomization-precommit-*.json"))
+
+
+def test_direct_frozen_implementation_globals_mutation_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    membership = _install_membership(monkeypatch)
+    implementation = _frozen_implementation()
+    monkeypatch.setitem(
+        implementation.__globals__,
+        "hashlib",
+        SimpleNamespace(sha256=lambda _payload=b"": None),
+    )
+
+    with pytest.raises(
+        precommit.RiskRandomizationPrecommitError,
+        match=r"frozen randomization implementation global 'hashlib' was rebound",
+    ):
+        precommit.issue_risk_randomization_precommit(
+            registry,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            experiment_id="experiment-direct-clone-globals",
+            authority_root=authority_root,
+        )
+
+    assert not list(workspace.glob(".risk-randomization-precommit-*.json"))
+
+
+def test_private_hash_facade_attribute_mutation_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    membership = _install_membership(monkeypatch)
+    implementation = _frozen_implementation()
+    private_hashlib = implementation.__globals__["hashlib"]
+    monkeypatch.setattr(private_hashlib, "sha256", lambda _payload=b"": None)
+
+    with pytest.raises(
+        precommit.RiskRandomizationPrecommitError,
+        match="frozen randomization SHA-256 dispatch was rebound",
+    ):
+        precommit.issue_risk_randomization_precommit(
+            registry,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            experiment_id="experiment-private-facade",
             authority_root=authority_root,
         )
 

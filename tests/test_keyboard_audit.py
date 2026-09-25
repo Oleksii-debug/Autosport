@@ -6,6 +6,11 @@ from unittest.mock import patch
 
 import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
+from autosport.windows_entry import (
+    _STARTUP_FOCUS_CONTROL,
+    _install_deterministic_startup_focus,
+    _schedule_startup_focus,
+)
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
@@ -66,9 +71,18 @@ class KeyboardAuditTests(unittest.TestCase):
         ]
         return bindings, focus, reachable, list(reversed(reachable))
 
+    def _summarize(self, *args, startup_focus_control=_STARTUP_FOCUS_CONTROL):
+        return summarize_keyboard_contract(
+            *args,
+            startup_focus_control=startup_focus_control,
+        )
+
     def test_keyboard_contract_passes_without_claiming_nvda(self):
-        report = summarize_keyboard_contract(*self._passing())
+        report = self._summarize(*self._passing())
         self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["startup_focus"]["expected_control"], "shell_navigation")
+        self.assertEqual(report["startup_focus"]["observed_control"], "shell_navigation")
+        self.assertTrue(report["startup_focus"]["passed"])
         self.assertEqual(report["expected_automation_ids"]["bankroll"], WINDOWS_BANKROLL_AUTOMATION_ID)
         self.assertEqual(
             report["expected_automation_ids"]["shell_navigation"],
@@ -102,38 +116,91 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["real_money_execution"])
 
+    def test_startup_focus_must_be_canonical_shell_navigation(self):
+        report = self._summarize(*self._passing(), startup_focus_control="strategy")
+        self.assertEqual(report["status"], "FAIL")
+        self.assertFalse(report["startup_focus"]["passed"])
+        self.assertTrue(any("startup focus expected shell_navigation" in item for item in report["failures"]))
+
+        missing = self._summarize(*self._passing(), startup_focus_control=None)
+        self.assertEqual(missing["status"], "FAIL")
+        self.assertEqual(missing["startup_focus"]["observed_control"], None)
+
+    def test_startup_focus_is_scheduled_after_idle_without_forcing_focus(self):
+        class _Target:
+            def __init__(self):
+                self.focus_calls = 0
+
+            def focus_set(self):
+                self.focus_calls += 1
+
+        class _App:
+            def __init__(self):
+                self.shell_navigation = _Target()
+                self.idle_callbacks = []
+
+            def after_idle(self, callback):
+                self.idle_callbacks.append(callback)
+
+        app = _App()
+        _schedule_startup_focus(app)
+        self.assertEqual(app.shell_navigation.focus_calls, 0)
+        self.assertEqual(len(app.idle_callbacks), 1)
+        app.idle_callbacks[0]()
+        self.assertEqual(app.shell_navigation.focus_calls, 1)
+
+    def test_startup_focus_installer_is_idempotent(self):
+        class _Target:
+            def focus_set(self):
+                return None
+
+        class _App:
+            def __init__(self):
+                self.shell_navigation = _Target()
+                self.idle_callbacks = []
+
+            def after_idle(self, callback):
+                self.idle_callbacks.append(callback)
+
+        _install_deterministic_startup_focus(_App)
+        wrapped_init = _App.__init__
+        _install_deterministic_startup_focus(_App)
+        self.assertIs(_App.__init__, wrapped_init)
+        app = _App()
+        self.assertEqual(len(app.idle_callbacks), 1)
+
     def test_missing_action_binding_fails_closed(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         bindings["<Control-Alt-Right>"] = False
-        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("<Control-Alt-Right>" in item for item in report["failures"]))
 
     def test_focus_shortcut_must_reach_exact_target(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         focus["<F2>"] = False
-        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("<F2>" in item for item in report["failures"]))
 
     def test_all_critical_controls_must_be_tab_reachable(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         reachable.remove("shell_details")
-        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("shell_details" in item for item in report["failures"]))
 
     def test_shell_open_action_must_be_tab_reachable(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         reachable.remove("shell_open")
-        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("shell_open" in item for item in report["failures"]))
 
     def test_reverse_tab_must_reach_all_critical_controls(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         reverse_reachable.remove("shell_open")
-        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(
             any("Shift+Tab" in item and "shell_open" in item for item in report["failures"])
@@ -141,14 +208,14 @@ class KeyboardAuditTests(unittest.TestCase):
 
     def test_missing_reverse_tab_evidence_fails_closed(self):
         bindings, focus, reachable, _reverse_reachable = self._passing()
-        report = summarize_keyboard_contract(bindings, focus, reachable)
+        report = self._summarize(bindings, focus, reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertIn("Shift+Tab traversal evidence missing", report["failures"])
 
     def test_bankroll_summary_must_be_tab_reachable(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         reachable.remove("bankroll")
-        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("bankroll" in item for item in report["failures"]))
 
@@ -178,7 +245,7 @@ class KeyboardAuditTests(unittest.TestCase):
             audit_dialog = SimpleNamespace(destroy=lambda: None)
             with (
                 patch.object(keyboard_audit, "WindowsAutosportApp", return_value=_AuditApp()),
-                patch.object(keyboard_audit, "show_manual_calculation_workbench", return_value=object()),
+                patch.object(keyboard_audit, "_focused_control_name", return_value=_STARTUP_FOCUS_CONTROL),
                 patch.object(
                     keyboard_audit,
                     "show_manual_calculation_workbench",

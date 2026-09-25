@@ -17,18 +17,34 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
     def _sha(label: str) -> str:
         return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
-    def _binding(self) -> OutcomeLineageBinding:
-        revision = TrustedOutcomeRevision(
-            revision=1,
-            revision_id="results-r1",
-            record_sha256=self._sha("r1"),
+    def _binding(self, *labels: str) -> OutcomeLineageBinding:
+        if not labels:
+            labels = ("r1",)
+        revisions = tuple(
+            TrustedOutcomeRevision(
+                revision=index,
+                revision_id=f"results-r{index}",
+                record_sha256=self._sha(label),
+            )
+            for index, label in enumerate(labels, start=1)
         )
         return OutcomeLineageBinding(
             source_identity="official-results:serialization-test",
             record_id="event-results:2026-01-01",
-            root_revision_id=revision.revision_id,
-            root_record_sha256=revision.record_sha256,
-            revisions=(revision,),
+            root_revision_id=revisions[0].revision_id,
+            root_record_sha256=revisions[0].record_sha256,
+            revisions=revisions,
+        )
+
+    def _resolve(
+        self,
+        registry: RunRegistry,
+        cutoff: str,
+    ) -> TrustedOutcomeRevision | None:
+        return registry.outcome_revision_as_of(
+            source_identity="official-results:serialization-test",
+            record_id="event-results:2026-01-01",
+            cutoff=cutoff,
         )
 
     def test_two_instances_cannot_publish_from_the_same_stale_snapshot(self) -> None:
@@ -121,6 +137,172 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 "2026-01-01T10:00:00.000000Z",
             )
 
+    def test_positive_availability_is_sampled_after_durable_unknown_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+            original_write = RunRegistry._write
+            events: list[str] = []
+
+            def traced_write(target: RunRegistry, state: dict) -> None:
+                trust = state.get("outcome_lineage_trust", [])
+                if trust:
+                    revision = trust[0]["revisions"][0]
+                    events.append(
+                        "write:positive"
+                        if "first_available_at" in revision
+                        else "write:unknown"
+                    )
+                else:
+                    events.append("write:other")
+                original_write(target, state)
+
+            def product_clock() -> str:
+                events.append("clock")
+                return "2026-01-01T10:00:00Z"
+
+            with (
+                patch.object(RunRegistry, "_write", new=traced_write),
+                patch("autosport.run_registry._utc_now", side_effect=product_clock),
+            ):
+                registry.begin(
+                    self._sha("market"),
+                    self._sha("results"),
+                    "baseline-v1",
+                    "run-causal",
+                    outcome_lineage=self._binding("r1"),
+                )
+
+            self.assertEqual(
+                events,
+                ["write:unknown", "clock", "write:positive"],
+            )
+            durable = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                durable["outcome_lineage_trust"][0]["revisions"][0][
+                    "first_available_at"
+                ],
+                "2026-01-01T10:00:00.000000Z",
+            )
+
+    def test_crash_after_identity_publication_stays_unknown_and_retry_binds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+            binding = self._binding("r1")
+
+            with patch(
+                "autosport.run_registry._utc_now",
+                side_effect=RuntimeError("crash after identity publication"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "crash after identity publication",
+                ):
+                    registry.begin(
+                        self._sha("market-crash"),
+                        self._sha("results-crash"),
+                        "baseline-v1",
+                        "run-crash",
+                        outcome_lineage=binding,
+                    )
+
+            reopened = RunRegistry(path)
+            self.assertIsNone(self._resolve(reopened, "2026-01-01T12:00:00Z"))
+            self.assertEqual(reopened.in_progress(), ())
+            staged = json.loads(path.read_text(encoding="utf-8"))
+            revision = staged["outcome_lineage_trust"][0]["revisions"][0]
+            self.assertNotIn("first_available_at", revision)
+            self.assertEqual(staged["runs"], {})
+
+            with patch(
+                "autosport.run_registry._utc_now",
+                return_value="2026-01-01T11:00:00Z",
+            ):
+                key = reopened.begin(
+                    self._sha("market-crash"),
+                    self._sha("results-crash"),
+                    "baseline-v1",
+                    "run-crash",
+                    outcome_lineage=binding,
+                )
+
+            self.assertIsInstance(key, str)
+            resolved = self._resolve(reopened, "2026-01-01T11:00:00Z")
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved.revision, 1)
+            self.assertEqual(
+                resolved.first_available_at,
+                "2026-01-01T11:00:00.000000Z",
+            )
+
+    def test_extension_publishes_available_prefix_unknown_suffix_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+
+            with patch(
+                "autosport.run_registry._utc_now",
+                return_value="2026-01-01T10:00:00Z",
+            ):
+                first_key = registry.begin(
+                    self._sha("market-r1"),
+                    self._sha("results-r1"),
+                    "baseline-v1",
+                    "run-r1",
+                    outcome_lineage=self._binding("r1"),
+                )
+            registry.complete(first_key)
+
+            original_write = RunRegistry._write
+            writes: list[tuple[list[bool], set[str]]] = []
+
+            def traced_write(target: RunRegistry, state: dict) -> None:
+                trust = state.get("outcome_lineage_trust", [])
+                if trust:
+                    revisions = trust[0]["revisions"]
+                    writes.append(
+                        (
+                            [
+                                "first_available_at" in revision
+                                for revision in revisions
+                            ],
+                            {
+                                entry["run_id"]
+                                for entry in state["runs"].values()
+                            },
+                        )
+                    )
+                original_write(target, state)
+
+            with (
+                patch.object(RunRegistry, "_write", new=traced_write),
+                patch(
+                    "autosport.run_registry._utc_now",
+                    return_value="2026-01-01T11:00:00Z",
+                ),
+            ):
+                second_key = registry.begin(
+                    self._sha("market-r2"),
+                    self._sha("results-r2"),
+                    "baseline-v1",
+                    "run-r2",
+                    outcome_lineage=self._binding("r1", "r2"),
+                )
+
+            self.assertIsInstance(second_key, str)
+            self.assertEqual(writes[0][0], [True, False])
+            self.assertNotIn("run-r2", writes[0][1])
+            self.assertEqual(writes[-1][0], [True, True])
+            self.assertIn("run-r2", writes[-1][1])
+
+            at_mid = self._resolve(registry, "2026-01-01T10:30:00Z")
+            at_r2 = self._resolve(registry, "2026-01-01T11:00:00Z")
+            self.assertIsNotNone(at_mid)
+            self.assertIsNotNone(at_r2)
+            self.assertEqual(at_mid.revision, 1)
+            self.assertEqual(at_r2.revision, 2)
+
     def test_all_run_registry_read_modify_write_methods_are_serialized(self) -> None:
         for method_name in (
             "begin",
@@ -133,6 +315,9 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 getattr(method, "_autosport_registry_rmw_serialized", False),
                 method_name,
             )
+        self.assertTrue(
+            getattr(RunRegistry.begin, "_autosport_outcome_two_phase", False)
+        )
 
 
 if __name__ == "__main__":

@@ -259,8 +259,24 @@ def test_subscription_authority_is_bound_to_exact_transport_object_not_labels(
     assert first is not second
     assert first.connection_id == second.connection_id == "conn-1"
     assert first._connection_generation == second._connection_generation == 1
-    with pytest.raises(BetfairAuthenticatedStreamError, match="exact transport object"):
+    with pytest.raises(BetfairAuthenticatedStreamError, match="exact active transport object"):
         BetfairAuthenticatedStreamFreshnessRuntime(second, subscription)
+
+
+def test_second_subscription_on_same_connection_is_rejected_before_network_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, fake = _transport(monkeypatch, _subscription_status())
+    first = _open(transport)
+    first.assert_issued()
+    sent_before = list(fake.sent)
+
+    with pytest.raises(BetfairAuthenticatedStreamError, match="already has an active"):
+        _open(transport)
+
+    assert fake.sent == sent_before
+    assert transport.is_authenticated
+    first.assert_issued()
 
 
 def test_subscription_requires_exact_provider_success_id_and_closes_connection(

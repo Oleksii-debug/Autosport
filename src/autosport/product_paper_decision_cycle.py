@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Callable
 
+from .causal_collector import SyncState
 from .decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
 from .live_decision_loop import (
     LiveCycleResult,
@@ -232,6 +233,8 @@ class ProductPaperDecisionCycle:
             return "market_invalidation_backlog"
         if getattr(status, "source_provider_unavailable", None) is True:
             return "source_provider_unavailable"
+        if getattr(status, "source_sync_state", None) == SyncState.RETRY_REQUIRED.value:
+            return "source_retry_required"
         unresolved = getattr(status, "source_unresolved_gap_delta_ids", None)
         if unresolved:
             return "source_gap_unresolved"

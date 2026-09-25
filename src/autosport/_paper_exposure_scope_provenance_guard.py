@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sys
+from contextvars import ContextVar
 from functools import wraps
 from hashlib import sha256
 from types import CodeType
 from typing import Any
 
 from . import _paper_execution_reality_legacy as _ledger_impl
+from . import _paper_value_execution_authority as _value_authority
 from .paper_execution_adoption import (
     PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
@@ -84,9 +86,18 @@ def _install_guard() -> None:
         raise RuntimeError("canonical PAPER exposure-scope payload dispatch is unavailable")
     original_scope_payload = scope_descriptor.__func__
 
-    prepare_codes: tuple[CodeType, CodeType] = (
-        original_prepare.__code__,
-        original_prepare_paper_value.__code__,
+    nested_paper_value_prepare_code = (
+        _value_authority._ORIGINAL_PREPARE_PAPER_VALUE_ACTION.__code__
+    )
+    authorize_descriptor_code = _value_authority._authorize_descriptor.__code__
+    verify_general_risk_admission_code = (
+        _value_authority._verify_general_risk_admission.__code__
+    )
+    value_authority_globals = _value_authority.__dict__
+    mint_token = object()
+    mint_context: ContextVar[object | None] = ContextVar(
+        "autosport_paper_exposure_scope_prepared_mint",
+        default=None,
     )
     getframe = sys._getframe
     canonical_json = _ledger_impl._canonical
@@ -290,17 +301,56 @@ def _install_guard() -> None:
             raise adoption_error("canonical PAPER preparation requires exact runtime")
         if runtime_type._mint_prepared is not guarded_mint_prepared:
             raise adoption_error("canonical prepared-execution mint dispatch was rebound")
-        caller_code = getframe(1).f_code
+        caller = getframe(1)
+        caller_code = caller.f_code
         if caller_code is original_prepare.__code__:
+            if mint_context.get() is not mint_token:
+                raise adoption_error(
+                    "prepared execution mint is reserved for canonical preparation authority"
+                )
             globals_ok = function_globals_match(
                 original_prepare,
                 original_prepare_globals,
             )
         elif caller_code is original_prepare_paper_value.__code__:
+            if mint_context.get() is not mint_token:
+                raise adoption_error(
+                    "prepared execution mint is reserved for canonical preparation authority"
+                )
             globals_ok = function_globals_match(
                 original_prepare_paper_value,
                 original_prepare_paper_value_globals,
             )
+        elif caller_code is nested_paper_value_prepare_code:
+            if (
+                mint_context.get() is not mint_token
+                or caller.f_globals
+                is not _value_authority._ORIGINAL_PREPARE_PAPER_VALUE_ACTION.__globals__
+            ):
+                raise adoption_error(
+                    "prepared execution mint is reserved for canonical preparation authority"
+                )
+            globals_ok = True
+        elif caller_code is authorize_descriptor_code:
+            if (
+                caller.f_globals is not value_authority_globals
+                or _value_authority._authorize_descriptor.__code__
+                is not authorize_descriptor_code
+            ):
+                raise adoption_error(
+                    "canonical PAPER descriptor authorization dispatch changed"
+                )
+            globals_ok = True
+        elif caller_code is verify_general_risk_admission_code:
+            if (
+                caller.f_globals is not value_authority_globals
+                or _value_authority._verify_general_risk_admission.__code__
+                is not verify_general_risk_admission_code
+            ):
+                raise adoption_error(
+                    "canonical PAPER recovery authorization dispatch changed"
+                )
+            globals_ok = True
         else:
             raise adoption_error(
                 "prepared execution mint is reserved for canonical preparation authority"
@@ -327,7 +377,11 @@ def _install_guard() -> None:
                 raise adoption_error("canonical prepared-execution mint dispatch was rebound")
             if not function_globals_match(method, method_globals):
                 raise adoption_error("canonical PAPER preparation globals were rebound")
-            return method(self, *args, **kwargs)
+            marker = mint_context.set(mint_token)
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                mint_context.reset(marker)
 
         return owned
 

@@ -7,17 +7,13 @@ import json
 import pytest
 
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
-from autosport.risk_membership_publication import RiskMembershipPublicationReceipt
+import autosport.risk_membership_publication as publication
+from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
 import autosport.risk_randomization_precommit as precommit
 
 
-def _membership_receipt(*, suffix: str = "a") -> RiskMembershipPublicationReceipt:
-    return RiskMembershipPublicationReceipt(
-        workspace_instance_id="workspace-test",
-        membership_sha256=suffix * 64,
-        authority_generation=1,
-        authority_record_sha256="b" * 64,
-        state_sha256="c" * 64,
+def _membership(*, suffix: str = "3") -> ResolvedFixedNRiskMembership:
+    return ResolvedFixedNRiskMembership(
         research_protocol_id="protocol-001",
         protocol_sha256="d" * 64,
         protocol_record_sha256="e" * 64,
@@ -26,10 +22,10 @@ def _membership_receipt(*, suffix: str = "a") -> RiskMembershipPublicationReceip
         dataset_record_sha256="1" * 64,
         causal_cutoff="2026-09-23T00:00:00+00:00",
         outcome_reveal_after="2026-09-24T00:00:00+00:00",
+        precommitted_at="2026-09-23T00:10:00+00:00",
         planned_run_ids=("run-001", "run-002"),
         sampling_frame_sha256="2" * 64,
-        design_sha256="3" * 64,
-        receipt_sha256="4" * 64 if suffix == "a" else "5" * 64,
+        design_sha256=suffix * 64,
     )
 
 
@@ -42,27 +38,42 @@ def _paths(tmp_path):
     return workspace, registry, authority_root
 
 
-def _install_membership(monkeypatch, receipt: RiskMembershipPublicationReceipt) -> None:
+def _publish_membership(
+    monkeypatch,
+    workspace,
+    registry,
+    authority_root,
+    membership: ResolvedFixedNRiskMembership,
+):
     monkeypatch.setattr(
-        precommit,
-        "resolve_fixed_n_membership_publication",
-        lambda *_args, **_kwargs: receipt,
+        publication,
+        "inspect_fixed_n_risk_membership_structure",
+        lambda *_args, **_kwargs: membership,
+    )
+    return publication.publish_fixed_n_membership_structure(
+        registry,
+        workspace=workspace,
+        research_protocol_id=membership.research_protocol_id,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        authority_root=authority_root,
     )
 
 
-def _issue(tmp_path, monkeypatch, *, receipt=None, experiment_id="experiment-001"):
+def _issue(tmp_path, monkeypatch, *, membership=None, experiment_id="experiment-001"):
     workspace, registry, authority_root = _paths(tmp_path)
-    value = receipt or _membership_receipt()
-    _install_membership(monkeypatch, value)
+    resolved = membership or _membership()
+    receipt = _publish_membership(
+        monkeypatch, workspace, registry, authority_root, resolved
+    )
     issued = precommit.issue_risk_randomization_precommit(
         registry,
         workspace=workspace,
-        research_protocol_id=value.research_protocol_id,
-        dataset_snapshot_id=value.dataset_snapshot_id,
+        research_protocol_id=receipt.research_protocol_id,
+        dataset_snapshot_id=receipt.dataset_snapshot_id,
         experiment_id=experiment_id,
         authority_root=authority_root,
     )
-    return issued, workspace, registry, authority_root, value
+    return issued, workspace, registry, authority_root, receipt
 
 
 def test_issuer_surface_accepts_no_caller_seed_or_root() -> None:
@@ -80,8 +91,10 @@ def test_simultaneous_entropy_dispatch_rebinding_fails_closed(
     tmp_path, monkeypatch
 ) -> None:
     workspace, registry, authority_root = _paths(tmp_path)
-    membership = _membership_receipt()
-    _install_membership(monkeypatch, membership)
+    membership = _membership()
+    receipt = _publish_membership(
+        monkeypatch, workspace, registry, authority_root, membership
+    )
     attacker_called = False
 
     def forged_token_bytes(size: int) -> bytes:
@@ -90,8 +103,6 @@ def test_simultaneous_entropy_dispatch_rebinding_fails_closed(
         return b"\x00" * size
 
     monkeypatch.setattr(precommit.secrets, "token_bytes", forged_token_bytes)
-    # Recreate the predecessor's private module token too.  The public issuer's
-    # entropy source is closure-sealed and must not late-read either surface.
     monkeypatch.setattr(
         precommit,
         "_PRODUCT_TOKEN_BYTES",
@@ -106,8 +117,8 @@ def test_simultaneous_entropy_dispatch_rebinding_fails_closed(
         precommit.issue_risk_randomization_precommit(
             registry,
             workspace=workspace,
-            research_protocol_id=membership.research_protocol_id,
-            dataset_snapshot_id=membership.dataset_snapshot_id,
+            research_protocol_id=receipt.research_protocol_id,
+            dataset_snapshot_id=receipt.dataset_snapshot_id,
             experiment_id="experiment-001",
             authority_root=authority_root,
         )
@@ -157,7 +168,7 @@ def test_issue_retry_rejects_commit_with_wrong_semantic_binding(
 
     def recover_with_wrong_binding(self, **kwargs):
         recovery = original_recover(self, **kwargs)
-        if recovery.record is None:
+        if self.domain != precommit._AUTHORITY_DOMAIN or recovery.record is None:
             return recovery
         return replace(
             recovery,
@@ -189,22 +200,24 @@ def test_issue_retry_rejects_commit_with_wrong_semantic_binding(
 
 def test_distinct_experiments_get_distinct_roots(tmp_path, monkeypatch) -> None:
     workspace, registry, authority_root = _paths(tmp_path)
-    membership = _membership_receipt()
-    _install_membership(monkeypatch, membership)
+    membership = _membership()
+    receipt = _publish_membership(
+        monkeypatch, workspace, registry, authority_root, membership
+    )
 
     first = precommit.issue_risk_randomization_precommit(
         registry,
         workspace=workspace,
-        research_protocol_id=membership.research_protocol_id,
-        dataset_snapshot_id=membership.dataset_snapshot_id,
+        research_protocol_id=receipt.research_protocol_id,
+        dataset_snapshot_id=receipt.dataset_snapshot_id,
         experiment_id="experiment-001",
         authority_root=authority_root,
     )
     second = precommit.issue_risk_randomization_precommit(
         registry,
         workspace=workspace,
-        research_protocol_id=membership.research_protocol_id,
-        dataset_snapshot_id=membership.dataset_snapshot_id,
+        research_protocol_id=receipt.research_protocol_id,
+        dataset_snapshot_id=receipt.dataset_snapshot_id,
         experiment_id="experiment-002",
         authority_root=authority_root,
     )
@@ -217,8 +230,10 @@ def test_same_experiment_cannot_be_rebound_to_changed_membership(
     tmp_path, monkeypatch
 ) -> None:
     first, workspace, registry, authority_root, _ = _issue(tmp_path, monkeypatch)
-    changed = _membership_receipt(suffix="9")
-    _install_membership(monkeypatch, changed)
+    changed = _membership(suffix="9")
+    changed_receipt = _publish_membership(
+        monkeypatch, workspace, registry, authority_root, changed
+    )
 
     with pytest.raises(
         precommit.RiskRandomizationPrecommitError,
@@ -227,8 +242,8 @@ def test_same_experiment_cannot_be_rebound_to_changed_membership(
         precommit.issue_risk_randomization_precommit(
             registry,
             workspace=workspace,
-            research_protocol_id=changed.research_protocol_id,
-            dataset_snapshot_id=changed.dataset_snapshot_id,
+            research_protocol_id=changed_receipt.research_protocol_id,
+            dataset_snapshot_id=changed_receipt.dataset_snapshot_id,
             experiment_id=first.experiment_id,
             authority_root=authority_root,
         )
@@ -286,11 +301,19 @@ def test_crash_after_publish_before_commit_recovers_exact_root(
     tmp_path, monkeypatch
 ) -> None:
     workspace, registry, authority_root = _paths(tmp_path)
-    membership = _membership_receipt()
-    _install_membership(monkeypatch, membership)
+    resolved_membership = _membership()
+    membership = _publish_membership(
+        monkeypatch,
+        workspace,
+        registry,
+        authority_root,
+        resolved_membership,
+    )
     original_commit = MonotonicWorkspaceAuthority.commit
 
-    def crash_before_commit(self, **_kwargs):
+    def crash_before_commit(self, **kwargs):
+        if self.domain != precommit._AUTHORITY_DOMAIN:
+            return original_commit(self, **kwargs)
         raise OSError("simulated crash after publication")
 
     monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", crash_before_commit)

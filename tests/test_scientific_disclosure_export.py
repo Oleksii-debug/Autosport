@@ -146,7 +146,16 @@ def _promotion_evidence(bundle_sha: str) -> PromotionEvidence:
     return PromotionEvidence(evidence_id, **fields)
 
 
-def _system(tmp_path, *, with_decision: bool = True):
+def _system(
+    tmp_path,
+    *,
+    with_evidence: bool = True,
+    with_decision: bool = True,
+    outcome: ResearchOutcome = ResearchOutcome.POSITIVE,
+):
+    if with_decision and not with_evidence:
+        raise ValueError("test fixture decision requires promotion evidence")
+
     workspace = tmp_path / "product-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     registry = ScientificRegistry.initialize_pristine(
@@ -247,7 +256,7 @@ def _system(tmp_path, *, with_decision: bool = True):
         "eval-1",
         7,
         SHA_B,
-        ResearchOutcome.POSITIVE,
+        outcome,
         T1,
         model_version_id="model-1",
         completed_at=T2,
@@ -267,7 +276,8 @@ def _system(tmp_path, *, with_decision: bool = True):
         registry.append(record)
 
     evidence = _promotion_evidence(bundle.bundle_sha256)
-    registry.append(evidence)
+    if with_evidence:
+        registry.append(evidence)
     decision = PromotionDecision(
         "promotion-1",
         PromotionAction.PROMOTE,
@@ -331,22 +341,46 @@ def test_safe_export_consumes_canonical_holdout_before_writing_outcome(tmp_path)
     assert result.holdout_consumption_id == ledger.records()[0].consumption_id
 
 
-def test_missing_promotion_decision_fails_before_consumption_or_output(tmp_path) -> None:
-    _, _, _, _, ledger, exporter = _system(tmp_path, with_decision=False)
-    target = tmp_path / "outward.json"
+def test_export_with_evidence_does_not_require_promotion_decision(tmp_path) -> None:
+    _, _, evidence, _, ledger, exporter = _system(tmp_path, with_decision=False)
+    target = tmp_path / "outward-before-decision.json"
 
-    with pytest.raises(
-        ScientificDisclosureExportError,
-        match="exactly one canonical PromotionDecision",
-    ):
-        exporter.export_reproducibility_bundle(
-            "experiment-1",
-            target,
-            disclosed_at_utc=T4,
-        )
+    result = exporter.export_reproducibility_bundle(
+        "experiment-1",
+        target,
+        disclosed_at_utc=T4,
+    )
 
-    assert ledger.records() == ()
-    assert not target.exists()
+    assert target.exists()
+    assert result.promotion_evidence_id == evidence.promotion_evidence_id
+    assert result.promotion_decision_id is None
+    assert len(ledger.records()) == 1
+
+
+def test_negative_result_without_promotion_is_still_disclosable_after_consumption(
+    tmp_path,
+) -> None:
+    _, dataset, _, _, ledger, exporter = _system(
+        tmp_path,
+        with_evidence=False,
+        with_decision=False,
+        outcome=ResearchOutcome.NEGATIVE,
+    )
+    target = tmp_path / "negative-result.json"
+
+    result = exporter.export_reproducibility_bundle(
+        "experiment-1",
+        target,
+        disclosed_at_utc=T4,
+    )
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["experiment"]["outcome"] == ResearchOutcome.NEGATIVE.value
+    assert result.promotion_evidence_id is None
+    assert result.promotion_decision_id is None
+    assert len(ledger.records()) == 1
+    assert ledger.records()[0].dataset_manifest_sha256 == dataset.manifest_sha256
+    assert result.holdout_consumption_id == ledger.records()[0].consumption_id
 
 
 def test_publish_failure_stays_consumed_and_exact_retry_is_idempotent(

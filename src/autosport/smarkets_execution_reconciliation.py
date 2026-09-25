@@ -25,6 +25,7 @@ from .bookmaker_capability import (
     BookmakerCapabilityState,
 )
 from .real_execution_ledger import AcknowledgementStatus, ExecutionAction
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 ADAPTER_ID = "smarkets-official-api"
@@ -1086,100 +1087,109 @@ class SmarketsReconciliationJournal:
         return tuple(row["record"] for row in self._load_rows())
 
     def append(self, effect: VerifiedSmarketsOrderEffect) -> None:
-        if type(effect) is not VerifiedSmarketsOrderEffect:
-            raise SmarketsReconciliationError(
-                "journal accepts only VerifiedSmarketsOrderEffect"
-            )
-        rows = self._load_rows()
-        records = [row["record"] for row in rows]
-        effect_record = effect.to_canonical_dict()
-        (
-            new_status,
-            new_stake,
-            new_odds,
-            new_liability,
-            new_observed,
-            new_quantity,
-            new_avg_price,
-        ) = _validated_effect_record(effect_record)
-        for record in records:
-            if record.get("evidence_id") == effect.evidence_id:
-                if record == effect_record:
-                    return
-                raise SmarketsReconciliationError(
-                    "evidence_id was reused with conflicting journal payload"
-                )
-            if record.get("reference_id") == effect.reference_id and (
-                record.get("action_id") != effect.action_id
-                or record.get("provider_order_id") != effect.provider_order_id
-            ):
-                raise SmarketsReconciliationError(
-                    "reference_id conflicts with prior provider order/action"
-                )
-            if record.get("provider_order_id") != effect.provider_order_id:
-                continue
-            if record.get("action_id") != effect.action_id:
-                raise SmarketsReconciliationError(
-                    "provider_order_id conflicts with prior action"
-                )
-            if record.get("reference_id") != effect.reference_id:
-                raise SmarketsReconciliationError(
-                    "provider_order_id changed durable reference_id"
-                )
-            (
-                old_status,
-                old_stake,
-                old_odds,
-                old_liability,
-                old_observed,
-                old_quantity,
-                old_avg_price,
-            ) = _validated_effect_record(record)
-            if new_observed < old_observed:
-                raise SmarketsReconciliationError(
-                    "provider order readback time regressed"
-                )
-            if new_quantity < old_quantity:
-                raise SmarketsReconciliationError(
-                    "provider order executed quantity regressed"
-                )
-            if new_quantity == old_quantity and (
-                new_avg_price != old_avg_price
-                or new_stake != old_stake
-                or new_odds != old_odds
-                or new_liability != old_liability
-            ):
-                raise SmarketsReconciliationError(
-                    "provider economics changed without a new fill"
-                )
-            if old_status is AcknowledgementStatus.ACCEPTED and (
-                new_status is not AcknowledgementStatus.ACCEPTED
-                or new_quantity != old_quantity
-                or new_avg_price != old_avg_price
-            ):
-                raise SmarketsReconciliationError(
-                    "fully accepted provider order cannot regress"
-                )
-            if old_status is AcknowledgementStatus.REJECTED and (
-                new_status is not AcknowledgementStatus.REJECTED
-                or new_quantity != 0
-            ):
-                raise SmarketsReconciliationError(
-                    "rejected provider order cannot later mint a fill"
-                )
-        previous = rows[-1]["record_sha256"] if rows else "0" * 64
-        record = effect_record
-        row = {
-            "prev_sha256": previous,
-            "record": record,
-            "schema_version": 1,
-        }
-        row["record_sha256"] = _digest(row)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Serialize one complete journal mutation under the canonical economic lock."""
+
         try:
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(_canonical(row).decode("ascii") + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError as exc:
-            raise SmarketsReconciliationError("cannot append Smarkets journal") from exc
+            with WorkspaceEconomicLock(self.path.parent):
+            if type(effect) is not VerifiedSmarketsOrderEffect:
+                raise SmarketsReconciliationError(
+                    "journal accepts only VerifiedSmarketsOrderEffect"
+                )
+            rows = self._load_rows()
+            records = [row["record"] for row in rows]
+            effect_record = effect.to_canonical_dict()
+            (
+                new_status,
+                new_stake,
+                new_odds,
+                new_liability,
+                new_observed,
+                new_quantity,
+                new_avg_price,
+            ) = _validated_effect_record(effect_record)
+            for record in records:
+                if record.get("evidence_id") == effect.evidence_id:
+                    if record == effect_record:
+                        return
+                    raise SmarketsReconciliationError(
+                        "evidence_id was reused with conflicting journal payload"
+                    )
+                if record.get("reference_id") == effect.reference_id and (
+                    record.get("action_id") != effect.action_id
+                    or record.get("provider_order_id") != effect.provider_order_id
+                ):
+                    raise SmarketsReconciliationError(
+                        "reference_id conflicts with prior provider order/action"
+                    )
+                if record.get("provider_order_id") != effect.provider_order_id:
+                    continue
+                if record.get("action_id") != effect.action_id:
+                    raise SmarketsReconciliationError(
+                        "provider_order_id conflicts with prior action"
+                    )
+                if record.get("reference_id") != effect.reference_id:
+                    raise SmarketsReconciliationError(
+                        "provider_order_id changed durable reference_id"
+                    )
+                (
+                    old_status,
+                    old_stake,
+                    old_odds,
+                    old_liability,
+                    old_observed,
+                    old_quantity,
+                    old_avg_price,
+                ) = _validated_effect_record(record)
+                if new_observed < old_observed:
+                    raise SmarketsReconciliationError(
+                        "provider order readback time regressed"
+                    )
+                if new_quantity < old_quantity:
+                    raise SmarketsReconciliationError(
+                        "provider order executed quantity regressed"
+                    )
+                if new_quantity == old_quantity and (
+                    new_avg_price != old_avg_price
+                    or new_stake != old_stake
+                    or new_odds != old_odds
+                    or new_liability != old_liability
+                ):
+                    raise SmarketsReconciliationError(
+                        "provider economics changed without a new fill"
+                    )
+                if old_status is AcknowledgementStatus.ACCEPTED and (
+                    new_status is not AcknowledgementStatus.ACCEPTED
+                    or new_quantity != old_quantity
+                    or new_avg_price != old_avg_price
+                ):
+                    raise SmarketsReconciliationError(
+                        "fully accepted provider order cannot regress"
+                    )
+                if old_status is AcknowledgementStatus.REJECTED and (
+                    new_status is not AcknowledgementStatus.REJECTED
+                    or new_quantity != 0
+                ):
+                    raise SmarketsReconciliationError(
+                        "rejected provider order cannot later mint a fill"
+                    )
+            previous = rows[-1]["record_sha256"] if rows else "0" * 64
+            record = effect_record
+            row = {
+                "prev_sha256": previous,
+                "record": record,
+                "schema_version": 1,
+            }
+            row["record_sha256"] = _digest(row)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(_canonical(row).decode("ascii") + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                raise SmarketsReconciliationError("cannot append Smarkets journal") from exc
+
+        except WorkspaceEconomicLockError as exc:
+            raise SmarketsReconciliationError(
+                "cannot acquire Smarkets reconciliation economic-writer lock"
+            ) from exc

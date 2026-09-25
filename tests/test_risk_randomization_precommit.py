@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import inspect
 import json
 
@@ -104,6 +105,46 @@ def test_issue_retry_restart_resolves_exact_same_product_root(
     assert first.occurrence_ancestry_proven is False
     assert first.iid_qualified is False
     assert first.grants_real_money_authority is False
+
+
+def test_issue_retry_rejects_commit_with_wrong_semantic_binding(
+    tmp_path, monkeypatch
+) -> None:
+    first, workspace, registry, authority_root, membership = _issue(
+        tmp_path, monkeypatch
+    )
+    original_recover = MonotonicWorkspaceAuthority.recover
+
+    def recover_with_wrong_binding(self, **kwargs):
+        recovery = original_recover(self, **kwargs)
+        if recovery.record is None:
+            return recovery
+        return replace(
+            recovery,
+            record=replace(
+                recovery.record,
+                semantic_binding_sha256="0" * 64,
+            ),
+        )
+
+    monkeypatch.setattr(
+        MonotonicWorkspaceAuthority,
+        "recover",
+        recover_with_wrong_binding,
+    )
+
+    with pytest.raises(
+        precommit.RiskRandomizationPrecommitError,
+        match="semantic binding",
+    ):
+        precommit.issue_risk_randomization_precommit(
+            registry,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            experiment_id=first.experiment_id,
+            authority_root=authority_root,
+        )
 
 
 def test_distinct_experiments_get_distinct_roots(tmp_path, monkeypatch) -> None:

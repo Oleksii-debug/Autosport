@@ -336,6 +336,7 @@ def run_product(
     installed_handlers: list[int] = []
     started = False
     terminalized = False
+    terminal_stop_attempted = False
     try:
         if install_signal_handlers:
             previous_handlers = {
@@ -359,6 +360,7 @@ def run_product(
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
                 exit_code = stop_request.exit_code
+                terminal_stop_attempted = True
                 stop_status = runtime.stop(stop_request.reason)
                 terminalized = True
                 _print_record(
@@ -380,6 +382,7 @@ def run_product(
 
             if stop_request.requested:
                 exit_code = stop_request.exit_code
+                terminal_stop_attempted = True
                 stop_status = runtime.stop(stop_request.reason)
                 terminalized = True
                 _print_record(
@@ -390,6 +393,7 @@ def run_product(
                 )
                 break
             if max_cycles is not None and cycles >= max_cycles:
+                terminal_stop_attempted = True
                 stop_status = runtime.stop("max_cycles_reached")
                 terminalized = True
                 _print_record(
@@ -414,8 +418,14 @@ def run_product(
         primary_failure = sys.exc_info()[1]
         cleanup_failure: BaseException | None = None
 
-        if started and not terminalized and primary_failure is not None:
+        if (
+            started
+            and not terminalized
+            and not terminal_stop_attempted
+            and primary_failure is not None
+        ):
             try:
+                terminal_stop_attempted = True
                 runtime.stop("runtime_error")
                 terminalized = True
             except BaseException as stop_error:

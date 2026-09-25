@@ -187,7 +187,7 @@ def test_guard_module_factory_proxy_cannot_hide_real_clock_rebind(
         issuance._open_canonical_authorities(authority)
 
 
-def test_public_issue_dispatch_ignores_dispatch_state_class_rebind(monkeypatch):
+def test_public_issue_dispatch_fails_closed_on_dispatch_state_class_rebind(monkeypatch):
     called = False
 
     def forged_issue(self, *args, **kwargs):
@@ -197,7 +197,10 @@ def test_public_issue_dispatch_ignores_dispatch_state_class_rebind(monkeypatch):
 
     monkeypatch.setattr(guard_module._DispatchState, "issue", forged_issue)
 
-    with pytest.raises(issuance.ProductPolicyEvaluationIssuanceError):
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="dispatch state class",
+    ):
         issuance.issue_product_policy_evaluation(
             None,
             None,
@@ -207,7 +210,7 @@ def test_public_issue_dispatch_ignores_dispatch_state_class_rebind(monkeypatch):
     assert called is False
 
 
-def test_pinned_common_guard_ignores_class_checker_rebind(monkeypatch):
+def test_policy_guard_fails_closed_on_internal_checker_class_rebind(monkeypatch):
     monkeypatch.setattr(
         guard_module._DispatchState,
         "_require_common_dispatch",
@@ -221,7 +224,7 @@ def test_pinned_common_guard_ignores_class_checker_rebind(monkeypatch):
 
     with pytest.raises(
         issuance.ProductPolicyEvaluationIssuanceError,
-        match="direct helper graph",
+        match="dispatch state class",
     ):
         issuance.issue_product_policy_evaluation(
             None,

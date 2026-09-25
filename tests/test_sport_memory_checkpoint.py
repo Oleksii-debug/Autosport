@@ -524,6 +524,48 @@ def test_opponent_source_projection_rejects_duplicate_performances_key(tmp_path)
 
 
 
+
+def test_checkpoint_restart_normalizes_invalid_utf8_to_checkpoint_error(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint_path.write_bytes(b'{"schema":"sport-memory-authority-checkpoint","bad":"\xff"}')
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="cannot load sport-memory authority checkpoint",
+    ):
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path, identity, opponent
+        )
+
+
+def test_opponent_source_projection_normalizes_invalid_utf8_to_checkpoint_error(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    opponent.path.write_bytes(b'{"performances":["\xff"]}')
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="cannot read opponent canonical store",
+    ):
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path, identity, opponent
+        )
+
+
+
 def test_checkpoint_rejects_store_bound_to_different_registry_object(tmp_path):
     identity, opponent = _canonical_stores(tmp_path)
     other_identity = ParticipantIdentityRegistry.initialize_pristine(

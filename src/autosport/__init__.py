@@ -153,3 +153,7 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# K07 authenticated account identity must acquire account details from a sealed
+# product-origin snapshot, not mutable live-client fields during provider I/O.
+from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402

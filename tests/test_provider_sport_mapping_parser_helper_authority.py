@@ -39,6 +39,31 @@ def test_register_evidence_rejects_rebound_strict_json_helper(monkeypatch):
         assert registry.bindings == ()
 
 
+def test_register_evidence_rejects_in_place_parser_helper_code_swap(monkeypatch):
+    raw = b"not-json-provider-evidence"
+    canonical = mapping._strict_json_object
+
+    def forged_json(_raw_bytes: bytes) -> dict[str, object]:
+        return {
+            "schema": "autosport.provider_sport_mapping_evidence",
+            "schema_version": 1,
+            "provider_namespace": "betfair",
+            "provider_sport_id": "forged-provider-sport",
+            "canonical_sport": "football",
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_until": None,
+            "evidence_available_at": "2026-01-02T00:00:00Z",
+        }
+
+    monkeypatch.setattr(canonical, "__code__", forged_json.__code__)
+
+    with TemporaryDirectory() as tmp:
+        registry = _registry(tmp)
+        with pytest.raises(mapping.ProviderSportMappingError, match="parser|authority|executable"):
+            registry.register_evidence(raw)
+        assert registry.bindings == ()
+
+
 def test_register_evidence_rejects_rebound_supported_schema_identity(monkeypatch):
     payload = {
         "schema": "caller-selected-provider-evidence-schema",

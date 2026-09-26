@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -77,6 +78,13 @@ class RunTransactionRetainedBaseCrashGuardTests(unittest.TestCase):
         )
         tx.stage_outputs(terminal, ledger_path)
         return tx, experiment_key, book_path, base_payload
+
+    def test_obsolete_side_effect_guard_module_is_not_shipped(self):
+        self.assertIsNone(
+            importlib.util.find_spec(
+                "autosport._run_transaction_retained_base_crash_guard"
+            )
+        )
 
     def test_guard_does_not_publish_raw_predecessor_bypass_methods(self):
         self.assertFalse(

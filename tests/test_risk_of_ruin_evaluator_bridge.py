@@ -161,3 +161,39 @@ def test_synchronized_product_evaluator_rebinding_fails_closed(
         authority._resolve_product_evaluator_result(tmp_path, RESULT_ID)
 
     assert attacker_called is False
+
+def test_product_evaluator_resolve_code_swap_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    canonical = ProductRiskOfRuinEvaluator.resolve
+
+    def forged_resolve(self, result_id):
+        del self, result_id
+        raise AssertionError("forged evaluator resolve executed")
+
+    monkeypatch.setattr(canonical, "__code__", forged_resolve.__code__)
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="product evaluator resolver executable changed",
+    ):
+        _resolve_product_evaluator_result(tmp_path, RESULT_ID)
+
+
+def test_product_evaluator_init_code_swap_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    canonical = ProductRiskOfRuinEvaluator.__init__
+
+    def forged_init(self, *, workspace):
+        del self, workspace
+        raise AssertionError("forged evaluator init executed")
+
+    monkeypatch.setattr(canonical, "__code__", forged_init.__code__)
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="product evaluator resolver executable changed",
+    ):
+        _resolve_product_evaluator_result(tmp_path, RESULT_ID)
+

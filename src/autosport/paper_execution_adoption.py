@@ -173,6 +173,10 @@ class PaperExecutionAdoptionRuntime:
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
+        # Scope publication has a stricter capability than generic execution minting.
+        # Only canonical preparation/verified PaperValue authorization may place an
+        # exact PreparedPaperExecution identity in this second registry.
+        self._exposure_scope_authorities: dict[int, PreparedPaperExecution] = {}
         self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
@@ -206,6 +210,16 @@ class PaperExecutionAdoptionRuntime:
         if self._prepared_authorities.get(id(prepared)) is not prepared:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"
+            )
+
+    def _require_exposure_scope_authority(
+        self,
+        prepared: PreparedPaperExecution,
+    ) -> None:
+        self._require_minted(prepared)
+        if self._exposure_scope_authorities.get(id(prepared)) is not prepared:
+            raise PaperExecutionAdoptionError(
+                "prepared execution lacks canonical PAPER exposure-scope authority"
             )
 
     def prepare(
@@ -352,13 +366,15 @@ class PaperExecutionAdoptionRuntime:
             created_at=plan.decision_ts,
             actions=tuple(actions),
         )
-        return self._mint_prepared(
+        prepared = self._mint_prepared(
             PreparedPaperExecution(
                 execution_plan=execution_plan,
                 exposure_bindings=tuple(bindings),
                 intent_evidence_json=intent_evidence_json,
             )
         )
+        self._exposure_scope_authorities[id(prepared)] = prepared
+        return prepared
 
     def prepare_paper_value_action(
         self,

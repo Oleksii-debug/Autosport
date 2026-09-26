@@ -1001,13 +1001,15 @@ def _authorize_descriptor(
         trigger_id=trigger_id,
         started_at=started_at,
     )
-    return self._mint_prepared(
+    prepared = self._mint_prepared(
         PreparedPaperExecution(
             execution_plan=descriptor.execution_plan,
             exposure_bindings=descriptor.exposure_bindings,
             intent_evidence_json=descriptor.intent_evidence_json,
         )
     )
+    self._exposure_scope_authorities[id(prepared)] = prepared
+    return prepared
 
 
 def _execute(
@@ -1056,6 +1058,7 @@ def _execute(
                 suspended_action_ids=suspended_action_ids,
             )
         finally:
+            self._exposure_scope_authorities.pop(id(authorized), None)
             self._prepared_authorities.pop(id(authorized), None)
 
 

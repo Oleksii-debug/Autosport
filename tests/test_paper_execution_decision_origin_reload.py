@@ -121,6 +121,8 @@ def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_exe
                 intent_evidence_json="{}",
             )
         )
+        # White-box fixture: model an already-authorized lower-layer execution.
+        runtime._exposure_scope_authorities[id(prepared)] = prepared
 
         result = runtime.execute(
             prepared=prepared,

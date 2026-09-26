@@ -93,7 +93,7 @@ def _prepared(
     runtime: PaperExecutionAdoptionRuntime,
     *actions: ExecutionAction,
 ) -> PreparedPaperExecution:
-    return runtime._mint_prepared(
+    prepared = runtime._mint_prepared(
         PreparedPaperExecution(
             execution_plan=_plan(*actions),
             exposure_bindings=tuple(
@@ -108,6 +108,9 @@ def _prepared(
             intent_evidence_json='{"schema":"wp-e03a-test-intent"}',
         )
     )
+    # White-box fixture: model an already-authorized lower-layer execution.
+    runtime._exposure_scope_authorities[id(prepared)] = prepared
+    return prepared
 
 
 def _evidence(

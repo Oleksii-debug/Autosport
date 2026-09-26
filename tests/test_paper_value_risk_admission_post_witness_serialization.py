@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from time import monotonic, sleep
 
 from autosport.agents import AgentContext
@@ -114,11 +114,40 @@ def _run_agent(
         done.set()
 
 
+class _PostWitnessBlockingPaperBook(PaperBook):
+    """Block target materialization after the canonical risk witness commits."""
+
+    def __init__(self, initial_balance: str, *, blocked: Event, release: Event) -> None:
+        super().__init__(initial_balance)
+        self.blocked = blocked
+        self.release = release
+        self.blocking_thread: Thread | None = None
+
+    def open_ticket(self, *args, **kwargs):
+        # Canonical PaperValue execution reaches PaperBook materialization only
+        # after _issue_general_risk_admission has durably committed and while the
+        # runtime's execution RLock is still held.  Blocking here preserves the
+        # production authority graph and leaves the exact JsonlDecisionLedger in
+        # place for decision-origin verification.
+        if (
+            self.blocking_thread is not None
+            and current_thread() is self.blocking_thread
+        ):
+            self.blocked.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("target execution was not released")
+        return super().open_ticket(*args, **kwargs)
+
 def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     tmp_path,
-    monkeypatch,
 ) -> None:
-    book = PaperBook("100.00")
+    target_post_witness = Event()
+    release_target = Event()
+    book = _PostWitnessBlockingPaperBook(
+        "100.00",
+        blocked=target_post_witness,
+        release=release_target,
+    )
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("0.02"),
         max_committed_fraction=Decimal("0.20"),
@@ -157,44 +186,6 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         competitor_context,
         competitor_event,
     )
-    target_post_witness = Event()
-    release_target = Event()
-    original_execute_unlocked = PaperExecutionAdoptionRuntime._execute_unlocked
-
-    def block_after_target_witness(
-        self,
-        *,
-        prepared,
-        trigger_id: str,
-        started_at: str,
-        materialize_exposure: bool,
-        observations=None,
-        evidence_registry=None,
-        suspended_action_ids: frozenset[str] = frozenset(),
-    ):
-        # This boundary is reached only after GENERAL risk admission has committed
-        # and while the runtime-wide execution lock is held. Test synchronization
-        # therefore cannot replace the protected PaperValue authority entry point.
-        if trigger_id == target_decision_id:
-            target_post_witness.set()
-            if not release_target.wait(timeout=5):
-                raise AssertionError("target execution was not released")
-        return original_execute_unlocked(
-            self,
-            prepared=prepared,
-            trigger_id=trigger_id,
-            started_at=started_at,
-            materialize_exposure=materialize_exposure,
-            observations=observations,
-            evidence_registry=evidence_registry,
-            suspended_action_ids=suspended_action_ids,
-        )
-
-    monkeypatch.setattr(
-        PaperExecutionAdoptionRuntime,
-        "_execute_unlocked",
-        block_after_target_witness,
-    )
 
     target_done = Event()
     competitor_done = Event()
@@ -212,6 +203,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         kwargs={"done": competitor_done, "errors": competitor_errors},
         daemon=True,
     )
+    book.blocking_thread = target_thread
 
     target_thread.start()
     try:

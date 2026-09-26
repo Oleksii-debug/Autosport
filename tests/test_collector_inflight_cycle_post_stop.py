@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 
 from autosport.causal_collector import CollectorDeltaStore
-from autosport.collector_service import HeadlessCollectorService
+from autosport.collector_service import (
+    CollectorServiceStoppedError,
+    HeadlessCollectorService,
+)
 from autosport.event_lifecycle import CatalogPage, ContinuousEventLifecycle
 
 
@@ -112,7 +115,7 @@ class CollectorInflightCyclePostStopTests(unittest.TestCase):
 
             # Durable STOP is now the post-quiescence boundary: after it is visible,
             # another cycle cannot publish any terminal/data mutation until resume.
-            with self.assertRaises(Exception):
+            with self.assertRaises(CollectorServiceStoppedError):
                 service.run_cycle()
             self.assertEqual(service.status(), final_status)
 

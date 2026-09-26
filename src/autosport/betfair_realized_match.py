@@ -872,9 +872,16 @@ def validate_betfair_realized_match_revision(
 
 def _install_realized_match_authority() -> None:
     issued: dict[int, tuple[object, str, str]] = {}
-    raw_resolve = resolve_betfair_realized_match
-    raw_validate_revision = validate_betfair_realized_match_revision
-    validate_integrity = BetfairRealizedMatchEvidence._validate_integrity
+    # Capture the owning implementation, not the thin public wrapper.  The wrapper
+    # performs a late module-global lookup of _resolve_betfair_realized_match and
+    # would otherwise let a post-install rebind mint origin-sealed forged evidence.
+    owning_resolve = _resolve_betfair_realized_match
+    owning_validate_revision = validate_betfair_realized_match_revision
+    evidence_type = BetfairRealizedMatchEvidence
+    error_type = RealizedMatchEvidenceError
+    hash_payload = _sha256
+    weak_ref = ref
+    validate_integrity = evidence_type._validate_integrity
 
     def authoritative_resolve(
         plan: ExecutionPlan,
@@ -883,41 +890,53 @@ def _install_realized_match_authority() -> None:
         *,
         attempt_id: str,
     ) -> BetfairRealizedMatchEvidence:
-        evidence = raw_resolve(
+        if globals().get("_resolve_betfair_realized_match") is not owning_resolve:
+            raise error_type(
+                "canonical realized match resolver implementation changed"
+            )
+        if globals().get("resolve_betfair_realized_match") is not authoritative_resolve:
+            raise error_type("canonical realized match resolver dispatch changed")
+        evidence = owning_resolve(
             plan,
             ledger,
             readback,
             attempt_id=attempt_id,
         )
+        if globals().get("_resolve_betfair_realized_match") is not owning_resolve:
+            raise error_type(
+                "canonical realized match resolver implementation changed during resolution"
+            )
+        if type(evidence) is not evidence_type:
+            raise error_type("canonical realized match resolver returned invalid evidence")
         evidence_id = id(evidence)
 
         def forget(_weakref: object, *, key: int = evidence_id) -> None:
             issued.pop(key, None)
 
         issued[evidence_id] = (
-            ref(evidence, forget),
+            weak_ref(evidence, forget),
             evidence.evidence_id,
-            _sha256(evidence._payload()),
+            hash_payload(evidence._payload()),
         )
         return evidence
 
     def assert_authoritative(
         self: BetfairRealizedMatchEvidence,
     ) -> None:
-        if type(self) is not BetfairRealizedMatchEvidence:
+        if type(self) is not evidence_type:
             raise TypeError("evidence must be exact BetfairRealizedMatchEvidence")
         validate_integrity(self)
         record = issued.get(id(self))
         if record is None or record[0]() is not self:
-            raise RealizedMatchEvidenceError(
+            raise error_type(
                 "realized match evidence was not issued by canonical resolver"
             )
         if record[1] != self.evidence_id:
-            raise RealizedMatchEvidenceError(
+            raise error_type(
                 "realized match evidence changed after canonical resolution"
             )
-        if record[2] != _sha256(self._payload()):
-            raise RealizedMatchEvidenceError(
+        if record[2] != hash_payload(self._payload()):
+            raise error_type(
                 "realized match evidence payload changed after canonical resolution"
             )
 
@@ -925,19 +944,32 @@ def _install_realized_match_authority() -> None:
         previous: BetfairRealizedMatchEvidence,
         current: BetfairRealizedMatchEvidence,
     ) -> BetfairRealizedMatchEvidence:
-        if BetfairRealizedMatchEvidence.assert_authoritative is not assert_authoritative:
-            raise RealizedMatchEvidenceError(
+        if (
+            globals().get("validate_betfair_realized_match_revision")
+            is not authoritative_validate_revision
+        ):
+            raise error_type("canonical realized match revision dispatch changed")
+        if evidence_type.assert_authoritative is not assert_authoritative:
+            raise error_type(
                 "canonical realized match evidence authority changed"
             )
         assert_authoritative(previous)
         assert_authoritative(current)
-        return raw_validate_revision(previous, current)
+        result = owning_validate_revision(previous, current)
+        if (
+            globals().get("validate_betfair_realized_match_revision")
+            is not authoritative_validate_revision
+        ):
+            raise error_type(
+                "canonical realized match revision dispatch changed during validation"
+            )
+        return result
 
     globals()["resolve_betfair_realized_match"] = authoritative_resolve
     globals()["validate_betfair_realized_match_revision"] = (
         authoritative_validate_revision
     )
-    BetfairRealizedMatchEvidence.assert_authoritative = assert_authoritative
+    evidence_type.assert_authoritative = assert_authoritative
 
 
 _install_realized_match_authority()

@@ -57,3 +57,18 @@ def test_replay_worker_error_redacts_secret_and_custom_type_name() -> None:
     assert message.error == "RuntimeError: api_key=" + REDACTED
     assert _SECRET not in message.error
     assert "_SecretBearingReplayError" not in message.error
+
+
+def test_replay_terminal_redacts_short_escaped_credential_key() -> None:
+    short_escape_secret = "short_escape_secret_1943"
+
+    class ShortEscapedCredentialError(RuntimeError):
+        def __str__(self) -> str:
+            return r'{"api\\tkey":"' + short_escape_secret + '"}'
+
+    rendered = _terminal_error(ShortEscapedCredentialError())
+
+    assert short_escape_secret not in rendered
+    assert REDACTED in rendered
+    assert r"api\\tkey" in rendered
+    assert "ShortEscapedCredentialError" not in rendered

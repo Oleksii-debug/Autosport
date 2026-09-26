@@ -110,7 +110,10 @@ def run_benchmark(count: int = 50_000) -> StorageReadBenchmarkResult:
     events = _build_events(count)
     target_event_id = "event-0"
     expected_history_ids = {event.dedupe_key for event in events}
-    expected_current_keys = {(event.source_id, event.quote_key) for event in events}
+    expected_current = {
+        (event.source_id, event.quote_key): event
+        for event in events
+    }
     expected_filtered_ids = {
         event.dedupe_key for event in events if event.event_id == target_event_id
     }
@@ -154,8 +157,14 @@ def run_benchmark(count: int = 50_000) -> StorageReadBenchmarkResult:
     filtered_ids = {event.dedupe_key for event in filtered}
     if history_ids != expected_history_ids:
         raise RuntimeError("full-history read did not preserve the populated durable identities")
-    if set(current) != expected_current_keys:
+    if set(current) != set(expected_current):
         raise RuntimeError("current projection read did not preserve expected provider/quote keys")
+    current_ids = {key: event.dedupe_key for key, event in current.items()}
+    expected_current_ids = {
+        key: event.dedupe_key for key, event in expected_current.items()
+    }
+    if current_ids != expected_current_ids:
+        raise RuntimeError("current projection read did not preserve the latest durable identity per key")
     if filtered_ids != expected_filtered_ids:
         raise RuntimeError("event-filter read did not preserve the expected durable identities")
 

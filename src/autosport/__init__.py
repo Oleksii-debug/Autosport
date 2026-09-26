@@ -154,6 +154,11 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
+# Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
+# exponent forms and oversized text before Decimal fixed-point materialization so
+# tiny hostile inputs cannot amplify into attacker-sized evidence strings.
+from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402
+
 # PAPER economic scope is a reserved canonical ledger event, not a generic caller
 # append capability. Install this after the existing PAPER authority composition.
 from . import _paper_exposure_scope_provenance_guard as _paper_exposure_scope_provenance_guard  # noqa: F401,E402

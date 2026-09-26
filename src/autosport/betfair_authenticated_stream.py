@@ -322,9 +322,11 @@ def open_authenticated_market_subscription(
             raise BetfairAuthenticatedStreamError("provider status acknowledgement id mismatch")
         provider_error_present = "error" in raw_status
         provider_error = raw_status.get("error")
+        connection_closed_present = "connectionClosed" in raw_status
+        connection_closed = raw_status.get("connectionClosed")
         if (
             raw_status.get("statusCode") != "SUCCESS"
-            or raw_status.get("connectionClosed") is not False
+            or (connection_closed_present and connection_closed is not False)
             or "errorCode" in raw_status
             or "errorMessage" in raw_status
             or (provider_error_present and provider_error is not False)

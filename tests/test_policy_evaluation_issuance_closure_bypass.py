@@ -27,7 +27,17 @@ def _closure_functions(function: FunctionType) -> tuple[FunctionType, ...]:
 
 def _dispatch_state():
     values = _closure_values(issuance.issue_product_policy_evaluation)
-    states = tuple(value for value in values if type(value).__name__ == "_DispatchState")
+    states: list[object] = []
+    for value in values:
+        candidate = value
+        if type(candidate).__name__ != "_DispatchState":
+            candidate = getattr(value, "__self__", None)
+        if (
+            candidate is not None
+            and type(candidate).__name__ == "_DispatchState"
+            and not any(candidate is prior for prior in states)
+        ):
+            states.append(candidate)
     assert len(states) == 1
     return states[0]
 

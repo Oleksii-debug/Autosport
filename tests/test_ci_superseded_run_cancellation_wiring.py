@@ -44,15 +44,9 @@ def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
     assert concurrency is not None
     group = concurrency.group("body")
     assert "cancel-in-progress: true" in group
-    assert any(
-        token in group
-        for token in (
-            "github.run_id",
-            "github.run_attempt",
-            "github.event.pull_request.head.sha",
-            "github.sha",
-        )
-    ), "workflow must isolate PR runs before job-level live-head admission"
+    assert "github.run_id" in group, (
+        "workflow must isolate every PR run before job-level live-head admission"
+    )
 
     heavy = _job_body(text, heavy_job)
     assert re.search(
@@ -60,3 +54,15 @@ def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
         heavy,
     ), f"{heavy_job} must wait for current-head admission"
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in heavy
+
+
+@pytest.mark.parametrize(("workflow_path", "_heavy_job"), _WORKFLOWS)
+def test_closed_pr_lifecycle_never_requires_head_checkout(
+    workflow_path: Path,
+    _heavy_job: str,
+) -> None:
+    """Closing/deleting a source branch must not turn harmless cleanup into red CI."""
+
+    text = workflow_path.read_text(encoding="utf-8")
+    assert "github.event_name != 'pull_request' || github.event.action == 'closed'" in text
+    assert "github.event_name == 'pull_request' && github.event.action != 'closed'" in text

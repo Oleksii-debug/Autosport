@@ -268,6 +268,23 @@ def test_corrupt_durable_file_fails_closed_on_restart(tmp_path) -> None:
         )
 
 
+def test_oversized_durable_file_fails_before_json_decode(tmp_path) -> None:
+    goal = _goal()
+    store = PaperRiskPolicyStore(tmp_path)
+    policy = _policy(goal)
+    store.initialize_owner(policy)
+    store.path.write_bytes(b"{" + (b"x" * risk_store_module._MAX_DURABLE_JSON_BYTES))
+
+    with pytest.raises(
+        PaperRiskPolicyStoreError,
+        match="exceeds bounded durable-state size",
+    ):
+        store.load(
+            economic_goal=goal,
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )
+
+
 def test_unbound_policy_roundtrip_requires_exact_unbound_state() -> None:
     policy = _policy(None)
     payload = paper_risk_policy_to_payload(policy)

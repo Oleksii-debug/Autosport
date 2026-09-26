@@ -3,8 +3,12 @@ from __future__ import annotations
 import multiprocessing
 import threading
 from pathlib import Path
+from typing import TypeVar
 
 from autosport.endurance import EnduranceConfig, run_endurance
+
+
+_T = TypeVar("_T")
 
 
 def _alive_non_daemon_threads() -> tuple[threading.Thread, ...]:
@@ -24,10 +28,10 @@ def _alive_child_processes() -> tuple[multiprocessing.Process, ...]:
     )
 
 
-def _new_identity_objects[T](
-    current: tuple[T, ...],
-    baseline: tuple[T, ...],
-) -> tuple[T, ...]:
+def _new_identity_objects(
+    current: tuple[_T, ...],
+    baseline: tuple[_T, ...],
+) -> tuple[_T, ...]:
     """Return live objects that are not the exact objects captured at baseline."""
 
     return tuple(

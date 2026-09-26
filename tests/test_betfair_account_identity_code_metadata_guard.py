@@ -7,6 +7,7 @@ import urllib.request as _urllib_request
 
 import pytest
 
+from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
     BetfairAccountIdentityError,
     build_betfair_authenticated_client,
@@ -51,6 +52,16 @@ def _reachable_named(root: FunctionType, name: str) -> FunctionType:
         for function in _reachable_functions(root)
         if function is not root and function.__name__ == name
     ]
+    if name == "read_account_details" and len(matches) > 1:
+        # K07 intentionally keeps the live read-only predecessor for ordinary
+        # non-identity reads plus one sealed metadata template for identity
+        # acquisition.  The falsifier targets the sealed template, not whichever
+        # function happens to share its source-level name.
+        matches = [
+            function
+            for function in matches
+            if function.__globals__ is not _readonly.__dict__
+        ]
     assert len(matches) == 1, [function.__name__ for function in matches]
     return matches[0]
 

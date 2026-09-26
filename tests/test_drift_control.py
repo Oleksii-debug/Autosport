@@ -4,6 +4,7 @@ from decimal import localcontext
 
 import pytest
 
+import autosport.drift_control as drift_control
 from autosport.drift_control import (
     DriftCausalityError,
     DriftKind,
@@ -203,6 +204,165 @@ def _reference(monitor, **overrides):
     return monitor.create_reference(**values)
 
 
+def test_min_samples_requires_exact_builtin_int_before_comparison(tmp_path):
+    class HostileMinSamples(int):
+        def __le__(self, other):
+            raise AssertionError("hostile min_samples comparison must not run")
+
+    hostile = HostileMinSamples(-1)
+    monitor = DriftMonitor(_registry(tmp_path))
+
+    with pytest.raises(ValueError, match="min_samples must be an integer"):
+        _reference(monitor, min_samples=hostile)
+
+    with pytest.raises(ValueError, match="min_samples must be an integer"):
+        drift_control._sample_insufficiency_reason(
+            algorithm_version=drift_control.DRIFT_ALGORITHM_VERSION,
+            min_samples=hostile,
+            baseline_count=2,
+            baseline_effective_sample_size=None,
+            current_count=2,
+            current_effective_sample_size=None,
+        )
+
+    reference = _reference(monitor, min_samples=3)
+    assert type(reference.min_samples) is int
+    assert reference.min_samples == 3
+
+
+def test_sample_counts_and_effective_size_require_exact_builtin_int(tmp_path):
+    class HostileCount(int):
+        def __lt__(self, other):
+            raise AssertionError("hostile count comparison must not run")
+
+        def __le__(self, other):
+            raise AssertionError("hostile count comparison must not run")
+
+        def __gt__(self, other):
+            raise AssertionError("hostile count comparison must not run")
+
+    hostile = HostileCount(-1)
+
+    with pytest.raises(ValueError, match="effective_sample_size must be a positive integer"):
+        _baseline_window(effective_sample_size=hostile)
+
+    with pytest.raises(ValueError, match="baseline_count must be a non-negative integer"):
+        drift_control._sample_insufficiency_reason(
+            algorithm_version=drift_control.DRIFT_ALGORITHM_VERSION,
+            min_samples=1,
+            baseline_count=hostile,
+            baseline_effective_sample_size=None,
+            current_count=2,
+            current_effective_sample_size=None,
+        )
+
+    monitor = DriftMonitor(_registry(tmp_path))
+    reference = _reference(monitor)
+    with pytest.raises(ValueError, match="sample_count must be an integer"):
+        replace(reference, sample_count=hostile)
+
+    current = _current_window()
+    observation = drift_control.DriftObservation(
+        reference_id=reference.reference_id,
+        dataset_snapshot_id=current.dataset_snapshot_id,
+        source_identity=current.source_identity,
+        revision_id=current.revision_id,
+        window_start=current.window_start,
+        window_end=current.window_end,
+        observation_as_of=current.as_of,
+        evidence_sha256=current.evidence_sha256,
+        sample_count=current.sample_count,
+        mean_fraction=current.mean_fraction,
+        effective_sample_size=current.effective_sample_size,
+        evidence_values=current.values,
+        evidence_observed_at=current.value_observed_at,
+        evidence_available_at=current.value_available_at,
+    )
+    with pytest.raises(ValueError, match="sample_count must be an integer"):
+        replace(observation, sample_count=hostile)
+    with pytest.raises(ValueError, match="effective_sample_size must be a positive integer"):
+        replace(observation, effective_sample_size=hostile)
+
+    ordinary = _baseline_window(effective_sample_size=1)
+    assert type(ordinary.sample_count) is int
+    assert type(ordinary.effective_sample_size) is int
+
+
+def test_authority_objects_require_exact_canonical_types_before_dispatch(tmp_path):
+    class HostileRegistry(ScientificRegistry):
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("hostile registry dispatch must not run")
+
+        def append(self, *_args, **_kwargs):
+            raise AssertionError("hostile registry dispatch must not run")
+
+    hostile_registry = object.__new__(HostileRegistry)
+    with pytest.raises(TypeError, match="exact ScientificRegistry"):
+        DriftMonitor(hostile_registry)
+
+    class HostileWindow(DriftWindow):
+        def __getattribute__(self, name):
+            if name in {
+                "dataset_snapshot_id",
+                "source_identity",
+                "revision_id",
+                "window_start",
+                "window_end",
+                "as_of",
+                "evidence_sha256",
+                "sample_count",
+                "mean_fraction",
+                "effective_sample_size",
+                "values",
+                "value_observed_at",
+                "value_available_at",
+            }:
+                raise AssertionError("hostile DriftWindow dispatch must not run")
+            return super().__getattribute__(name)
+
+    baseline = _baseline_window()
+    current = _current_window()
+
+    def hostile_window_from(window):
+        hostile = object.__new__(HostileWindow)
+        fields = object.__getattribute__(window, "__dataclass_fields__")
+        for name in fields:
+            object.__setattr__(
+                hostile,
+                name,
+                object.__getattribute__(window, name),
+            )
+        return hostile
+
+    hostile_baseline = hostile_window_from(baseline)
+    hostile_current = hostile_window_from(current)
+    monitor = DriftMonitor(_registry(tmp_path))
+
+    with pytest.raises(TypeError, match="baseline must be exact DriftWindow"):
+        _reference(monitor, baseline=hostile_baseline)
+
+    with pytest.raises(TypeError, match="window must be exact DriftWindow"):
+        monitor._validate_window_dataset(hostile_current)
+
+    reference = _reference(monitor)
+    with pytest.raises(TypeError, match="current must be exact DriftWindow"):
+        monitor.evaluate(
+            reference.reference_id,
+            hostile_current,
+            evaluated_at=EVALUATED_AT,
+        )
+
+    class HostileFinding(drift_control.DriftFinding):
+        def __getattribute__(self, name):
+            if name == "finding_id":
+                raise AssertionError("hostile finding dispatch must not run")
+            return super().__getattribute__(name)
+
+    hostile_finding = object.__new__(HostileFinding)
+    with pytest.raises(TypeError, match="finding must be exact DriftFinding"):
+        monitor.finding_binding(hostile_finding)
+
+
 def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     baseline = _baseline_window(effective_sample_size=1)
     current = _current_window(effective_sample_size=1)
@@ -250,6 +410,99 @@ def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     registry.path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="record digest mismatch"):
         ScientificRegistry(registry.path)
+
+
+def test_reference_effective_sample_size_controls_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=2)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert baseline.sample_count == 2
+    assert baseline.effective_sample_size == 1
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
+
+
+def test_current_effective_sample_size_controls_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=2)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert current.sample_count == 2
+    assert current.effective_sample_size == 1
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
+
+
+def test_v1_finding_replay_preserves_pre_ess_sample_semantics(tmp_path, monkeypatch):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    monkeypatch.setattr(
+        drift_control,
+        "DRIFT_ALGORITHM_VERSION",
+        drift_control.DRIFT_ALGORITHM_VERSION_V1,
+    )
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert finding.algorithm_version == drift_control.DRIFT_ALGORITHM_VERSION_V1
+    assert finding.state is DriftState.DRIFT_DETECTED
+    assert finding.insufficiency_reason is None
+    stored = registry.get("DriftFinding", finding.finding_id)
+    assert stored is not None
+    assert (
+        stored.payload["algorithm_version"]
+        == drift_control.DRIFT_ALGORITHM_VERSION_V1
+    )
+
+    monkeypatch.setattr(
+        drift_control,
+        "DRIFT_ALGORITHM_VERSION",
+        drift_control.DRIFT_ALGORITHM_VERSION_V2,
+    )
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
 
 
 def test_scoped_drift_evidence_is_hash_bound_and_scope_mismatch_fails_closed(tmp_path):

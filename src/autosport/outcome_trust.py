@@ -564,7 +564,10 @@ def _strict_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
 
 
 def _canonical_text(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    # Authority-bearing text must not retain caller-defined str dispatch.
+    # Exact JSON/product strings are ordinary built-ins; accepting a subclass
+    # lets strip/replace/hash/equality change meaning after validation.
+    if type(value) is not str or not value or value != value.strip():
         raise OutcomeLineageTrustError(
             f"{field} must be a non-empty canonical string without surrounding whitespace"
         )

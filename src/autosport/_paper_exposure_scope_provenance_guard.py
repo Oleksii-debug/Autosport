@@ -141,10 +141,89 @@ def _install_guard() -> None:
             for name, expected in bindings
         )
 
+    def snapshot_function_metadata(
+        function: Any,
+    ) -> tuple[object, object, object, object]:
+        defaults = function.__defaults__
+        frozen_defaults = None if defaults is None else tuple(defaults)
+        kwdefaults = function.__kwdefaults__
+        frozen_kwdefaults = (
+            None
+            if kwdefaults is None
+            else tuple(sorted(kwdefaults.items(), key=lambda item: item[0]))
+        )
+        closure = function.__closure__
+        if closure is None:
+            frozen_closure = None
+        else:
+            values: list[object] = []
+            for cell in closure:
+                try:
+                    values.append(cell.cell_contents)
+                except ValueError:
+                    values.append(_EMPTY_CELL)
+            frozen_closure = tuple(values)
+        return function.__code__, frozen_defaults, frozen_kwdefaults, frozen_closure
+
+    def function_metadata_match(
+        function: Any,
+        snapshot: tuple[object, object, object, object],
+    ) -> bool:
+        expected_code, expected_defaults, expected_kwdefaults, expected_closure = snapshot
+        if function.__code__ is not expected_code:
+            return False
+
+        live_defaults = function.__defaults__
+        if expected_defaults is None:
+            if live_defaults is not None:
+                return False
+        elif live_defaults is None or len(live_defaults) != len(expected_defaults):
+            return False
+        elif any(
+            live is not expected
+            for live, expected in zip(live_defaults, expected_defaults, strict=True)
+        ):
+            return False
+
+        live_kwdefaults = function.__kwdefaults__
+        if expected_kwdefaults is None:
+            if live_kwdefaults is not None:
+                return False
+        else:
+            expected_kw_map = dict(expected_kwdefaults)
+            if live_kwdefaults is None or set(live_kwdefaults) != set(expected_kw_map):
+                return False
+            if any(
+                live_kwdefaults[name] is not expected
+                for name, expected in expected_kw_map.items()
+            ):
+                return False
+
+        live_closure = function.__closure__
+        if expected_closure is None:
+            return live_closure is None
+        if live_closure is None or len(live_closure) != len(expected_closure):
+            return False
+        for cell, expected in zip(live_closure, expected_closure, strict=True):
+            try:
+                live = cell.cell_contents
+            except ValueError:
+                live = _EMPTY_CELL
+            if live is not expected:
+                return False
+        return True
+
+    _EMPTY_CELL = object()
     original_prepare_globals = snapshot_function_globals(original_prepare)
     original_prepare_paper_value_globals = snapshot_function_globals(
         original_prepare_paper_value
     )
+    original_prepare_metadata = snapshot_function_metadata(original_prepare)
+    original_prepare_paper_value_metadata = snapshot_function_metadata(
+        original_prepare_paper_value
+    )
+    original_prepare_code = original_prepare_metadata[0]
+    original_prepare_paper_value_code = original_prepare_paper_value_metadata[0]
     original_execute_globals = snapshot_function_globals(original_execute)
     original_require_minted_globals = snapshot_function_globals(original_require_minted)
     original_execute_unlocked_globals = snapshot_function_globals(original_execute_unlocked)
@@ -312,7 +391,8 @@ def _install_guard() -> None:
             raise adoption_error("canonical prepared-execution mint dispatch was rebound")
         caller = getframe(1)
         caller_code = caller.f_code
-        if caller_code is original_prepare.__code__:
+        metadata_ok = True
+        if caller_code is original_prepare_code:
             if mint_context.get() is not mint_token:
                 raise adoption_error(
                     "prepared execution mint is reserved for canonical preparation authority"
@@ -321,7 +401,11 @@ def _install_guard() -> None:
                 original_prepare,
                 original_prepare_globals,
             )
-        elif caller_code is original_prepare_paper_value.__code__:
+            metadata_ok = function_metadata_match(
+                original_prepare,
+                original_prepare_metadata,
+            )
+        elif caller_code is original_prepare_paper_value_code:
             if mint_context.get() is not mint_token:
                 raise adoption_error(
                     "prepared execution mint is reserved for canonical preparation authority"
@@ -329,6 +413,10 @@ def _install_guard() -> None:
             globals_ok = function_globals_match(
                 original_prepare_paper_value,
                 original_prepare_paper_value_globals,
+            )
+            metadata_ok = function_metadata_match(
+                original_prepare_paper_value,
+                original_prepare_paper_value_metadata,
             )
         elif caller_code is nested_paper_value_prepare_code:
             if (
@@ -366,6 +454,8 @@ def _install_guard() -> None:
             )
         if not globals_ok:
             raise adoption_error("canonical PAPER preparation globals were rebound")
+        if not metadata_ok:
+            raise adoption_error("canonical PAPER preparation metadata were rebound")
         if type(prepared) is not prepared_type:
             raise TypeError("prepared must be exact PreparedPaperExecution")
         self._prepared_authorities[id(prepared)] = prepared
@@ -377,6 +467,11 @@ def _install_guard() -> None:
             if method is original_prepare
             else original_prepare_paper_value_globals
         )
+        method_metadata = (
+            original_prepare_metadata
+            if method is original_prepare
+            else original_prepare_paper_value_metadata
+        )
 
         @wraps(method)
         def owned(self: PaperExecutionAdoptionRuntime, *args: Any, **kwargs: Any) -> Any:
@@ -386,6 +481,8 @@ def _install_guard() -> None:
                 raise adoption_error("canonical prepared-execution mint dispatch was rebound")
             if not function_globals_match(method, method_globals):
                 raise adoption_error("canonical PAPER preparation globals were rebound")
+            if not function_metadata_match(method, method_metadata):
+                raise adoption_error("canonical PAPER preparation metadata were rebound")
             marker = mint_context.set(mint_token)
             try:
                 return method(self, *args, **kwargs)

@@ -3,10 +3,52 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import timedelta
 from itertools import count
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+# Root-selection production now correctly treats post-composition replacement of the
+# OS account-location resolver as an authority violation. Tests that need a sandbox
+# must therefore install one stable process-local resolver *before* importing the
+# product package. The resolver identity never changes after composition; scoped
+# fixtures below vary only this test-process state. When no sandbox is active the
+# shim delegates to the real OS resolver, so unrelated tests retain normal behavior.
+_ROOT_SELECTION_TEST_HOME: Path | None = None
+
+if os.name == "nt":
+    import ctypes as _root_selection_ctypes
+
+    _real_root_selection_shell32 = _root_selection_ctypes.windll.shell32  # type: ignore[attr-defined]
+    _real_root_selection_get_folder_path = _real_root_selection_shell32.SHGetFolderPathW
+
+    def _pytest_root_selection_get_folder_path(_hwnd, _csidl, _token, _flags, buffer):
+        if _ROOT_SELECTION_TEST_HOME is None:
+            return _real_root_selection_get_folder_path(
+                _hwnd,
+                _csidl,
+                _token,
+                _flags,
+                buffer,
+            )
+        buffer.value = str(_ROOT_SELECTION_TEST_HOME)
+        return 0
+
+    _real_root_selection_shell32.SHGetFolderPathW = _pytest_root_selection_get_folder_path
+else:
+    import pwd as _root_selection_pwd
+
+    _real_root_selection_getpwuid = _root_selection_pwd.getpwuid
+
+    def _pytest_root_selection_getpwuid(uid):
+        if _ROOT_SELECTION_TEST_HOME is None:
+            return _real_root_selection_getpwuid(uid)
+        return SimpleNamespace(pw_dir=str(_ROOT_SELECTION_TEST_HOME))
+
+    _root_selection_pwd.getpwuid = _pytest_root_selection_getpwuid
+
+from autosport import monotonic_authority_root_binding as _root_selection
 from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,
 )
@@ -18,6 +60,39 @@ from autosport.paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
+
+
+_ROOT_SELECTION_PRODUCT_STORE_TEST = "test_monotonic_root_selection_product_store.py"
+_ROOT_SELECTION_SANDBOX_TESTS = frozenset(
+    {
+        "test_monotonic_root_selector_concurrent_instance_fork.py",
+        "test_monotonic_workspace_authority_bootstrap.py",
+        "test_monotonic_workspace_authority_p0_regressions.py",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_monotonic_root_selection_store(request, tmp_path):
+    """Keep root-selection tests hermetic without post-import resolver rebinding."""
+
+    global _ROOT_SELECTION_TEST_HOME
+
+    test_file = Path(str(request.node.fspath)).name
+    if test_file == _ROOT_SELECTION_PRODUCT_STORE_TEST:
+        yield
+        return
+    if test_file not in _ROOT_SELECTION_SANDBOX_TESTS:
+        yield
+        return
+
+    sandbox = tmp_path / "root-selection-product-state"
+    previous = _ROOT_SELECTION_TEST_HOME
+    _ROOT_SELECTION_TEST_HOME = sandbox
+    try:
+        yield
+    finally:
+        _ROOT_SELECTION_TEST_HOME = previous
 
 
 # These four legacy suites predate #623 execution-reality adoption. Their product

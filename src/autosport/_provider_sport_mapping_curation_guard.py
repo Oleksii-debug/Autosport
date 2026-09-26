@@ -78,7 +78,9 @@ def _install_guard() -> None:
     canonical_digest = mapping._digest
     canonical_digest_code = canonical_digest.__code__
     canonical_atomic_write_json = mapping.atomic_write_json
+    canonical_atomic_write_json_code = getattr(canonical_atomic_write_json, "__code__", None)
     canonical_durable_path_lock = mapping.durable_path_lock
+    canonical_durable_path_lock_code = getattr(canonical_durable_path_lock, "__code__", None)
     canonical_schema = mapping._SCHEMA
     canonical_version = mapping._VERSION
 
@@ -134,7 +136,9 @@ def _install_guard() -> None:
             mapping._digest is not canonical_digest
             or canonical_digest.__code__ is not canonical_digest_code
             or mapping.atomic_write_json is not canonical_atomic_write_json
+            or getattr(canonical_atomic_write_json, "__code__", None) is not canonical_atomic_write_json_code
             or mapping.durable_path_lock is not canonical_durable_path_lock
+            or getattr(canonical_durable_path_lock, "__code__", None) is not canonical_durable_path_lock_code
             or mapping._SCHEMA != canonical_schema
             or mapping._VERSION != canonical_version
         ):

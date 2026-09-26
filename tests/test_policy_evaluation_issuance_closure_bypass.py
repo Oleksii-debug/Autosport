@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import FunctionType
 
 import pytest
@@ -85,6 +86,36 @@ def test_reflected_dispatch_state_does_not_offer_an_ordinary_predecessor_escape(
 
     with pytest.raises(AttributeError, match="state is sealed"):
         state._public_open = None
+
+
+def test_trusted_clock_callable_does_not_late_read_mutable_dispatch_state() -> None:
+    state = _dispatch_state()
+    clock = object.__getattribute__(state, "_trusted_clock_callable")
+    original_datetime = object.__getattribute__(state, "_trusted_datetime")
+    original_utc = object.__getattribute__(state, "_trusted_utc")
+    called = False
+
+    class ForgedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            nonlocal called
+            del cls, tz
+            called = True
+            raise AssertionError("mutable dispatch-state clock must not run")
+
+    object.__setattr__(state, "_trusted_datetime", ForgedDateTime)
+    object.__setattr__(state, "_trusted_utc", object())
+    try:
+        observed = clock()
+    finally:
+        object.__setattr__(state, "_trusted_datetime", original_datetime)
+        object.__setattr__(state, "_trusted_utc", original_utc)
+
+    assert getattr(clock, "__self__", None) is None
+    assert type(observed) is datetime
+    assert observed.tzinfo is not None
+    assert observed.utcoffset() == timezone.utc.utcoffset(observed)
+    assert called is False
 
 
 def test_object_setattr_clock_rebind_fails_against_external_state_witness() -> None:

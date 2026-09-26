@@ -2069,6 +2069,18 @@ class ProductDecisionActivationTests(unittest.TestCase):
         ):
             self.store.load()
 
+    def test_oversized_activation_state_fails_before_json_decode(self) -> None:
+        self._initialize()
+        self.store.path.write_bytes(
+            b"{" + (b"x" * activation_module._MAX_DURABLE_JSON_BYTES)
+        )
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "exceeds bounded durable-state size",
+        ):
+            self.store.load()
+
     def test_non_paper_binding_cannot_be_made_valid_by_rehashing(self) -> None:
         self._initialize()
         root = json.loads(self.store.path.read_text(encoding="utf-8"))

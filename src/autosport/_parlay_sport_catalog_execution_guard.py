@@ -18,6 +18,11 @@ from __future__ import annotations
 from . import parlay_sport_catalog_acquisition as _catalog
 
 
+def _kwdefaults_witness(function):
+    defaults = function.__kwdefaults__ or {}
+    return tuple((name, value, getattr(value, "__code__", None)) for name, value in defaults.items())
+
+
 def _closure_witness(function):
     cells = function.__closure__ or ()
     names = function.__code__.co_freevars
@@ -29,14 +34,12 @@ def _closure_witness(function):
             cell,
             cell.cell_contents,
             getattr(cell.cell_contents, "__code__", None),
+            _kwdefaults_witness(cell.cell_contents)
+            if hasattr(cell.cell_contents, "__kwdefaults__")
+            else None,
         )
         for name, cell in zip(names, cells)
     )
-
-
-def _kwdefaults_witness(function):
-    defaults = function.__kwdefaults__ or {}
-    return tuple((name, value, getattr(value, "__code__", None)) for name, value in defaults.items())
 
 
 def _install_guard() -> None:
@@ -78,23 +81,6 @@ def _install_guard() -> None:
     build_opener = _catalog.urllib.request.build_opener
     build_opener_code = getattr(build_opener, "__code__", None)
 
-    def require_function_cells(function, witnesses, *, label: str) -> None:
-        cells = function.__closure__ or ()
-        names = function.__code__.co_freevars
-        if len(cells) != len(witnesses) or len(names) != len(witnesses):
-            raise error_type(f"Parlay sport-catalog {label} closure changed")
-        for index, (name, expected_cell, expected_value, expected_code) in enumerate(witnesses):
-            if names[index] != name or cells[index] is not expected_cell:
-                raise error_type(f"Parlay sport-catalog {label} closure changed")
-            try:
-                current_value = cells[index].cell_contents
-            except ValueError as exc:
-                raise error_type(f"Parlay sport-catalog {label} closure changed") from exc
-            if current_value is not expected_value:
-                raise error_type(f"Parlay sport-catalog {label} closure changed")
-            if getattr(expected_value, "__code__", None) is not expected_code:
-                raise error_type(f"Parlay sport-catalog {label} closure executable changed")
-
     def require_kwdefaults(function, witnesses, *, label: str) -> None:
         defaults = function.__kwdefaults__ or {}
         if tuple(defaults) != tuple(name for name, _value, _code in witnesses):
@@ -106,6 +92,35 @@ def _install_guard() -> None:
             if getattr(expected_value, "__code__", None) is not expected_code:
                 raise error_type(
                     f"Parlay sport-catalog {label} keyword-default executable changed"
+                )
+
+    def require_function_cells(function, witnesses, *, label: str) -> None:
+        cells = function.__closure__ or ()
+        names = function.__code__.co_freevars
+        if len(cells) != len(witnesses) or len(names) != len(witnesses):
+            raise error_type(f"Parlay sport-catalog {label} closure changed")
+        for index, (
+            name,
+            expected_cell,
+            expected_value,
+            expected_code,
+            expected_kwdefaults,
+        ) in enumerate(witnesses):
+            if names[index] != name or cells[index] is not expected_cell:
+                raise error_type(f"Parlay sport-catalog {label} closure changed")
+            try:
+                current_value = cells[index].cell_contents
+            except ValueError as exc:
+                raise error_type(f"Parlay sport-catalog {label} closure changed") from exc
+            if current_value is not expected_value:
+                raise error_type(f"Parlay sport-catalog {label} closure changed")
+            if getattr(expected_value, "__code__", None) is not expected_code:
+                raise error_type(f"Parlay sport-catalog {label} closure executable changed")
+            if expected_kwdefaults is not None:
+                require_kwdefaults(
+                    expected_value,
+                    expected_kwdefaults,
+                    label=f"{label} closure {name!r}",
                 )
 
     def require_canonical_execution() -> None:

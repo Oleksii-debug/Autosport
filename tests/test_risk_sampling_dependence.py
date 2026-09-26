@@ -402,6 +402,23 @@ class RiskSamplingDependenceTests(unittest.TestCase):
                 occurrences=self._occurrences(structure),
             )
 
+    def test_stream_identity_rejects_crlf_delimiter_aliases(self):
+        collision_manifests = (
+            self._manifest(experiment_id="exp\n0\nmember"),
+            self._manifest(planned_member_ids=["member\n1\nz", "run-002", "run-003"]),
+            self._manifest(experiment_id="exp\r0\rmember"),
+        )
+        for manifest in collision_manifests:
+            with self.subTest(manifest=manifest):
+                with self.assertRaisesRegex(
+                    RiskSamplingDependenceError,
+                    "must not contain CR/LF delimiters",
+                ):
+                    inspect_fixed_n_iid_sampling_structure(
+                        self._membership(),
+                        sampling_manifest_json=manifest,
+                    )
+
     def test_uppercase_sha_text_is_not_canonical_identity(self):
         with self.assertRaisesRegex(
             RiskSamplingDependenceError,

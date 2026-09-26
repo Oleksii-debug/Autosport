@@ -268,3 +268,41 @@ def test_directory_replacement_before_descent_fails_closed(
         error.error_type == "DirectoryIdentityChanged"
         for error in report.errors
     )
+
+
+def test_symlink_swap_immediately_before_open_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    victim = tmp_path / "artifact.bin"
+    victim.write_bytes(b"safe")
+    target = tmp_path / "target.bin"
+    target.write_text(canary, encoding="utf-8")
+    original_open = secret_canary_scan._open_readonly_no_follow
+    swapped = False
+
+    def swap_to_symlink_then_open(path: Path) -> int:
+        nonlocal swapped
+        if path == victim and not swapped:
+            victim.unlink()
+            try:
+                victim.symlink_to(target)
+            except (OSError, NotImplementedError):
+                victim.write_bytes(b"safe")
+                pytest.skip("file symlinks unavailable in this test environment")
+            swapped = True
+        return original_open(path)
+
+    monkeypatch.setattr(
+        secret_canary_scan,
+        "_open_readonly_no_follow",
+        swap_to_symlink_then_open,
+    )
+
+    report = secret_canary_scan.scan_secret_canary(tmp_path, canary)
+
+    assert swapped is True
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert report.findings == ()

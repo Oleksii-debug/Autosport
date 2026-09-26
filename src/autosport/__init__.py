@@ -55,6 +55,11 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
+# Parlay display labels must never silently become canonical provider identity.
+# Bind provider event witnesses and reject ambiguous event/market/selection tuples
+# before any partial provider snapshot can escape to product evaluation.
+from . import _parlayapi_canonical_identity_guard as _parlayapi_canonical_identity_guard  # noqa: F401,E402
+
 # Install the fail-closed predictive runtime authority bridge before callers import
 # decision modules.  The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.

@@ -1344,7 +1344,7 @@ class CanonicalVOCAuthorityResolver:
         *,
         as_of: str,
     ) -> OutcomeDerivedVOCScore | None:
-        if not isinstance(evaluation, PairedVOCEvaluation):
+        if type(evaluation) is not PairedVOCEvaluation:
             raise TypeError("evaluation must be PairedVOCEvaluation")
         _instant("as_of", as_of)
         canonical = self._require_registry_result(evaluation, as_of=as_of)
@@ -1437,7 +1437,7 @@ class VOCEvaluationStore:
 
     def record(self, evaluation: PairedVOCEvaluation) -> str:
         """Persist immutable evidence; persistence alone grants no CLOUD authority."""
-        if not isinstance(evaluation, PairedVOCEvaluation):
+        if type(evaluation) is not PairedVOCEvaluation:
             raise TypeError("evaluation must be PairedVOCEvaluation")
         with WorkspaceEconomicLock(self.path.parent):
             loaded = self._load()

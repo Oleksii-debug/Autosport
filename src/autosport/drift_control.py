@@ -906,8 +906,8 @@ class DriftMonitor:
     """Create immutable drift evidence and bounded scientific recommendations."""
 
     def __init__(self, scientific_registry: ScientificRegistry) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be exact ScientificRegistry")
         self.scientific_registry = scientific_registry
 
     def _require_record(
@@ -935,6 +935,8 @@ class DriftMonitor:
         return entry
 
     def _validate_window_dataset(self, window: DriftWindow) -> RegistryEntry:
+        if type(window) is not DriftWindow:
+            raise TypeError("window must be exact DriftWindow")
         entry = self._require_record(
             "DatasetSnapshot", window.dataset_snapshot_id, as_of=window.as_of
         )
@@ -982,6 +984,8 @@ class DriftMonitor:
         threshold: str,
         metric_definition_sha256: str,
     ) -> DriftReference:
+        if type(baseline) is not DriftWindow:
+            raise TypeError("baseline must be exact DriftWindow")
         if not isinstance(drift_kind, DriftKind):
             raise TypeError("drift_kind must be DriftKind")
         if not isinstance(metric, DriftMetric):
@@ -1084,6 +1088,8 @@ class DriftMonitor:
         *,
         evaluated_at: str,
     ) -> DriftFinding:
+        if type(current) is not DriftWindow:
+            raise TypeError("current must be exact DriftWindow")
         reference_entry = self._require_record(
             "DriftReference", reference_id, as_of=evaluated_at
         )
@@ -1460,6 +1466,6 @@ class DriftMonitor:
 
     @staticmethod
     def finding_binding(finding: DriftFinding) -> tuple[tuple[str, str], ...]:
-        if not isinstance(finding, DriftFinding):
-            raise TypeError("finding must be DriftFinding")
+        if type(finding) is not DriftFinding:
+            raise TypeError("finding must be exact DriftFinding")
         return (("drift_finding_id", finding.finding_id),)

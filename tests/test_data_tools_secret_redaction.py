@@ -78,6 +78,24 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
         self.assertIn("ordinary failure", output)
         self.assertNotIn(secret_type_name, output)
 
+    def test_rebound_redactor_cannot_publish_raw_secret(self) -> None:
+        secret = "AS-DATATOOLS-REDISPATCH-SENTINEL-5e8a"
+        exc = ValueError(f"Authorization: Bearer {secret}")
+
+        with patch.object(
+            data_tools_entry,
+            "safe_exception_detail",
+            lambda _exc, **_kwargs: str(_exc),
+        ):
+            output = data_tools_entry._expected_failure_message(
+                "verify-dataset",
+                exc,
+            )
+
+        self.assertIn("error=ValueError", output)
+        self.assertIn("exception details unavailable", output)
+        self.assertNotIn(secret, output)
+
 
 if __name__ == "__main__":
     unittest.main()

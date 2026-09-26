@@ -176,3 +176,10 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# RunRegistry availability and run-state updates are whole-image authority
+# transitions. Serialize the entire read/modify/write cycle, not only final replace.
+from . import _outcome_availability_registry_serialization as _outcome_availability_registry_serialization  # noqa: F401,E402
+# Seal the two-phase availability clock against mutable function defaults, module
+# dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
+from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402

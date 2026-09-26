@@ -13,11 +13,39 @@ from .paper_execution_reality import PaperAttemptOutcome
 
 _ORIGINAL_PREPARE = PaperExecutionAdoptionRuntime.prepare
 _ORIGINAL_EXECUTE = PaperExecutionAdoptionRuntime.execute
+_ORIGINAL_TICKET_MATCHES_ATTEMPT = PaperExecutionAdoptionRuntime._ticket_matches_attempt
 _LIVE_DECISION_PREFIX = "live-"
 _PRE_ACTION_BOOK_FILE_NAME = "live_decision_pre_action_book.json"
 _ACCEPTED_EQUIVALENT = frozenset(
     {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}
 )
+
+
+def _exact_ticket_matches_attempt(
+    *,
+    ticket,
+    attempt,
+    action,
+    binding,
+) -> bool:
+    """Require one exact attempt-id token before accepting durable exposure identity."""
+    if type(ticket.strategy_reason) is not str:
+        return False
+    marker_prefix = PaperExecutionAdoptionRuntime._TICKET_MARKER
+    expected_marker = f"{marker_prefix}{attempt.attempt_id}"
+    marker_tokens = tuple(
+        token
+        for token in (part.strip() for part in ticket.strategy_reason.split(";"))
+        if token.startswith(marker_prefix)
+    )
+    if marker_tokens != (expected_marker,):
+        return False
+    return _ORIGINAL_TICKET_MATCHES_ATTEMPT(
+        ticket=ticket,
+        attempt=attempt,
+        action=action,
+        binding=binding,
+    )
 
 
 def _load_pre_action_path(path: Path, *, label: str) -> PaperBook | None:
@@ -244,6 +272,9 @@ def _install_runtime_guards() -> None:
         return
     PaperExecutionAdoptionRuntime.assert_recoverable_book_state = (
         _exact_assert_recoverable_book_state
+    )
+    PaperExecutionAdoptionRuntime._ticket_matches_attempt = staticmethod(
+        _exact_ticket_matches_attempt
     )
     PaperExecutionAdoptionRuntime.prepare = _guarded_prepare
     PaperExecutionAdoptionRuntime.execute = _guarded_execute

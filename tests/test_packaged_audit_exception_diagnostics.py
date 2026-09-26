@@ -36,7 +36,7 @@ class PackagedAuditExceptionDiagnosticTests(unittest.TestCase):
 
         self._assert_fail_closed_payload(
             payload,
-            "Exception: exception details unavailable",
+            "_BrokenStringError: exception details unavailable",
         )
 
     def test_keyboard_broken_exception_stringification_still_publishes_fail(self) -> None:

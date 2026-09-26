@@ -757,7 +757,7 @@ def test_caller_cannot_clone_verified_effect_to_mint_ack() -> None:
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
-def test_complete_provider_absence_is_required_before_retry_release() -> None:
+def test_complete_provider_absence_is_diagnostic_without_retry_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
@@ -775,7 +775,7 @@ def test_complete_provider_absence_is_required_before_retry_release() -> None:
         assert ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
-        ) is True
+        ) is False
 
 
 def test_opaque_not_found_hashes_cannot_release_retry() -> None:

@@ -184,36 +184,38 @@ def _install_preparation_guard() -> None:
                     raise PaperExecutionAdoptionError(
                         "prepared execution mint is reserved for canonical preparation authority"
                     )
-                if (
-                    not _function_globals_match(
-                        hidden_prepare,
-                        hidden_prepare_globals,
-                    )
-                    or not _function_metadata_match(
-                        hidden_prepare,
-                        hidden_prepare_metadata,
-                    )
+                if not _function_globals_match(
+                    hidden_prepare,
+                    hidden_prepare_globals,
                 ):
                     raise PaperExecutionAdoptionError(
-                        "canonical PAPER preparation metadata/globals were rebound"
+                        "canonical PAPER preparation globals were rebound"
+                    )
+                if not _function_metadata_match(
+                    hidden_prepare,
+                    hidden_prepare_metadata,
+                ):
+                    raise PaperExecutionAdoptionError(
+                        "canonical PAPER preparation metadata were rebound"
                     )
             elif caller_code is hidden_prepare_paper_value.__code__:
                 if mint_context.get() is not mint_token:
                     raise PaperExecutionAdoptionError(
                         "prepared execution mint is reserved for canonical preparation authority"
                     )
-                if (
-                    not _function_globals_match(
-                        hidden_prepare_paper_value,
-                        hidden_prepare_paper_value_globals,
-                    )
-                    or not _function_metadata_match(
-                        hidden_prepare_paper_value,
-                        hidden_prepare_paper_value_metadata,
-                    )
+                if not _function_globals_match(
+                    hidden_prepare_paper_value,
+                    hidden_prepare_paper_value_globals,
                 ):
                     raise PaperExecutionAdoptionError(
-                        "canonical PAPER preparation metadata/globals were rebound"
+                        "canonical PAPER preparation globals were rebound"
+                    )
+                if not _function_metadata_match(
+                    hidden_prepare_paper_value,
+                    hidden_prepare_paper_value_metadata,
+                ):
+                    raise PaperExecutionAdoptionError(
+                        "canonical PAPER preparation metadata were rebound"
                     )
             elif caller_code is authorize_descriptor.__code__:
                 parent = caller.f_back

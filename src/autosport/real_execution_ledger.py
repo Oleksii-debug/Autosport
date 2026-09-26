@@ -2204,6 +2204,12 @@ class RealExecutionLedger:
                 raise ExecutionStateError(
                     "execution plan is stale; recompute before another action"
                 )
+            if _timestamp(reserved_at, "reserved_at") >= _timestamp(
+                action["expires_at"], "expires_at"
+            ):
+                raise ExecutionStateError(
+                    "cannot reserve attempt at or after persisted quote expiry"
+                )
             for event in events:
                 if (
                     event["plan_id"] == plan_id
@@ -2211,21 +2217,10 @@ class RealExecutionLedger:
                     and event["event_type"]
                     == EventType.ATTEMPT_RESERVED.value
                 ):
-                    if (
-                        self._state(
-                            self._attempt_events(events, event["attempt_id"])
-                        )
-                        != AttemptState.RECONCILED_NOT_FOUND
-                    ):
-                        raise ExecutionStateError(
-                            "action already has unresolved/final attempt"
-                        )
-            if _timestamp(reserved_at, "reserved_at") >= _timestamp(
-                action["expires_at"], "expires_at"
-            ):
-                raise ExecutionStateError(
-                    "cannot reserve attempt at or after persisted quote expiry"
-                )
+                    raise ExecutionStateError(
+                        "action already has prior attempt without "
+                        "provider-authoritative retry release"
+                    )
             self._append(
                 EventType.ATTEMPT_RESERVED,
                 plan_id,
@@ -2751,13 +2746,14 @@ class RealExecutionLedger:
             and event["event_type"]
             == EventType.ATTEMPT_RESERVED.value
         ]
-        return (
-            not attempts
-            or self._state(
-                self._attempt_events(events, attempts[-1])
-            )
-            == AttemptState.RECONCILED_NOT_FOUND
-        )
+        # Generic/caller-constructible RECONCILED_NOT_FOUND is diagnostic
+        # evidence only. It cannot prove that an ambiguous provider submission
+        # will never appear later, so it must not mint retry authority.
+        #
+        # A positive retry path must be added only by composing the canonical
+        # product-issued provider-absence authority and revalidating that
+        # authority at consume time. Until then, any prior attempt fails closed.
+        return not attempts
 
     def saga(self, plan_id: str) -> ExecutionSaga:
         events = self._events()

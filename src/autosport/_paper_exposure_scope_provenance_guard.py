@@ -229,10 +229,21 @@ def _install_guard() -> None:
     original_execute_unlocked_globals = snapshot_function_globals(original_execute_unlocked)
     original_scope_payload_globals = snapshot_function_globals(original_scope_payload)
     canonical_json_globals = snapshot_function_globals(canonical_json)
+    original_execute_metadata = snapshot_function_metadata(original_execute)
+    original_require_minted_metadata = snapshot_function_metadata(original_require_minted)
+    original_execute_unlocked_metadata = snapshot_function_metadata(
+        original_execute_unlocked
+    )
+    original_scope_payload_metadata = snapshot_function_metadata(original_scope_payload)
+    canonical_json_metadata = snapshot_function_metadata(canonical_json)
+    original_execute_code = original_execute_metadata[0]
+    original_execute_unlocked_code = original_execute_unlocked_metadata[0]
 
     def checked_canonical_json(value: object) -> str:
         if not function_globals_match(canonical_json, canonical_json_globals):
             raise integrity_error("canonical PAPER ledger serializer globals were rebound")
+        if not function_metadata_match(canonical_json, canonical_json_metadata):
+            raise integrity_error("canonical PAPER ledger serializer metadata were rebound")
         return canonical_json(value)
 
     def canonical_text(value: object, name: str) -> str:
@@ -508,6 +519,15 @@ def _install_guard() -> None:
             raise adoption_error("canonical PAPER unlocked execution dispatch was rebound")
         if not function_globals_match(original_execute, original_execute_globals):
             raise adoption_error("canonical PAPER execution globals were rebound")
+        if not function_metadata_match(original_execute, original_execute_metadata):
+            raise adoption_error("canonical PAPER execution metadata were rebound")
+        if not function_metadata_match(
+            original_require_minted,
+            original_require_minted_metadata,
+        ):
+            raise adoption_error(
+                "canonical prepared-execution verification metadata were rebound"
+            )
         marker = execution_context.set(execution_token)
         try:
             return original_execute(self, *args, **kwargs)
@@ -532,7 +552,7 @@ def _install_guard() -> None:
             )
         caller = getframe(1)
         if (
-            caller.f_code is not original_execute.__code__
+            caller.f_code is not original_execute_code
             or caller.f_globals is not original_execute.__globals__
         ):
             raise adoption_error(
@@ -543,6 +563,18 @@ def _install_guard() -> None:
             original_execute_unlocked_globals,
         ):
             raise adoption_error("canonical PAPER unlocked execution globals were rebound")
+        if not function_metadata_match(
+            original_execute_unlocked,
+            original_execute_unlocked_metadata,
+        ):
+            raise adoption_error("canonical PAPER unlocked execution metadata were rebound")
+        if not function_metadata_match(
+            original_require_minted,
+            original_require_minted_metadata,
+        ):
+            raise adoption_error(
+                "canonical prepared-execution verification metadata were rebound"
+            )
         return original_execute_unlocked(self, *args, **kwargs)
 
     def publish_owned_exposure_scope(
@@ -565,7 +597,7 @@ def _install_guard() -> None:
             )
         caller = getframe(1)
         if (
-            caller.f_code is not original_execute_unlocked.__code__
+            caller.f_code is not original_execute_unlocked_code
             or caller.f_globals is not original_execute_unlocked.__globals__
         ):
             raise integrity_error(
@@ -576,6 +608,11 @@ def _install_guard() -> None:
             original_execute_unlocked_globals,
         ):
             raise integrity_error("canonical PAPER execution globals were rebound")
+        if not function_metadata_match(
+            original_execute_unlocked,
+            original_execute_unlocked_metadata,
+        ):
+            raise integrity_error("canonical PAPER execution metadata were rebound")
         if (
             ledger_type._append_event is not guarded_append_event
             or append_owner.__dict__.get("_append_event") is not guarded_append_event
@@ -612,12 +649,26 @@ def _install_guard() -> None:
             raise integrity_error(
                 "canonical prepared-execution verification globals were rebound"
             )
+        if not function_metadata_match(
+            original_require_minted,
+            original_require_minted_metadata,
+        ):
+            raise integrity_error(
+                "canonical prepared-execution verification metadata were rebound"
+            )
         if not function_globals_match(
             original_scope_payload,
             original_scope_payload_globals,
         ):
             raise integrity_error(
                 "canonical PAPER exposure-scope payload globals were rebound"
+            )
+        if not function_metadata_match(
+            original_scope_payload,
+            original_scope_payload_metadata,
+        ):
+            raise integrity_error(
+                "canonical PAPER exposure-scope payload metadata were rebound"
             )
 
         original_require_minted(self, prepared)

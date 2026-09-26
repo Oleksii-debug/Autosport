@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from threading import RLock
+from threading import Lock, RLock
 
 from .continuous_session import ContinuousSessionStatus, ContinuousTickResult
 from .product_runtime import AutonomousProductRuntime
@@ -44,6 +44,12 @@ class ProductOperatorController:
             raise TypeError("runtime must be exact AutonomousProductRuntime")
         self._runtime = runtime
         self._lock = RLock()
+        # Tick serialization is deliberately separate from the lifecycle lock. A
+        # provider-facing tick can block for bounded I/O, but an operator STOP must
+        # still be able to reach the canonical runtime immediately. This lock owns no
+        # lifecycle truth; it only prevents two caller threads from executing ticks at
+        # the same time.
+        self._tick_lock = Lock()
         # Validate canonical state at attachment time without creating a second local
         # lifecycle authority. Durable RUNNING/PAUSED/STOPPED remains the only truth.
         initial_status = self._runtime.status()
@@ -82,41 +88,52 @@ class ProductOperatorController:
     def start(self) -> ContinuousSessionStatus:
         """Start or resume the canonical runtime exactly once for this running phase."""
 
-        with self._lock:
-            self._ensure_open()
-            status, state = self._canonical_status()
-            if state == self._RUNNING:
-                return status
-            try:
-                status = self._runtime.start()
-            except Exception:
-                # Runtime start spans multiple durable authorities: collector resume
-                # can commit before session resume fails. Canonical STOP compensation
-                # prevents a reported start failure from leaving a half-started graph.
-                # Preserve the original start exception; callers keep the workspace
-                # quarantined if the best-effort compensation itself also fails.
+        # Do not start/resume while a previous tick is still unwinding. STOP is the
+        # sole lifecycle operation intentionally allowed to preempt an in-flight tick.
+        with self._tick_lock:
+            with self._lock:
+                self._ensure_open()
+                status, state = self._canonical_status()
+                if state == self._RUNNING:
+                    return status
                 try:
-                    self._runtime.stop("operator_start_failed")
+                    status = self._runtime.start()
                 except Exception:
-                    pass
-                raise
-            self._remember_status(status)
-            return status
+                    # Runtime start spans multiple durable authorities: collector resume
+                    # can commit before session resume fails. Canonical STOP compensation
+                    # prevents a reported start failure from leaving a half-started graph.
+                    # Preserve the original start exception; callers keep the workspace
+                    # quarantined if the best-effort compensation itself also fails.
+                    try:
+                        self._runtime.stop("operator_start_failed")
+                    except Exception:
+                        pass
+                    raise
+                self._remember_status(status)
+                return status
 
     def tick(self) -> ContinuousTickResult:
-        """Execute exactly one canonical product tick; never schedules another tick."""
+        """Execute exactly one canonical product tick; never schedules another tick.
 
-        with self._lock:
-            self._ensure_open()
-            _, state = self._canonical_status()
-            if state != self._RUNNING:
-                raise ProductOperatorError("product runtime must be started before tick")
+        The lifecycle lock is released while the canonical tick executes so an
+        operator STOP can preempt blocked provider work. A separate tick lock keeps
+        concurrent tick callers serialized without turning that serialization into
+        lifecycle authority.
+        """
+
+        with self._tick_lock:
+            with self._lock:
+                self._ensure_open()
+                _, state = self._canonical_status()
+                if state != self._RUNNING:
+                    raise ProductOperatorError("product runtime must be started before tick")
             result = self._runtime.tick()
-            self._controller_tick_count += 1
+            with self._lock:
+                self._controller_tick_count += 1
             return result
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
-        """Persist an explicit operator stop without duplicating repeated stop requests."""
+        """Persist an explicit operator stop without waiting for an in-flight tick."""
 
         normalized_reason = self._stop_reason(reason)
         with self._lock:
@@ -161,22 +178,25 @@ class ProductOperatorController:
         unreadable recovery state.
         """
 
-        with self._lock:
-            if self._closed:
-                return
-            try:
-                self._canonical_status()
-            except Exception:
-                # Cleanup must remain available even when canonical lifecycle status is
-                # already fail-closed (for example RECOVERY_REQUIRED). The previously
-                # validated status remains the only CLOSED presentation snapshot.
-                pass
-            try:
-                self._runtime.close()
-            except BaseException:
-                # Runtime close is an authority-revoking transition. After it has been
-                # attempted, never let this controller resurrect positive operations if
-                # a lower-level resource teardown reports a failure.
+        # Resource teardown cannot race a tick that may still be using the canonical
+        # runtime graph. Unlike STOP, close waits for tick serialization to quiesce.
+        with self._tick_lock:
+            with self._lock:
+                if self._closed:
+                    return
+                try:
+                    self._canonical_status()
+                except Exception:
+                    # Cleanup must remain available even when canonical lifecycle status is
+                    # already fail-closed (for example RECOVERY_REQUIRED). The previously
+                    # validated status remains the only CLOSED presentation snapshot.
+                    pass
+                try:
+                    self._runtime.close()
+                except BaseException:
+                    # Runtime close is an authority-revoking transition. After it has been
+                    # attempted, never let this controller resurrect positive operations if
+                    # a lower-level resource teardown reports a failure.
+                    self._closed = True
+                    raise
                 self._closed = True
-                raise
-            self._closed = True

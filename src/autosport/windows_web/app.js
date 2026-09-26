@@ -265,6 +265,7 @@
   async function dispatch(actionId, payload = {}, options = {}) {
     const useGlobalAnnouncement = options.globalAnnouncement !== false;
     const useResultFocus = options.resultFocus !== false;
+    const usePostRefresh = options.postRefresh !== false;
     // A state read that began before this command is not allowed to overwrite
     // the operator-visible result after the command crosses the backend bridge.
     invalidateStateProjection();
@@ -285,7 +286,7 @@
         );
       }
       if (useResultFocus) focusResult(result);
-      await refreshState();
+      if (usePostRefresh) await refreshState();
       return result;
     } catch (_error) {
       invalidateStateProjection();

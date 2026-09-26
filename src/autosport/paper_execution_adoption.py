@@ -276,10 +276,12 @@ class PaperExecutionAdoptionRuntime:
                 or leg.market_id != event.market_id
                 or leg.selection_id != event.selection_id
                 or leg.sport != event.sport
+                or leg.exchange_side != event.exchange_side
             ):
                 raise PaperExecutionAdoptionError(
                     "ticket leg identity does not match canonical execution quote"
                 )
+            self._require_back_compatible_exchange_side(event.exchange_side)
 
             account_by_source = dict(context.provider_accounts)
             if set(account_by_source) != {event.source_id}:
@@ -360,6 +362,18 @@ class PaperExecutionAdoptionRuntime:
             )
         )
 
+    @staticmethod
+    def _require_back_compatible_exchange_side(exchange_side: str | None) -> None:
+        if exchange_side == "lay":
+            raise PaperExecutionAdoptionError(
+                "LAY PAPER adoption is unavailable until canonical liability "
+                "and settlement semantics are integrated"
+            )
+        if exchange_side not in {None, "back"}:
+            raise PaperExecutionAdoptionError(
+                "PAPER adoption exchange side is not supported"
+            )
+
     def prepare_paper_value_action(
         self,
         *,
@@ -387,6 +401,7 @@ class PaperExecutionAdoptionRuntime:
             raise ValueError("account_id must be non-empty canonical text")
         if (bankroll_id is None) != (currency is None):
             raise ValueError("bankroll_id and currency must be supplied together")
+        self._require_back_compatible_exchange_side(event.exchange_side)
 
         quote_time = _utc_timestamp(
             event.source_ts or event.observed_ts,
@@ -758,6 +773,10 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
         decision_id: str,
     ) -> PaperTicket:
+        if action.side != "BACK":
+            raise PaperExecutionAdoptionError(
+                "PaperBook materialization supports BACK execution only"
+            )
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"

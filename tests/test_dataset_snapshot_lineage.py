@@ -28,7 +28,7 @@ def _registry(tmp_path: Path) -> ScientificRegistry:
 
 
 def _machine_root(tmp_path: Path) -> Path:
-    return tmp_path.parent / f"{tmp_path.name}-lineage-machine-state"
+    return tmp_path.parent / f"{tmp_path.name}-machine-authority"
 
 
 def _append_snapshot(

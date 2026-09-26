@@ -11,6 +11,7 @@ from autosport.execution_stop_authority import (
     ExecutionStopAuthorityError,
     ExecutionStopIntegrityError,
 )
+from autosport.monotonic_workspace_authority import MonotonicAuthorityConfigurationError
 
 
 def _initialized(path: Path) -> ExecutionStopAuthority:
@@ -231,13 +232,19 @@ def test_posix_passwd_resolver_retarget_cannot_reauthorize_valid_old_armed(
 
     restarted = ExecutionStopAuthority(path)
 
-    # The dynamic resolver is no longer an admission-time authority input.
-    # The process keeps the import-composed product root that already carries
-    # the newer STOP high-water mark.
-    assert restarted._monotonic_authority().authority_root == product_root
+    # Root selection seals the same passwd dispatch before any monotonic
+    # authority can reopen, so substitution now fails even earlier than the
+    # ExecutionStop-specific canonical-root fence.
+    with pytest.raises(
+        MonotonicAuthorityConfigurationError,
+        match="POSIX root-selection resolver dispatch was rebound",
+    ):
+        restarted._monotonic_authority()
     assert forged_calls == []
 
-    with pytest.raises(ExecutionStopAuthorityError):
+    with pytest.raises(
+        (ExecutionStopAuthorityError, MonotonicAuthorityConfigurationError)
+    ):
         with restarted.admission_lease():
             pytest.fail("passwd retarget resurrected valid-old ARMED authority")
 

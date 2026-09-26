@@ -313,19 +313,15 @@ def run_product(
 
     output_format = _validated_output_format(output_format)
     if max_cycles is not None and (
-        isinstance(max_cycles, bool)
-        or not isinstance(max_cycles, int)
-        or max_cycles <= 0
+        type(max_cycles) is not int or max_cycles <= 0
     ):
         raise ValueError("max_cycles must be a positive integer or None")
-    if (
-        isinstance(poll_seconds, bool)
-        or not isinstance(poll_seconds, (int, float))
-        or not math.isfinite(float(poll_seconds))
-        or poll_seconds < 0
-    ):
+    if type(poll_seconds) not in (int, float):
         raise ValueError("poll_seconds must be a finite non-negative number")
-    if max_cycles is None and float(poll_seconds) == 0.0:
+    poll_interval = float(poll_seconds)
+    if not math.isfinite(poll_interval) or poll_interval < 0:
+        raise ValueError("poll_seconds must be a finite non-negative number")
+    if max_cycles is None and poll_interval == 0.0:
         raise ValueError("unbounded product run requires a positive poll interval")
 
     source = _validated_source(source_factory, workspace=workspace)
@@ -407,9 +403,9 @@ def run_product(
                 )
                 break
             if install_signal_handlers and sleep is time.sleep:
-                stop_request.wait(float(poll_seconds))
+                stop_request.wait(poll_interval)
             else:
-                sleep(float(poll_seconds))
+                sleep(poll_interval)
         return exit_code
     except BaseException as exc:
         if started:

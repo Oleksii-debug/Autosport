@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .secret_redaction import REDACTED, is_sensitive_key
+from .secret_redaction import REDACTED, is_sensitive_key as _canonical_is_sensitive_key
 
 SCHEMA_VERSION = 1
 GENESIS_SHA256 = "0" * 64
@@ -143,8 +143,26 @@ def _validate_event_type(value: Any) -> str:
     return value
 
 
+def _journal_sensitive_key(key: str) -> bool:
+    """Use shared secret authority while preserving stricter journal legacy keys."""
+
+    if _canonical_is_sensitive_key(key):
+        return True
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key.strip())
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
+    parts = [
+        part
+        for part in re.sub(r"[^a-z0-9]+", "_", separated.casefold()).split("_")
+        if part
+    ]
+    return bool(
+        (parts and parts[-1] in {"cookie", "token"})
+        or (len(parts) >= 2 and parts[-2:] == ["session", "key"])
+    )
+
+
 def _redact(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and is_sensitive_key(key):
+    if key is not None and _journal_sensitive_key(key):
         return REDACTED
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -171,7 +189,7 @@ def redact_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
 def _assert_redaction_invariant(value: Any) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if is_sensitive_key(key) and child != REDACTED:
+            if _journal_sensitive_key(key) and child != REDACTED:
                 raise JournalIntegrityError("journal contains unredacted sensitive payload data")
             _assert_redaction_invariant(child)
     elif isinstance(value, list):

@@ -180,3 +180,29 @@ def test_post_start_custom_exception_name_cannot_mint_public_error_type(
 def test_product_runtime_error_rejects_caller_supplied_type_label() -> None:
     with pytest.raises(TypeError):
         entrypoint.ProductRuntimeError(_TYPE_CANARY)  # type: ignore[arg-type]
+
+
+def test_command_ignores_mutated_product_runtime_error_label(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    forged = entrypoint.ProductRuntimeError(RuntimeError("safe"))
+    forged.error_type = _TYPE_CANARY
+
+    def fail_source(*_args: object, **_kwargs: object) -> object:
+        raise forged
+
+    monkeypatch.setattr(entrypoint, "_validated_source", fail_source)
+
+    exit_code = entrypoint.run_product_command(
+        workspace=entrypoint.Path("unused"),
+        source_factory="unused:factory",
+        initial_bankroll="10000",
+        max_cycles=1,
+        poll_seconds=0,
+    )
+
+    assert exit_code == 4
+    output = capsys.readouterr().out
+    assert _TYPE_CANARY not in output
+    assert '"error_type":"RuntimeError"' in output

@@ -130,3 +130,21 @@ def test_register_rejects_atomic_writer_rebind_before_durable_mutation(
 
     assert not hostile_called
     assert registry.bindings == ()
+
+
+def test_register_rejects_in_place_atomic_writer_code_swap_before_mutation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+
+    def hostile_writer(path, payload):
+        del path, payload
+        raise AssertionError("hostile atomic writer executable ran")
+
+    monkeypatch.setattr(mapping.atomic_write_json, "__code__", hostile_writer.__code__)
+
+    with pytest.raises(mapping.ProviderSportMappingError, match="writer dependency authority"):
+        registry.register_evidence(_curated_evidence())
+
+    assert registry.bindings == ()

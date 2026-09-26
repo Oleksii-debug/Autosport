@@ -147,7 +147,11 @@ def _read_previous_status(path: Path) -> dict[str, object] | None:
         raw = strict_json_loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError("continuous observation status is unreadable or invalid JSON") from exc
-    if not isinstance(raw, dict) or raw.get("schema_version") != _STATUS_SCHEMA_VERSION:
+    if (
+        type(raw) is not dict
+        or type(raw.get("schema_version")) is not int
+        or raw["schema_version"] != _STATUS_SCHEMA_VERSION
+    ):
         raise ValueError("continuous observation status has unsupported schema")
     if raw.get("kind") != _STATUS_KIND:
         raise ValueError("continuous observation status has unsupported kind")

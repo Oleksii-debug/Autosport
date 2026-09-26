@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.domain import MarketType
 from autosport.ingestion import IngestionEngine
@@ -91,6 +92,37 @@ class ParlayApiProviderTests(unittest.TestCase):
         error = ProviderTransportError("provider transport unavailable")
         self.assertIsInstance(error, ProviderUnavailableError)
         self.assertIsInstance(error, RuntimeError)
+
+    def test_socket_read_timeout_is_typed_provider_unavailability(self):
+        class TimeoutResponse:
+            status = 200
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def read(self):
+                raise TimeoutError("timed out")
+
+        provider = ParlayApiTableTennisProvider(
+            public_preview=True,
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+
+        with patch(
+            "autosport.parlayapi_provider.urlopen",
+            return_value=TimeoutResponse(),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "provider transport timeout: timed out",
+            ) as raised:
+                provider.read_batch()
+
+        self.assertIsInstance(raised.exception, ProviderUnavailableError)
 
     def test_authenticated_snapshot_maps_to_typed_provider_quotes_without_key_in_url(self):
         calls = []

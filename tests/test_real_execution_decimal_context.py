@@ -590,6 +590,7 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
 
     def test_event_identity_subclass_cannot_persist_different_restart_bytes(self) -> None:
         plan = _plan()
+        action = plan.actions[0]
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             ledger_path = Path(temporary_directory) / "real-execution.jsonl"
@@ -597,23 +598,39 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
             ledger.reserve_plan(plan)
             original_bytes = ledger_path.read_bytes()
 
-            hostile_plan_id = _HostileText("forged-plan-id")
-            hostile_action_id = _HostileText("forged-action-id")
-            _HostileText.reset_calls()
+            cases = (
+                (
+                    "plan_id",
+                    _HostileText("forged-plan-id"),
+                    action.action_id,
+                    r"plan_id must be non-empty text",
+                ),
+                (
+                    "action_id",
+                    plan.plan_id,
+                    _HostileText("forged-action-id"),
+                    r"action_id must be non-empty text",
+                ),
+            )
+            for field, plan_id, action_id, expected_error in cases:
+                with self.subTest(field=field):
+                    _HostileText.reset_calls()
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        ledger.begin_attempt(
+                            plan_id=plan_id,
+                            action_id=action_id,
+                            attempt_id=f"attempt-hostile-{field}",
+                            reserved_at="2026-09-21T20:00:02+00:00",
+                        )
 
-            with self.assertRaisesRegex(ValueError, r"plan_id must be non-empty text"):
-                ledger.begin_attempt(
-                    plan_id=hostile_plan_id,
-                    action_id=hostile_action_id,
-                    attempt_id="attempt-hostile-identity",
-                    reserved_at="2026-09-21T20:00:02+00:00",
-                )
-
-            self.assertEqual(ledger_path.read_bytes(), original_bytes)
-            self.assertEqual(RealExecutionLedger(ledger_path).verify_integrity(), 1)
-            self.assertEqual(_HostileText.comparison_calls, 0)
-            self.assertEqual(_HostileText.strip_calls, 0)
-            self.assertEqual(_HostileText.encode_calls, 0)
+                    self.assertEqual(ledger_path.read_bytes(), original_bytes)
+                    self.assertEqual(
+                        RealExecutionLedger(ledger_path).verify_integrity(),
+                        1,
+                    )
+                    self.assertEqual(_HostileText.comparison_calls, 0)
+                    self.assertEqual(_HostileText.strip_calls, 0)
+                    self.assertEqual(_HostileText.encode_calls, 0)
 
     def test_execution_plan_schema_rejects_int_subclass_before_comparison(self) -> None:
         _HostileSchemaVersion.reset_calls()

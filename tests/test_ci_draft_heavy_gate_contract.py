@@ -63,9 +63,16 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
     assert "Upload endurance evidence" in workflow
 
 
-def test_heavy_gate_concurrency_keeps_fresh_runs_shared_but_isolates_reruns_by_exact_head() -> None:
+def test_ci_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    assert "cancel-in-progress: true" in workflow
+    assert "github.run_id" in workflow
+    assert "format('pr-{0}-run-{1}'" in workflow
+    assert "github.run_attempt == 1 && 'fresh'" not in workflow
+
+
+def test_other_heavy_gates_keep_existing_fresh_vs_rerun_lane() -> None:
     workflows = {
-        "ci": _workflow(".github/workflows/ci.yml"),
         "windows-candidate": _workflow(".github/workflows/windows-build.yml"),
         "endurance": _workflow(".github/workflows/endurance.yml"),
     }

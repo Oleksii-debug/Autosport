@@ -66,8 +66,8 @@ def _build_provider_origin_issuance_authority():
     """Keep positive provider-origin issuance outside caller-writable DTO state.
 
     Frozen dataclass slots are not an authority boundary because callers can invoke
-    ``object.__setattr__`` directly.  Product-issued positive origin is therefore
-    tracked by exact object identity in closure-private weak references.  The public
+    ``object.__setattr__`` directly. Product-issued positive origin is therefore
+    tracked by exact object identity in closure-private weak references. The public
     property remains read-only compatibility surface; downstream authority-sensitive
     composition should use ``is_product_origin_acquisition``.
     """
@@ -177,7 +177,7 @@ def _validate_raw_response(response: object, *, max_response_bytes: int) -> RawC
             "Parlay sport-catalog response final URL does not match the canonical origin/path"
         )
     if not isinstance(response.body, bytes):
-        raise ParlaySportCatalogEvidenceError("response body must be exact bytes")
+        raise ParlaySportCatalogEvidenceError("provider response body is not bytes")
     if len(response.body) > max_response_bytes:
         raise ParlaySportCatalogEvidenceError("Parlay sport-catalog response exceeds bounded size")
     if not isinstance(response.headers, tuple) or any(
@@ -260,9 +260,7 @@ def _perform_catalog_http_response(
                 body=bounded_reader(exc, max_response_bytes),
                 final_url=str(exc.geturl()),
             )
-        raise transport_error_type(
-            f"Parlay sport-catalog HTTP {exc.code}"
-        ) from exc
+        raise transport_error_type(f"Parlay sport-catalog HTTP {exc.code}") from exc
     except url_error_type as exc:
         raise transport_error_type(
             f"Parlay sport-catalog transport error: {exc.reason}"
@@ -424,30 +422,18 @@ def _acquire_parlay_sport_catalog_impl(
     product-owned durable acquisition authority rather than a caller-supplied object.
     """
 
-    timeout_seconds = finite_positive_float(
-        timeout_seconds,
-        field_name="timeout_seconds",
-    )
-    max_response_bytes = positive_int(
-        max_response_bytes,
-        field_name="max_response_bytes",
-    )
+    timeout_seconds = finite_positive_float(timeout_seconds, field_name="timeout_seconds")
+    max_response_bytes = positive_int(max_response_bytes, field_name="max_response_bytes")
     if timeout_seconds > timeout_limit:
-        raise ValueError(
-            f"timeout_seconds must not exceed product maximum {timeout_limit}"
-        )
+        raise ValueError(f"timeout_seconds must not exceed product maximum {timeout_limit}")
     if max_response_bytes > response_size_limit:
         raise ValueError(
-            "max_response_bytes must not exceed product maximum "
-            f"{response_size_limit}"
+            "max_response_bytes must not exceed product maximum " f"{response_size_limit}"
         )
     if prior is not None and not isinstance(prior, acquisition_type):
         raise TypeError("prior must be a ParlaySportCatalogAcquisition")
 
-    headers: dict[str, str] = {
-        "Accept": "application/json",
-        "User-Agent": user_agent,
-    }
+    headers: dict[str, str] = {"Accept": "application/json", "User-Agent": user_agent}
     conditional_etag: str | None = None
     if prior is not None:
         conditional_etag = prior_validator(prior)
@@ -458,21 +444,12 @@ def _acquire_parlay_sport_catalog_impl(
     using_product_clock = clock is product_clock
     active_transport = product_transport if transport is None else transport
     response = raw_response_validator(
-        active_transport(
-            canonical_url,
-            headers,
-            timeout_seconds,
-            max_response_bytes,
-        ),
+        active_transport(canonical_url, headers, timeout_seconds, max_response_bytes),
         max_response_bytes=max_response_bytes,
     )
     acquired_at = timestamp_validator(clock())
-    if prior is not None and timestamp_parser(acquired_at) < timestamp_parser(
-        prior.acquired_at
-    ):
-        raise evidence_error_type(
-            "acquired_at cannot precede the exact prior acquisition"
-        )
+    if prior is not None and timestamp_parser(acquired_at) < timestamp_parser(prior.acquired_at):
+        raise evidence_error_type("acquired_at cannot precede the exact prior acquisition")
     etag = header_reader(response.headers, "ETag")
 
     if response.status_code == 304:
@@ -565,8 +542,9 @@ acquire_parlay_sport_catalog = _build_product_acquirer(
     implementation=_acquire_parlay_sport_catalog_impl,
 )
 
-# These installer/implementation names are not dispatch seams. The public acquirer
-# retains exact objects in closure cells; rebinding module symbols cannot replace
-# the transport or clock used to mint positive origin evidence.
+# The public acquirer retains exact product authorities in closure/default cells.
+# Remove construction/issuance helpers from module dispatch so callers cannot invoke
+# the positive origin mint directly or replace the public acquirer by rebinding them.
 del _build_product_acquirer
 del _acquire_parlay_sport_catalog_impl
+del _issue_product_origin

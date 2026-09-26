@@ -17,19 +17,28 @@ from .product_runtime import AutonomousProductRuntime, build_autonomous_product_
 from .secret_redaction import _safe_exception_type_label
 
 
-_SAFE_EXCEPTION_TYPE_LABEL = _safe_exception_type_label
-_SAFE_EXCEPTION_TYPE_LABEL_CODE = _safe_exception_type_label.__code__
+def _build_canonical_exception_type_label_renderer():
+    """Bind the exact secret-safe renderer and executable outside mutable dispatch."""
+
+    canonical = _safe_exception_type_label
+    canonical_code = canonical.__code__
+
+    def render(exc: BaseException) -> str:
+        exposed = globals().get("_SAFE_EXCEPTION_TYPE_LABEL")
+        if exposed is not canonical or canonical.__code__ is not canonical_code:
+            return "Exception"
+        try:
+            return canonical(exc)
+        except BaseException:
+            return "Exception"
+
+    return canonical, render
 
 
-def _canonical_exception_type_label(exc: BaseException) -> str:
-    """Render a caught exception type through the frozen secret-safe authority."""
-
-    if _SAFE_EXCEPTION_TYPE_LABEL.__code__ is not _SAFE_EXCEPTION_TYPE_LABEL_CODE:
-        return "Exception"
-    try:
-        return _SAFE_EXCEPTION_TYPE_LABEL(exc)
-    except BaseException:
-        return "Exception"
+_SAFE_EXCEPTION_TYPE_LABEL, _canonical_exception_type_label = (
+    _build_canonical_exception_type_label_renderer()
+)
+del _build_canonical_exception_type_label_renderer
 
 
 _OUTPUT_FORMATS = frozenset({"json", "text"})

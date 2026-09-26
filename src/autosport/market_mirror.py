@@ -358,18 +358,20 @@ class MarketMirror:
         selection_id: str,
         *,
         sport: str | None = None,
+        exchange_side: str | None = None,
     ) -> MarketEvent | None:
-        """Return one exact canonical quote without inferring a missing sport.
+        """Return one exact canonical quote without inferring identity dimensions.
 
-        Omitting sport preserves the deployed legacy sport=None lookup byte-for-byte.
-        Explicit-sport callers must provide the canonical sport dimension so same
-        provider-local IDs across sports cannot alias or be guessed.
+        Omitting sport and exchange_side preserves the deployed legacy lookup byte-for-byte.
+        Explicit callers must provide each canonical identity dimension they intend to
+        address so same provider-local IDs cannot alias or be guessed across sports/sides.
         """
         quote_key = _quote_identity(
             event_id,
             market_id,
             selection_id,
             sport,
+            exchange_side,
         )
         with self._lock:
             event = self._latest.get((source_id, quote_key))

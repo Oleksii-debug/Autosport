@@ -39,7 +39,9 @@ class _BlockingCatalogSource:
 
 
 class CollectorInflightCyclePostStopTests(unittest.TestCase):
-    def test_durable_stop_fences_terminal_success_from_already_started_cycle(self) -> None:
+    def test_external_stop_becomes_durable_only_after_inflight_cycle_quiesces(self) -> None:
+        """No catalog/delta/error/status mutation may occur after durable STOP."""
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = _BlockingCatalogSource()
@@ -54,62 +56,65 @@ class CollectorInflightCyclePostStopTests(unittest.TestCase):
 
             results: list[object] = []
             errors: list[BaseException] = []
+            stop_started = threading.Event()
+            stop_finished = threading.Event()
 
             def run_cycle() -> None:
                 try:
                     results.append(service.run_cycle())
-                except BaseException as exc:
+                except BaseException as exc:  # pragma: no cover - diagnostic capture
                     errors.append(exc)
 
-            thread = threading.Thread(
+            def stop_service() -> None:
+                stop_started.set()
+                try:
+                    service.stop("operator_stop")
+                except BaseException as exc:  # pragma: no cover - diagnostic capture
+                    errors.append(exc)
+                finally:
+                    stop_finished.set()
+
+            cycle_thread = threading.Thread(
                 target=run_cycle,
                 name="collector-cycle-blocked-inside-provider",
             )
-            thread.start()
+            cycle_thread.start()
             self.assertTrue(
                 source.entered_catalog.wait(1),
                 "collector cycle never entered the blocking provider call",
             )
 
-            service.stop("operator_stop")
-            stopped_before_release = service.status()
-            self.assertEqual(stopped_before_release["stop_reason"], "operator_stop")
-            self.assertIsNotNone(stopped_before_release["stopped_at"])
-            self.assertEqual(stopped_before_release["cycles_attempted"], 1)
-            self.assertEqual(stopped_before_release["cycles_succeeded"], 0)
+            stop_thread = threading.Thread(target=stop_service, name="collector-stop")
+            stop_thread.start()
+            self.assertTrue(stop_started.wait(1), "STOP thread did not start")
 
+            # The cycle owns the path-shared mutation window. Releasing the provider
+            # lets that exact pre-STOP transaction finish; only then may STOP become
+            # durable. On the historical implementation STOP wins immediately here,
+            # causing the terminal state fence to abort the older cycle instead.
             source.release_catalog.set()
-            thread.join(2)
 
-            self.assertFalse(thread.is_alive())
+            cycle_thread.join(2)
+            stop_thread.join(2)
+            self.assertFalse(cycle_thread.is_alive())
+            self.assertFalse(stop_thread.is_alive())
+            self.assertTrue(stop_finished.is_set())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 1)
+
             final_status = service.status()
-
-            self.assertEqual(
-                results,
-                [],
-                "an already-started collector cycle returned success after durable STOP",
-            )
-            self.assertEqual(
-                final_status["cycles_succeeded"],
-                0,
-                "an already-started collector cycle recorded terminal success after STOP",
-            )
-            self.assertIsNone(
-                final_status["last_success_at"],
-                "post-STOP cycle completion must not become the last successful cycle",
-            )
+            self.assertEqual(final_status["cycles_attempted"], 1)
+            self.assertEqual(final_status["cycles_succeeded"], 1)
             self.assertEqual(final_status["stop_reason"], "operator_stop")
-            self.assertEqual(
-                final_status["stopped_at"],
-                stopped_before_release["stopped_at"],
-            )
+            self.assertIsNotNone(final_status["stopped_at"])
             self.assertEqual(source.catalog_calls, 1)
-            self.assertLessEqual(source.delta_calls, 1)
+            self.assertEqual(source.delta_calls, 1)
 
-            # A repair may abort through the existing internal STOP control-flow
-            # signal or another fail-closed stop-specific exception. The safety law
-            # above is about forbidden post-STOP success, not one exception class.
-            self.assertLessEqual(len(errors), 1)
+            # Durable STOP is now the post-quiescence boundary: after it is visible,
+            # another cycle cannot publish any terminal/data mutation until resume.
+            with self.assertRaises(Exception):
+                service.run_cycle()
+            self.assertEqual(service.status(), final_status)
 
 
 if __name__ == "__main__":

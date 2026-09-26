@@ -36,17 +36,14 @@ def _bundle(*, promotion_shaped: bool) -> EvaluationBundleRef:
     )
 
 
-def test_promotion_effective_sample_requires_dependence_evidence_authority(tmp_path) -> None:
-    """Absorb #1318: caller-minted promotion ESS must not become durable truth."""
+def test_promotion_effective_sample_requires_canonical_scientific_lineage(tmp_path) -> None:
+    """Absorb #1318's pristine-registry falsifier without minting ESS authority."""
 
     registry = ScientificRegistry.initialize_pristine(
         tmp_path / "scientific-registry.json"
     )
 
-    with pytest.raises(
-        ValueError,
-        match="raw-sample/dependence/cluster derivation authority",
-    ):
+    with pytest.raises(ValueError, match="canonical scientific lineage"):
         registry.append(_bundle(promotion_shaped=True))
 
 

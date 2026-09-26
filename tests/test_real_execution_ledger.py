@@ -1221,7 +1221,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
             with self.assertRaisesRegex(
-                ExecutionStateError, "precede attempt causal boundary"
+                ExecutionStateError, "precede attempt submission"
             ):
                 ledger.mark_unknown(
                     "try-1", reason="timeout", observed_at=RESERVED_AT

@@ -304,27 +304,63 @@ class CanonicalSportResolution:
 
 
 def _build_register_evidence_method():
-    """Seal positive evidence parsing and chronology behind import-time authority."""
+    """Seal positive parsing, chronology and durable mutation behind product authority."""
 
+    canonical_registry_type = ProviderSportMappingRegistry
     canonical_clock = _utc_now
     parser_descriptor = vars(ProviderSportEvidence).get("from_exact_bytes")
     if type(parser_descriptor) is not classmethod:
         raise RuntimeError("ProviderSportEvidence.from_exact_bytes must remain a classmethod")
     canonical_parser = parser_descriptor.__func__
+    parser_dispatch = {
+        "_strict_json_object": _strict_json_object,
+        "_canonical_text": _canonical_text,
+        "_opaque_provider_id": _opaque_provider_id,
+        "_canonical_sport": _canonical_sport,
+        "_time_text": _time_text,
+        "_instant": _instant,
+        "ProviderSportMappingError": ProviderSportMappingError,
+        "hashlib": hashlib,
+        "json": json,
+        "unicodedata": unicodedata,
+        "datetime": datetime,
+        "timezone": timezone,
+        "_RESERVED_SPORTS": _RESERVED_SPORTS,
+    }
+    canonical_load = vars(canonical_registry_type)["_load"]
+    canonical_persist = vars(canonical_registry_type)["_persist"]
+    overlap_descriptor = vars(canonical_registry_type)["_assert_no_overlap"]
+    if type(overlap_descriptor) is not staticmethod:
+        raise RuntimeError("ProviderSportMappingRegistry._assert_no_overlap must remain static")
+    canonical_overlap = overlap_descriptor.__func__
 
     def register_evidence(
         self: "ProviderSportMappingRegistry",
         source_snapshot_bytes: bytes,
     ) -> ProviderSportBinding:
+        if type(self) is not canonical_registry_type:
+            raise ProviderSportMappingError("canonical provider sport registry type is required")
         if globals().get("_utc_now") is not canonical_clock:
             raise ProviderSportMappingError("product recording clock authority changed")
         if vars(ProviderSportEvidence).get("from_exact_bytes") is not parser_descriptor:
             raise ProviderSportMappingError("canonical evidence parser authority changed")
+        for name, expected in parser_dispatch.items():
+            if globals().get(name) is not expected:
+                raise ProviderSportMappingError("canonical evidence parser authority changed")
+        if vars(canonical_registry_type).get("_load") is not canonical_load:
+            raise ProviderSportMappingError("canonical registry load authority changed")
+        if vars(canonical_registry_type).get("_persist") is not canonical_persist:
+            raise ProviderSportMappingError("canonical registry persist authority changed")
+        if vars(canonical_registry_type).get("_assert_no_overlap") is not overlap_descriptor:
+            raise ProviderSportMappingError("canonical registry overlap authority changed")
 
-        evidence = canonical_parser(ProviderSportEvidence, source_snapshot_bytes)
         with durable_path_lock(self.path):
-            if self.path.exists():
-                self._load()
+            if not self.path.exists():
+                raise ProviderSportMappingError(
+                    "durable provider sport mapping registry is missing; initialize it first"
+                )
+            canonical_load(self)
+            evidence = canonical_parser(ProviderSportEvidence, source_snapshot_bytes)
             recorded_at = canonical_clock()
             if _instant("recorded_at", recorded_at) < _instant(
                 "evidence_available_at", evidence.evidence_available_at
@@ -345,7 +381,7 @@ def _build_register_evidence_method():
             for existing in self._bindings:
                 if existing.binding_id == candidate.binding_id:
                     return existing
-            self._assert_no_overlap(candidate, self._bindings)
+            canonical_overlap(candidate, self._bindings)
             updated = sorted(
                 [*self._bindings, candidate],
                 key=lambda value: (
@@ -357,7 +393,7 @@ def _build_register_evidence_method():
                     value.binding_id,
                 ),
             )
-            self._persist(updated)
+            canonical_persist(self, updated)
             self._bindings = updated
             return candidate
 
@@ -402,13 +438,16 @@ class ProviderSportMappingRegistry:
     def resolve(
         self, *, provider_namespace: str, provider_sport_id: str, as_of: str
     ) -> CanonicalSportResolution:
+        if type(self) is not ProviderSportMappingRegistry:
+            raise ProviderSportMappingError("canonical provider sport registry type is required")
         namespace = _canonical_text("provider_namespace", provider_namespace)
         opaque_id = _opaque_provider_id("provider_sport_id", provider_sport_id)
         instant = _instant("as_of", as_of)
         canonical_as_of = instant.isoformat().replace("+00:00", "Z")
         with durable_path_lock(self.path):
-            if self.path.exists():
-                self._load()
+            if not self.path.exists():
+                raise ProviderSportMappingError("durable provider sport mapping registry is missing")
+            self._load()
         candidates: list[ProviderSportBinding] = []
         for binding in self._bindings:
             if binding.provider_namespace != namespace or binding.provider_sport_id != opaque_id:

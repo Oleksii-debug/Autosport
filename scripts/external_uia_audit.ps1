@@ -349,16 +349,42 @@ try {
         throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
     }
 
-    # Native host visibility is not semantic readiness. Wait for one stable DOM
-    # control and bind the audit root to that same WebView2 top-level window.
+    # Native host visibility is not semantic readiness. The already discovered
+    # top-level window is the cheapest and strongest same-window probe, so poll its
+    # descendants directly. WebView2 can finish attaching under another process-
+    # family top-level after the native host first appears; retain that bounded
+    # rediscovery path, but rate-limit the expensive CIM + desktop enumeration.
     $semanticReady = $null
+    $semanticCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        '330'
+    )
+    $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-        $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
-        if ($null -ne $semanticSurface) {
-            $uiaRoot = $semanticSurface.Root
-            $semanticReady = $semanticSurface.Element
-            break
+        try {
+            if ([string]$uiaRoot.Current.AutomationId -eq '330') {
+                $semanticReady = $uiaRoot
+            } else {
+                $semanticReady = $uiaRoot.FindFirst(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    $semanticCondition
+                )
+            }
+        } catch {
+            $semanticReady = $null
+        }
+        if ($null -ne $semanticReady) { break }
+
+        $now = [DateTime]::UtcNow
+        if ($now -ge $nextFamilyRefresh) {
+            $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
+            if ($null -ne $semanticSurface) {
+                $uiaRoot = $semanticSurface.Root
+                $semanticReady = $semanticSurface.Element
+                break
+            }
+            $nextFamilyRefresh = $now.AddMilliseconds(1000)
         }
         Start-Sleep -Milliseconds 100
     }

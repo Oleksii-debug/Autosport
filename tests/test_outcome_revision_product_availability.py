@@ -190,6 +190,58 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
                 "2026-01-01T11:00:00.000000Z",
             )
 
+    def test_as_of_cutoff_rejects_string_subclass_before_virtual_replace(self) -> None:
+        class ForgedCutoff(str):
+            replace_calls = 0
+
+            def replace(self, old, new, count=-1):
+                type(self).replace_calls += 1
+                del old, new, count
+                return "2026-01-01T12:00:00+00:00"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            self._accept(
+                registry,
+                self._binding("r1"),
+                run_id="exact-cutoff",
+                market="market-exact-cutoff",
+                results="results-exact-cutoff",
+                accepted_at=self.t1,
+            )
+
+            forged = ForgedCutoff(self.t0)
+            with self.assertRaisesRegex(ValueError, "cutoff.*exact"):
+                self._resolve(registry, forged)
+            self.assertEqual(ForgedCutoff.replace_calls, 0)
+
+    def test_as_of_identity_rejects_string_subclass_before_hash_lookup(self) -> None:
+        class ForgedIdentity(str):
+            hash_calls = 0
+
+            def __hash__(self):
+                type(self).hash_calls += 1
+                return str.__hash__(self)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            self._accept(
+                registry,
+                self._binding("r1"),
+                run_id="exact-identity",
+                market="market-exact-identity",
+                results="results-exact-identity",
+                accepted_at=self.t1,
+            )
+
+            with self.assertRaisesRegex(ValueError, "source_identity.*exact"):
+                registry.outcome_revision_as_of(
+                    source_identity=ForgedIdentity(self.source_identity),
+                    record_id=self.record_id,
+                    cutoff=self.t1,
+                )
+            self.assertEqual(ForgedIdentity.hash_calls, 0)
+
     def test_equivalent_timezone_cutoffs_match_and_naive_cutoff_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")

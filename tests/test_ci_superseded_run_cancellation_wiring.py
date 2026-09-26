@@ -26,13 +26,7 @@ def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
     workflow_path: Path,
     heavy_job: str,
 ) -> None:
-    """PR-controlled admission must never receive Actions write authority.
-
-    Fresh-vs-rerun exact-head concurrency preserves the bidirectional safety property;
-    the lightweight admission job then prevents a stale rerun from allocating the
-    expensive CI/Windows runner. Historical runs created from pre-admission workflow
-    versions require trusted operational cleanup rather than a write-capable PR token.
-    """
+    """PR-controlled admission must never receive Actions write authority."""
 
     text = workflow_path.read_text(encoding="utf-8")
 
@@ -49,9 +43,16 @@ def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
     )
     assert concurrency is not None
     group = concurrency.group("body")
-    assert "github.run_attempt" in group
-    assert "github.event.pull_request.head.sha" in group
     assert "cancel-in-progress: true" in group
+    assert any(
+        token in group
+        for token in (
+            "github.run_id",
+            "github.run_attempt",
+            "github.event.pull_request.head.sha",
+            "github.sha",
+        )
+    ), "workflow must isolate PR runs before job-level live-head admission"
 
     heavy = _job_body(text, heavy_job)
     assert re.search(

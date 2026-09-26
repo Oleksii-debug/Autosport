@@ -292,6 +292,23 @@ class ContinuousObservationTests(unittest.TestCase):
                 self._run(provider, self._config(workspace, max_cycles=1))
             self.assertEqual(provider.calls, 0)
 
+    def test_non_integer_schema_version_fails_before_any_provider_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+            for invalid_version in ("true", "1.0"):
+                with self.subTest(schema_version=invalid_version):
+                    (workspace / "continuous_observation_status.json").write_text(
+                        '{"schema_version":'
+                        + invalid_version
+                        + ',"kind":"autosport_continuous_local_observation","run_id":"prior-run","state":"stopped"}',
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(ValueError, "unsupported schema"):
+                        self._run(provider, self._config(workspace, max_cycles=1))
+                    self.assertEqual(provider.calls, 0)
+
     def test_duplicate_key_previous_status_fails_before_any_provider_io(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

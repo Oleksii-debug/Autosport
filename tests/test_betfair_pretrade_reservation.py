@@ -1,0 +1,1026 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from decimal import Decimal, localcontext
+import http.client as _http_client
+import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+import autosport.betfair_pretrade_reservation as reservation_module
+from autosport.betfair_account_funds_precheck import (
+    evaluate_betfair_account_funds,
+)
+from autosport.betfair_account_identity import (
+    build_betfair_authenticated_client,
+)
+from autosport.betfair_account_readonly import BetfairSessionCredentials
+from autosport.betfair_pretrade_reservation import (
+    BetfairPreTradeReservationError,
+    BetfairPreTradeReservationStore,
+    ReservationStatus,
+    worst_case_incremental_exposure,
+)
+from autosport.real_execution_ledger import (
+    AcknowledgementStatus,
+    AttemptState,
+    ExecutionAction,
+    ExecutionPlan,
+    ExternalAcknowledgement,
+    ExternalEffectReconciliation,
+    RealExecutionLedger,
+    ReconciliationSnapshot,
+)
+
+
+TS = "2026-09-23T18:00:00+00:00"
+RESERVED_1 = "2026-09-23T18:00:10+00:00"
+RESERVED_2 = "2026-09-23T18:00:11+00:00"
+SUBMITTED = "2026-09-23T18:00:20+00:00"
+UNKNOWN = "2026-09-23T18:00:25+00:00"
+RECONCILED = "2026-09-23T18:00:30+00:00"
+ACKED = "2026-09-23T18:00:35+00:00"
+EXPIRES = "2026-09-23T19:00:00+00:00"
+
+
+class _Response:
+    status = 200
+    code = 200
+    reason = "OK"
+    msg = "OK"
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def info(self):
+        return {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+        return False
+
+    def read(self, limit: int | None = None) -> bytes:
+        if limit is None:
+            return self._payload
+        assert limit >= len(self._payload)
+        return self._payload
+
+    def close(self) -> None:
+        return None
+
+
+def _install_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    balance: object = 1000,
+    currency: str = "EUR",
+) -> list[str]:
+    """Stub below the canonical K07 opener/transport boundary."""
+
+    methods: list[str] = []
+
+    def fake_request(
+        connection,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        assert method == "POST"
+        assert url.endswith("/exchange/account/json-rpc/v1")
+        assert isinstance(body, bytes)
+        rpc = json.loads(body.decode("utf-8"))
+        methods.append(rpc["method"])
+        normalized_headers = {
+            key.lower(): value for key, value in (headers or {}).items()
+        }
+        assert normalized_headers["x-application"]
+        assert normalized_headers["x-authentication"]
+        connection._autosport_pretrade_request = rpc
+        connection._autosport_pretrade_encode_chunked = encode_chunked
+
+    def fake_getresponse(connection):
+        rpc = connection._autosport_pretrade_request
+        if rpc["method"].endswith("getAccountDetails"):
+            result = {
+                "currencyCode": currency,
+                "localeCode": "en",
+                "region": "SVK",
+                "timezone": "Europe/Bratislava",
+            }
+        elif rpc["method"].endswith("getAccountFunds"):
+            result = {
+                "availableToBetBalance": balance,
+                "exposure": 0,
+                "retainedCommission": 0,
+                "exposureLimit": -1000,
+            }
+        else:
+            raise AssertionError(rpc["method"])
+        payload = {
+            "jsonrpc": "2.0",
+            "id": rpc["id"],
+            "result": result,
+        }
+        return _Response(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr(_http_client.HTTPSConnection, "request", fake_request)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "getresponse", fake_getresponse)
+    return methods
+
+
+def _client(
+    *,
+    app: str = "app-key",
+    session: str = "session-token",
+):
+    return build_betfair_authenticated_client(
+        BetfairSessionCredentials(app, session),
+        account_label="pretrade-test",
+    )
+
+
+def _action(
+    action_id: str,
+    *,
+    side: str = "BACK",
+    odds: str = "2.50",
+    stake: str = "10.00",
+) -> ExecutionAction:
+    return ExecutionAction(
+        action_id=action_id,
+        bookmaker_id="betfair",
+        account_id="acct-1",
+        event_id="event-1",
+        market_id=f"market-{action_id}",
+        selection_id=f"selection-{action_id}",
+        side=side,
+        requested_odds=odds,
+        requested_stake=stake,
+        quote_id=f"quote-{action_id}",
+        quote_observed_at=TS,
+        expires_at=EXPIRES,
+    )
+
+
+def _plan(*actions: ExecutionAction) -> ExecutionPlan:
+    return ExecutionPlan(
+        plan_id="plan-1",
+        bookmaker_profile_version="profile-v1",
+        decision_id="decision-1",
+        approval_id="approval-1",
+        created_at=TS,
+        actions=tuple(actions),
+    )
+
+
+def _ledger(tmp_path, *actions: ExecutionAction) -> RealExecutionLedger:
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+    ledger.reserve_plan(_plan(*actions))
+    for index, action in enumerate(actions):
+        ledger.begin_attempt(
+            plan_id="plan-1",
+            action_id=action.action_id,
+            attempt_id=f"try-{index + 1}",
+            reserved_at=RESERVED_1 if index == 0 else RESERVED_2,
+        )
+    return ledger
+
+
+def _precheck(client, action: ExecutionAction):
+    return evaluate_betfair_account_funds(
+        client,
+        worst_case_incremental_exposure(action),
+        required_currency_code="EUR",
+    )
+
+
+def _store(tmp_path) -> BetfairPreTradeReservationStore:
+    return BetfairPreTradeReservationStore(
+        tmp_path,
+        account_id="acct-1",
+        currency_code="EUR",
+    )
+
+
+def test_back_and_lay_use_exact_worst_case_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+
+    back = _action("back", side="BACK", odds="2.5", stake="10")
+    assert worst_case_incremental_exposure(back) == Decimal("10")
+
+    lay = _action("lay", side="LAY", odds="20", stake="10")
+    assert worst_case_incremental_exposure(lay) == Decimal("190")
+
+    ledger = _ledger(tmp_path, lay)
+    result = _store(tmp_path).reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, lay),
+        execution_ledger=ledger,
+        customer_order_ref="order-ref-1",
+    )
+    assert result.reserved_amount == Decimal("190")
+    assert result.ledger_state is AttemptState.RESERVED
+    assert result.status is ReservationStatus.ACTIVE
+
+
+def test_understated_funds_precheck_cannot_underreserve_durable_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("lay", side="LAY", odds="20", stake="10")
+    ledger = _ledger(tmp_path, action)
+    understated = evaluate_betfair_account_funds(
+        client,
+        Decimal("10"),
+        required_currency_code="EUR",
+    )
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="liability does not match durable action",
+    ):
+        _store(tmp_path).reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=understated,
+            execution_ledger=ledger,
+        )
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_ledger_view",
+        "_LEDGER_SNAPSHOT",
+        "worst_case_incremental_exposure",
+        "_positive_decimal",
+        "_bounded_decimal_shape",
+        "require_authoritative_funds_precheck",
+    ),
+)
+def test_reservation_admission_rejects_module_helper_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    helper_name: str,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("sealed", side="LAY", odds="20", stake="10")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    attacker_calls: list[str] = []
+
+    def attacker(*_args, **_kwargs):
+        attacker_calls.append(helper_name)
+        raise AssertionError("attacker reservation helper executed")
+
+    monkeypatch.setattr(reservation_module, helper_name, attacker)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation admission helper dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=precheck,
+            execution_ledger=ledger,
+        )
+
+    assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+@pytest.mark.parametrize("dependency_name", ("Decimal", "localcontext"))
+def test_reservation_admission_rejects_liability_primitive_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    dependency_name: str,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("liability-primitive", stake="100")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    attacker_calls: list[str] = []
+
+    def attacker(*_args, **_kwargs):
+        attacker_calls.append(dependency_name)
+        raise AssertionError("attacker liability primitive executed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reservation_module, dependency_name, attacker)
+        with pytest.raises(
+            BetfairPreTradeReservationError,
+            match="reservation admission helper dispatch changed",
+        ):
+            store.reserve(
+                plan_id="plan-1",
+                attempt_id="try-1",
+                funds_precheck=precheck,
+                execution_ledger=ledger,
+            )
+
+    assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_reservation_admission_rejects_understating_positive_decimal_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("liability-understate", stake="100")
+    ledger = _ledger(tmp_path, action)
+    understated = evaluate_betfair_account_funds(
+        client,
+        Decimal("1"),
+        required_currency_code="EUR",
+    )
+    store = _store(tmp_path)
+    attacker_calls: list[str] = []
+
+    def forged_positive_decimal(*_args, **_kwargs) -> Decimal:
+        attacker_calls.append("positive-decimal")
+        return Decimal("1")
+
+    monkeypatch.setattr(
+        reservation_module,
+        "_positive_decimal",
+        forged_positive_decimal,
+    )
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation admission helper dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=understated,
+            execution_ledger=ledger,
+        )
+
+    assert attacker_calls == []
+    monkeypatch.undo()
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_reservation_admission_rejects_instance_insert_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("insert-shadow", stake="25")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    insert_calls: list[str] = []
+
+    def fake_insert(*_args, **_kwargs) -> None:
+        insert_calls.append("insert")
+
+    store._insert = fake_insert
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation store admission dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=precheck,
+            execution_ledger=ledger,
+        )
+
+    assert insert_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_reservation_admission_rejects_store_path_retarget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("path-retarget", stake="25")
+    ledger = _ledger(tmp_path, action)
+    precheck = _precheck(client, action)
+    store = _store(tmp_path)
+    original_path = store.path
+    store.path = tmp_path / "decoy-reservations.sqlite3"
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="reservation store binding changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=precheck,
+            execution_ledger=ledger,
+        )
+
+    assert not store.path.exists()
+    store.path = original_path
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_reservation_admission_rejects_execution_action_constructor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("action-constructor", stake="100")
+    ledger = _ledger(tmp_path, action)
+    understated = evaluate_betfair_account_funds(
+        client,
+        Decimal("1"),
+        required_currency_code="EUR",
+    )
+    store = _store(tmp_path)
+    canonical_init = ExecutionAction.__init__
+    attacker_calls: list[str] = []
+
+    def forged_init(self, *args, **kwargs) -> None:
+        attacker_calls.append("init")
+        canonical_init(self, *args, **kwargs)
+        object.__setattr__(self, "requested_stake", Decimal("1"))
+
+    monkeypatch.setattr(ExecutionAction, "__init__", forged_init)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="execution action dispatch changed",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=understated,
+            execution_ledger=ledger,
+        )
+
+    assert attacker_calls == []
+    assert store.active_reserved_amount() == Decimal("0")
+
+
+def test_local_reservations_close_same_balance_double_spend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("a1", stake="70")
+    second = _action("a2", stake="40")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="minus local reservations",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+    assert store.active_reserved_amount() == Decimal("70")
+
+
+def test_concurrent_admission_has_at_most_one_winner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("a1", stake="70")
+    second = _action("a2", stake="70")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    checks = {
+        "try-1": _precheck(client, first),
+        "try-2": _precheck(client, second),
+    }
+
+    def run(attempt_id: str) -> str:
+        try:
+            store.reserve(
+                plan_id="plan-1",
+                attempt_id=attempt_id,
+                funds_precheck=checks[attempt_id],
+                execution_ledger=ledger,
+            )
+        except BetfairPreTradeReservationError:
+            return "rejected"
+        return "reserved"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(run, ("try-1", "try-2")))
+
+    assert results.count("reserved") == 1
+    assert results.count("rejected") == 1
+    assert store.active_reserved_amount() == Decimal("70")
+
+
+def test_unknown_and_accepted_attempts_keep_full_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    ledger.mark_unknown("try-1", reason="timeout", observed_at=UNKNOWN)
+    unknown = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert unknown.ledger_state is AttemptState.UNKNOWN
+    assert unknown.active
+    assert store.active_reserved_amount() == Decimal("25")
+
+    ledger.reconcile_found(
+        ExternalEffectReconciliation(
+            attempt_id="try-1",
+            evidence_id="provider-found",
+            external_receipt_id="bet-1",
+            observed_at=RECONCILED,
+            source="provider-readback",
+        )
+    )
+    ledger.acknowledge(
+        ExternalAcknowledgement(
+            attempt_id="try-1",
+            external_receipt_id="bet-1",
+            status=AcknowledgementStatus.ACCEPTED,
+            acknowledged_at=ACKED,
+            accepted_odds="2.5",
+            accepted_stake="25",
+            reconciliation_evidence_id="provider-found",
+        )
+    )
+    accepted = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert accepted.ledger_state is AttemptState.ACCEPTED
+    assert accepted.active
+    assert store.active_reserved_amount() == Decimal("25")
+
+
+def test_generic_reconciled_not_found_cannot_release_local_capital(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("a1", stake="70")
+    second = _action("a2", stake="40")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    ledger.mark_unknown("try-1", reason="timeout", observed_at=UNKNOWN)
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="try-1",
+            evidence_id="caller-authored-absence",
+            observed_at=RECONCILED,
+            external_effect_found=False,
+            source="provider-readback",
+        )
+    )
+    held = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert held.ledger_state is AttemptState.RECONCILED_NOT_FOUND
+    assert held.status is ReservationStatus.ACTIVE
+    assert held.active
+    assert store.active_reserved_amount() == Decimal("70")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="minus local reservations",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+
+
+def test_deleted_row_cannot_free_generic_not_found_held_capital(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("not-found-held", stake="70")
+    second = _action("next-after-not-found", stake="40")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    ledger.mark_unknown("try-1", reason="timeout", observed_at=UNKNOWN)
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="try-1",
+            evidence_id="generic-not-found",
+            observed_at=RECONCILED,
+            external_effect_found=False,
+            source="provider-readback",
+        )
+    )
+    held = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert held.ledger_state is AttemptState.RECONCILED_NOT_FOUND
+    assert held.active
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM reservations WHERE attempt_id = 'try-1'")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+
+
+def test_deleted_row_cannot_free_rejected_held_capital(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=100)
+    client = _client()
+    first = _action("rejected-held", stake="70")
+    second = _action("next-after-rejected", stake="40")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    ledger.acknowledge(
+        ExternalAcknowledgement(
+            attempt_id="try-1",
+            external_receipt_id="rejected-receipt",
+            status=AcknowledgementStatus.REJECTED,
+            acknowledged_at=ACKED,
+        )
+    )
+    held = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert held.ledger_state is AttemptState.REJECTED
+    assert held.active
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM reservations WHERE attempt_id = 'try-1'")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+
+
+def test_restart_preserves_active_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    first_store = _store(tmp_path)
+    first = first_store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    restarted = _store(tmp_path)
+    assert restarted.get("try-1") == first
+    assert restarted.active_reserved_amount() == Decimal("25")
+
+
+def test_deleted_reservation_row_cannot_free_older_unresolved_ledger_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    first = _action("a1", stake="25")
+    second = _action("a2", stake="25")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, first),
+        execution_ledger=ledger,
+    )
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM reservations WHERE attempt_id = 'try-1'")
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(client, second),
+            execution_ledger=ledger,
+        )
+
+
+def test_payload_tamper_is_detected_on_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    with sqlite3.connect(store.path) as conn:
+        raw = conn.execute(
+            "SELECT payload_json FROM reservations WHERE attempt_id = 'try-1'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE reservations SET payload_json = ? WHERE attempt_id = 'try-1'",
+            (raw.replace('"reserved_amount":"25"', '"reserved_amount":"1"'),),
+        )
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="payload hash mismatch",
+    ):
+        _store(tmp_path)
+
+
+def test_active_old_authenticated_context_blocks_new_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    first_client = _client(app="app-a", session="session-a")
+    second_client = _client(app="app-b", session="session-b")
+    first = _action("a1", stake="25")
+    second = _action("a2", stake="25")
+    ledger = _ledger(tmp_path, first, second)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(first_client, first),
+        execution_ledger=ledger,
+    )
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="different authenticated account context",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-2",
+            funds_precheck=_precheck(second_client, second),
+            execution_ledger=ledger,
+        )
+
+
+
+def test_lay_liability_is_independent_of_ambient_decimal_precision() -> None:
+    action = _action(
+        "lay-precision",
+        side="LAY",
+        odds="123.456",
+        stake="78.901",
+    )
+    with localcontext() as context:
+        context.prec = 2
+        assert worst_case_incremental_exposure(action) == Decimal("9661.900856")
+
+
+def test_later_advanced_unreserved_attempt_blocks_earlier_new_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    first = _action("a1", stake="25")
+    second = _action("a2", stake="25")
+    ledger = _ledger(tmp_path, first, second)
+    ledger.mark_submitted("try-2", submitted_at=SUBMITTED)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="unresolved ledger attempt lacks active local reservation",
+    ):
+        _store(tmp_path).reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=_precheck(client, first),
+            execution_ledger=ledger,
+        )
+
+
+def test_sync_can_skip_intermediate_unknown_without_releasing_local_capital(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    store = _store(tmp_path)
+    store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    ledger.mark_submitted("try-1", submitted_at=SUBMITTED)
+    submitted = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert submitted.ledger_state is AttemptState.SUBMITTED
+
+    ledger.mark_unknown("try-1", reason="timeout", observed_at=UNKNOWN)
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="try-1",
+            evidence_id="provider-absence",
+            observed_at=RECONCILED,
+            external_effect_found=False,
+            source="provider-readback",
+        )
+    )
+    held = store.sync_from_ledger(
+        attempt_id="try-1",
+        execution_ledger=ledger,
+    )
+    assert held.ledger_state is AttemptState.RECONCILED_NOT_FOUND
+    assert held.status is ReservationStatus.ACTIVE
+    assert held.active
+    assert store.active_reserved_amount() == Decimal("25")
+
+
+
+def test_refreshing_funds_evidence_in_same_context_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    store = _store(tmp_path)
+
+    first = store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+    refreshed = store.reserve(
+        plan_id="plan-1",
+        attempt_id="try-1",
+        funds_precheck=_precheck(client, action),
+        execution_ledger=ledger,
+    )
+
+    assert refreshed == first
+    assert store.active_reserved_amount() == Decimal("25")
+
+
+
+def test_store_is_bound_to_canonical_execution_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    ledger = _ledger(foreign, action)
+    store = _store(tmp_path)
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="different workspaces",
+    ):
+        store.reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=_precheck(client, action),
+            execution_ledger=ledger,
+        )
+
+
+def test_copied_funds_precheck_cannot_mint_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _install_provider(monkeypatch, balance=1000)
+    client = _client()
+    action = _action("a1", stake="25")
+    ledger = _ledger(tmp_path, action)
+    copied = replace(_precheck(client, action))
+
+    with pytest.raises(
+        BetfairPreTradeReservationError,
+        match="lacks current product authority",
+    ):
+        _store(tmp_path).reserve(
+            plan_id="plan-1",
+            attempt_id="try-1",
+            funds_precheck=copied,
+            execution_ledger=ledger,
+        )

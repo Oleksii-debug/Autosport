@@ -96,6 +96,38 @@ def test_builtin_fixed_offset_timezone_remains_supported() -> None:
     assert evidence.effective_retention_deadline() == captured + LINE_LEVEL_MAX_RETENTION
 
 
+def test_line_level_retention_deadline_must_fit_supported_datetime_range() -> None:
+    max_aware = datetime.max.replace(tzinfo=timezone.utc)
+    latest_supported = max_aware - LINE_LEVEL_MAX_RETENTION
+    evidence = capture(
+        captured_at=latest_supported,
+        available_at=latest_supported,
+    )
+
+    assert evidence.effective_retention_deadline() == max_aware
+
+    too_late = latest_supported + timedelta(microseconds=1)
+    with pytest.raises(
+        ParlayApiRetentionError,
+        match="line-level retention exceeds supported datetime range",
+    ):
+        capture(captured_at=too_late, available_at=too_late)
+
+
+def test_line_level_retention_overflow_does_not_mask_capture_chronology() -> None:
+    max_aware = datetime.max.replace(tzinfo=timezone.utc)
+    available_at = max_aware - timedelta(days=1)
+
+    with pytest.raises(
+        ParlayApiRetentionError,
+        match="captured_at cannot precede available_at",
+    ):
+        capture(
+            captured_at=available_at - timedelta(days=1),
+            available_at=available_at,
+        )
+
+
 def test_line_level_pricing_has_hard_90_day_cap_without_consent_authority() -> None:
     evidence = capture(
         internal_retention_until=T0 + timedelta(days=365),

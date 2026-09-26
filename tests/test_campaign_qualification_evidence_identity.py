@@ -156,11 +156,21 @@ class CampaignEvidenceIdentityTests(unittest.TestCase):
 
         report = assess_campaign_qualification(evidence)
 
+        self.assertEqual(report.state, QualificationState.BLOCKED)
         self.assertEqual(
-            report.state,
-            QualificationState.COMPLETE_FOR_CANONICAL_RESOLUTION,
+            report.blockers,
+            (
+                "observed evidence does not span the minimum 24-hour multi-day interval",
+            ),
         )
-        self.assertEqual(report.blockers, ())
+        self.assertFalse(
+            any(
+                "reuses evidence anchor" in blocker
+                or "evidence identity already used" in blocker
+                for blocker in report.blockers
+            ),
+            report.blockers,
+        )
 
 
 if __name__ == "__main__":

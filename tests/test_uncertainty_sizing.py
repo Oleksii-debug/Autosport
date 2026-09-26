@@ -283,6 +283,37 @@ class UncertaintySizingTests(unittest.TestCase):
         with self.assertRaisesRegex(UncertaintySizingError, "strictly positive"):
             self._request(bankroll=Decimal("0"))
 
+    def test_decimal_subclasses_fail_before_polymorphic_dispatch(self) -> None:
+        hooks: list[str] = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self) -> bool:
+                hooks.append("is_finite")
+                raise AssertionError("hostile Decimal hook executed")
+
+            def __le__(self, other: object) -> bool:
+                hooks.append("__le__")
+                raise AssertionError("hostile Decimal comparison executed")
+
+            def __gt__(self, other: object) -> bool:
+                hooks.append("__gt__")
+                raise AssertionError("hostile Decimal comparison executed")
+
+        hostile = HostileDecimal("0.55")
+        cases = (
+            lambda: self._evidence(probability_lower=hostile),
+            lambda: self._request(bankroll=hostile),
+            lambda: self._policy(fractional_kelly=hostile),
+        )
+        for construct in cases:
+            with self.subTest(construct=construct):
+                with self.assertRaisesRegex(
+                    UncertaintySizingError,
+                    "finite exact Decimal",
+                ):
+                    construct()
+        self.assertEqual(hooks, [])
+
     def test_temporal_and_evidence_provenance_are_canonical(self) -> None:
         with self.assertRaisesRegex(UncertaintySizingError, "must not exceed produced_at"):
             self._evidence(causal_cutoff="2026-09-21T08:01:01+00:00")

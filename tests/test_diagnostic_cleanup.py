@@ -132,7 +132,7 @@ class DiagnosticCleanupTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
-            self.assertEqual(payload["error"], "_BrokenStringError: exception details unavailable")
+            self.assertEqual(payload["error"], "RuntimeError: exception details unavailable")
             self.assertNotIn("error_notes", payload)
 
     def test_cleanup_failure_with_broken_stringification_preserves_primary_failure(self) -> None:
@@ -152,7 +152,7 @@ class DiagnosticCleanupTests(unittest.TestCase):
                 payload["error_notes"],
                 [
                     "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
-                    "_BrokenStringError: exception details unavailable"
+                    "RuntimeError: exception details unavailable"
                 ],
             )
 
@@ -165,7 +165,7 @@ class DiagnosticCleanupTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
-            self.assertEqual(payload["error"], "_SurrogateStringError: �")
+            self.assertEqual(payload["error"], "RuntimeError: �")
             self.assertNotIn("error_notes", payload)
 
     def test_cleanup_failure_with_surrogate_stringification_preserves_primary_failure(self) -> None:
@@ -185,7 +185,7 @@ class DiagnosticCleanupTests(unittest.TestCase):
                 payload["error_notes"],
                 [
                     "SQLiteMarketStore.close() also failed while preserving the primary diagnostic failure: "
-                    "_SurrogateStringError: �"
+                    "RuntimeError: �"
                 ],
             )
 

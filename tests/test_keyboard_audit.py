@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
-_STARTUP_FOCUS_CONTROL = keyboard_audit._STARTUP_FOCUS_CONTROL\nfrom autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
+_STARTUP_FOCUS_CONTROL = keyboard_audit._STARTUP_FOCUS_CONTROL
+from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
 

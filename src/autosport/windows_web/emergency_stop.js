@@ -23,11 +23,11 @@
       return;
     }
 
-    // Emergency backend dispatch is an independent safety lane, but the shared
-    // frontend dispatcher performs a causally ordered get_state() after it. That
-    // state read may legitimately wait for an unrelated ordinary controller lock.
-    // Give a blind/keyboard operator immediate, explicitly non-final feedback
-    // before awaiting the ordered durable confirmation. Never claim STOP here.
+    // Emergency backend dispatch is an independent safety lane. Give a
+    // blind/keyboard operator immediate, explicitly non-final feedback before
+    // awaiting the backend result. The shared dispatcher skips only its synchronous
+    // post-command state refresh for this path; periodic polling remains canonical
+    // durable-state convergence.
     setStatus(
       "Аварійний STOP: запит передано. "
       + "Очікується підтвердження стійкого журналу заборони.",
@@ -38,17 +38,25 @@
       const result = await dispatch(
         "emergency_stop.activate",
         {},
-        { globalAnnouncement: false, resultFocus: false },
+        {
+          globalAnnouncement: false,
+          resultFocus: false,
+          postRefresh: false,
+        },
       );
       if (result === null) {
         setStatus(
           "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
           + "Нові виконання мають залишатися заблокованими; перевірте журнал STOP.",
         );
-      } else if (result.status !== "completed") {
+      } else {
         setStatus(
           result.message
-          || "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. Перевірте журнал STOP.",
+          || (
+            result.status === "completed"
+              ? "Аварійний STOP: команда завершена. Перевірте стійкий стан."
+              : "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. Перевірте журнал STOP."
+          ),
         );
       }
     } catch (_error) {
@@ -57,8 +65,8 @@
         + "Нові виконання мають залишатися заблокованими; перевірте журнал STOP.",
       );
     }
-    // The shared dispatcher has already forced one causally post-command state
-    // refresh. Focus only after that refresh; this asset is not a second state writer.
+    // This is immediate backend-result confirmation. It is not a second state
+    // authority: the existing poll loop will converge this readback to durable state.
     focusStatus();
   }
 

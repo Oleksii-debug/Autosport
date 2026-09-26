@@ -38,6 +38,7 @@ _RECORD_TYPES = frozenset(
         "CounterfactualQualification",
         "CounterfactualSourceEvidence",
         "ChampionEligibilityDecision",
+        "AblationAuthorityEvidence",
     }
 )
 
@@ -138,8 +139,12 @@ def promotion_holdout_access_id(
 def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     text = _text(value, "binding.promotion_rule")
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
     if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
         raise PromotionEvidenceError("frozen promotion rule kind is unsupported")
@@ -180,6 +185,17 @@ class PromotionAction(StrEnum):
     RETAIN = "RETAIN"
     REJECT = "REJECT"
     ROLLBACK = "ROLLBACK"
+
+
+class RetestCondition(StrEnum):
+    NEW_EVALUATION_BUNDLE = "NEW_EVALUATION_BUNDLE"
+
+
+class AblationAuthorityKind(StrEnum):
+    FACTUAL_MECHANICAL = "FACTUAL_MECHANICAL"
+    FROZEN_REPLAY_COUNTERFACTUAL = "FROZEN_REPLAY_COUNTERFACTUAL"
+    SIMULATED_COUNTERFACTUAL = "SIMULATED_COUNTERFACTUAL"
+    FORWARD_RANDOMIZED_OR_PAIRED = "FORWARD_RANDOMIZED_OR_PAIRED"
 
 
 class ScientificRecord(Protocol):
@@ -510,6 +526,143 @@ class EvaluationBundleRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ScientificEvidenceRef:
+    record_type: str
+    record_id: str
+    record_sha256: str
+
+    def __post_init__(self) -> None:
+        record_type = _text(self.record_type, "record_type")
+        if record_type not in _RECORD_TYPES:
+            raise ValueError("repeat evidence record_type is unsupported")
+        _text(self.record_id, "record_id")
+        _sha256(self.record_sha256, "record_sha256")
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "record_type": self.record_type,
+            "record_id": self.record_id,
+            "record_sha256": self.record_sha256.lower(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AblationAuthorityEvidence:
+    """Durable scientific binding for one ablation observation.
+
+    This is registry evidence, not product issuance.  A caller-selected registry can
+    persist valid scientific evidence but cannot by itself prove that the running
+    product issued or consumed that evidence.
+    """
+
+    ablation_authority_id: str
+    authority_kind: AblationAuthorityKind
+    research_protocol_id: str
+    protocol_sha256: str
+    research_protocol_record_sha256: str
+    scope_id: str
+    dataset_snapshot_id: str
+    dataset_manifest_sha256: str
+    dataset_snapshot_record_sha256: str
+    confirmation_trial_family_id: str
+    holdout_access_sha256: str
+    causal_cutoff: str
+    observation_evidence: ScientificEvidenceRef
+    supporting_evidence: tuple[ScientificEvidenceRef, ...]
+    created_at: str
+    execution_receipt_sha256: str | None = None
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in (
+            "ablation_authority_id",
+            "research_protocol_id",
+            "scope_id",
+            "dataset_snapshot_id",
+            "confirmation_trial_family_id",
+        ):
+            _text(getattr(self, name), name)
+        if type(self.authority_kind) is not AblationAuthorityKind:
+            raise ValueError("authority_kind must be an AblationAuthorityKind")
+        for name in (
+            "protocol_sha256",
+            "research_protocol_record_sha256",
+            "dataset_manifest_sha256",
+            "dataset_snapshot_record_sha256",
+            "holdout_access_sha256",
+        ):
+            _sha256(getattr(self, name), name)
+        _iso(self.causal_cutoff, "causal_cutoff")
+        _iso(self.created_at, "created_at")
+        if type(self.observation_evidence) is not ScientificEvidenceRef:
+            raise ValueError("observation_evidence must be a ScientificEvidenceRef")
+        if self.observation_evidence.record_type == "AblationAuthorityEvidence":
+            raise ValueError("ablation authority cannot use another ablation authority as observation evidence")
+        if type(self.supporting_evidence) is not tuple or any(
+            type(value) is not ScientificEvidenceRef for value in self.supporting_evidence
+        ):
+            raise ValueError("supporting_evidence must be a tuple of ScientificEvidenceRef values")
+        refs = (self.observation_evidence,) + self.supporting_evidence
+        if any(value.record_type == "AblationAuthorityEvidence" for value in refs):
+            raise ValueError("ablation authority evidence cannot recursively reference ablation authority")
+        ref_keys = tuple(
+            (value.record_type, value.record_id, value.record_sha256.lower())
+            for value in refs
+        )
+        if len(ref_keys) != len(set(ref_keys)):
+            raise ValueError("ablation authority evidence references must be unique")
+        if self.execution_receipt_sha256 is not None:
+            _sha256(self.execution_receipt_sha256, "execution_receipt_sha256")
+        if type(self.assumptions) is not tuple:
+            raise ValueError("assumptions must be a tuple")
+        assumptions = _text_tuple(self.assumptions, "assumptions", allow_empty=True)
+        if assumptions != tuple(sorted(assumptions)):
+            raise ValueError("assumptions must be sorted canonically")
+        if self.authority_kind is AblationAuthorityKind.SIMULATED_COUNTERFACTUAL:
+            if not assumptions:
+                raise ValueError("simulated ablation authority requires explicit assumptions")
+        elif assumptions:
+            raise ValueError("non-simulated ablation authority cannot carry simulator assumptions")
+
+    @property
+    def record_type(self) -> str:
+        return "AblationAuthorityEvidence"
+
+    @property
+    def record_id(self) -> str:
+        return self.ablation_authority_id
+
+    @property
+    def available_at(self) -> str:
+        return self.created_at
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "ablation_authority_id": self.ablation_authority_id,
+            "authority_kind": self.authority_kind.value,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256.lower(),
+            "research_protocol_record_sha256": self.research_protocol_record_sha256.lower(),
+            "scope_id": self.scope_id,
+            "dataset_snapshot_id": self.dataset_snapshot_id,
+            "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
+            "dataset_snapshot_record_sha256": self.dataset_snapshot_record_sha256.lower(),
+            "confirmation_trial_family_id": self.confirmation_trial_family_id,
+            "holdout_access_sha256": self.holdout_access_sha256.lower(),
+            "causal_cutoff": self.causal_cutoff,
+            "observation_evidence": self.observation_evidence.to_payload(),
+            "supporting_evidence": [value.to_payload() for value in self.supporting_evidence],
+            "execution_receipt_sha256": (
+                None
+                if self.execution_receipt_sha256 is None
+                else self.execution_receipt_sha256.lower()
+            ),
+            "assumptions": list(self.assumptions),
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ExperimentRecord:
     experiment_id: str
     research_protocol_id: str
@@ -524,6 +677,10 @@ class ExperimentRecord:
     model_version_id: str | None = None
     completed_at: str | None = None
     notes: str = ""
+    repeat_of_experiment_id: str | None = None
+    repeat_postmortem_id: str | None = None
+    retest_condition: str | None = None
+    repeat_evidence: tuple[ScientificEvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("experiment_id", "research_protocol_id", "dataset_snapshot_id",
@@ -544,6 +701,33 @@ class ExperimentRecord:
             raise ValueError("completed_at must not precede created_at")
         if type(self.notes) is not str:
             raise ValueError("notes must be a string")
+        repeat_fields = (
+            self.repeat_of_experiment_id,
+            self.repeat_postmortem_id,
+            self.retest_condition,
+        )
+        has_repeat_provenance = any(value is not None for value in repeat_fields) or bool(self.repeat_evidence)
+        if has_repeat_provenance:
+            if any(value is None for value in repeat_fields):
+                raise ValueError(
+                    "repeat experiment provenance requires repeat_of_experiment_id, "
+                    "repeat_postmortem_id and retest_condition"
+                )
+            _text(self.repeat_of_experiment_id, "repeat_of_experiment_id")
+            _text(self.repeat_postmortem_id, "repeat_postmortem_id")
+            _text(self.retest_condition, "retest_condition")
+            if not isinstance(self.repeat_evidence, tuple) or not self.repeat_evidence:
+                raise ValueError("repeat_evidence must be a non-empty tuple")
+            if any(not isinstance(value, ScientificEvidenceRef) for value in self.repeat_evidence):
+                raise ValueError("repeat_evidence must contain ScientificEvidenceRef values")
+            evidence_keys = tuple(
+                (value.record_type, value.record_id, value.record_sha256.lower())
+                for value in self.repeat_evidence
+            )
+            if len(evidence_keys) != len(set(evidence_keys)):
+                raise ValueError("repeat_evidence must not contain duplicates")
+        elif not isinstance(self.repeat_evidence, tuple):
+            raise ValueError("repeat_evidence must be a tuple")
 
     @property
     def record_type(self) -> str: return "Experiment"
@@ -560,13 +744,21 @@ class ExperimentRecord:
                         "strategy_version_id": self.strategy_version_id,
                         "seed": self.seed, "config_sha256": self.config_sha256.lower()})
     def to_payload(self) -> dict[str, Any]:
-        return {"experiment_id": self.experiment_id, "research_protocol_id": self.research_protocol_id,
-                "dataset_snapshot_id": self.dataset_snapshot_id, "feature_set_id": self.feature_set_id,
-                "model_version_id": self.model_version_id, "strategy_version_id": self.strategy_version_id,
-                "evaluation_bundle_id": self.evaluation_bundle_id, "seed": self.seed,
-                "config_sha256": self.config_sha256.lower(), "outcome": self.outcome.value,
-                "created_at": self.created_at, "completed_at": self.completed_at,
-                "fingerprint": self.fingerprint, "notes": self.notes}
+        payload = {"experiment_id": self.experiment_id, "research_protocol_id": self.research_protocol_id,
+                   "dataset_snapshot_id": self.dataset_snapshot_id, "feature_set_id": self.feature_set_id,
+                   "model_version_id": self.model_version_id, "strategy_version_id": self.strategy_version_id,
+                   "evaluation_bundle_id": self.evaluation_bundle_id, "seed": self.seed,
+                   "config_sha256": self.config_sha256.lower(), "outcome": self.outcome.value,
+                   "created_at": self.created_at, "completed_at": self.completed_at,
+                   "fingerprint": self.fingerprint, "notes": self.notes}
+        if self.repeat_of_experiment_id is not None:
+            payload.update({
+                "repeat_of_experiment_id": self.repeat_of_experiment_id,
+                "repeat_postmortem_id": self.repeat_postmortem_id,
+                "retest_condition": self.retest_condition,
+                "repeat_evidence": [value.to_payload() for value in self.repeat_evidence],
+            })
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -943,14 +1135,18 @@ class ScientificRegistry:
             state = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
         except json.JSONDecodeError as exc:
             raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
-        if type(state) is not dict or state.get("schema_version") != self.SCHEMA_VERSION:
+        if (
+            type(state) is not dict
+            or type(state.get("schema_version")) is not int
+            or state["schema_version"] != self.SCHEMA_VERSION
+        ):
             raise ValueError("scientific registry schema_version mismatch")
         records = state.get("records")
         if type(records) is not list:
             raise ValueError("scientific registry records must be a list")
         seen: set[tuple[str, str]] = set()
         fingerprints: set[str] = set()
-        for raw_entry in records:
+        for index, raw_entry in enumerate(records):
             self._validate_entry(raw_entry)
             key = (raw_entry["record_type"], raw_entry["record_id"])
             if key in seen:
@@ -958,12 +1154,42 @@ class ScientificRegistry:
             seen.add(key)
             if raw_entry["record_type"] == "Experiment":
                 fingerprint = raw_entry["payload"].get("fingerprint")
-                if fingerprint in fingerprints:
-                    # Historical explicit repeats are represented by allow_repeat and therefore may
-                    # share a fingerprint. They remain detectable by lookup rather than invalidating
-                    # restart. Do not reject the persisted state here.
-                    pass
+                prior_state = {
+                    "schema_version": self.SCHEMA_VERSION,
+                    "records": records[:index],
+                }
+                matching_experiments = [
+                    existing
+                    for existing in records[:index]
+                    if existing["record_type"] == "Experiment"
+                    and existing["payload"].get("fingerprint") == fingerprint
+                ]
+                negative_history = [
+                    existing
+                    for existing in matching_experiments
+                    if existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
+                ]
+                has_repeat_provenance = raw_entry["payload"].get("repeat_of_experiment_id") is not None
+                if negative_history:
+                    if not has_repeat_provenance:
+                        raise DuplicateExperimentFingerprintError(
+                            "persisted negative-result repeat lacks durable repeat provenance"
+                        )
+                    self._validate_negative_repeat_authorization(
+                        prior_state,
+                        raw_entry,
+                        negative_history,
+                    )
+                elif has_repeat_provenance:
+                    raise DuplicateExperimentFingerprintError(
+                        "repeat provenance requires prior non-positive experiment history"
+                    )
                 fingerprints.add(fingerprint)
+        for raw_entry in records:
+            if raw_entry["record_type"] == "PromotionDecision":
+                self._validate_persisted_promotion_decision(records, raw_entry)
+            if raw_entry["record_type"] == "AblationAuthorityEvidence":
+                self._validate_ablation_authority_causal_inputs(records, raw_entry)
         return state
 
     @staticmethod
@@ -987,6 +1213,331 @@ class ScientificRegistry:
             raise ValueError("scientific registry record digest mismatch")
 
     @staticmethod
+    def _ablation_authority_from_payload(payload: object) -> AblationAuthorityEvidence:
+        expected_fields = {
+            "ablation_authority_id",
+            "authority_kind",
+            "research_protocol_id",
+            "protocol_sha256",
+            "research_protocol_record_sha256",
+            "scope_id",
+            "dataset_snapshot_id",
+            "dataset_manifest_sha256",
+            "dataset_snapshot_record_sha256",
+            "confirmation_trial_family_id",
+            "holdout_access_sha256",
+            "causal_cutoff",
+            "observation_evidence",
+            "supporting_evidence",
+            "execution_receipt_sha256",
+            "assumptions",
+            "created_at",
+        }
+        if type(payload) is not dict or set(payload) != expected_fields:
+            raise ValueError("persisted ablation authority payload fields mismatch")
+
+        def evidence_ref(value: object, field: str) -> ScientificEvidenceRef:
+            if type(value) is not dict or set(value) != {
+                "record_type",
+                "record_id",
+                "record_sha256",
+            }:
+                raise ValueError(f"{field} fields mismatch")
+            return ScientificEvidenceRef(
+                value["record_type"],
+                value["record_id"],
+                value["record_sha256"],
+            )
+
+        supporting = payload["supporting_evidence"]
+        assumptions = payload["assumptions"]
+        if type(supporting) is not list:
+            raise ValueError("persisted supporting_evidence must be a list")
+        if type(assumptions) is not list:
+            raise ValueError("persisted assumptions must be a list")
+        try:
+            return AblationAuthorityEvidence(
+                ablation_authority_id=payload["ablation_authority_id"],
+                authority_kind=AblationAuthorityKind(payload["authority_kind"]),
+                research_protocol_id=payload["research_protocol_id"],
+                protocol_sha256=payload["protocol_sha256"],
+                research_protocol_record_sha256=payload[
+                    "research_protocol_record_sha256"
+                ],
+                scope_id=payload["scope_id"],
+                dataset_snapshot_id=payload["dataset_snapshot_id"],
+                dataset_manifest_sha256=payload["dataset_manifest_sha256"],
+                dataset_snapshot_record_sha256=payload[
+                    "dataset_snapshot_record_sha256"
+                ],
+                confirmation_trial_family_id=payload[
+                    "confirmation_trial_family_id"
+                ],
+                holdout_access_sha256=payload["holdout_access_sha256"],
+                causal_cutoff=payload["causal_cutoff"],
+                observation_evidence=evidence_ref(
+                    payload["observation_evidence"], "observation_evidence"
+                ),
+                supporting_evidence=tuple(
+                    evidence_ref(value, "supporting_evidence")
+                    for value in supporting
+                ),
+                execution_receipt_sha256=payload["execution_receipt_sha256"],
+                assumptions=tuple(assumptions),
+                created_at=payload["created_at"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("persisted ablation authority is not canonical") from exc
+
+    @staticmethod
+    def _validate_ablation_authority_causal_inputs(
+        records: list[dict[str, Any]],
+        entry: Mapping[str, Any],
+    ) -> None:
+        if entry.get("record_type") != "AblationAuthorityEvidence":
+            raise ValueError(
+                "ablation authority validation requires AblationAuthorityEvidence"
+            )
+        authority = ScientificRegistry._ablation_authority_from_payload(
+            entry.get("payload")
+        )
+        if (
+            entry.get("record_id") != authority.record_id
+            or entry.get("available_at") != authority.available_at
+            or ScientificRegistry._entry(authority) != entry
+        ):
+            raise ValueError(
+                "persisted ablation authority envelope does not match canonical payload"
+            )
+
+        by_key = {
+            (raw["record_type"], raw["record_id"]): (index, raw)
+            for index, raw in enumerate(records)
+        }
+        current = by_key.get(("AblationAuthorityEvidence", authority.record_id))
+        authority_index = len(records) if current is None else current[0]
+        authority_at = _instant(authority.created_at, "AblationAuthorityEvidence.created_at")
+
+        def require(
+            record_type: str,
+            record_id: str,
+            record_sha256: str,
+            field: str,
+        ) -> Mapping[str, Any]:
+            resolved = by_key.get((record_type, record_id))
+            if resolved is None:
+                raise ValueError(f"ablation authority references missing {field}")
+            index, raw = resolved
+            if index >= authority_index:
+                raise ValueError(
+                    f"ablation authority {field} must be durably recorded first"
+                )
+            if raw["record_sha256"] != _sha256(record_sha256, f"{field}.record_sha256"):
+                raise ValueError(f"ablation authority {field} digest mismatch")
+            if _instant(raw["available_at"], f"{field}.available_at") > authority_at:
+                raise ValueError(f"ablation authority {field} was not causally available")
+            reveal = raw["payload"].get("outcome_reveal_after")
+            if (
+                isinstance(reveal, str)
+                and _instant(reveal, f"{field}.outcome_reveal_after") > authority_at
+            ):
+                raise ValueError(f"ablation authority {field} outcome was not revealed")
+            return raw
+
+        protocol = require(
+            "ResearchProtocol",
+            authority.research_protocol_id,
+            authority.research_protocol_record_sha256,
+            "research protocol",
+        )
+        dataset = require(
+            "DatasetSnapshot",
+            authority.dataset_snapshot_id,
+            authority.dataset_snapshot_record_sha256,
+            "dataset snapshot",
+        )
+        protocol_payload = protocol["payload"]
+        dataset_payload = dataset["payload"]
+        if protocol_payload.get("protocol_sha256") != authority.protocol_sha256.lower():
+            raise ValueError("ablation authority protocol digest mismatch")
+        if (
+            protocol_payload.get("dataset_manifest_sha256")
+            != authority.dataset_manifest_sha256.lower()
+        ):
+            raise ValueError("ablation authority protocol dataset manifest mismatch")
+        if (
+            dataset_payload.get("manifest_sha256")
+            != authority.dataset_manifest_sha256.lower()
+        ):
+            raise ValueError("ablation authority dataset manifest mismatch")
+        binding = protocol_payload.get("binding")
+        if type(binding) is not dict:
+            raise ValueError("ablation authority research protocol binding is invalid")
+        if binding.get("causal_cutoff") != authority.causal_cutoff:
+            raise ValueError("ablation authority protocol causal cutoff mismatch")
+        if dataset_payload.get("causal_cutoff") != authority.causal_cutoff:
+            raise ValueError("ablation authority dataset causal cutoff mismatch")
+        expected_holdout = promotion_holdout_access_id(
+            research_protocol_id=authority.research_protocol_id,
+            dataset_manifest_sha256=authority.dataset_manifest_sha256,
+            source_identity=dataset_payload.get("source_identity"),
+            license_identity=dataset_payload.get("license_identity"),
+            confirmation_trial_family_id=authority.confirmation_trial_family_id,
+        )
+        if expected_holdout != authority.holdout_access_sha256.lower():
+            raise ValueError("ablation authority holdout identity mismatch")
+
+        evidence_refs = (authority.observation_evidence,) + authority.supporting_evidence
+        for index, ref in enumerate(evidence_refs):
+            if ref.record_type == "AblationAuthorityEvidence":
+                raise ValueError("ablation authority cannot recursively source itself")
+            require(
+                ref.record_type,
+                ref.record_id,
+                ref.record_sha256,
+                "observation evidence" if index == 0 else f"supporting evidence {index}",
+            )
+
+    @staticmethod
+    def _validate_persisted_promotion_decision(
+        records: list[dict[str, Any]],
+        raw_entry: Mapping[str, Any],
+    ) -> None:
+        payload = raw_entry["payload"]
+        expected_fields = {
+            "promotion_decision_id",
+            "action",
+            "candidate_strategy_version_id",
+            "candidate_model_version_id",
+            "research_protocol_id",
+            "protocol_sha256",
+            "evaluation_bundle_id",
+            "evaluation_bundle_sha256",
+            "predecessor_strategy_version_id",
+            "rollback_to_strategy_version_id",
+            "promotion_evidence_id",
+            "reason",
+            "decided_at",
+        }
+        if type(payload) is not dict or set(payload) != expected_fields:
+            raise PromotionEvidenceError(
+                "persisted promotion decision payload fields mismatch"
+            )
+        try:
+            decision = PromotionDecision(
+                promotion_decision_id=payload["promotion_decision_id"],
+                action=PromotionAction(payload["action"]),
+                candidate_strategy_version_id=payload[
+                    "candidate_strategy_version_id"
+                ],
+                research_protocol_id=payload["research_protocol_id"],
+                protocol_sha256=payload["protocol_sha256"],
+                evaluation_bundle_id=payload["evaluation_bundle_id"],
+                evaluation_bundle_sha256=payload["evaluation_bundle_sha256"],
+                decided_at=payload["decided_at"],
+                predecessor_strategy_version_id=payload[
+                    "predecessor_strategy_version_id"
+                ],
+                rollback_to_strategy_version_id=payload[
+                    "rollback_to_strategy_version_id"
+                ],
+                candidate_model_version_id=payload["candidate_model_version_id"],
+                promotion_evidence_id=payload["promotion_evidence_id"],
+                reason=payload["reason"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PromotionEvidenceError(
+                "persisted promotion decision is not canonical"
+            ) from exc
+        if (
+            raw_entry["record_id"] != decision.record_id
+            or raw_entry["available_at"] != decision.available_at
+            or ScientificRegistry._entry(decision) != raw_entry
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision envelope does not match its payload"
+            )
+
+        entries = {
+            (raw["record_type"], raw["record_id"]): raw
+            for raw in records
+        }
+        decision_at = _instant(decision.decided_at, "PromotionDecision.decided_at")
+
+        def require(kind: str, identity: str) -> Mapping[str, Any]:
+            value = entries.get((kind, identity))
+            if value is None:
+                raise PromotionEvidenceError(
+                    f"persisted promotion decision references missing {kind}:{identity}"
+                )
+            if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
+                raise PromotionEvidenceError(
+                    f"persisted promotion decision references future {kind}:{identity}"
+                )
+            reveal = value["payload"].get("outcome_reveal_after")
+            if (
+                isinstance(reveal, str)
+                and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at
+            ):
+                raise PromotionEvidenceError(
+                    f"persisted promotion decision references unrevealed {kind}:{identity}"
+                )
+            return value
+
+        strategy = require("StrategyVersion", decision.candidate_strategy_version_id)
+        protocol = require("ResearchProtocol", decision.research_protocol_id)
+        bundle = require("EvaluationBundle", decision.evaluation_bundle_id)
+        if protocol["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
+            raise PromotionEvidenceError(
+                "persisted promotion decision protocol binding mismatch"
+            )
+        if bundle["payload"].get("bundle_sha256") != decision.evaluation_bundle_sha256.lower():
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation bundle digest mismatch"
+            )
+        if bundle["payload"].get("protocol_sha256") != decision.protocol_sha256.lower():
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation protocol mismatch"
+            )
+        if (
+            bundle["payload"].get("evaluated_strategy_version_id")
+            != decision.candidate_strategy_version_id
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation strategy mismatch"
+            )
+        if (
+            bundle["payload"].get("evaluated_model_version_id")
+            != decision.candidate_model_version_id
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision evaluation model mismatch"
+            )
+        if (
+            strategy["payload"].get("model_version_id")
+            != decision.candidate_model_version_id
+        ):
+            raise PromotionEvidenceError(
+                "persisted promotion decision strategy/model mismatch"
+            )
+
+        if decision.promotion_evidence_id is not None:
+            evidence = require("PromotionEvidence", decision.promotion_evidence_id)
+            evidence_payload = evidence["payload"]
+            expected_bindings = {
+                "research_protocol_id": decision.research_protocol_id,
+                "candidate_strategy_version_id": decision.candidate_strategy_version_id,
+                "candidate_model_version_id": decision.candidate_model_version_id,
+                "evaluation_bundle_id": decision.evaluation_bundle_id,
+                "evaluation_bundle_sha256": decision.evaluation_bundle_sha256.lower(),
+            }
+            for field, expected in expected_bindings.items():
+                if evidence_payload.get(field) != expected:
+                    raise PromotionEvidenceError(
+                        f"persisted promotion decision evidence {field} mismatch"
+                    )
+
+    @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:
         if record.record_type not in _RECORD_TYPES:
             raise ValueError("unsupported scientific record type")
@@ -1003,7 +1554,20 @@ class ScientificRegistry:
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         if record.record_type == "PromotionDecision":
             raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
+        if record.record_type == "AblationAuthorityEvidence":
+            raise ValueError(
+                "ablation authority evidence must be recorded through record_ablation_authority"
+            )
         return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
+
+    def record_ablation_authority(self, record: AblationAuthorityEvidence) -> str:
+        if type(record) is not AblationAuthorityEvidence:
+            raise TypeError("record must be AblationAuthorityEvidence")
+        entry = self._entry(record)
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate_ablation_authority_causal_inputs(state["records"], entry)
+            return self._append_entry_locked(state, entry)
 
     def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         entry = self._entry(record)
@@ -1065,6 +1629,248 @@ class ScientificRegistry:
                 "promotion evidence availability precedes matching experiment completion"
             )
 
+    @staticmethod
+    def _validate_postmortem_causal_inputs(
+        state: Mapping[str, Any],
+        postmortem: Mapping[str, Any],
+    ) -> None:
+        payload = postmortem.get("payload")
+        if not isinstance(payload, Mapping):
+            raise DuplicateExperimentFingerprintError("postmortem payload is invalid")
+        experiment_id = payload.get("experiment_id")
+        experiment = next(
+            (
+                raw
+                for raw in state["records"]
+                if raw["record_type"] == "Experiment" and raw["record_id"] == experiment_id
+            ),
+            None,
+        )
+        if experiment is None:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result postmortem references missing experiment"
+            )
+        experiment_outcome = experiment["payload"].get("outcome")
+        if experiment_outcome == ResearchOutcome.POSITIVE.value:
+            raise DuplicateExperimentFingerprintError(
+                "positive experiment cannot create negative-result postmortem authority"
+            )
+        if payload.get("classification") != experiment_outcome:
+            raise DuplicateExperimentFingerprintError(
+                "postmortem classification does not match durable experiment outcome"
+            )
+        if _instant(postmortem["available_at"], "Postmortem.available_at") < _instant(
+            experiment["available_at"], "Experiment.available_at"
+        ):
+            raise DuplicateExperimentFingerprintError(
+                "postmortem cannot predate experiment completion"
+            )
+
+    @staticmethod
+    def _validate_negative_repeat_authorization(
+        state: Mapping[str, Any],
+        entry: Mapping[str, Any],
+        matching_experiments: list[Mapping[str, Any]],
+    ) -> None:
+        payload = entry["payload"]
+        repeat_of_experiment_id = payload.get("repeat_of_experiment_id")
+        repeat_postmortem_id = payload.get("repeat_postmortem_id")
+        retest_condition = payload.get("retest_condition")
+        repeat_evidence = payload.get("repeat_evidence")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                repeat_of_experiment_id,
+                repeat_postmortem_id,
+                retest_condition,
+            )
+        ):
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat requires durable repeat provenance"
+            )
+        if not isinstance(repeat_evidence, list) or not repeat_evidence:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat requires durable repeat evidence references"
+            )
+        prior = next(
+            (
+                raw
+                for raw in matching_experiments
+                if raw["record_id"] == repeat_of_experiment_id
+            ),
+            None,
+        )
+        if prior is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat_of_experiment_id must name an existing experiment with the same fingerprint"
+            )
+        prior_outcome = prior["payload"].get("outcome")
+        if prior_outcome == ResearchOutcome.POSITIVE.value:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat provenance cannot target a positive experiment"
+            )
+        postmortem = next(
+            (
+                raw
+                for raw in state["records"]
+                if raw["record_type"] == "Postmortem"
+                and raw["record_id"] == repeat_postmortem_id
+            ),
+            None,
+        )
+        if postmortem is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat_postmortem_id must name an existing durable postmortem"
+            )
+        postmortem_payload = postmortem["payload"]
+        if postmortem_payload.get("experiment_id") != repeat_of_experiment_id:
+            raise DuplicateExperimentFingerprintError(
+                "repeat postmortem does not belong to repeat_of experiment"
+            )
+        if postmortem_payload.get("classification") != prior_outcome:
+            raise DuplicateExperimentFingerprintError(
+                "repeat postmortem classification does not match prior experiment outcome"
+            )
+        conditions = postmortem_payload.get("retest_conditions")
+        if not isinstance(conditions, list) or retest_condition not in conditions:
+            raise DuplicateExperimentFingerprintError(
+                "retest_condition is not authorized by the durable postmortem"
+            )
+        repeat_created = _instant(payload["created_at"], "Experiment.created_at")
+        if _instant(postmortem["available_at"], "Postmortem.available_at") > repeat_created:
+            raise DuplicateExperimentFingerprintError(
+                "repeat experiment cannot predate its authorizing postmortem"
+            )
+        if retest_condition != RetestCondition.NEW_EVALUATION_BUNDLE.value:
+            raise DuplicateExperimentFingerprintError(
+                "retest_condition is not a mechanically supported repeat authorization"
+            )
+
+        records = state["records"]
+        record_by_key = {
+            (raw["record_type"], raw["record_id"]): (index, raw)
+            for index, raw in enumerate(records)
+        }
+        resolved: list[tuple[int, Mapping[str, Any]]] = []
+        evidence_keys: set[tuple[str, str, str]] = set()
+        for raw_ref in repeat_evidence:
+            if type(raw_ref) is not dict or set(raw_ref) != {
+                "record_type",
+                "record_id",
+                "record_sha256",
+            }:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence reference fields are invalid"
+                )
+            record_type = raw_ref.get("record_type")
+            record_id = raw_ref.get("record_id")
+            record_sha256 = raw_ref.get("record_sha256")
+            if (
+                not isinstance(record_type, str)
+                or record_type not in _RECORD_TYPES
+                or not isinstance(record_id, str)
+                or not record_id
+                or not isinstance(record_sha256, str)
+            ):
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence reference identity is invalid"
+                )
+            try:
+                expected_sha256 = _sha256(record_sha256, "repeat_evidence.record_sha256")
+            except ValueError as exc:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence reference digest is invalid"
+                ) from exc
+            evidence_key = (record_type, record_id, expected_sha256)
+            if evidence_key in evidence_keys:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence references must be unique"
+                )
+            evidence_keys.add(evidence_key)
+            resolved_record = record_by_key.get((record_type, record_id))
+            if resolved_record is None:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence references missing durable scientific record"
+                )
+            record_index, raw_record = resolved_record
+            if raw_record["record_sha256"] != expected_sha256:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence durable record digest mismatch"
+                )
+            if _instant(raw_record["available_at"], "repeat evidence available_at") > repeat_created:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence was not available before repeat creation"
+                )
+            resolved.append((record_index, raw_record))
+
+        prior_bundle_id = prior["payload"].get("evaluation_bundle_id")
+        current_bundle_id = payload.get("evaluation_bundle_id")
+        if current_bundle_id == prior_bundle_id:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat requires a new durable EvaluationBundle"
+            )
+        current_bundle_match = next(
+            (
+                (record_index, raw_record)
+                for record_index, raw_record in resolved
+                if raw_record["record_type"] == "EvaluationBundle"
+                and raw_record["record_id"] == current_bundle_id
+            ),
+            None,
+        )
+        if current_bundle_match is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat evidence must bind the repeat EvaluationBundle"
+            )
+        current_bundle_index, current_bundle = current_bundle_match
+        prior_bundle_match = record_by_key.get(("EvaluationBundle", prior_bundle_id))
+        if prior_bundle_match is None:
+            raise DuplicateExperimentFingerprintError(
+                "prior experiment EvaluationBundle is missing"
+            )
+        _, prior_bundle = prior_bundle_match
+        if current_bundle["payload"].get("bundle_sha256") == prior_bundle["payload"].get("bundle_sha256"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle does not contain materially changed evidence"
+            )
+        postmortem_match = record_by_key.get(("Postmortem", repeat_postmortem_id))
+        if postmortem_match is None or current_bundle_index <= postmortem_match[0]:
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle must be durably recorded after the authorizing postmortem"
+            )
+
+        bundle_payload = current_bundle["payload"]
+        if bundle_payload.get("dataset_snapshot_id") != payload.get("dataset_snapshot_id"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle dataset lineage mismatch"
+            )
+        if bundle_payload.get("evaluated_strategy_version_id") != payload.get("strategy_version_id"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle strategy lineage mismatch"
+            )
+        if bundle_payload.get("evaluated_model_version_id") != payload.get("model_version_id"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle model lineage mismatch"
+            )
+        protocol_match = record_by_key.get(("ResearchProtocol", payload.get("research_protocol_id")))
+        if protocol_match is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat experiment ResearchProtocol is missing"
+            )
+        if bundle_payload.get("protocol_sha256") != protocol_match[1]["payload"].get("protocol_sha256"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle protocol lineage mismatch"
+            )
+
+        # A registry row is a durable reference, not proof that the product evaluator
+        # actually produced the referenced evaluation artifact. Until the canonical
+        # factory/artifact authority is mechanically verified at this boundary, a
+        # caller-created EvaluationBundleRef must never reopen negative-result work.
+        raise DuplicateExperimentFingerprintError(
+            "negative-result repeat requires product-issued EvaluationBundle authority; "
+            "generic ScientificRegistry EvaluationBundle evidence is insufficient"
+        )
+
     def _append_entry_locked(
         self,
         state: dict[str, Any],
@@ -1074,6 +1880,8 @@ class ScientificRegistry:
     ) -> str:
         if entry["record_type"] == "PromotionEvidence":
             self._validate_promotion_evidence_causal_inputs(state, entry)
+        if entry["record_type"] == "Postmortem":
+            self._validate_postmortem_causal_inputs(state, entry)
         for existing in state["records"]:
             if (existing["record_type"], existing["record_id"]) == (
                 entry["record_type"], entry["record_id"]
@@ -1095,13 +1903,31 @@ class ScientificRegistry:
                     raise ConflictingScientificRecordError(
                         "evaluation bundle is already bound to a different experiment fingerprint"
                     )
-            if not allow_repeat_experiment and any(
-                existing["record_type"] == "Experiment"
-                and existing["payload"].get("fingerprint") == fingerprint
+            matching_experiments = [
+                existing
                 for existing in state["records"]
-            ):
+                if existing["record_type"] == "Experiment"
+                and existing["payload"].get("fingerprint") == fingerprint
+            ]
+            if matching_experiments and not allow_repeat_experiment:
                 raise DuplicateExperimentFingerprintError(
                     "experiment fingerprint already has durable history; inspect negative/null results before repeating"
+                )
+            negative_history = [
+                existing
+                for existing in matching_experiments
+                if existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
+            ]
+            has_repeat_provenance = entry["payload"].get("repeat_of_experiment_id") is not None
+            if negative_history:
+                self._validate_negative_repeat_authorization(
+                    state,
+                    entry,
+                    negative_history,
+                )
+            elif has_repeat_provenance:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat provenance requires prior non-positive experiment history"
                 )
         state["records"].append(entry)
         atomic_write_json(self.path, state)

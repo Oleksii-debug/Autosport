@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Iterable, Mapping, Protocol, Sequence
 
 from .integrity import atomic_write_json, sha256_file
+from .reproducibility_manifest import (
+    FactoryReproducibilityManifest,
+    derive_walk_forward_splits,
+)
 from .scientific_registry import (
     DuplicateExperimentFingerprintError,
     EvaluationBundleRef,
@@ -1299,6 +1303,7 @@ class ExperimentRunner:
             artifact_identities = (
                 ("model", spec.model_version_id),
                 ("metrics", spec.evaluation_bundle_id),
+                ("reproducibility-manifest", spec.evaluation_bundle_id),
                 ("evaluation", spec.evaluation_bundle_id),
             )
             for kind, identity in artifact_identities:
@@ -1318,12 +1323,50 @@ class ExperimentRunner:
                 "config_sha256": config_sha256,
                 "evaluator_config_sha256": evaluation_config.config_sha256,
                 "training_points_manifest_sha256": input_manifest_sha256,
+                "learner_state_sha256": final_model.identity_sha256,
                 "seed": spec.seed,
             }
         )
         model_artifact_sha256 = self.artifact_store.write(
             "model", spec.model_version_id, model_payload
         )
+
+        dataset = self.registry.get("DatasetSnapshot", spec.dataset_snapshot_id)
+        if dataset is None:
+            raise ValueError(
+                "reproducibility manifest requires the durable candidate dataset snapshot"
+            )
+        reproducibility_manifest = FactoryReproducibilityManifest(
+            experiment_id=spec.experiment_id,
+            evaluation_bundle_id=spec.evaluation_bundle_id,
+            dataset_snapshot_id=spec.dataset_snapshot_id,
+            dataset_manifest_sha256=dataset_manifest_sha256,
+            training_points_manifest_sha256=input_manifest_sha256,
+            dataset_source_identity=dataset.payload.get("source_identity"),
+            dataset_license_identity=dataset.payload.get("license_identity"),
+            splits=derive_walk_forward_splits(
+                points,
+                walk_forward.folds,
+                minimum_train_size=effective_minimum_train_size,
+            ),
+            model_version_id=spec.model_version_id,
+            model_artifact_sha256=model_artifact_sha256,
+            learner_state_sha256=final_model.identity_sha256,
+            model_config_sha256=config_sha256,
+            research_protocol_id=spec.research_protocol_id,
+            protocol_sha256=protocol_sha256,
+            evaluator_config_sha256=evaluation_config.config_sha256,
+            source_sha256=spec.source_sha256,
+            evaluator_source_sha256=spec.evaluator_source_sha256,
+            environment_sha256=spec.environment_sha256,
+            seed=spec.seed,
+        )
+        reproducibility_manifest_sha256 = self.artifact_store.write(
+            "reproducibility-manifest",
+            spec.evaluation_bundle_id,
+            reproducibility_manifest.to_envelope(),
+        )
+
         self.registry.append(
             ModelVersion(
                 spec.model_version_id,
@@ -1395,6 +1438,7 @@ class ExperimentRunner:
             "walk_forward_result_sha256": walk_forward.result_sha256,
             "candidate_metrics": candidate_metrics,
             "candidate_metrics_artifact_sha256": candidate_metrics_artifact_sha256,
+            "reproducibility_manifest_sha256": reproducibility_manifest_sha256,
             "candidate_metrics_source": "causal-walk-forward-v1",
             "champion_evaluation_bundle_id": champion_evaluation_bundle_id,
             "champion_metrics": champion_metrics,
@@ -1536,7 +1580,11 @@ class ExperimentRunner:
                 spec.evaluator_source_sha256,
                 spec.dataset_snapshot_id,
                 protocol_sha256,
-                (model_artifact_sha256, candidate_metrics_artifact_sha256),
+                (
+                    model_artifact_sha256,
+                    candidate_metrics_artifact_sha256,
+                    reproducibility_manifest_sha256,
+                ),
                 spec.completed_at,
                 evaluated_strategy_version_id=spec.strategy_version_id,
                 evaluated_model_version_id=spec.model_version_id,
@@ -1734,6 +1782,89 @@ class ExperimentRunner:
             "model training_points_manifest_sha256",
         ) != dataset_manifest_sha256:
             raise ValueError("model artifact dataset input manifest mismatch")
+
+        artifact_hashes = bundle.payload.get("artifact_hashes")
+        if type(artifact_hashes) is not list:
+            raise ValueError("EvaluationBundle artifact hashes are invalid after restart")
+        reproducibility_manifest_sha256 = evaluation_payload.get(
+            "reproducibility_manifest_sha256"
+        )
+        if reproducibility_manifest_sha256 is not None:
+            if (
+                type(reproducibility_manifest_sha256) is not str
+                or reproducibility_manifest_sha256 not in artifact_hashes
+            ):
+                raise ValueError(
+                    "reproducibility manifest is not hash-bound to EvaluationBundle"
+                )
+            reproducibility_envelope = store.read(
+                "reproducibility-manifest",
+                evaluation_bundle_id,
+                expected_sha256=reproducibility_manifest_sha256,
+            )
+            reproducibility_manifest = FactoryReproducibilityManifest.from_envelope(
+                reproducibility_envelope
+            )
+            expected_manifest_lineage = {
+                "experiment_id": experiment_id,
+                "evaluation_bundle_id": evaluation_bundle_id,
+                "dataset_snapshot_id": dataset_snapshot_id,
+                "dataset_manifest_sha256": dataset_manifest_sha256,
+                "training_points_manifest_sha256": dataset_manifest_sha256,
+                "dataset_source_identity": dataset.payload.get("source_identity"),
+                "dataset_license_identity": dataset.payload.get("license_identity"),
+                "model_version_id": model_version_id,
+                "model_artifact_sha256": model.payload.get("artifact_sha256"),
+                "learner_state_sha256": model_payload.get("learner_state_sha256"),
+                "model_config_sha256": model.payload.get("config_sha256"),
+                "research_protocol_id": research_protocol_id,
+                "protocol_sha256": protocol.payload.get("protocol_sha256"),
+                "evaluator_config_sha256": evaluation_config.config_sha256,
+                "source_sha256": model.payload.get("source_sha256"),
+                "evaluator_source_sha256": bundle.payload.get("evaluator_source_sha256"),
+                "environment_sha256": model.payload.get("environment_sha256"),
+                "seed": model.payload.get("seed"),
+            }
+            for field_name, expected_value in expected_manifest_lineage.items():
+                if getattr(reproducibility_manifest, field_name) != expected_value:
+                    raise ValueError(
+                        "reproducibility manifest lineage mismatch: " + field_name
+                    )
+
+            raw_walk_forward = evaluation_payload.get("walk_forward")
+            if type(raw_walk_forward) is not dict:
+                raise ValueError(
+                    "evaluation artifact lacks canonical walk-forward payload"
+                )
+            raw_folds = raw_walk_forward.get("folds")
+            if type(raw_folds) is not list:
+                raise ValueError("evaluation artifact walk-forward folds are invalid")
+            manifest_fold_lineage = tuple(
+                (
+                    split.fold_id,
+                    split.training_cutoff,
+                    split.evaluation_at,
+                    len(split.training_indices),
+                )
+                for split in reproducibility_manifest.splits
+            )
+            evaluation_fold_lineage = tuple(
+                (
+                    raw_fold.get("fold_id"),
+                    raw_fold.get("training_cutoff"),
+                    raw_fold.get("evaluation_at"),
+                    raw_fold.get("causal_training_count"),
+                )
+                for raw_fold in raw_folds
+                if type(raw_fold) is dict
+            )
+            if (
+                len(evaluation_fold_lineage) != len(raw_folds)
+                or manifest_fold_lineage != evaluation_fold_lineage
+            ):
+                raise ValueError(
+                    "reproducibility manifest walk-forward lineage mismatch"
+                )
 
         metrics_sha256 = evaluation_payload.get("candidate_metrics_artifact_sha256")
         if type(metrics_sha256) is not str:

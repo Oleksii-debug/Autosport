@@ -20,10 +20,14 @@ from . import research_multiplicity_family_close as _close
 
 def _install_guard() -> None:
     error_type = _close.MultiplicityFamilyCloseError
-    derive = _close.derive_multiplicity_family_close
-    require_current = _close.require_current_multiplicity_family_close
-    derive_code = getattr(derive, "__code__", None)
-    require_current_code = getattr(require_current, "__code__", None)
+    derive_name = _close.derive_multiplicity_family_close.__name__
+    derive_qualname = _close.derive_multiplicity_family_close.__qualname__
+    derive_doc = _close.derive_multiplicity_family_close.__doc__
+    derive_module = _close.derive_multiplicity_family_close.__module__
+    require_current_name = _close.require_current_multiplicity_family_close.__name__
+    require_current_qualname = _close.require_current_multiplicity_family_close.__qualname__
+    require_current_doc = _close.require_current_multiplicity_family_close.__doc__
+    require_current_module = _close.require_current_multiplicity_family_close.__module__
 
     member_type = _close.TerminalMultiplicityMemberEvidence
     member_init = member_type.__init__
@@ -107,8 +111,6 @@ def _install_guard() -> None:
             _close.MultiplicityFamilyCloseError is not error_type
             or _close.TerminalMultiplicityMemberEvidence is not member_type
             or _close.MultiplicityFamilyCloseEvidence is not evidence_type
-            or getattr(derive, "__code__", None) is not derive_code
-            or getattr(require_current, "__code__", None) is not require_current_code
         ):
             raise error_type("multiplicity family-close public authority changed")
 
@@ -173,39 +175,64 @@ def _install_guard() -> None:
         ):
             raise error_type("multiplicity family-close primitive dispatch changed")
 
-    def guarded_derive(*args, **kwargs):
+    def guarded_derive(store):
         if _close.derive_multiplicity_family_close is not guarded_derive:
             raise error_type("multiplicity family-close derive entrypoint was rebound")
         require_dispatch()
-        result = derive(*args, **kwargs)
+        path, workspace_root = _close._canonical_location(store)
         require_dispatch()
+        with _close.WorkspaceEconomicLock(workspace_root):
+            require_dispatch()
+            _close._require_canonical_store_read_dispatch()
+            require_dispatch()
+            canonical = store_type(
+                path,
+                workspace_root=workspace_root,
+            )
+            require_dispatch()
+            _close._require_canonical_store_read_dispatch()
+            require_dispatch()
+            result = _close._derive_locked(canonical)
+            require_dispatch()
         if type(result) is not evidence_type:
             raise error_type("family-close derivation returned non-canonical evidence")
         return result
 
-    def guarded_require_current(*args, **kwargs):
+    def guarded_require_current(store, evidence):
         if _close.require_current_multiplicity_family_close is not guarded_require_current:
             raise error_type("multiplicity family-close verifier entrypoint was rebound")
-        evidence = kwargs.get("evidence")
-        if evidence is None and len(args) >= 2:
-            evidence = args[1]
         if type(evidence) is not evidence_type:
             raise TypeError("evidence must be MultiplicityFamilyCloseEvidence")
         require_dispatch()
-        result = require_current(*args, **kwargs)
+        path, workspace_root = _close._canonical_location(store)
         require_dispatch()
-        if type(result) is not evidence_type:
-            raise error_type("family-close verification returned non-canonical evidence")
-        return result
+        with _close.WorkspaceEconomicLock(workspace_root):
+            require_dispatch()
+            _close._require_canonical_store_read_dispatch()
+            require_dispatch()
+            canonical = store_type(
+                path,
+                workspace_root=workspace_root,
+            )
+            require_dispatch()
+            _close._require_canonical_store_read_dispatch()
+            require_dispatch()
+            current = _close._derive_locked(canonical)
+            require_dispatch()
+        if current != evidence or current.evidence_sha256 != evidence.evidence_sha256:
+            raise error_type(
+                "family-close evidence does not match the current canonical multiplicity store"
+            )
+        return current
 
-    guarded_derive.__name__ = derive.__name__
-    guarded_derive.__qualname__ = derive.__qualname__
-    guarded_derive.__doc__ = derive.__doc__
-    guarded_derive.__module__ = derive.__module__
-    guarded_require_current.__name__ = require_current.__name__
-    guarded_require_current.__qualname__ = require_current.__qualname__
-    guarded_require_current.__doc__ = require_current.__doc__
-    guarded_require_current.__module__ = require_current.__module__
+    guarded_derive.__name__ = derive_name
+    guarded_derive.__qualname__ = derive_qualname
+    guarded_derive.__doc__ = derive_doc
+    guarded_derive.__module__ = derive_module
+    guarded_require_current.__name__ = require_current_name
+    guarded_require_current.__qualname__ = require_current_qualname
+    guarded_require_current.__doc__ = require_current_doc
+    guarded_require_current.__module__ = require_current_module
 
     _close.derive_multiplicity_family_close = guarded_derive
     _close.require_current_multiplicity_family_close = guarded_require_current

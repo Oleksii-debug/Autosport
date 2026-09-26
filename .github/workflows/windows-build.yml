@@ -155,7 +155,7 @@ jobs:
           if ($packagedOutput -notmatch 'repair=OK') { throw 'Packaged repair-workspace did not report canonical repair=OK' }
 
           $freshOutput = (& $freshDataExe repair-workspace --workspace $freshWorkspace 2>&1 | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted repair-workspace exited $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe repair-workspace exited $LASTEXITCODE" }
           if ($freshOutput -notmatch 'repair=OK') { throw 'Fresh-extracted repair-workspace did not report canonical repair=OK' }
 
           $evidence = [ordered]@{

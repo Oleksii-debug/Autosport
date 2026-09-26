@@ -292,6 +292,9 @@ _CANONICAL_GOVERNANCE_HISTORY = BookmakerCapabilityRegistry.governance_history
 _CANONICAL_REGISTRY_READ_SURFACES = (
     ("governance_history", BookmakerCapabilityRegistry.governance_history),
     ("_load_document", BookmakerCapabilityRegistry._load_document),
+    ("_profiles_from_document", BookmakerCapabilityRegistry._profiles_from_document),
+    ("_decode_profile", BookmakerCapabilityRegistry._decode_profile),
+    ("_profile_key", BookmakerCapabilityRegistry._profile_key),
     ("_governance_from_document", BookmakerCapabilityRegistry._governance_from_document),
     ("_governance_key", BookmakerCapabilityRegistry._governance_key),
     ("_decode_governance", BookmakerCapabilityRegistry._decode_governance),

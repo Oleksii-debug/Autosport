@@ -151,6 +151,36 @@ def test_instance_rebound_ledger_read_surface_fails_before_dispatch(
     assert calls == 0
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    ["verified_snapshot", "saga", "provider_order_reference"],
+)
+def test_class_ledger_read_surface_code_swap_fails_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    plan, ledger, capture = _prepared(tmp_path)
+    canonical = getattr(RealExecutionLedger, method_name)
+
+    def forged(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("forged ledger read authority executed")
+
+    monkeypatch.setattr(canonical, "__code__", forged.__code__)
+
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="authority|dispatch|executable|changed",
+    ):
+        resolve_betfair_realized_match(
+            plan,
+            ledger,
+            capture,
+            attempt_id=ATTEMPT_ID,
+        )
+
+
 def test_real_execution_ledger_subclass_cannot_supply_positive_authority(
     tmp_path: Path,
 ) -> None:

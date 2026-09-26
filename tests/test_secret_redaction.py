@@ -27,6 +27,11 @@ class SecretRedactionTests(unittest.TestCase):
             "Api-Key",
             "X-API-Key",
             "AUTOSPORT_PARLAYAPI_KEY",
+            "appKey",
+            "APPKEY",
+            "betfairAppKey",
+            "betfairAppKeyValue",
+            "BETFAIR_APP_KEY_HEADER",
             "accessToken",
             "REFRESH_TOKEN",
             "password",
@@ -42,6 +47,28 @@ class SecretRedactionTests(unittest.TestCase):
         for key in ("market_key", "token_count", "secretary", "authorization_mode"):
             with self.subTest(key=key):
                 self.assertFalse(is_sensitive_key(key))
+
+    def test_app_key_aliases_and_bounded_wrappers_redact_values(self) -> None:
+        secrets = {
+            "appKey": "app-secret-804",
+            "APPKEY": "upper-secret-804",
+            "betfairAppKey": "provider-secret-804",
+            "betfairAppKeyValue": "value-secret-804",
+            "BETFAIR_APP_KEY_HEADER": "header-secret-804",
+        }
+        redacted_value = redact_operator_value(secrets)
+
+        for key, secret in secrets.items():
+            with self.subTest(key=key):
+                self.assertEqual(redacted_value[key], REDACTED)
+                rendered = redact_operator_text(f"{key}={secret}")
+                self.assertEqual(rendered, f"{key}={REDACTED}")
+                self.assertNotIn(secret, rendered)
+
+        # Wrapper stripping is bounded and credential-specific, not a general
+        # suffix rule for ordinary operator metadata.
+        self.assertFalse(is_sensitive_key("marketValue"))
+        self.assertFalse(is_sensitive_key("responseHeader"))
 
     def test_text_redacts_key_values_bearer_url_userinfo_and_sensitive_query(self) -> None:
         source = (

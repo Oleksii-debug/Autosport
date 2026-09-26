@@ -464,7 +464,7 @@ def run_product(
                     try:
                         primary_failure.add_note(
                             "signal handler restoration also failed during cleanup: "
-                            f"{type(exc).__name__}"
+                            f"{_safe_exception_type_label(exc)}"
                         )
                     except BaseException:
                         pass

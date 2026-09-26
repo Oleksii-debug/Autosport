@@ -112,6 +112,8 @@ _REQUIRED_BRIDGE_MARKERS = (
     'window.addEventListener("pywebviewready"',
     'globalThis.pywebview.api.get_state()',
     'globalThis.pywebview.api.dispatch({',
+    "const usePostRefresh = options.postRefresh !== false;",
+    "if (usePostRefresh) await refreshState();",
     'dispatch("product_runtime.start")',
     'dispatch("product_runtime.stop")',
     'renderSingleColumnTable(byId("tickets-table-body"), state.tickets)',

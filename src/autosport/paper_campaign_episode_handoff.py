@@ -444,6 +444,34 @@ class PaperCampaignEpisodeHandoff:
                 "consumption authority"
             )
 
+    def _reject_omitted_committed_parent(
+        self,
+        state: dict[str, object],
+    ) -> None:
+        """Reject a locally rolled-back snapshot that omits a committed child."""
+
+        _parent_snapshot, parent_checkpoint = self._parent_witness()
+        parent_checkpoint_id = _sha(
+            parent_checkpoint.checkpoint_id,
+            "parent_checkpoint_id",
+        )
+        handoffs = state["handoffs"]
+        assert isinstance(handoffs, dict)
+        if parent_checkpoint_id in handoffs:
+            return
+        try:
+            history = self._consumption_authority(
+                parent_checkpoint_id
+            ).read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot verify omitted parent-checkpoint consumption authority"
+            ) from exc
+        if any(entry.phase is AuthorityPhase.COMMIT for entry in history):
+            raise PaperCampaignEpisodeHandoffError(
+                "local handoff state omits independently committed child"
+            )
+
     def committed_children(
         self,
     ) -> tuple[PaperCampaignEpisodeHandoffRecord, ...]:
@@ -457,6 +485,7 @@ class PaperCampaignEpisodeHandoff:
 
         with WorkspaceEconomicLock(self.state_path.parent):
             state = self._read_state()
+            self._reject_omitted_committed_parent(state)
             projected: list[PaperCampaignEpisodeHandoffRecord] = []
             for parent_checkpoint_id in sorted(state["handoffs"]):
                 raw = state["handoffs"][parent_checkpoint_id]

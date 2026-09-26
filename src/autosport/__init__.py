@@ -176,3 +176,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# The Parlay sport-catalog origin mint is meaningful only while the exact captured
+# fixed-origin transport/clock executable chain remains unchanged in-place.
+from . import _parlay_sport_catalog_execution_guard as _parlay_sport_catalog_execution_guard  # noqa: F401,E402

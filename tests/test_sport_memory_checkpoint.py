@@ -604,3 +604,139 @@ def test_existing_runtime_without_checkpoint_cannot_self_attest_generation(tmp_p
             identity,
             opponent,
         )
+
+
+def _bound_runtime_for_binding_tamper(root):
+    root.mkdir()
+    identity, opponent = _canonical_stores(root)
+    checkpoint_path, runtime_path = _paths(root)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    return runtime, identity, opponent, checkpoint_path, runtime_path
+
+
+def test_bound_runtime_rejects_post_bind_authority_reassignment(tmp_path):
+    runtime, identity, opponent, checkpoint_path, runtime_path = (
+        _bound_runtime_for_binding_tamper(tmp_path / "ordinary-reassign")
+    )
+
+    attempts = {
+        "path": tmp_path / "redirected-runtime.json",
+        "authority_generation_sha256": SHA_B,
+        "opponent_authority": opponent,
+        "_bound_checkpoint_path": tmp_path / "redirected-checkpoint.json",
+        "_bound_identity_selector": identity,
+        "_bound_opponent_selector": opponent,
+    }
+    for name, value in attempts.items():
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="authority binding is immutable",
+        ):
+            setattr(runtime, name, value)
+
+    assert runtime.path == runtime_path
+    assert runtime._bound_checkpoint_path == checkpoint_path
+
+
+@pytest.mark.parametrize(
+    "field,value_kind",
+    [
+        ("path", "path"),
+        ("authority_generation_sha256", "generation"),
+        ("opponent_authority", "object"),
+    ],
+)
+def test_bound_runtime_detects_direct_base_field_injection(
+    tmp_path, field, value_kind
+):
+    runtime, _, _, _, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / f"dict-{field}"
+    )
+    if value_kind == "path":
+        value = tmp_path / "redirected-runtime.json"
+    elif value_kind == "generation":
+        value = SHA_B
+    else:
+        value = object()
+
+    runtime.__dict__[field] = value
+    with pytest.raises(SportMemoryCheckpointError, match="binding changed"):
+        runtime._persist()
+
+
+def test_bound_runtime_detects_direct_slot_name_injection(tmp_path):
+    runtime, _, _, _, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / "dict-slot"
+    )
+    runtime.__dict__["_bound_checkpoint_path"] = tmp_path / "forged.json"
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="direct binding injection|instance authority shadow",
+    ):
+        runtime._persist()
+
+
+def test_bound_runtime_detects_identity_selector_path_drift(tmp_path):
+    runtime, identity, _, _, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / "identity-selector-drift"
+    )
+    identity.path = tmp_path / "other-identity.json"
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="identity selector path changed",
+    ):
+        runtime._persist()
+
+
+def test_bound_runtime_detects_opponent_selector_path_drift(tmp_path):
+    runtime, _, opponent, _, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / "opponent-selector-drift"
+    )
+    opponent.path = tmp_path / "other-opponent.json"
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="opponent selector path changed",
+    ):
+        runtime._persist()
+
+
+def test_bound_runtime_cannot_be_redirected_to_second_authority_lineage(tmp_path):
+    runtime, _, _, _, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / "lineage-a"
+    )
+    _, identity_b, opponent_b, checkpoint_b, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / "lineage-b"
+    )
+
+    for name, value in (
+        ("_bound_checkpoint_path", checkpoint_b),
+        ("_bound_identity_selector", identity_b),
+        ("_bound_opponent_selector", opponent_b),
+        ("opponent_authority", opponent_b),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="authority binding is immutable",
+        ):
+            setattr(runtime, name, value)
+
+
+def test_verified_refresh_remains_the_only_post_bind_opponent_replacement(tmp_path):
+    runtime, _, _, _, _ = _bound_runtime_for_binding_tamper(
+        tmp_path / "verified-refresh"
+    )
+    before = runtime.opponent_authority
+
+    verified = runtime._refresh_bound_authority()
+
+    assert verified is runtime.opponent_authority
+    assert runtime.opponent_authority is not before
+    runtime._persist()

@@ -16,6 +16,7 @@ class _Runtime:
         self.workspace = Path("ignored-workspace")
         self.manifest = SimpleNamespace(source_id="provider-a")
         self.tick_completed = threading.Event()
+        self.tick_calls = 0
         self.stop_reasons: list[str] = []
         self.close_calls = 0
 
@@ -23,6 +24,7 @@ class _Runtime:
         return object()
 
     def tick(self) -> object:
+        self.tick_calls += 1
         self.tick_completed.set()
         return object()
 
@@ -35,7 +37,7 @@ class _Runtime:
 
 
 class ProductEntrypointSignalIdleWaitPreemptionTests(unittest.TestCase):
-    def test_signal_stop_preempts_idle_poll_wait(self) -> None:
+    def test_signal_stop_preempts_idle_poll_wait_without_post_signal_tick(self) -> None:
         runtime = _Runtime()
         signal_sent = threading.Event()
 
@@ -78,6 +80,7 @@ class ProductEntrypointSignalIdleWaitPreemptionTests(unittest.TestCase):
         self.assertTrue(signal_sent.is_set())
         self.assertFalse(sender.is_alive())
         self.assertEqual(exit_code, 128 + int(signal.SIGINT))
+        self.assertEqual(runtime.tick_calls, 1)
         self.assertEqual(runtime.stop_reasons, ["signal:SIGINT"])
         self.assertEqual(runtime.close_calls, 1)
         self.assertLess(

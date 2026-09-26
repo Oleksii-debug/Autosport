@@ -447,12 +447,12 @@ class PaperCampaignEpisodeHandoff:
     def _reject_omitted_committed_parent(
         self,
         state: dict[str, object],
+        parent_checkpoint_id: str,
     ) -> None:
         """Reject a locally rolled-back snapshot that omits a committed child."""
 
-        _parent_snapshot, parent_checkpoint = self._parent_witness()
         parent_checkpoint_id = _sha(
-            parent_checkpoint.checkpoint_id,
+            parent_checkpoint_id,
             "parent_checkpoint_id",
         )
         handoffs = state["handoffs"]
@@ -483,9 +483,17 @@ class PaperCampaignEpisodeHandoff:
         handoff authority.
         """
 
+        _parent_snapshot, parent_checkpoint = self._parent_witness()
+        parent_checkpoint_id = _sha(
+            parent_checkpoint.checkpoint_id,
+            "parent_checkpoint_id",
+        )
         with WorkspaceEconomicLock(self.state_path.parent):
             state = self._read_state()
-            self._reject_omitted_committed_parent(state)
+            self._reject_omitted_committed_parent(
+                state,
+                parent_checkpoint_id,
+            )
             projected: list[PaperCampaignEpisodeHandoffRecord] = []
             for parent_checkpoint_id in sorted(state["handoffs"]):
                 raw = state["handoffs"][parent_checkpoint_id]

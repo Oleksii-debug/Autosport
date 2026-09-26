@@ -255,6 +255,476 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     reserved_at=RETRY_RESERVED_AT,
                 )
 
+    def test_recover_uncertain_clock_rollback_before_reservation_does_not_mutate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            before = path.read_bytes()
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=TS,
+            ):
+                with self.assertRaisesRegex(
+                    ExecutionStateError,
+                    "recovery clock precedes attempt causal boundary",
+                ):
+                    ledger.recover_uncertain()
+
+            self.assertEqual(path.read_bytes(), before)
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 2)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.RESERVED,
+            )
+
+    def test_recover_uncertain_clock_rollback_before_submission_does_not_mutate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            before = path.read_bytes()
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=RESERVED_AT,
+            ):
+                with self.assertRaisesRegex(
+                    ExecutionStateError,
+                    "recovery clock precedes attempt causal boundary",
+                ):
+                    ledger.recover_uncertain()
+
+            self.assertEqual(path.read_bytes(), before)
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 3)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+
+    def test_mark_unknown_cannot_precede_bound_provider_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="e" * 64,
+                observed_at=UNKNOWN_AT,
+                source="provider-readback",
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "UNKNOWN observed_at cannot precede attempt causal boundary",
+            ):
+                ledger.mark_unknown(
+                    "try-1",
+                    reason="provider-timeout",
+                    observed_at="2026-09-17T19:28:17+00:00",
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 4)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+            self.assertEqual(
+                restarted.provider_evidence_binding("try-1"),
+                {
+                    "evidence_id": "e" * 64,
+                    "observed_at": UNKNOWN_AT,
+                    "source": "provider-readback",
+                },
+            )
+
+    def test_recover_uncertain_clock_rollback_before_provider_evidence_does_not_mutate(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="f" * 64,
+                observed_at=UNKNOWN_AT,
+                source="provider-readback",
+            )
+            before = path.read_bytes()
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value="2026-09-17T19:28:17+00:00",
+            ):
+                with self.assertRaisesRegex(
+                    ExecutionStateError,
+                    "recovery clock precedes attempt causal boundary",
+                ):
+                    ledger.recover_uncertain()
+
+            self.assertEqual(path.read_bytes(), before)
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 4)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+            self.assertEqual(
+                restarted.provider_evidence_binding("try-1"),
+                {
+                    "evidence_id": "f" * 64,
+                    "observed_at": UNKNOWN_AT,
+                    "source": "provider-readback",
+                },
+            )
+
+    def test_provider_evidence_blocks_backdated_found_reconciliation_and_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="e" * 64,
+                observed_at=SECOND_RECONCILED_AT,
+                source="provider-readback",
+            )
+            reconciliation = ExternalEffectReconciliation(
+                attempt_id="try-1",
+                evidence_id="found-before-provider-evidence",
+                external_receipt_id="r1",
+                observed_at=RECONCILED_AT,
+                source="provider-readback",
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "positive reconciliation evidence must be newer",
+            ):
+                ledger.reconcile_found(reconciliation)
+
+            self.assertEqual(path.read_bytes(), before)
+            ledger._append(
+                EventType.RECONCILED_FOUND,
+                "p1",
+                "a1",
+                "try-1",
+                reconciliation.to_dict(),
+            )
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "found reconciliation is not newer than attempt causal boundary",
+            ):
+                RealExecutionLedger(path).verify_integrity()
+
+    def test_provider_evidence_blocks_backdated_not_found_reconciliation_and_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="e" * 64,
+                observed_at=SECOND_RECONCILED_AT,
+                source="provider-readback",
+            )
+            snapshot = ReconciliationSnapshot(
+                attempt_id="try-1",
+                evidence_id="absence-before-provider-evidence",
+                observed_at=RECONCILED_AT,
+                external_effect_found=False,
+                source="provider-readback",
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "external not-found evidence must be newer",
+            ):
+                ledger.reconcile_not_found(snapshot)
+
+            self.assertEqual(path.read_bytes(), before)
+            ledger._append(
+                EventType.RECONCILED_NOT_FOUND,
+                "p1",
+                "a1",
+                "try-1",
+                snapshot.to_dict(),
+            )
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "not-found reconciliation is not newer than attempt causal boundary",
+            ):
+                RealExecutionLedger(path).verify_integrity()
+
+    def test_ack_after_later_provider_evidence_preserves_valid_prior_found_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.mark_unknown(
+                "try-1", reason="timeout", observed_at=UNKNOWN_AT
+            )
+            reconciliation = ExternalEffectReconciliation(
+                attempt_id="try-1",
+                evidence_id="found-before-later-provider-evidence",
+                external_receipt_id="r1",
+                observed_at=RECONCILED_AT,
+                source="provider-readback",
+            )
+            ledger.reconcile_found(reconciliation)
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="e" * 64,
+                observed_at=SECOND_RECONCILED_AT,
+                source="provider-readback-later",
+            )
+            ledger.acknowledge(
+                ExternalAcknowledgement(
+                    attempt_id="try-1",
+                    external_receipt_id="r1",
+                    status=AcknowledgementStatus.ACCEPTED,
+                    acknowledged_at=RETRY_RESERVED_AT,
+                    accepted_odds="2.5",
+                    accepted_stake="5",
+                    reconciliation_evidence_id=reconciliation.evidence_id,
+                )
+            )
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 7)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.ACCEPTED,
+            )
+
+    def test_provider_evidence_blocks_backdated_acknowledgement_and_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="e" * 64,
+                observed_at=SECOND_RECONCILED_AT,
+                source="provider-readback",
+            )
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="r1",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.5",
+                accepted_stake="5",
+            )
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "acknowledgement precedes attempt causal boundary",
+            ):
+                ledger.acknowledge(acknowledgement)
+
+            self.assertEqual(path.read_bytes(), before)
+            ledger._append(
+                EventType.EXTERNAL_ACKNOWLEDGEMENT,
+                "p1",
+                "a1",
+                "try-1",
+                acknowledgement.to_dict(),
+            )
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "acknowledgement precedes attempt causal boundary",
+            ):
+                RealExecutionLedger(path).verify_integrity()
+
+    def test_restart_rejects_multiple_provider_evidence_bindings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="e" * 64,
+                observed_at=UNKNOWN_AT,
+                source="provider-readback",
+            )
+            ledger._append(
+                EventType.PROVIDER_EVIDENCE_BOUND,
+                "p1",
+                "a1",
+                "try-1",
+                {
+                    "evidence_id": "f" * 64,
+                    "observed_at": RECONCILED_AT,
+                    "source": "provider-readback-later",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "multiple provider evidence bindings",
+            ):
+                RealExecutionLedger(path).verify_integrity()
+
+    def test_recover_uncertain_clock_rollback_preflights_all_attempts_before_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action("a1"), action("a2")))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a2",
+                attempt_id="try-2",
+                reserved_at=RETRY_RESERVED_AT,
+            )
+            before = path.read_bytes()
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=UNKNOWN_AT,
+            ):
+                with self.assertRaisesRegex(
+                    ExecutionStateError,
+                    "recovery clock precedes attempt causal boundary",
+                ):
+                    ledger.recover_uncertain()
+
+            self.assertEqual(path.read_bytes(), before)
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 4)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+            self.assertEqual(
+                restarted.attempt_state("try-2"),
+                AttemptState.RESERVED,
+            )
+
+    def test_recover_uncertain_multi_attempt_valid_clock_promotes_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action("a1"), action("a2")))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a2",
+                attempt_id="try-2",
+                reserved_at=RESERVED_AT,
+            )
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=UNKNOWN_AT,
+            ):
+                self.assertEqual(
+                    ledger.recover_uncertain(),
+                    ("try-1", "try-2"),
+                )
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 6)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.UNKNOWN,
+            )
+            self.assertEqual(
+                restarted.attempt_state("try-2"),
+                AttemptState.UNKNOWN,
+            )
+
     def test_unknown_ack_requires_durable_positive_reconciliation_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
@@ -588,7 +1058,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ledger.can_retry_action(plan_id="p1", action_id="a1")
             )
 
-    def test_unknown_retry_only_after_not_found_reconciliation(self):
+    def test_not_found_reconciliation_is_diagnostic_not_retry_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action()))
@@ -613,13 +1083,18 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertEqual(
                 ledger.attempt_state("try-1"), AttemptState.RECONCILED_NOT_FOUND
             )
-            self.assertTrue(ledger.can_retry_action(plan_id="p1", action_id="a1"))
-            ledger.begin_attempt(
-                plan_id="p1",
-                action_id="a1",
-                attempt_id="try-2",
-                reserved_at=RETRY_RESERVED_AT,
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
             )
+            with self.assertRaisesRegex(
+                ExecutionStateError, "product-issued no-effect authority"
+            ):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="try-2",
+                    reserved_at=RETRY_RESERVED_AT,
+                )
 
     def test_stale_not_found_evidence_cannot_authorize_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -687,7 +1162,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
             )
             with self.assertRaisesRegex(
-                ExecutionStateError, "persisted quote expiry"
+                ExecutionStateError, "product-issued no-effect authority"
             ):
                 ledger.begin_attempt(
                     plan_id="p1",

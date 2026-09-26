@@ -1157,3 +1157,42 @@ def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_pat
             evidence=(DriftEvidence("mse", 0.30, 0.60, 0.10, "2026-01-09T00:00:00+00:00"),),
             recorded_at=T7,
         )
+
+
+def test_factory_manifest_precommits_exact_research_protocol_registry_envelope(tmp_path):
+    registry, _registry_path, rule, store, _evaluator_config, _dataset_sha = (
+        _factory_foundation(tmp_path)
+    )
+    _run_candidate(
+        ExperimentRunner(registry, store),
+        _candidate_points(),
+        rule,
+    )
+
+    protocol_entry = registry.get("ResearchProtocol", "protocol-factory")
+    bundle = registry.get("EvaluationBundle", "eval-v2")
+    assert protocol_entry is not None
+    assert bundle is not None
+
+    evaluation_payload = store.read(
+        "evaluation",
+        "eval-v2",
+        expected_sha256=bundle.payload["bundle_sha256"],
+    )
+    manifest_sha256 = evaluation_payload["reproducibility_manifest_sha256"]
+    envelope = store.read(
+        "reproducibility-manifest",
+        "eval-v2",
+        expected_sha256=manifest_sha256,
+    )
+    manifest = FactoryReproducibilityManifest.from_envelope(envelope)
+
+    assert envelope["research"]["research_protocol_record_sha256"] == (
+        protocol_entry.record_sha256
+    )
+    assert envelope["research"]["research_protocol_available_at"] == (
+        protocol_entry.available_at
+    )
+    assert manifest.research_protocol_record_sha256 == protocol_entry.record_sha256
+    assert manifest.research_protocol_available_at == protocol_entry.available_at
+    assert manifest.manifest_sha256 == manifest_sha256

@@ -490,6 +490,15 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         *,
         policy: BetfairStreamFreshnessPolicy,
     ) -> BetfairAuthenticatedFreshnessDecision:
+        if type(policy) is not BetfairStreamFreshnessPolicy:
+            raise TypeError("policy must be canonical BetfairStreamFreshnessPolicy")
+        # The caller retains the policy object. Snapshot it before any
+        # authority-bearing evaluation so one exact product-owned policy governs both
+        # the issuance-time verdict and every later currentness check.
+        policy_snapshot = BetfairStreamFreshnessPolicy(
+            max_age_ms=policy.max_age_ms,
+            max_future_skew_ms=policy.max_future_skew_ms,
+        )
         self._require_current_connection()
         evaluated_at_ms = _wall_time_ms()
         with self._state_lock:
@@ -497,7 +506,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             structural = self._freshness.evaluate(
                 identity,
                 as_of_ms=evaluated_at_ms,
-                policy=policy,
+                policy=policy_snapshot,
             )
             frame_sha = self._bound_frame_sha(identity, structural.evidence_id)
             if (
@@ -526,15 +535,6 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 subscription_id=self._subscription.subscription_id,
                 transport_frame_sha256=frame_sha,
                 evaluated_at_ms=evaluated_at_ms,
-            )
-            # The policy argument is caller-owned. A frozen dataclass prevents
-            # ordinary attribute assignment but does not make that exact object an
-            # authority-safe lifetime boundary (object.__setattr__ can still mutate it).
-            # Snapshot the already validated exact scalar policy into a product-owned
-            # canonical instance before retaining it for future currentness checks.
-            policy_snapshot = BetfairStreamFreshnessPolicy(
-                max_age_ms=policy.max_age_ms,
-                max_future_skew_ms=policy.max_future_skew_ms,
             )
             with _AUTHORITY_LOCK:
                 _ISSUED_DECISIONS[decision] = _DecisionAuthority(

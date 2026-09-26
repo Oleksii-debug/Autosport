@@ -534,6 +534,38 @@ class UncertaintySizingTests(unittest.TestCase):
             ).fingerprint_sha256,
         )
 
+    def test_subprecision_edge_never_rounds_up_into_positive_stake(self) -> None:
+        probability = Decimal(
+            "0.500000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+        )
+        evidence = self._evidence(
+            probability_lower=probability,
+            probability_point=probability,
+            probability_upper=probability,
+            net_win_profit_per_stake=Decimal("1"),
+        )
+
+        # Exact EV is 2E-90.  A finite-precision conservative calculation may
+        # round below that value, but it must never round above it and manufacture
+        # actionable edge from precision loss.
+        self.assertLessEqual(
+            evidence.conservative_ev_per_stake,
+            Decimal("2E-90"),
+        )
+
+        decision = evaluate_uncertainty_sizing(
+            evidence,
+            self._request(),
+            self._policy(),
+        )
+        self.assertEqual(decision.action, SizingAction.ABSTAIN)
+        self.assertEqual(
+            decision.reasons,
+            ("insufficient_conservative_edge",),
+        )
+        self.assertEqual(decision.stake_fraction_ceiling, Decimal("0"))
+        self.assertEqual(decision.stake_ceiling, Decimal("0"))
+
     def test_sizing_arithmetic_ignores_ambient_decimal_context(self) -> None:
         evidence = self._evidence(
             probability_lower=Decimal("0.571234567890123456789"),

@@ -196,13 +196,18 @@ class UncertaintySizingEvidence:
     def conservative_ev_per_stake(self) -> Decimal:
         # Win: +b. Loss: -1. Use lower probability bound, never the point estimate.
         # Use a private fixed context so caller-global Decimal settings cannot
-        # change a sizing decision. ROUND_FLOOR is conservative for positive EV.
+        # change a sizing decision.  Compute the algebraically equivalent
+        # p * (b + 1) - 1 form: with p >= 0 and b > 0, ROUND_FLOOR can only
+        # reduce the positive (b + 1) and product intermediates, so the result
+        # cannot exceed exact EV.  The p*b - (1-p) form is unsafe at finite
+        # precision because rounding the positive loss term downward before
+        # subtracting it can increase the reported edge.
         p = self.probability_lower
         b = self.net_win_profit_per_stake
         with localcontext(
             Context(prec=_SIZING_ARITHMETIC_PRECISION, rounding=ROUND_FLOOR)
         ):
-            return +(p * b - (Decimal("1") - p))
+            return +(p * (b + Decimal("1")) - Decimal("1"))
 
     @property
     def conservative_full_kelly_fraction(self) -> Decimal:

@@ -232,6 +232,62 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             finally:
                 original_globals["_digest"] = canonical_digest
 
+    def test_hidden_prepare_code_rebinding_cannot_mint_prepared_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            canonical = _prepared(runtime)
+            caller_authored = PreparedPaperExecution(
+                execution_plan=canonical.execution_plan,
+                exposure_bindings=canonical.exposure_bindings,
+                intent_evidence_json=canonical.intent_evidence_json,
+            )
+            guarded = PaperExecutionAdoptionRuntime.prepare_paper_value_action
+            original = guarded.__wrapped__
+            original_code = original.__code__
+
+            def forged_prepare(
+                self,
+                *,
+                event,
+                stake,
+                decision_id,
+                account_id,
+                bankroll_id,
+                currency,
+            ):
+                return self._mint_prepared(event)
+
+            # Preserve the canonical FunctionType identity and globals dictionary
+            # while replacing only executable metadata.  Before this regression,
+            # the owned wrapper set mint_context after a globals-only check and
+            # guarded_mint_prepared compared against the now-mutated live
+            # original.__code__, allowing this forged caller to mint arbitrary
+            # PreparedPaperExecution.
+            original.__code__ = forged_prepare.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "preparation metadata were rebound",
+                ):
+                    guarded(
+                        runtime,
+                        event=caller_authored,
+                        stake=Decimal("5.00"),
+                        decision_id="forged-code-mint",
+                        account_id="paper-account",
+                        bankroll_id="bankroll-eur",
+                        currency="EUR",
+                    )
+            finally:
+                original.__code__ = original_code
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "was not minted by this runtime",
+            ):
+                _execute(runtime, caller_authored)
+            self.assertEqual(ledger.events(), ())
+
     def test_hidden_scope_payload_globals_mutation_fails_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))

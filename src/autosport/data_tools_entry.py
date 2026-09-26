@@ -6,12 +6,10 @@ from autosport.secret_redaction import safe_exception_detail
 
 
 # Expected failures are an operator-presentation boundary, not an extensible exception
-# registry. Capture the concrete interpreter-owned classes and canonical redactor once
-# so later module-global or builtins rebinding cannot mint presentation authority.
+# registry. Capture the concrete interpreter-owned classes used by the catch boundary so
+# later builtins rebinding cannot mint new expected-failure authority.
 _CANONICAL_VALUE_ERROR = ValueError
 _CANONICAL_OS_ERROR = OSError
-_CANONICAL_FILE_NOT_FOUND_ERROR = FileNotFoundError
-_CANONICAL_SAFE_EXCEPTION_DETAIL = safe_exception_detail
 _EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
 
 
@@ -128,28 +126,57 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
     return 2
 
 
-def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    # Type labels are selected only from captured interpreter-owned classes. Custom
-    # exception metadata and the mutable builtins namespace never become presentation
-    # authority. Unknown OSError subclasses intentionally collapse to OSError.
-    if isinstance(exc, _CANONICAL_VALUE_ERROR):
-        error_label = "ValueError"
-    elif isinstance(exc, _CANONICAL_FILE_NOT_FOUND_ERROR):
-        error_label = "FileNotFoundError"
-    else:
-        error_label = "OSError"
+def _install_expected_failure_message():
+    """Seal the product-owned presentation authorities in a closure.
 
-    if safe_exception_detail is not _CANONICAL_SAFE_EXCEPTION_DETAIL:
-        error_label = "ExpectedFailure"
-        detail = "exception details unavailable"
-    else:
-        detail = _CANONICAL_SAFE_EXCEPTION_DETAIL(
-            exc,
-            unavailable_detail="exception details unavailable",
+    Function-object identity alone is insufficient in Python because ordinary caller
+    code can replace a function object's ``__code__`` in place. Capture both the
+    canonical redactor object and its executable identity and fail closed before and
+    after redaction if either changes.
+    """
+
+    canonical_value_error = ValueError
+    canonical_file_not_found_error = FileNotFoundError
+    canonical_redactor = safe_exception_detail
+    canonical_redactor_code = canonical_redactor.__code__
+
+    def expected_failure_message(command: str, exc: OSError | ValueError) -> str:
+        if isinstance(exc, canonical_value_error):
+            error_label = "ValueError"
+        elif isinstance(exc, canonical_file_not_found_error):
+            error_label = "FileNotFoundError"
+        else:
+            error_label = "OSError"
+
+        redactor_is_canonical = (
+            safe_exception_detail is canonical_redactor
+            and getattr(canonical_redactor, "__code__", None) is canonical_redactor_code
         )
-    detail = " ".join(detail.splitlines()).strip()
-    suffix = "" if not detail else f": {detail}"
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={error_label}{suffix}"
+        if not redactor_is_canonical:
+            error_label = "ExpectedFailure"
+            detail = "exception details unavailable"
+        else:
+            detail = canonical_redactor(
+                exc,
+                unavailable_detail="exception details unavailable",
+            )
+            if (
+                safe_exception_detail is not canonical_redactor
+                or getattr(canonical_redactor, "__code__", None)
+                is not canonical_redactor_code
+            ):
+                error_label = "ExpectedFailure"
+                detail = "exception details unavailable"
+
+        detail = " ".join(detail.splitlines()).strip()
+        suffix = "" if not detail else f": {detail}"
+        return f"Autosport-Data: {command}=FAIL_CLOSED error={error_label}{suffix}"
+
+    return expected_failure_message
+
+
+_expected_failure_message = _install_expected_failure_message()
+del _install_expected_failure_message
 
 
 def main(argv: list[str] | None = None) -> int:

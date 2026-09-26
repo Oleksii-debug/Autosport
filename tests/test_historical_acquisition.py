@@ -261,7 +261,7 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     ProviderPayloadError,
-                    "match_results.capture bytes changed after child capture",
+                    "match_results.evidence capture_sha256 does not bind staged capture bytes",
                 ):
                     capture_historical_acquisition_bundle(
                         self._provider(transport),

@@ -67,7 +67,10 @@ def test_product_issuer_rejects_in_place_store_constructor_code_rebind(
     canonical_init = FactoryArtifactStore.__init__
     canonical_code = canonical_init.__code__
 
+    closure_shape_marker = object()
+
     def forged_init(self, root, *, clock=None):
+        _ = closure_shape_marker
         raise AssertionError("forged constructor code must not execute")
 
     canonical_init.__code__ = forged_init.__code__

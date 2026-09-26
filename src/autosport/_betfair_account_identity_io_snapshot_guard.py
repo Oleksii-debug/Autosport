@@ -262,8 +262,15 @@ def _install_guard() -> None:
         sealed_transport_post,
         "Betfair HTTP transport",
     )
-    read_account_details_snapshot = snapshot_function(
+    # Copy the owning reader once at composition time.  The live predecessor
+    # function must not remain a closure-reachable mutable authority; per-call
+    # readers are cloned only from this sealed template.
+    sealed_read_account_details = clone_function(
         original_read_account_details,
+        label="Betfair account-details reader",
+    )
+    read_account_details_snapshot = snapshot_function(
+        sealed_read_account_details,
         "Betfair account-details reader",
     )
 
@@ -292,7 +299,7 @@ def _install_guard() -> None:
             "K07 Betfair HTTP transport",
         )
         require_snapshot(
-            original_read_account_details,
+            sealed_read_account_details,
             read_account_details_snapshot,
             "K07 Betfair account-details reader",
         )
@@ -424,7 +431,7 @@ def _install_guard() -> None:
             metadata=transport_snapshot[0],
         )
         local_read_account_details = clone_function(
-            original_read_account_details,
+            sealed_read_account_details,
             label="per-call K07 Betfair account-details reader",
             metadata=read_account_details_snapshot[0],
         )

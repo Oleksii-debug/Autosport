@@ -7,6 +7,7 @@ from types import FrameType
 
 from . import _paper_execution_decision_origin as _origin
 from . import _paper_execution_decision_origin_instance_guard as _instance_guard
+from . import _paper_exposure_scope_provenance_guard as _exposure_scope_guard
 from . import _paper_value_execution_authority as _paper_value_authority
 from . import live_decision_loop as _live_decision_loop
 from .decision_ledger import JsonlDecisionLedger
@@ -437,6 +438,9 @@ _execute_with_exact_product_callsite = _make_execute_guard(
     _instance_guard._PRODUCT_ORIGIN_CALLSITE_CODE,
     _PAPER_VALUE_FRESH_CODE,
     _PAPER_VALUE_RECOVERY_CODE,
+)
+_execute_with_exact_product_callsite = _exposure_scope_guard.bind_canonical_execute(
+    _execute_with_exact_product_callsite
 )
 
 

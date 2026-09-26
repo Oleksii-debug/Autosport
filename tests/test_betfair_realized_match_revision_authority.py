@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+import autosport.betfair_realized_match as realized_match_module
 from autosport.betfair_account_readonly import (
     BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyClient,
@@ -286,6 +287,78 @@ def test_revision_detects_class_validator_rebinding_before_positive_use(
         match="canonical realized match evidence authority changed",
     ):
         validate_betfair_realized_match_revision(evidence, evidence)
+
+
+def test_private_resolver_rebind_cannot_mint_canonical_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, ledger, provider_ref, template = _resolve_current(tmp_path)
+    forged = replace(template)
+    calls = 0
+
+    def forged_resolver(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        del args, kwargs
+        return forged
+
+    monkeypatch.setattr(
+        realized_match_module,
+        "_resolve_betfair_realized_match",
+        forged_resolver,
+    )
+    readback = _capture(
+        provider_ref,
+        observed_at=datetime(2026, 9, 21, 9, 56, tzinfo=timezone.utc),
+        current=_current(provider_ref, matched_price=3.1),
+    )
+
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="resolver implementation changed",
+    ):
+        resolve_betfair_realized_match(
+            plan,
+            ledger,
+            readback,
+            attempt_id=ATTEMPT_ID,
+        )
+
+    assert calls == 0
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="not issued by canonical resolver",
+    ):
+        forged.assert_authoritative()
+
+
+def test_revision_dispatch_rebind_fails_before_captured_validator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _plan, _ledger, _provider_ref, evidence = _resolve_current(tmp_path)
+    calls = 0
+
+    def forged_validator(previous, current):
+        nonlocal calls
+        calls += 1
+        del previous
+        return current
+
+    monkeypatch.setattr(
+        realized_match_module,
+        "validate_betfair_realized_match_revision",
+        forged_validator,
+    )
+
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="revision dispatch changed",
+    ):
+        validate_betfair_realized_match_revision(evidence, evidence)
+
+    assert calls == 0
 
 
 def test_canonical_revision_self_validation_still_passes(tmp_path: Path) -> None:

@@ -303,40 +303,29 @@ class CanonicalSportResolution:
         })
 
 
-class ProviderSportMappingRegistry:
-    """Append-only causal registry whose positive entries derive from exact evidence bytes."""
+def _build_register_evidence_method():
+    """Seal positive evidence parsing and chronology behind import-time authority."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self._bindings: list[ProviderSportBinding] = []
+    canonical_clock = _utc_now
+    parser_descriptor = vars(ProviderSportEvidence).get("from_exact_bytes")
+    if type(parser_descriptor) is not classmethod:
+        raise RuntimeError("ProviderSportEvidence.from_exact_bytes must remain a classmethod")
+    canonical_parser = parser_descriptor.__func__
+
+    def register_evidence(
+        self: "ProviderSportMappingRegistry",
+        source_snapshot_bytes: bytes,
+    ) -> ProviderSportBinding:
+        if globals().get("_utc_now") is not canonical_clock:
+            raise ProviderSportMappingError("product recording clock authority changed")
+        if vars(ProviderSportEvidence).get("from_exact_bytes") is not parser_descriptor:
+            raise ProviderSportMappingError("canonical evidence parser authority changed")
+
+        evidence = canonical_parser(ProviderSportEvidence, source_snapshot_bytes)
         with durable_path_lock(self.path):
             if self.path.exists():
                 self._load()
-
-    @classmethod
-    def initialize_pristine(cls, path: str | Path) -> "ProviderSportMappingRegistry":
-        target = Path(path)
-        registry = cls(target)
-        with durable_path_lock(target):
-            if target.exists():
-                raise ProviderSportMappingError("provider sport mapping registry already exists")
-            registry._persist(registry._bindings)
-        return registry
-
-    @property
-    def bindings(self) -> tuple[ProviderSportBinding, ...]:
-        return tuple(self._bindings)
-
-    @property
-    def registry_sha256(self) -> str:
-        return _digest(self._unsigned_payload(self._bindings))
-
-    def register_evidence(self, source_snapshot_bytes: bytes) -> ProviderSportBinding:
-        evidence = ProviderSportEvidence.from_exact_bytes(source_snapshot_bytes)
-        with durable_path_lock(self.path):
-            if self.path.exists():
-                self._load()
-            recorded_at = _utc_now()
+            recorded_at = canonical_clock()
             if _instant("recorded_at", recorded_at) < _instant(
                 "evidence_available_at", evidence.evidence_available_at
             ):
@@ -371,6 +360,39 @@ class ProviderSportMappingRegistry:
             self._persist(updated)
             self._bindings = updated
             return candidate
+
+    register_evidence.__name__ = "register_evidence"
+    register_evidence.__qualname__ = "ProviderSportMappingRegistry.register_evidence"
+    return register_evidence
+
+
+class ProviderSportMappingRegistry:
+    """Append-only causal registry whose positive entries derive from exact evidence bytes."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._bindings: list[ProviderSportBinding] = []
+        with durable_path_lock(self.path):
+            if self.path.exists():
+                self._load()
+
+    @classmethod
+    def initialize_pristine(cls, path: str | Path) -> "ProviderSportMappingRegistry":
+        target = Path(path)
+        registry = cls(target)
+        with durable_path_lock(target):
+            if target.exists():
+                raise ProviderSportMappingError("provider sport mapping registry already exists")
+            registry._persist(registry._bindings)
+        return registry
+
+    @property
+    def bindings(self) -> tuple[ProviderSportBinding, ...]:
+        return tuple(self._bindings)
+
+    @property
+    def registry_sha256(self) -> str:
+        return _digest(self._unsigned_payload(self._bindings))
 
     def register(self, **_: object) -> ProviderSportBinding:
         raise ProviderSportMappingError(
@@ -520,3 +542,7 @@ class ProviderSportMappingRegistry:
         if bindings != canonical:
             raise ProviderSportMappingError("provider sport mapping registry is not canonically ordered")
         self._bindings = bindings
+
+
+ProviderSportMappingRegistry.register_evidence = _build_register_evidence_method()
+del _build_register_evidence_method

@@ -465,7 +465,7 @@ def test_manual_calculation_ukrainian_result_preserves_canonical_evidence():
     service = ManualCalculationService()
     evidence = service.paper_payout("25", "2.10")
     rendered = _render_evidence_uk(evidence)
-    human = rendered.split("Канонічний evidence JSON (незмінений):", 1)[0]
+    human = rendered.split("Канонічний JSON доказів (незмінений):", 1)[0]
 
     assert rendered == _render_evidence_uk(evidence)
     assert "Результат ручного розрахунку" in human
@@ -474,7 +474,7 @@ def test_manual_calculation_ukrainian_result_preserves_canonical_evidence():
     assert "Припущення:" in human
     assert "Розрахунок лише паперовий; повноваження реального виконання відсутнє." in human
     assert "одиниця: paper_currency" in human
-    assert f"Хеш evidence: {evidence.evidence_sha256}" in human
+    assert f"Хеш доказів: {evidence.evidence_sha256}" in human
     assert "Реальне виконання: ні (real_money_execution=false)" in human
     assert evidence.to_text().rstrip("\n") in rendered
 
@@ -495,7 +495,7 @@ def test_manual_calculation_ukrainian_renderer_covers_all_current_assumptions_an
         service.maximum_drawdown(("100", "120", "90")),
     )
     rendered = [_render_evidence_uk(item) for item in evidence]
-    assert all("Канонічний evidence JSON (незмінений):" in item for item in rendered)
+    assert all("Канонічний JSON доказів (незмінений):" in item for item in rendered)
     assert "Ділення округлюється в детермінованому десятковому контексті." in rendered[2]
     assert "Мультиплікативна нормалізація є методом моделювання" in rendered[3]
     assert "Ділення у формулі Kelly округлюється" in rendered[6]

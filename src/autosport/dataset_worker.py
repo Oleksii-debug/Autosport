@@ -6,21 +6,19 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .dataset import ReplayDataset
+from .secret_redaction import safe_exception_text
 
 
 DatasetValidationTask = Callable[[], ReplayDataset]
 
 
 def _safe_worker_error(exc: BaseException) -> str:
-    """Render a terminal worker failure without trusting exception metadata."""
+    """Render a terminal worker failure through the shared redaction boundary."""
 
-    try:
-        name = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        return "BaseException"
-    if not isinstance(name, str) or not name.isascii() or not name.isidentifier() or len(name) > 80:
-        return "BaseException"
-    return name
+    return safe_exception_text(
+        exc,
+        unavailable_detail="dataset validation failed; exception details unavailable",
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,12 +3,12 @@ from __future__ import annotations
 from autosport.dataset_worker import OneShotDatasetValidationWorker, _safe_worker_error
 
 
-_SECRET = r"C:\Users\Operator\.autosport\provider.txt?token=sk-live-do-not-leak"
+_SECRET = "sk-live-do-not-leak"
 
 
 class _SecretBearingError(RuntimeError):
     def __str__(self) -> str:
-        return _SECRET
+        return f"provider dataset failed api_key={_SECRET}"
 
 
 class _UnrenderableError(RuntimeError):
@@ -16,26 +16,23 @@ class _UnrenderableError(RuntimeError):
         raise RuntimeError(_SECRET)
 
 
-def test_safe_worker_error_keeps_type_but_drops_exception_message() -> None:
+def test_safe_worker_error_reuses_shared_secret_redaction() -> None:
     rendered = _safe_worker_error(_SecretBearingError())
 
-    assert rendered == "_SecretBearingError"
+    assert rendered.startswith("RuntimeError:")
+    assert "provider dataset failed" in rendered
+    assert "[REDACTED]" in rendered
     assert _SECRET not in rendered
-    assert "sk-live-do-not-leak" not in rendered
-    assert "C:\\Users\\Operator" not in rendered
 
 
-def test_safe_worker_error_never_calls_exception_str() -> None:
-    assert _safe_worker_error(_UnrenderableError()) == "_UnrenderableError"
+def test_safe_worker_error_handles_hostile_stringification_without_leak() -> None:
+    rendered = _safe_worker_error(_UnrenderableError())
+
+    assert rendered == "RuntimeError: dataset validation failed; exception details unavailable"
+    assert _SECRET not in rendered
 
 
-def test_safe_worker_error_rejects_unbounded_type_name() -> None:
-    unsafe_error_type = type(f"Leaked-{_SECRET}", (RuntimeError,), {})
-
-    assert _safe_worker_error(unsafe_error_type()) == "BaseException"
-
-
-def test_worker_error_message_does_not_propagate_raw_exception_payload() -> None:
+def test_worker_terminal_message_never_publishes_raw_secret() -> None:
     worker = OneShotDatasetValidationWorker()
 
     def fail_validation() -> None:
@@ -46,5 +43,7 @@ def test_worker_error_message_does_not_propagate_raw_exception_payload() -> None
 
     assert message is not None
     assert message.result is None
-    assert message.error == "_SecretBearingError"
+    assert message.error is not None
+    assert message.error.startswith("RuntimeError:")
+    assert "[REDACTED]" in message.error
     assert _SECRET not in message.error

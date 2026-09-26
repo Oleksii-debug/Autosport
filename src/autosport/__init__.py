@@ -167,3 +167,7 @@ from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_select
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.
 from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402
+
+# K07 authenticated account identity must acquire account details from a sealed
+# product-origin snapshot, not mutable live-client fields during provider I/O.
+from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402

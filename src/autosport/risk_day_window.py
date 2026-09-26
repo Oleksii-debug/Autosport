@@ -48,6 +48,7 @@ _STATE_KEYS: Final = frozenset(
 )
 _UTC: Final = timezone.utc
 _HEX_DIGITS: Final = frozenset("0123456789abcdef")
+_MAX_STATE_BYTES: Final = 64 * 1024
 
 # Capture the actual built-in wall-clock and timestamp converter at import time.
 # Replacing module globals such as time.time_ns or datetime.fromtimestamp later
@@ -301,6 +302,10 @@ def _read_regular_bytes(path: Path) -> bytes:
         raise RiskDayWindowIntegrityError(
             "risk day state must be a single-link regular file"
         )
+    if path_before.st_size < 0 or path_before.st_size > _MAX_STATE_BYTES:
+        raise RiskDayWindowIntegrityError(
+            "risk day state exceeds bounded durable-state size"
+        )
 
     try:
         descriptor = _open_read_only_descriptor(path)
@@ -319,6 +324,15 @@ def _read_regular_bytes(path: Path) -> bytes:
         finally:
             os.close(verification)
         if (
+            opened_before.st_size < 0
+            or opened_before.st_size > _MAX_STATE_BYTES
+            or verified_stat.st_size < 0
+            or verified_stat.st_size > _MAX_STATE_BYTES
+        ):
+            raise RiskDayWindowIntegrityError(
+                "risk day state exceeds bounded durable-state size"
+            )
+        if (
             not same_file
             or not stat.S_ISREG(opened_before.st_mode)
             or opened_before.st_nlink != 1
@@ -330,14 +344,34 @@ def _read_regular_bytes(path: Path) -> bytes:
             )
 
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            remaining = (_MAX_STATE_BYTES + 1) - total_bytes
+            if remaining <= 0:
+                raise RiskDayWindowIntegrityError(
+                    "risk day state exceeds bounded durable-state size"
+                )
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
             if not chunk:
                 break
             chunks.append(chunk)
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_STATE_BYTES:
+                raise RiskDayWindowIntegrityError(
+                    "risk day state exceeds bounded durable-state size"
+                )
 
         opened_after = os.fstat(descriptor)
         path_after = os.stat(path, follow_symlinks=False)
+        if (
+            opened_after.st_size < 0
+            or opened_after.st_size > _MAX_STATE_BYTES
+            or path_after.st_size < 0
+            or path_after.st_size > _MAX_STATE_BYTES
+        ):
+            raise RiskDayWindowIntegrityError(
+                "risk day state exceeds bounded durable-state size"
+            )
         final_verification = _open_read_only_descriptor(path)
         try:
             same_final_file = os.path.sameopenfile(descriptor, final_verification)

@@ -283,6 +283,42 @@ class ProtectiveRiskFlowEvidenceTests(unittest.TestCase):
                 raw_equity=Decimal("NaN"),
             )
 
+    def test_decimal_subclasses_cannot_forge_money_validation_or_flow_arithmetic(self) -> None:
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                return True
+
+            def __le__(self, _other):
+                return False
+
+            def as_tuple(self):
+                return Decimal("1").as_tuple()
+
+            def copy_negate(self):
+                return Decimal("999999")
+
+        with self.assertRaises(ProtectiveRiskEvidenceError) as valuation:
+            ProtectiveRiskEvent(
+                sequence=1,
+                event_id="hostile-valuation",
+                occurred_at=T0,
+                kind=RiskEvidenceEventKind.VALUATION,
+                raw_equity=HostileDecimal("1000"),
+            )
+        self.assertEqual(valuation.exception.code, "INVALID_EVENT")
+
+        with self.assertRaises(ProtectiveRiskEvidenceError) as flow:
+            ProtectiveRiskEvent(
+                sequence=1,
+                event_id="hostile-flow",
+                occurred_at=T0,
+                kind=RiskEvidenceEventKind.CAPITAL_FLOW,
+                amount=HostileDecimal("-5"),
+                source_scope_id="portfolio-A",
+                destination_scope_id="owner",
+            )
+        self.assertEqual(flow.exception.code, "INVALID_EVENT")
+
     def test_unrepresentable_finite_decimal_fails_closed_with_typed_reason(self) -> None:
         for value in (
             "1e1000000",

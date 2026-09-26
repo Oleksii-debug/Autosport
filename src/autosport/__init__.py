@@ -162,3 +162,8 @@ from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_sel
 # store resolver cannot be replaced after package import. Freeze that dispatch and
 # MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
 from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
+
+# Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
+# exponent forms and oversized text before Decimal fixed-point materialization so
+# tiny hostile inputs cannot amplify into attacker-sized evidence strings.
+from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402

@@ -84,15 +84,15 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
 
         with patch.object(
             data_tools_entry,
-            "safe_exception_detail",
-            lambda _exc, **_kwargs: str(_exc),
+            "safe_exception_text",
+            lambda _exc, **_kwargs: f"ValueError: Authorization: Bearer {secret}",
         ):
             output = data_tools_entry._expected_failure_message(
                 "verify-dataset",
                 exc,
             )
 
-        self.assertIn("error=ValueError", output)
+        self.assertIn("error=ExpectedFailure", output)
         self.assertIn("exception details unavailable", output)
         self.assertNotIn(secret, output)
 

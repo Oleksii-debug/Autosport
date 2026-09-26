@@ -138,6 +138,50 @@ class _HostileReconciliationSnapshot(ReconciliationSnapshot):
         return super().to_dict()
 
 
+class _HostileText(str):
+    strip_calls = 0
+    encode_calls = 0
+    comparison_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.strip_calls = 0
+        cls.encode_calls = 0
+        cls.comparison_calls = 0
+
+    def strip(self, *args: object, **kwargs: object) -> str:
+        type(self).strip_calls += 1
+        return "forged-valid"
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        type(self).encode_calls += 1
+        return b"forged-valid"
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparison_calls += 1
+        return True
+
+    __hash__ = str.__hash__
+
+
+class _HostileSchemaVersion(int):
+    comparison_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.comparison_calls = 0
+
+    def __ne__(self, other: object) -> bool:
+        type(self).comparison_calls += 1
+        return False
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparison_calls += 1
+        return True
+
+    __hash__ = int.__hash__
+
+
 class RealExecutionDecimalContextTests(unittest.TestCase):
     def test_plan_payload_and_fingerprint_ignore_ambient_decimal_context(self) -> None:
         plan = _plan()
@@ -530,6 +574,56 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
                     self.assertEqual(hostile_type.serialization_calls, 0)
 
             self.assertFalse(ledger.path.exists())
+
+
+    def test_text_ingress_rejects_str_subclass_before_virtual_hooks(self) -> None:
+        base = _plan().actions[0]
+        hostile = _HostileText("")
+        _HostileText.reset_calls()
+
+        with self.assertRaisesRegex(ValueError, r"action_id must be non-empty text"):
+            replace(base, action_id=hostile)
+
+        self.assertEqual(_HostileText.strip_calls, 0)
+        self.assertEqual(_HostileText.encode_calls, 0)
+        self.assertEqual(_HostileText.comparison_calls, 0)
+
+    def test_event_identity_subclass_cannot_persist_different_restart_bytes(self) -> None:
+        plan = _plan()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            ledger_path = Path(temporary_directory) / "real-execution.jsonl"
+            ledger = RealExecutionLedger(ledger_path)
+            ledger.reserve_plan(plan)
+            original_bytes = ledger_path.read_bytes()
+
+            hostile_plan_id = _HostileText("forged-plan-id")
+            hostile_action_id = _HostileText("forged-action-id")
+            _HostileText.reset_calls()
+
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError, r"invalid plan_id"
+            ):
+                ledger.begin_attempt(
+                    plan_id=hostile_plan_id,
+                    action_id=hostile_action_id,
+                    attempt_id="attempt-hostile-identity",
+                    reserved_at="2026-09-21T20:00:02+00:00",
+                )
+
+            self.assertEqual(ledger_path.read_bytes(), original_bytes)
+            self.assertEqual(RealExecutionLedger(ledger_path).verify_integrity(), 1)
+            self.assertGreater(_HostileText.comparison_calls, 0)
+            self.assertEqual(_HostileText.strip_calls, 0)
+            self.assertEqual(_HostileText.encode_calls, 0)
+
+    def test_execution_plan_schema_rejects_int_subclass_before_comparison(self) -> None:
+        _HostileSchemaVersion.reset_calls()
+
+        with self.assertRaisesRegex(ValueError, r"unsupported execution plan schema"):
+            replace(_plan(), schema_version=_HostileSchemaVersion(999))
+
+        self.assertEqual(_HostileSchemaVersion.comparison_calls, 0)
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,7 +74,10 @@ def _now() -> str:
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Authority-bearing durable text must not accept caller-defined str
+    # subclasses whose virtual methods/comparisons can disagree with the
+    # underlying bytes that json.dumps persists.
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
     try:
         value.encode("utf-8")
@@ -286,7 +289,7 @@ class ExecutionPlan:
         ):
             _text(getattr(self, name), name)
         _timestamp(self.created_at, "created_at")
-        if self.schema_version != SCHEMA_VERSION:
+        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
         actions = tuple(self.actions)
         if not actions or not all(type(item) is ExecutionAction for item in actions):
@@ -600,7 +603,7 @@ class RealExecutionLedger:
         if type(event["schema_version"]) is not int or event["schema_version"] != SCHEMA_VERSION:
             raise ExecutionLedgerIntegrityError(f"unsupported event schema{where}")
         for name in ("event_id", "event_type", "recorded_at", "plan_id"):
-            if not isinstance(event[name], str) or not event[name].strip():
+            if type(event[name]) is not str or not event[name].strip():
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         try:
             _timestamp(event["recorded_at"], "recorded_at")
@@ -613,7 +616,7 @@ class RealExecutionLedger:
         for name in ("action_id", "attempt_id"):
             value = event[name]
             if value is not None and (
-                not isinstance(value, str) or not value.strip()
+                type(value) is not str or not value.strip()
             ):
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         if not isinstance(event["payload"], dict):

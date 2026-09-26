@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 
+from autosport.market_mirror import MarketMirror
 from benchmarks.benchmark_market_mirror_latency import (
     _build_quote,
     _nearest_rank_percentile_ms,
@@ -82,5 +84,26 @@ def test_latency_benchmark_fails_if_persisted_events_never_reach_market_mirror()
         with pytest.raises(
             RuntimeError,
             match="market mirror benchmark workload did not fully apply",
+        ):
+            run_latency_benchmark(count=3, quote_keys=2, warmup=1)
+
+
+def test_latency_benchmark_rejects_wrong_payload_with_correct_revision_and_key_count() -> None:
+    canonical_view = MarketMirror.view
+
+    def corrupted_view(mirror: MarketMirror, *args, **kwargs):
+        snapshot = canonical_view(mirror, *args, **kwargs)
+        if not snapshot.events:
+            return snapshot
+        events = list(snapshot.events)
+        payload = events[0].to_dict()
+        payload["decimal_odds"] = "9.99"
+        events[0] = type(events[0]).from_dict(payload)
+        return replace(snapshot, events=tuple(events))
+
+    with patch.object(MarketMirror, "view", autospec=True, side_effect=corrupted_view):
+        with pytest.raises(
+            RuntimeError,
+            match="projection did not preserve exact latest payloads",
         ):
             run_latency_benchmark(count=3, quote_keys=2, warmup=1)

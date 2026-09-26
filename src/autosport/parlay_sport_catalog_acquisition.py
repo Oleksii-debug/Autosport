@@ -4,7 +4,8 @@ import hashlib
 import json
 import math
 import urllib.request
-from dataclasses import dataclass, field
+import weakref
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Mapping
 from urllib.error import HTTPError, URLError
@@ -45,7 +46,7 @@ class RawCatalogHttpResponse:
     final_url: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ParlaySportCatalogAcquisition:
     acquired_at: str
     status_code: int
@@ -55,11 +56,56 @@ class ParlaySportCatalogAcquisition:
     raw_body_sha256: str | None
     prior_acquisition_id: str | None
     acquisition_id: str
-    provider_origin_verified: bool = field(default=False, init=False)
 
     @property
     def is_not_modified(self) -> bool:
         return self.status_code == 304
+
+
+def _build_provider_origin_issuance_authority():
+    """Keep positive provider-origin issuance outside caller-writable DTO state.
+
+    Frozen dataclass slots are not an authority boundary because callers can invoke
+    ``object.__setattr__`` directly.  Product-issued positive origin is therefore
+    tracked by exact object identity in closure-private weak references.  The public
+    property remains read-only compatibility surface; downstream authority-sensitive
+    composition should use ``is_product_origin_acquisition``.
+    """
+
+    issued: dict[int, weakref.ReferenceType[ParlaySportCatalogAcquisition]] = {}
+
+    def is_product_origin_acquisition(value: object) -> bool:
+        if type(value) is not ParlaySportCatalogAcquisition:
+            return False
+        reference = issued.get(id(value))
+        return reference is not None and reference() is value
+
+    def provider_origin_verified(value: ParlaySportCatalogAcquisition) -> bool:
+        return is_product_origin_acquisition(value)
+
+    def issue(value: ParlaySportCatalogAcquisition) -> ParlaySportCatalogAcquisition:
+        if type(value) is not ParlaySportCatalogAcquisition:
+            raise ParlaySportCatalogEvidenceError(
+                "provider-origin authority requires canonical acquisition type"
+            )
+        identity = id(value)
+
+        def remove(reference, *, identity=identity) -> None:
+            if issued.get(identity) is reference:
+                issued.pop(identity, None)
+
+        issued[identity] = weakref.ref(value, remove)
+        return value
+
+    return property(provider_origin_verified), issue, is_product_origin_acquisition
+
+
+_origin_property, _issue_product_origin, is_product_origin_acquisition = (
+    _build_provider_origin_issuance_authority()
+)
+setattr(ParlaySportCatalogAcquisition, "provider_origin_verified", _origin_property)
+del _origin_property
+del _build_provider_origin_issuance_authority
 
 
 Transport = Callable[[str, Mapping[str, str], float, int], RawCatalogHttpResponse]
@@ -305,7 +351,11 @@ def _acquisition_id(
     return "parlay-sports-acquisition:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _validate_prior_acquisition(prior: ParlaySportCatalogAcquisition) -> str | None:
+def _validate_prior_acquisition(
+    prior: ParlaySportCatalogAcquisition,
+    *,
+    origin_verifier=is_product_origin_acquisition,
+) -> str | None:
     if prior.status_code != 200 or prior.raw_body is None or prior.raw_body_sha256 is None:
         raise ParlaySportCatalogEvidenceError(
             "conditional acquisition requires an exact prior HTTP 200 body acquisition"
@@ -331,7 +381,7 @@ def _validate_prior_acquisition(prior: ParlaySportCatalogAcquisition) -> str | N
         etag=prior.etag,
         raw_body_sha256=prior.raw_body_sha256,
         prior_acquisition_id=None,
-        provider_origin_verified=prior.provider_origin_verified,
+        provider_origin_verified=origin_verifier(prior),
     )
     if prior.acquisition_id != expected_id:
         raise ParlaySportCatalogEvidenceError("prior acquisition identity mismatch")
@@ -362,6 +412,7 @@ def _acquire_parlay_sport_catalog_impl(
     user_agent: str = _USER_AGENT,
     timeout_limit: float = DEFAULT_TIMEOUT_SECONDS,
     response_size_limit: int = DEFAULT_MAX_RESPONSE_BYTES,
+    origin_issuer=_issue_product_origin,
 ) -> ParlaySportCatalogAcquisition:
     """Acquire exact `/v1/sports` bytes without granting odds/write/product authority.
 
@@ -431,10 +482,6 @@ def _acquire_parlay_sport_catalog_impl(
             )
         if response.body:
             raise evidence_error_type("HTTP 304 must not carry a catalog body")
-        # A caller-supplied prior object is only structurally self-consistent evidence.
-        # Until a product-owned durable authority can re-resolve its exact HTTP-200
-        # bytes by identity, a genuine provider 304 must not transfer positive origin
-        # authority from that object.
         provider_origin_verified = False
         acquisition_id = acquisition_id_builder(
             acquired_at=acquired_at,
@@ -479,7 +526,7 @@ def _acquire_parlay_sport_catalog_impl(
         )
 
     if provider_origin_verified:
-        object.__setattr__(result, "provider_origin_verified", True)
+        origin_issuer(result)
     return result
 
 

@@ -1608,7 +1608,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_execution.disposition,
                 ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("execution identity", cloud_execution.reason)
+            self.assertIn("backend/model/config identity", cloud_execution.reason)
 
             original = path.read_text(encoding="utf-8")
 
@@ -1931,8 +1931,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 second.disposition,
                 ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("execution identity", first.reason)
-            self.assertIn("execution identity", second.reason)
+            self.assertIn("backend/model/config identity", first.reason)
+            self.assertIn("backend/model/config identity", second.reason)
             raw = json.loads(path.read_text(encoding="utf-8"))
             raw["executions"] = [
                 item
@@ -2595,7 +2595,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_overrun.disposition,
                 ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("execution identity", cloud_overrun.reason)
+            self.assertIn("backend/model/config identity", cloud_overrun.reason)
 
             reopened = self.router_store(path)
             self.assertEqual(
@@ -2698,7 +2698,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 first_cloud.disposition,
                 ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("execution identity", first_cloud.reason)
+            self.assertIn("backend/model/config identity", first_cloud.reason)
             second_cloud = store.record_execution(
                 execution_id="exec-cumulative-cloud-2",
                 request_id=cloud_request.request_id,
@@ -2716,7 +2716,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 second_cloud.disposition,
                 ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("execution identity", second_cloud.reason)
+            self.assertIn("backend/model/config identity", second_cloud.reason)
             self.assertEqual(
                 store.total_actual_cost(cloud_request.request_id),
                 Decimal("10.01"),
@@ -2864,7 +2864,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 accepted_cloud_tail.disposition,
                 ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("execution identity", accepted_cloud_tail.reason)
+            self.assertIn("backend/model/config identity", accepted_cloud_tail.reason)
             original = path.read_text(encoding="utf-8")
 
             for execution_id in (

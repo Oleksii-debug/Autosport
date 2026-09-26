@@ -6,7 +6,7 @@ write to Betfair.
 
 Before a provider mutation, one exact execution attempt must atomically reserve
 its full worst-case incremental exposure. SUBMITTED, UNKNOWN, ACCEPTED,
-PARTIAL, and generic RECONCILED_NOT_FOUND attempts remain fully reserved. The
+PARTIAL, REJECTED, and generic RECONCILED_NOT_FOUND attempts remain fully reserved. The
 generic ledger state proves chronology/state only; it does not prove
 provider-origin zero effect. Release stays fail-closed until an exact Betfair
 absence authority is composed. A provider funds snapshot therefore cannot be
@@ -825,7 +825,7 @@ def _immutable_key(item: BetfairExposureReservation) -> tuple[object, ...]:
 
 def _require_nonrollback(previous: AttemptState, current: AttemptState) -> None:
     allowed = {
-        AttemptState.RESERVED: _ACTIVE_STATES | _LEDGER_NOT_FOUND_STATES,
+        AttemptState.RESERVED: _CAPITAL_HOLD_STATES,
         AttemptState.SUBMITTED: {
             AttemptState.SUBMITTED,
             AttemptState.UNKNOWN,

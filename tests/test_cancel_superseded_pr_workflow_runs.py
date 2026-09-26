@@ -128,7 +128,7 @@ def test_stale_rerun_has_zero_cancellation_authority() -> None:
 
 def test_current_head_cancels_only_older_same_workflow_runs() -> None:
     api = FakeApi(
-        [HEAD_B, HEAD_B],
+        [HEAD_B, HEAD_B, HEAD_B],
         (
             _run(40, HEAD_A),
             _run(41, HEAD_B),
@@ -164,6 +164,46 @@ def test_head_change_after_run_listing_revokes_cancellation_authority() -> None:
     assert result == CancellationResult(current_head=False, cancelled_run_ids=())
     assert api.active_calls == 1
     assert api.cancelled == []
+
+
+def test_aba_head_change_immediately_before_cancel_revokes_authority() -> None:
+    api = FakeApi(
+        [HEAD_B, HEAD_B, HEAD_A],
+        (
+            _run(60, HEAD_A),
+            _run(61, HEAD_B),
+        ),
+    )
+    result = cancel_superseded(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=61,
+    )
+    assert result == CancellationResult(current_head=False, cancelled_run_ids=())
+    assert api.active_calls == 1
+    assert api.cancelled == []
+
+
+def test_head_change_between_multiple_cancellations_stops_remaining_posts() -> None:
+    api = FakeApi(
+        [HEAD_B, HEAD_B, HEAD_B, HEAD_C],
+        (
+            _run(70, HEAD_A),
+            _run(71, HEAD_A),
+            _run(72, HEAD_B),
+        ),
+    )
+    result = cancel_superseded(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=72,
+    )
+    assert result == CancellationResult(current_head=False, cancelled_run_ids=(70,))
+    assert api.cancelled == [70]
 
 
 def test_github_output_exposes_only_boolean_current_head(tmp_path, monkeypatch) -> None:

@@ -47,7 +47,7 @@ def prepared(
     runtime: PaperExecutionAdoptionRuntime,
     *actions: ExecutionAction,
 ) -> PreparedPaperExecution:
-    return runtime._mint_prepared(
+    prepared = runtime._mint_prepared(
         PreparedPaperExecution(
             execution_plan=ExecutionPlan(
                 plan_id="adoption-plan-1",
@@ -69,6 +69,9 @@ def prepared(
             intent_evidence_json='{"schema":"test-intent-evidence"}',
         )
     )
+    # White-box fixture: model an already-authorized lower-layer execution.
+    runtime._exposure_scope_authorities[id(prepared)] = prepared
+    return prepared
 
 
 def config(**overrides) -> PaperExecutionModelConfig:

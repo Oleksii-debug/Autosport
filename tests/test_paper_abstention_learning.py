@@ -122,7 +122,7 @@ def _resume_runtime(
 
 
 class PaperAbstentionLearningTests(unittest.TestCase):
-    def test_negative_wait_reward_is_preserved_and_no_effect_authority_is_added(self) -> None:
+    def test_observed_wait_reward_is_zero_and_no_effect_authority_is_added(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _environment, _baseline, loop, observation, runtime = _runtime(root)
@@ -135,7 +135,7 @@ class PaperAbstentionLearningTests(unittest.TestCase):
             )
             outcome, reward = _evidence(
                 action,
-                reward_value="-0.25",
+                reward_value="0",
                 truth=EvidenceTruth.OBSERVED,
             )
 
@@ -153,14 +153,139 @@ class PaperAbstentionLearningTests(unittest.TestCase):
             self.assertIs(snapshot.phase, AgentLoopPhase.CHECKPOINT)
             self.assertIs(snapshot.external_effect_state, ExternalEffectState.NONE)
             raw = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
-            self.assertEqual(raw["resolutions"][0]["reward_value"], "-0.25")
+            self.assertEqual(raw["resolutions"][0]["reward_value"], "0")
             self.assertEqual(raw["resolutions"][0]["truth"], "observed")
-            self.assertEqual(raw["attributions"][0]["reward_value"], "-0.25")
+            self.assertEqual(raw["attributions"][0]["reward_value"], "0")
             self.assertEqual(
                 raw["attributions"][0]["findings"][0]["evidence_sha256"],
                 reward.reward_id,
             )
             self.assertEqual(raw["research_handoffs"], [])
+
+    def test_nonzero_observed_abstention_reward_is_rejected_before_resolution(self) -> None:
+        for reward_value in ("0.10", "-0.25"):
+            with self.subTest(reward_value=reward_value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _environment, _baseline, loop, observation, runtime = _runtime(root)
+                action = runtime.begin_abstention(
+                    observation=observation,
+                    action_type="WAIT",
+                    decision_at=T2,
+                    at=T2,
+                )
+                outcome, reward = _evidence(
+                    action,
+                    reward_value=reward_value,
+                    truth=EvidenceTruth.OBSERVED,
+                )
+
+                with self.assertRaisesRegex(
+                    PaperAbstentionLearningError,
+                    "observed abstention reward must be zero",
+                ):
+                    runtime.finalize_abstention(
+                        observation=observation,
+                        action=action,
+                        outcome=outcome,
+                        reward=reward,
+                        at=T4,
+                    )
+
+                self.assertIs(loop.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+                raw = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+                self.assertEqual(raw["resolutions"], [])
+                self.assertEqual(raw["attributions"], [])
+                self.assertEqual(raw["postmortems"], [])
+
+    def test_legacy_nonzero_observed_resolved_transition_replays_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, _baseline, _loop, observation, runtime = _runtime(root)
+            action = runtime.begin_abstention(
+                observation=observation,
+                action_type="WAIT",
+                decision_at=T2,
+                at=T2,
+            )
+            outcome, reward = _evidence(
+                action,
+                reward_value="-0.25",
+                truth=EvidenceTruth.OBSERVED,
+            )
+
+            # Represent a transition that was valid under the previous contract and
+            # became durable in the environment before the process stopped.
+            legacy_transition = environment.resolve(
+                action.action_id,
+                outcome=outcome,
+                reward=reward,
+                resolved_at=T4,
+            )
+            legacy_checkpoint = environment.checkpoint()
+
+            resumed_environment = CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=legacy_checkpoint,
+            )
+            resumed_loop = AgentLoopRuntime(root / "agent-loop.json")
+            resumed_runtime = PaperAbstentionLearningRuntime(
+                environment=resumed_environment,
+                agent_loop=resumed_loop,
+            )
+
+            receipt = resumed_runtime.finalize_abstention(
+                observation=observation,
+                action=action,
+                outcome=outcome,
+                reward=reward,
+                at=T4,
+            )
+
+            self.assertEqual(receipt.transition_id, legacy_transition.transition_id)
+            self.assertEqual(receipt.reward_id, reward.reward_id)
+            self.assertIs(receipt.reward_truth, EvidenceTruth.OBSERVED)
+            self.assertIs(resumed_loop.snapshot().phase, AgentLoopPhase.CHECKPOINT)
+            raw = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(raw["resolutions"]), 1)
+            self.assertEqual(raw["resolutions"][0]["reward_value"], "-0.25")
+            self.assertEqual(raw["resolutions"][0]["truth"], "observed")
+
+    def test_negative_simulated_wait_reward_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _environment, _baseline, loop, observation, runtime = _runtime(root)
+            action = runtime.begin_abstention(
+                observation=observation,
+                action_type="WAIT",
+                decision_at=T2,
+                at=T2,
+            )
+            outcome, reward = _evidence(
+                action,
+                reward_value="-0.25",
+                truth=EvidenceTruth.SIMULATED,
+            )
+
+            receipt = runtime.finalize_abstention(
+                observation=observation,
+                action=action,
+                outcome=outcome,
+                reward=reward,
+                at=T4,
+            )
+
+            self.assertIs(receipt.reward_truth, EvidenceTruth.SIMULATED)
+            self.assertIs(loop.snapshot().phase, AgentLoopPhase.CHECKPOINT)
+            raw = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw["resolutions"][0]["reward_value"], "-0.25")
+            self.assertEqual(raw["resolutions"][0]["truth"], "simulated")
+            self.assertEqual(
+                raw["resolutions"][0]["simulation_model_id"],
+                "abstention-counterfactual-v1",
+            )
 
     def test_simulated_no_bet_remains_simulated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

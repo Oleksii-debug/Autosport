@@ -15,6 +15,7 @@ from typing import Any, Callable, TypeVar
 
 
 SCHEMA_VERSION = 1
+_MAX_EXECUTION_DECIMAL_TEXT_LENGTH = 8192
 _T = TypeVar("_T")
 
 
@@ -101,17 +102,42 @@ def _timestamp(value: str, name: str) -> datetime:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+    if type(value) is Decimal:
+        parsed = value
+    elif type(value) is str:
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be a finite Decimal")
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"{name} must be finite and > 0")
     return parsed
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
+    # Decimal.normalize() applies the ambient Decimal Context and can round
+    # exact money/odds before durable persistence. Formatting the original
+    # coefficient/exponent is context-independent, but fixed-point formatting
+    # can amplify a tiny exponent-form input into an attacker-sized string.
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise ValueError("decimal fixed-point representation must be finite")
+    if exponent >= 0:
+        rendered_length = len(digits) + exponent
+    else:
+        point = len(digits) + exponent
+        rendered_length = len(digits) + 1 if point > 0 else 2 - exponent
+    if sign:
+        rendered_length += 1
+    if rendered_length > _MAX_EXECUTION_DECIMAL_TEXT_LENGTH:
+        raise ValueError("decimal fixed-point representation exceeds resource limit")
+    text = format(value, "f")
+    # Trim only representational fractional trailing zeros so numerically
+    # equivalent scales canonicalize.
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
@@ -251,8 +277,8 @@ class ExecutionPlan:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
         actions = tuple(self.actions)
-        if not actions or not all(isinstance(item, ExecutionAction) for item in actions):
-            raise ValueError("execution plan requires ExecutionAction items")
+        if not actions or not all(type(item) is ExecutionAction for item in actions):
+            raise ValueError("execution plan requires exact ExecutionAction items")
         if len({action.action_id for action in actions}) != len(actions):
             raise ValueError("execution plan needs unique action_id values")
         object.__setattr__(self, "actions", actions)
@@ -414,6 +440,55 @@ class VerifiedExecutionLedgerSnapshot:
     payload: bytes
     sha256: str
     event_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEvidenceBindingView:
+    """Immutable provider-evidence fact derived from a verified ledger snapshot."""
+
+    evidence_id: str
+    observed_at: str
+    source: str
+    acknowledgement_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        _sha256_text(self.evidence_id, "evidence_id")
+        _timestamp(self.observed_at, "observed_at")
+        _text(self.source, "source")
+        if self.acknowledgement_sha256 is not None:
+            _sha256_text(
+                self.acknowledgement_sha256,
+                "acknowledgement_sha256",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionAttemptReadView:
+    """Typed immutable view of one attempt from one verified ledger snapshot."""
+
+    attempt: ExecutionAttempt
+    action: ExecutionAction
+    state: AttemptState
+    submitted_at: str | None
+    unknown_reason: str | None
+    unknown_observed_at: str | None
+    provider_order_ref: str | None
+    provider_evidence: ProviderEvidenceBindingView | None
+    acknowledgement: ExternalAcknowledgement | None
+    found_reconciliations: tuple[ExternalEffectReconciliation, ...]
+    not_found_reconciliation: ReconciliationSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedExecutionPlanView:
+    """Plan/attempt facts tied to the exact immutable ledger bytes they came from."""
+
+    snapshot_sha256: str
+    event_count: int
+    plan: ExecutionPlan
+    plan_fingerprint: str
+    stale: bool
+    attempts: tuple[ExecutionAttemptReadView, ...]
 
 
 class RealExecutionLedger:
@@ -1161,6 +1236,7 @@ class RealExecutionLedger:
                 )
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
+            provider_evidence_time: datetime | None = None
             provider_order_reference_seen = False
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
@@ -1208,6 +1284,13 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "UNKNOWN observation precedes attempt submission"
                             )
+                        if (
+                            provider_evidence_time is not None
+                            and unknown_time < provider_evidence_time
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "UNKNOWN observation precedes provider evidence"
+                            )
                     elif (
                         followup["event_type"]
                         == EventType.RECONCILED_FOUND.value
@@ -1229,6 +1312,8 @@ class RealExecutionLedger:
                         causal_boundaries = [reserved_time, unknown_time]
                         if submitted_time is not None:
                             causal_boundaries.append(submitted_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
                         if observed_time <= max(causal_boundaries):
                             raise ExecutionLedgerIntegrityError(
                                 "found reconciliation is not newer than "
@@ -1328,6 +1413,10 @@ class RealExecutionLedger:
                             followup["payload"]["evidence_id"], "evidence_id"
                         )
                         _text(followup["payload"]["source"], "source")
+                        if provider_evidence_time is not None:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple provider evidence bindings"
+                            )
                         evidence_time = _timestamp(
                             followup["payload"]["observed_at"], "observed_at"
                         )
@@ -1340,6 +1429,7 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence precedes attempt causal boundary"
                             )
+                        provider_evidence_time = evidence_time
                     elif (
                         followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
@@ -1360,6 +1450,8 @@ class RealExecutionLedger:
                             causal_boundaries.append(submitted_time)
                         if unknown_time is not None:
                             causal_boundaries.append(unknown_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
                         if acknowledged_time < max(causal_boundaries):
                             raise ExecutionLedgerIntegrityError(
                                 "acknowledgement precedes attempt causal boundary"
@@ -1429,6 +1521,8 @@ class RealExecutionLedger:
                             causal_boundaries.append(submitted_time)
                         if unknown_time is not None:
                             causal_boundaries.append(unknown_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
                         if reconciled_time <= max(causal_boundaries):
                             raise ExecutionLedgerIntegrityError(
                                 "not-found reconciliation is not newer than "
@@ -1823,6 +1917,9 @@ class RealExecutionLedger:
         return dict(matches[0])
 
     def reserve_plan(self, plan: ExecutionPlan) -> str:
+        if type(plan) is not ExecutionPlan:
+            raise ValueError("plan must be exact ExecutionPlan")
+
         def operation() -> str:
             events = self._events()
             prior = self._plan_event(events, plan.plan_id)
@@ -2015,15 +2112,26 @@ class RealExecutionLedger:
                 if event["event_type"]
                 == EventType.ATTEMPT_SUBMITTED.value
             ]
+            causal_boundaries = [reserved_time]
             if submitted_events:
                 submitted_time = _timestamp(
                     submitted_events[-1]["payload"]["submitted_at"],
                     "submitted_at",
                 )
-                if observed_time < submitted_time:
-                    raise ExecutionStateError(
-                        "UNKNOWN observed_at cannot precede attempt submission"
-                    )
+                causal_boundaries.append(submitted_time)
+            provider_evidence_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+            ]
+            for event in provider_evidence_events:
+                causal_boundaries.append(
+                    _timestamp(event["payload"]["observed_at"], "observed_at")
+                )
+            if observed_time < max(causal_boundaries):
+                raise ExecutionStateError(
+                    "UNKNOWN observed_at cannot precede attempt causal boundary"
+                )
             self._append(
                 EventType.ATTEMPT_UNKNOWN,
                 first["plan_id"],
@@ -2051,20 +2159,59 @@ class RealExecutionLedger:
                 if event["event_type"]
                 == EventType.ATTEMPT_RESERVED.value
             ]
+            actual_observed_at = _now()
+            observed_time = _timestamp(actual_observed_at, "observed_at")
+            unresolved: list[tuple[dict[str, Any], str]] = []
             for reserved in reserved_events:
                 attempt_id = reserved["attempt_id"]
-                if self._state(
-                    self._attempt_events(events, attempt_id)
-                ) in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
-                    self._append(
-                        EventType.ATTEMPT_UNKNOWN,
-                        reserved["plan_id"],
-                        reserved["action_id"],
-                        attempt_id,
-                        {"reason": reason, "observed_at": _now()},
+                attempt_events = self._attempt_events(events, attempt_id)
+                if self._state(attempt_events) not in {
+                    AttemptState.RESERVED,
+                    AttemptState.SUBMITTED,
+                }:
+                    continue
+                causal_boundaries = [
+                    _timestamp(
+                        reserved["payload"]["reserved_at"], "reserved_at"
                     )
-                    promoted.append(attempt_id)
-                    events = self._events()
+                ]
+                for event in attempt_events:
+                    if (
+                        event["event_type"]
+                        == EventType.ATTEMPT_SUBMITTED.value
+                    ):
+                        causal_boundaries.append(
+                            _timestamp(
+                                event["payload"]["submitted_at"],
+                                "submitted_at",
+                            )
+                        )
+                    elif (
+                        event["event_type"]
+                        == EventType.PROVIDER_EVIDENCE_BOUND.value
+                    ):
+                        causal_boundaries.append(
+                            _timestamp(
+                                event["payload"]["observed_at"],
+                                "observed_at",
+                            )
+                        )
+                if observed_time < max(causal_boundaries):
+                    raise ExecutionStateError(
+                        "recovery clock precedes attempt causal boundary"
+                    )
+                unresolved.append((reserved, attempt_id))
+
+            for reserved, attempt_id in unresolved:
+                self._append(
+                    EventType.ATTEMPT_UNKNOWN,
+                    reserved["plan_id"],
+                    reserved["action_id"],
+                    attempt_id,
+                    {"reason": reason, "observed_at": actual_observed_at},
+                )
+                promoted.append(attempt_id)
+                events = self._events()
             return tuple(promoted)
 
         return self._mutate(operation)
@@ -2072,6 +2219,10 @@ class RealExecutionLedger:
     def acknowledge(
         self, acknowledgement: ExternalAcknowledgement
     ) -> None:
+        if type(acknowledgement) is not ExternalAcknowledgement:
+            raise ValueError(
+                "acknowledgement must be exact ExternalAcknowledgement"
+            )
         payload = acknowledgement.to_dict()
 
         def operation() -> None:
@@ -2101,18 +2252,24 @@ class RealExecutionLedger:
                     "UNKNOWN reconciliation"
                 )
             first = attempt_events[0]
-            causal_boundaries: list[datetime] = [
+            uncertainty_boundaries: list[datetime] = [
                 _timestamp(first["payload"]["reserved_at"], "reserved_at")
             ]
+            provider_evidence_boundaries: list[datetime] = []
             for event in attempt_events:
                 if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
-                    causal_boundaries.append(
+                    uncertainty_boundaries.append(
                         _timestamp(event["payload"]["submitted_at"], "submitted_at")
                     )
                 elif event["event_type"] == EventType.ATTEMPT_UNKNOWN.value:
-                    causal_boundaries.append(
+                    uncertainty_boundaries.append(
                         _timestamp(event["payload"]["observed_at"], "observed_at")
                     )
+                elif event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                    provider_evidence_boundaries.append(
+                        _timestamp(event["payload"]["observed_at"], "observed_at")
+                    )
+            causal_boundaries = uncertainty_boundaries + provider_evidence_boundaries
             acknowledged_time = _timestamp(
                 acknowledgement.acknowledged_at, "acknowledged_at"
             )
@@ -2150,7 +2307,7 @@ class RealExecutionLedger:
                 evidence_time = _timestamp(
                     reconciliation.observed_at, "observed_at"
                 )
-                if evidence_time <= max(causal_boundaries):
+                if evidence_time <= max(uncertainty_boundaries):
                     raise ExecutionStateError(
                         "positive reconciliation evidence must be newer than "
                         "attempt uncertainty boundary"
@@ -2199,6 +2356,10 @@ class RealExecutionLedger:
     def reconcile_found(
         self, reconciliation: ExternalEffectReconciliation
     ) -> None:
+        if type(reconciliation) is not ExternalEffectReconciliation:
+            raise ValueError(
+                "reconciliation must be exact ExternalEffectReconciliation"
+            )
         payload = reconciliation.to_dict()
 
         def operation() -> None:
@@ -2254,6 +2415,12 @@ class RealExecutionLedger:
                             event["payload"]["observed_at"], "observed_at"
                         )
                     )
+                elif event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                    causal_boundaries.append(
+                        _timestamp(
+                            event["payload"]["observed_at"], "observed_at"
+                        )
+                    )
             if _timestamp(
                 reconciliation.observed_at, "observed_at"
             ) <= max(causal_boundaries):
@@ -2287,6 +2454,8 @@ class RealExecutionLedger:
     def reconcile_not_found(
         self, snapshot: ReconciliationSnapshot
     ) -> None:
+        if type(snapshot) is not ReconciliationSnapshot:
+            raise ValueError("snapshot must be exact ReconciliationSnapshot")
         if snapshot.external_effect_found:
             raise ValueError(
                 "found external effect must be reconciled as acknowledgement"
@@ -2339,6 +2508,12 @@ class RealExecutionLedger:
                             event["payload"]["observed_at"], "observed_at"
                         )
                     )
+                elif event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                    uncertainty_boundaries.append(
+                        _timestamp(
+                            event["payload"]["observed_at"], "observed_at"
+                        )
+                    )
             if not uncertainty_boundaries:
                 raise ExecutionLedgerIntegrityError(
                     "UNKNOWN attempt is missing an uncertainty boundary"
@@ -2361,10 +2536,184 @@ class RealExecutionLedger:
         self._mutate(operation)
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
-        raw = self.path.read_bytes() if self.path.exists() else b""
+        if self.path.exists():
+            # A restarted reader must prove the visible ledger file and its
+            # pathname durable before returning facts that callers may bind to
+            # this snapshot identity. Keep the read path aligned with _events().
+            self._ensure_existing_path_durable()
+            raw = self.path.read_bytes()
+        else:
+            raw = b""
         events = self._parse(raw)
         return VerifiedExecutionLedgerSnapshot(
             raw, hashlib.sha256(raw).hexdigest(), len(events)
+        )
+
+    def verified_execution_view(self, plan_id: str) -> VerifiedExecutionPlanView:
+        """Return typed execution facts from one already-verified ledger snapshot.
+
+        The view is a read model only. It does not authorize execution, retry,
+        acknowledgement, reconciliation or risk capacity. Consumers that act
+        on the view must bind subsequent mutation to snapshot_sha256 through
+        the canonical writer/admission authority.
+        """
+
+        _text(plan_id, "plan_id")
+        snapshot = self.verified_snapshot()
+        # Parse the captured bytes, never a second filesystem read, so every
+        # returned fact is mechanically tied to snapshot.sha256/event_count.
+        events = self._parse(snapshot.payload)
+        plan_event = self._plan_event(events, plan_id)
+        if plan_event is None:
+            raise KeyError(plan_id)
+        plan = self._plan_from_dict(plan_event["payload"]["plan"])
+        actions = {action.action_id: action for action in plan.actions}
+
+        attempts: list[ExecutionAttemptReadView] = []
+        for reserved in events:
+            if (
+                reserved["plan_id"] != plan_id
+                or reserved["event_type"] != EventType.ATTEMPT_RESERVED.value
+            ):
+                continue
+            attempt_id = reserved["attempt_id"]
+            action_id = reserved["action_id"]
+            if not isinstance(attempt_id, str) or not isinstance(action_id, str):
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt identity is invalid"
+                )
+            action = actions.get(action_id)
+            if action is None:
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt references missing plan action"
+                )
+            attempt_events = self._attempt_events(events, attempt_id)
+            state = self._state(attempt_events)
+            if state is None:
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt has no state"
+                )
+
+            submitted = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value
+            ]
+            unknown = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.ATTEMPT_UNKNOWN.value
+            ]
+            provider_refs = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+            ]
+            provider_evidence_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+            ]
+            acknowledgements = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ]
+            found_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_FOUND.value
+            ]
+            not_found_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_NOT_FOUND.value
+            ]
+            for name, matches in (
+                ("submission", submitted),
+                ("UNKNOWN transition", unknown),
+                ("provider order reference", provider_refs),
+                ("provider evidence", provider_evidence_events),
+                ("external acknowledgement", acknowledgements),
+                ("not-found reconciliation", not_found_events),
+            ):
+                if len(matches) > 1:
+                    raise ExecutionLedgerIntegrityError(
+                        f"attempt has multiple {name} facts"
+                    )
+
+            submitted_at = (
+                submitted[0]["payload"]["submitted_at"] if submitted else None
+            )
+            unknown_reason = unknown[0]["payload"]["reason"] if unknown else None
+            unknown_observed_at = (
+                unknown[0]["payload"]["observed_at"] if unknown else None
+            )
+            provider_order_ref = (
+                provider_refs[0]["payload"]["provider_order_ref"]
+                if provider_refs
+                else None
+            )
+            provider_evidence = None
+            if provider_evidence_events:
+                payload = provider_evidence_events[0]["payload"]
+                provider_evidence = ProviderEvidenceBindingView(
+                    evidence_id=payload["evidence_id"],
+                    observed_at=payload["observed_at"],
+                    source=payload["source"],
+                    acknowledgement_sha256=payload.get(
+                        "acknowledgement_sha256"
+                    ),
+                )
+            acknowledgement = (
+                self._acknowledgement_from_dict(
+                    acknowledgements[0]["payload"]
+                )
+                if acknowledgements
+                else None
+            )
+            found_reconciliations = tuple(
+                self._found_reconciliation_from_dict(event["payload"])
+                for event in found_events
+            )
+            not_found_reconciliation = (
+                self._reconciliation_snapshot_from_dict(
+                    not_found_events[0]["payload"]
+                )
+                if not_found_events
+                else None
+            )
+            attempt = ExecutionAttempt(
+                attempt_id=attempt_id,
+                plan_id=plan_id,
+                action_id=action_id,
+                effect_fingerprint=reserved["payload"]["effect_fingerprint"],
+                reserved_at=reserved["payload"]["reserved_at"],
+            )
+            attempts.append(
+                ExecutionAttemptReadView(
+                    attempt=attempt,
+                    action=action,
+                    state=state,
+                    submitted_at=submitted_at,
+                    unknown_reason=unknown_reason,
+                    unknown_observed_at=unknown_observed_at,
+                    provider_order_ref=provider_order_ref,
+                    provider_evidence=provider_evidence,
+                    acknowledgement=acknowledgement,
+                    found_reconciliations=found_reconciliations,
+                    not_found_reconciliation=not_found_reconciliation,
+                )
+            )
+
+        return VerifiedExecutionPlanView(
+            snapshot_sha256=snapshot.sha256,
+            event_count=snapshot.event_count,
+            plan=plan,
+            plan_fingerprint=plan_event["payload"]["plan_fingerprint"],
+            stale=self._stale(events, plan_id),
+            attempts=tuple(attempts),
         )
 
     def verify_integrity(self) -> int:

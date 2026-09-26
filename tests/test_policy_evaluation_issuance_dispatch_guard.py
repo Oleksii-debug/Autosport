@@ -59,6 +59,35 @@ def test_product_issuer_rejects_same_class_store_constructor_rebind_before_dispa
     assert called is False
 
 
+def test_product_issuer_rejects_same_class_store_setattr_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    authority = _bound_workspace(tmp_path, monkeypatch)
+    original_setattr = FactoryArtifactStore.__setattr__
+    called = False
+
+    def forged_setattr(self, name, value):
+        nonlocal called
+        called = True
+        return original_setattr(self, name, value)
+
+    monkeypatch.setattr(
+        FactoryArtifactStore,
+        "__setattr__",
+        forged_setattr,
+        raising=False,
+    )
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="FactoryArtifactStore constructor/clock dispatch",
+    ):
+        issuance._open_canonical_authorities(authority)
+
+    assert called is False
+
+
 def test_product_issuer_rejects_factory_datetime_rebind_before_store_open(
     tmp_path,
     monkeypatch,

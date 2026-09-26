@@ -46,6 +46,7 @@ def test_direct_report_construction_cannot_mint_campaign_authority(
     ):
         CampaignQualificationReport(**kwargs)
 
+
 def _valid_report_kwargs() -> dict[str, object]:
     return {
         "state": QualificationState.COMPLETE_FOR_CANONICAL_RESOLUTION,

@@ -9,6 +9,13 @@ from autosport.live_decision_reevaluation import resolve_live_decision_dispositi
 
 
 _DISPOSITION_ID = "a" * 64
+_FORGED_CODE_CALLED = False
+
+
+def _forged_verified_records(self):
+    global _FORGED_CODE_CALLED
+    _FORGED_CODE_CALLED = True
+    raise AssertionError("in-place forged reader code must never execute")
 
 
 class LiveDecisionReevaluationOriginGuardTests(unittest.TestCase):
@@ -59,6 +66,20 @@ class LiveDecisionReevaluationOriginGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "canonical JsonlDecisionLedger"):
                 resolve_live_decision_disposition(_DISPOSITION_ID, ledger=ledger)
         self.assertFalse(called)
+
+    def test_in_place_ledger_code_replacement_is_rejected_before_dispatch(self) -> None:
+        global _FORGED_CODE_CALLED
+        _FORGED_CODE_CALLED = False
+        original_code = JsonlDecisionLedger.verified_records.__code__
+        try:
+            JsonlDecisionLedger.verified_records.__code__ = _forged_verified_records.__code__
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+                with self.assertRaisesRegex(TypeError, "canonical JsonlDecisionLedger"):
+                    resolve_live_decision_disposition(_DISPOSITION_ID, ledger=ledger)
+            self.assertFalse(_FORGED_CODE_CALLED)
+        finally:
+            JsonlDecisionLedger.verified_records.__code__ = original_code
 
 
 if __name__ == "__main__":

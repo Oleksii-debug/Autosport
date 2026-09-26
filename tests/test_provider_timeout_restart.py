@@ -149,7 +149,14 @@ class ProviderTimeoutRestartTests(unittest.TestCase):
             finally:
                 store.close()
             self.assertEqual(len(events), 1)
-            self.assertEqual(events[0].sequence, 1)
+            recovered_event = events[0]
+            self.assertEqual(recovered_event.source_id, _SequenceProvider.source_id)
+            self.assertEqual(recovered_event.event_id, "match-1")
+            self.assertEqual(recovered_event.market_id, "winner")
+            self.assertEqual(recovered_event.selection_id, "player-a")
+            self.assertEqual(recovered_event.decimal_odds, Decimal("1.80"))
+            self.assertEqual(recovered_event.source_ts, "2026-09-21T08:00:01+00:00")
+            self.assertEqual(recovered_event.sequence, 1)
 
 
 if __name__ == "__main__":

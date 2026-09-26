@@ -38,17 +38,14 @@ LEDGER_TIMEOUT_BOUNDARY = "2026-09-21T18:00:00+00:00"
 UNKNOWN_OBSERVED_AT = "2026-09-21T17:59:57+00:00"
 
 
-def test_timeout_absence_registrar_rejects_foreign_callable_origin() -> None:
-    def foreign_timeout_assertion(_evidence: object) -> None:
-        return None
-
-    with pytest.raises(
-        ProviderEvidenceError,
-        match="timeout absence authority assertion origin is not canonical",
-    ):
-        provider_evidence._register_betfair_timeout_absence_authority_assertion(
-            foreign_timeout_assertion
-        )
+def test_provider_evidence_exposes_no_timeout_absence_registrar() -> None:
+    # Timeout-horizon authority is consumed directly at the final supervised
+    # reconciliation boundary.  Provider evidence must expose no preregistration
+    # hook that a cold-import fake module can claim first.
+    assert not hasattr(
+        provider_evidence,
+        "_register_betfair_timeout_absence_authority_assertion",
+    )
 
 
 def _action() -> ExecutionAction:
@@ -1011,35 +1008,12 @@ def test_provider_absence_assertion_does_not_trust_rebound_timeout_symbol(
 
 
 
-def test_timeout_absence_registrar_rejects_registered_callback_code_mutation(
-    monkeypatch,
-) -> None:
-    helper = timeout_resolution.assert_betfair_timeout_absence_authoritative
-
-    def forged_factory():
-        a = object()
-        b = object()
-        c = object()
-        d = object()
-        e = object()
-
-        def forged(_evidence):
-            _ = (a, b, c, d, e)
-            return None
-
-        return forged
-
-    forged = forged_factory()
-    assert len(helper.__code__.co_freevars) == len(forged.__code__.co_freevars)
-    monkeypatch.setattr(helper, "__code__", forged.__code__)
-
-    with pytest.raises(
-        ProviderEvidenceError,
-        match="timeout absence authority assertion executable code changed",
-    ):
-        provider_evidence._register_betfair_timeout_absence_authority_assertion(
-            helper
-        )
+def test_timeout_absence_assertion_remains_local_to_timeout_module() -> None:
+    assert callable(timeout_resolution.assert_betfair_timeout_absence_authoritative)
+    assert not hasattr(
+        provider_evidence,
+        "_register_betfair_timeout_absence_authority_assertion",
+    )
 
 def test_provider_evidence_assertion_rejects_fingerprint_rebind(
     tmp_path, monkeypatch

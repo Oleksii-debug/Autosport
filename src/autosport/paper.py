@@ -69,6 +69,10 @@ def _make_ticket_opening_authority_registry():
                 raise ValueError("PaperBook ticket opening authority cannot be rebound")
             current[ticket.ticket_id] = commitment
 
+    def revoke(book: object) -> None:
+        with guard:
+            authorities.pop(book, None)
+
     def install_validated_snapshot(book: object) -> None:
         commitments = {
             ticket_id: _ticket_opening_commitment(ticket)
@@ -118,6 +122,7 @@ def _make_ticket_opening_authority_registry():
     return (
         register_book,
         record,
+        revoke,
         install_validated_snapshot,
         require_current,
         require_candidate,
@@ -127,6 +132,7 @@ def _make_ticket_opening_authority_registry():
 (
     _register_ticket_opening_authority_book,
     _record_ticket_opening_authority,
+    _revoke_ticket_opening_authority,
     _install_validated_ticket_opening_authority,
     _require_ticket_opening_authority,
     _require_snapshot_candidate_opening_authority,
@@ -1118,7 +1124,9 @@ class PaperBook:
             )
 
         cls._validate_loaded_state(book)
-        _install_validated_ticket_opening_authority(book)
+        # Decoding arbitrary bytes proves structure only. It must not mint the
+        # product-issued opening authority needed for economic mutation/readout.
+        _revoke_ticket_opening_authority(book)
         return book
 
     @classmethod
@@ -1141,4 +1149,6 @@ class PaperBook:
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        return cls.load_bytes(Path(path).read_bytes())
+        book = cls.load_bytes(Path(path).read_bytes())
+        _install_validated_ticket_opening_authority(book)
+        return book

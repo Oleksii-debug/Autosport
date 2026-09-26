@@ -326,6 +326,12 @@ def test_private_resolver_rebind_cannot_mint_canonical_origin(
         )
 
     assert calls == 0
+
+    # Restore the canonical helper graph before testing the separate origin seal.
+    # The first assertion proves a rebound builder cannot execute; this assertion
+    # proves an exact-class copy still cannot become authoritative after dispatch
+    # integrity is restored.
+    monkeypatch.setattr(realized_match_module, "_make_evidence", canonical_builder)
     with pytest.raises(
         RealizedMatchEvidenceError,
         match="not issued by canonical resolver",
@@ -340,6 +346,7 @@ def test_evidence_builder_rebind_cannot_mint_canonical_origin(
     plan, ledger, provider_ref, template = _resolve_current(tmp_path)
     forged = replace(template)
     calls = 0
+    canonical_builder = realized_match_module._make_evidence
 
     def forged_builder(**kwargs):
         nonlocal calls

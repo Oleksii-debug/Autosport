@@ -107,6 +107,46 @@ def test_product_issue_rejects_in_place_derive_code_rebind_before_arguments():
         canonical_derive.__code__ = canonical_code
 
 
+def test_product_issue_rejects_bootstrap_helper_rebind_before_arguments(monkeypatch):
+    called = False
+
+    def forged_bootstrap(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("forged bootstrap helper must not execute")
+
+    monkeypatch.setattr(issuance, "_bootstrap_interval", forged_bootstrap)
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match=r"transitive helper \(bootstrap interval\)",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )
+
+    assert called is False
+
+
+def test_product_issue_rejects_bootstrap_module_global_rebind_before_arguments(
+    monkeypatch,
+):
+    forged_hashlib = SimpleNamespace(sha256=issuance.hashlib.sha256)
+    monkeypatch.setattr(issuance, "hashlib", forged_hashlib)
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match=r"transitive helper global \(hashlib\)",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )
+
+
 def test_product_issuer_rejects_same_class_store_setattr_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

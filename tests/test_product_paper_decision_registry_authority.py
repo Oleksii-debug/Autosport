@@ -107,3 +107,27 @@ def test_cycle_binds_registry_path_not_caller_instance(tmp_path: Path) -> None:
     assert reconstructed is not caller_registry
     assert type(reconstructed) is _Registry
     assert reconstructed.path.resolve(strict=False) == original_path.resolve(strict=False)
+
+
+def test_cycle_rejects_late_public_registry_dispatch_substitution(tmp_path: Path) -> None:
+    original_path = tmp_path / "scientific_registry.json"
+    cycle = _build(tmp_path, _Registry(original_path))
+    caller_constructor_executed = False
+
+    class _LateBoundRegistry:
+        def __init__(self, path: Path) -> None:
+            nonlocal caller_constructor_executed
+            caller_constructor_executed = True
+            self.path = Path(path)
+
+        def get(self, *_args, **_kwargs):
+            return SimpleNamespace(payload={"caller_controlled": True})
+
+    with patch.object(cycle_module, "ScientificRegistry", _LateBoundRegistry):
+        with pytest.raises(
+            cycle_module.ProductPaperDecisionCycleError,
+            match="canonical|authority|changed",
+        ):
+            cycle._load_current_scientific_registry()
+
+    assert caller_constructor_executed is False

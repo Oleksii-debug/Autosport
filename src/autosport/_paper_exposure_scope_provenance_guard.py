@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import sys
-from contextvars import ContextVar
-from functools import wraps
 from hashlib import sha256
 from typing import Any, Callable
 
@@ -124,187 +122,6 @@ def _function_metadata_match(
         if live is not expected:
             return False
     return True
-
-
-def _install_preparation_guard() -> None:
-    runtime_type = PaperExecutionAdoptionRuntime
-    prepared_type = PreparedPaperExecution
-    if getattr(runtime_type, "_autosport_exposure_scope_preparation_guard", False):
-        return
-
-    current_prepare = runtime_type.prepare
-    current_prepare_paper_value = runtime_type.prepare_paper_value_action
-    hidden_prepare = _append_recovery._ORIGINAL_PREPARE
-    hidden_prepare_paper_value = _value_authority._ORIGINAL_PREPARE_PAPER_VALUE_ACTION
-    authorize_descriptor = _value_authority._authorize_descriptor
-    verify_general_risk_admission = _value_authority._verify_general_risk_admission
-
-    current_prepare_globals = _snapshot_function_globals(current_prepare)
-    current_prepare_metadata = _snapshot_function_metadata(current_prepare)
-    current_prepare_paper_value_globals = _snapshot_function_globals(
-        current_prepare_paper_value
-    )
-    current_prepare_paper_value_metadata = _snapshot_function_metadata(
-        current_prepare_paper_value
-    )
-    hidden_prepare_globals = _snapshot_function_globals(hidden_prepare)
-    hidden_prepare_metadata = _snapshot_function_metadata(hidden_prepare)
-    hidden_prepare_paper_value_globals = _snapshot_function_globals(
-        hidden_prepare_paper_value
-    )
-    hidden_prepare_paper_value_metadata = _snapshot_function_metadata(
-        hidden_prepare_paper_value
-    )
-
-    mint_token = object()
-    mint_context: ContextVar[object | None] = ContextVar(
-        "autosport_paper_exposure_scope_prepared_mint",
-        default=None,
-    )
-    getframe = sys._getframe
-
-    def guarded_mint_prepared(
-        self: PaperExecutionAdoptionRuntime,
-        prepared: PreparedPaperExecution,
-    ) -> PreparedPaperExecution:
-        if type(self) is not runtime_type:
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER preparation requires exact runtime"
-            )
-        if runtime_type._mint_prepared is not guarded_mint_prepared:
-            raise PaperExecutionAdoptionError(
-                "canonical prepared-execution mint dispatch was rebound"
-            )
-
-        caller = getframe(1)
-        try:
-            caller_code = caller.f_code
-            if caller_code is hidden_prepare.__code__:
-                if mint_context.get() is not mint_token:
-                    raise PaperExecutionAdoptionError(
-                        "prepared execution mint is reserved for canonical preparation authority"
-                    )
-                if not _function_globals_match(
-                    hidden_prepare,
-                    hidden_prepare_globals,
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "canonical PAPER preparation globals were rebound"
-                    )
-                if not _function_metadata_match(
-                    hidden_prepare,
-                    hidden_prepare_metadata,
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "canonical PAPER preparation metadata were rebound"
-                    )
-            elif caller_code is hidden_prepare_paper_value.__code__:
-                if mint_context.get() is not mint_token:
-                    raise PaperExecutionAdoptionError(
-                        "prepared execution mint is reserved for canonical preparation authority"
-                    )
-                if not _function_globals_match(
-                    hidden_prepare_paper_value,
-                    hidden_prepare_paper_value_globals,
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "canonical PAPER preparation globals were rebound"
-                    )
-                if not _function_metadata_match(
-                    hidden_prepare_paper_value,
-                    hidden_prepare_paper_value_metadata,
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "canonical PAPER preparation metadata were rebound"
-                    )
-            elif caller_code is authorize_descriptor.__code__:
-                parent = caller.f_back
-                if (
-                    parent is None
-                    or parent.f_code is not _value_authority._execute.__code__
-                    or _value_authority._authorize_descriptor is not authorize_descriptor
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "prepared execution mint is reserved for canonical preparation authority"
-                    )
-            elif caller_code is verify_general_risk_admission.__code__:
-                if (
-                    _value_authority._verify_general_risk_admission
-                    is not verify_general_risk_admission
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "prepared execution mint is reserved for canonical preparation authority"
-                    )
-            else:
-                raise PaperExecutionAdoptionError(
-                    "prepared execution mint is reserved for canonical preparation authority"
-                )
-        finally:
-            del caller
-
-        if type(prepared) is not prepared_type:
-            raise TypeError("prepared must be exact PreparedPaperExecution")
-        self._prepared_authorities[id(prepared)] = prepared
-        return prepared
-
-    def wrap_preparation(
-        method: Callable[..., object],
-        *,
-        globals_snapshot: tuple[tuple[tuple[str, object], ...], object],
-        metadata_snapshot: tuple[object, object, object, object],
-        attribute_name: str,
-    ):
-        @wraps(method)
-        def owned(self: PaperExecutionAdoptionRuntime, *args: object, **kwargs: object):
-            if type(self) is not runtime_type:
-                raise PaperExecutionAdoptionError(
-                    "canonical PAPER preparation requires exact runtime"
-                )
-            if getattr(runtime_type, attribute_name) is not owned:
-                raise PaperExecutionAdoptionError(
-                    "canonical PAPER preparation dispatch was rebound"
-                )
-            if runtime_type._mint_prepared is not guarded_mint_prepared:
-                raise PaperExecutionAdoptionError(
-                    "canonical prepared-execution mint dispatch was rebound"
-                )
-            if not _function_globals_match(method, globals_snapshot):
-                raise PaperExecutionAdoptionError(
-                    "canonical PAPER preparation globals were rebound"
-                )
-            if not _function_metadata_match(method, metadata_snapshot):
-                raise PaperExecutionAdoptionError(
-                    "canonical PAPER preparation metadata were rebound"
-                )
-            marker = mint_context.set(mint_token)
-            try:
-                return method(self, *args, **kwargs)
-            finally:
-                mint_context.reset(marker)
-
-        return owned
-
-    owned_prepare = wrap_preparation(
-        current_prepare,
-        globals_snapshot=current_prepare_globals,
-        metadata_snapshot=current_prepare_metadata,
-        attribute_name="prepare",
-    )
-    owned_prepare_paper_value = wrap_preparation(
-        current_prepare_paper_value,
-        globals_snapshot=current_prepare_paper_value_globals,
-        metadata_snapshot=current_prepare_paper_value_metadata,
-        attribute_name="prepare_paper_value_action",
-    )
-
-    guarded_mint_prepared._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
-    owned_prepare._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
-    owned_prepare_paper_value._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
-
-    runtime_type._mint_prepared = guarded_mint_prepared
-    runtime_type.prepare = owned_prepare
-    runtime_type.prepare_paper_value_action = owned_prepare_paper_value
-    runtime_type._autosport_exposure_scope_preparation_guard = True
 
 
 def bind_canonical_execute(execute_function):
@@ -471,38 +288,13 @@ def bind_canonical_execute(execute_function):
                 )
         return payload
 
-    @wraps(execute_function)
-    def canonical_execute(
-        self: PaperExecutionAdoptionRuntime,
-        *,
-        prepared,
-        trigger_id: str,
-        started_at: str,
-        materialize_exposure: bool,
-        observations=None,
-        evidence_registry=None,
-        suspended_action_ids: frozenset[str] = frozenset(),
-    ):
-        if type(self) is not runtime_type:
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER execution requires exact runtime"
-            )
-        if runtime_type.execute is not canonical_execute:
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER execution dispatch was rebound"
-            )
-        return execute_function(
-            self,
-            prepared=prepared,
-            trigger_id=trigger_id,
-            started_at=started_at,
-            materialize_exposure=materialize_exposure,
-            observations=observations,
-            evidence_registry=evidence_registry,
-            suspended_action_ids=suspended_action_ids,
-        )
-
-    canonical_execute_code = canonical_execute.__code__
+    # Reuse the already-canonical decision-origin execute function verbatim.
+    # Adding another wrapper frame here changes the direct-caller authority
+    # seen by the decision-origin guard and incorrectly turns valid product
+    # execution into nested execution. Exposure-scope publication consumes
+    # that authority; it must never replace it.
+    canonical_execute = execute_function
+    canonical_execute_code = execute_function.__code__
 
     def publish_owned_exposure_scope(
         self: PaperExecutionAdoptionRuntime,
@@ -796,10 +588,6 @@ def bind_canonical_execute(execute_function):
     publish_owned_exposure_scope._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
     runtime_type._publish_exposure_scope = publish_owned_exposure_scope
     return canonical_execute
-
-
-_install_preparation_guard()
-del _install_preparation_guard
 
 
 __all__ = ["bind_canonical_execute"]

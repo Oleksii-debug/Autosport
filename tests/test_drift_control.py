@@ -230,6 +230,64 @@ def test_min_samples_requires_exact_builtin_int_before_comparison(tmp_path):
     assert reference.min_samples == 3
 
 
+def test_sample_counts_and_effective_size_require_exact_builtin_int(tmp_path):
+    class HostileCount(int):
+        def __lt__(self, other):
+            raise AssertionError("hostile count comparison must not run")
+
+        def __le__(self, other):
+            raise AssertionError("hostile count comparison must not run")
+
+        def __gt__(self, other):
+            raise AssertionError("hostile count comparison must not run")
+
+    hostile = HostileCount(-1)
+
+    with pytest.raises(ValueError, match="effective_sample_size must be a positive integer"):
+        _baseline_window(effective_sample_size=hostile)
+
+    with pytest.raises(ValueError, match="baseline_count must be a non-negative integer"):
+        drift_control._sample_insufficiency_reason(
+            algorithm_version=drift_control.DRIFT_ALGORITHM_VERSION,
+            min_samples=1,
+            baseline_count=hostile,
+            baseline_effective_sample_size=None,
+            current_count=2,
+            current_effective_sample_size=None,
+        )
+
+    monitor = DriftMonitor(_registry(tmp_path))
+    reference = _reference(monitor)
+    with pytest.raises(ValueError, match="sample_count must be an integer"):
+        replace(reference, sample_count=hostile)
+
+    current = _current_window()
+    observation = drift_control.DriftObservation(
+        reference_id=reference.reference_id,
+        dataset_snapshot_id=current.dataset_snapshot_id,
+        source_identity=current.source_identity,
+        revision_id=current.revision_id,
+        window_start=current.window_start,
+        window_end=current.window_end,
+        observation_as_of=current.as_of,
+        evidence_sha256=current.evidence_sha256,
+        sample_count=current.sample_count,
+        mean_fraction=current.mean_fraction,
+        effective_sample_size=current.effective_sample_size,
+        evidence_values=current.values,
+        evidence_observed_at=current.value_observed_at,
+        evidence_available_at=current.value_available_at,
+    )
+    with pytest.raises(ValueError, match="sample_count must be an integer"):
+        replace(observation, sample_count=hostile)
+    with pytest.raises(ValueError, match="effective_sample_size must be a positive integer"):
+        replace(observation, effective_sample_size=hostile)
+
+    ordinary = _baseline_window(effective_sample_size=1)
+    assert type(ordinary.sample_count) is int
+    assert type(ordinary.effective_sample_size) is int
+
+
 def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     baseline = _baseline_window(effective_sample_size=1)
     current = _current_window(effective_sample_size=1)

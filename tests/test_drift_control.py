@@ -4,6 +4,7 @@ from decimal import localcontext
 
 import pytest
 
+import autosport.drift_control as drift_control
 from autosport.drift_control import (
     DriftCausalityError,
     DriftKind,
@@ -250,6 +251,99 @@ def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     registry.path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="record digest mismatch"):
         ScientificRegistry(registry.path)
+
+
+def test_reference_effective_sample_size_controls_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=2)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert baseline.sample_count == 2
+    assert baseline.effective_sample_size == 1
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
+
+
+def test_current_effective_sample_size_controls_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=2)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert current.sample_count == 2
+    assert current.effective_sample_size == 1
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
+
+
+def test_v1_finding_replay_preserves_pre_ess_sample_semantics(tmp_path, monkeypatch):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    monkeypatch.setattr(
+        drift_control,
+        "DRIFT_ALGORITHM_VERSION",
+        drift_control.DRIFT_ALGORITHM_VERSION_V1,
+    )
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert finding.algorithm_version == drift_control.DRIFT_ALGORITHM_VERSION_V1
+    assert finding.state is DriftState.DRIFT_DETECTED
+    assert finding.insufficiency_reason is None
+    stored = registry.get("DriftFinding", finding.finding_id)
+    assert stored is not None
+    assert (
+        stored.payload["algorithm_version"]
+        == drift_control.DRIFT_ALGORITHM_VERSION_V1
+    )
+
+    monkeypatch.setattr(
+        drift_control,
+        "DRIFT_ALGORITHM_VERSION",
+        drift_control.DRIFT_ALGORITHM_VERSION_V2,
+    )
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
 
 
 def test_scoped_drift_evidence_is_hash_bound_and_scope_mismatch_fails_closed(tmp_path):

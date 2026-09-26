@@ -543,7 +543,11 @@ def capture_historical_acquisition_bundle(
         raise ValueError("output_dir already exists; historical acquisition bundles never overwrite")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    expected_coverage_sport_key = provider.sport_key
+    expected_coverage_sport_key = "table_tennis"
+    if provider.sport_key != expected_coverage_sport_key:
+        raise ProviderPayloadError(
+            "historical acquisition requires canonical table-tennis sport scope"
+        )
     coverage_report = provider.historical_coverage(coverage_from, coverage_to)
     if (
         provider.sport_key != expected_coverage_sport_key
@@ -593,7 +597,7 @@ def capture_historical_acquisition_bundle(
     )
     request_scope = {
         "provider": "parlayapi",
-        "sport_key": provider.sport_key,
+        "sport_key": expected_coverage_sport_key,
         "regions": list(provider.regions),
         "markets": list(provider.markets),
         "requested_snapshot_timestamps": list(canonical_requests),

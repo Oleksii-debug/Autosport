@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
+    DecisionLedgerIntegrityError,
     DecisionRecord,
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
@@ -30,6 +32,37 @@ from autosport.paper_settlement_learning import (
 from autosport.risk import PaperRiskPolicy
 from autosport.settlement import SettlementEngine
 from autosport.continuous_session import SettlementResolution
+
+
+def _canonical_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _rewrite_bridge_state(root: Path, state: dict[str, object]) -> None:
+    bare = {
+        "schema": state["schema"],
+        "schema_version": state["schema_version"],
+        "bindings": state["bindings"],
+    }
+    state["state_sha256"] = _canonical_digest(bare)
+    (root / "paper_learning_bridge.json").write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _fixture(
@@ -245,6 +278,37 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
             )
             self.assertEqual(durable["bindings"][ticket.ticket_id]["status"], "OUTBOX")
+            reference = durable["bindings"][ticket.ticket_id]["outbox"][
+                "observed_reward_reference"
+            ]
+            self.assertEqual(
+                reference["schema"],
+                "autosport.paper_observed_reward_reference",
+            )
+            self.assertEqual(
+                reference["issuer"],
+                "autosport.paper_settlement_learning",
+            )
+            self.assertEqual(reference["currency"], "USD")
+            self.assertEqual(reference["reward"], "10.00")
+            self.assertEqual(reference["ticket_id"], ticket.ticket_id)
+            self.assertEqual(reference["decision_id"], decision.decision_id)
+            self.assertEqual(
+                reference["settlement_bundle_sha256"],
+                durable["bindings"][ticket.ticket_id]["outbox"][
+                    "settlement_bundle_sha256"
+                ],
+            )
+            self.assertEqual(
+                reference["reference_id"],
+                _canonical_digest(
+                    {
+                        key: value
+                        for key, value in reference.items()
+                        if key != "reference_id"
+                    }
+                ),
+            )
             self.assertEqual(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
 
             reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
@@ -267,6 +331,177 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             loop_state = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
             self.assertEqual(len(loop_state["resolutions"]), 1)
             self.assertEqual(loop_state["resolutions"][0]["reward_value"], "10.00")
+
+    def test_restart_rejects_resigned_forged_observed_reward_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+
+            with patch.object(
+                AgentLoopRuntime,
+                "record_resolution",
+                side_effect=RuntimeError("crash before learner acknowledgement"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before learner"):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            state = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            outbox = state["bindings"][ticket.ticket_id]["outbox"]
+            reference = outbox["observed_reward_reference"]
+            reference["reward"] = "999.00"
+            reference["reference_id"] = _canonical_digest(
+                {
+                    key: value
+                    for key, value in reference.items()
+                    if key != "reference_id"
+                }
+            )
+            outbox["outbox_id"] = _canonical_digest(
+                {
+                    key: value
+                    for key, value in outbox.items()
+                    if key != "outbox_id"
+                }
+            )
+            _rewrite_bridge_state(root, state)
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "reference differs from product-owned source truth",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:20:01+00:00",
+                )
+
+            self.assertIs(reopened_runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"], [])
+
+    def test_restart_rechecks_decision_ledger_before_observed_reward_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+
+            with patch.object(
+                AgentLoopRuntime,
+                "record_resolution",
+                side_effect=RuntimeError("crash before learner acknowledgement"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before learner"):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            ledger_path = root / "decisions.jsonl"
+            ledger_bytes = ledger_path.read_bytes()
+            self.assertIn(b"bridge-fixture", ledger_bytes)
+            ledger_path.write_bytes(
+                ledger_bytes.replace(b"bridge-fixture", b"forged-fixture", 1)
+            )
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "SHA-256 mismatch",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:20:01+00:00",
+                )
+
+            self.assertIs(reopened_runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"], [])
 
     def test_retry_after_agent_loop_resolution_before_bridge_ack_is_exactly_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1223,6 +1458,492 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                     at="2026-09-19T21:20:00+00:00",
                 )
             self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+
+
+    def test_restart_rejects_resigned_outbox_settlement_provenance_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                _decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id="bridge-decision",
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+
+            original_resolution = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="result:0",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="evidence:0",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            prepared = bridge.prepare_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=(original_resolution,),
+                at="2026-09-19T21:19:30+00:00",
+            )
+            self.assertEqual(prepared, (ticket.ticket_id,))
+
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            self.assertEqual(resolutions, (original_resolution,))
+
+            with patch.object(
+                AgentLoopRuntime,
+                "record_resolution",
+                side_effect=RuntimeError("crash before learner acknowledgement"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before learner"):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            state = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            binding = state["bindings"][ticket.ticket_id]
+            original_intent = binding["settlement_intent"]
+            self.assertEqual(
+                original_intent["settlement_evidence"][0]["evidence_id"],
+                "evidence:0",
+            )
+
+            forged_resolution = SettlementResolution(
+                event_identity=original_resolution.event_identity,
+                settlement_ref="forged-result:0",
+                quote_outcomes=dict(original_resolution.quote_outcomes),
+                evidence_id="forged-evidence:0",
+                evidence_sha256="f" * 64,
+                available_at=original_resolution.available_at,
+            )
+            settled_ticket = PaperBook.load(
+                root / "paper_book.json"
+            ).tickets[ticket.ticket_id]
+            forged_outbox = bridge._derive_outbox(
+                binding,
+                settled_ticket,
+                (forged_resolution,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            self.assertIsNotNone(forged_outbox)
+            binding["outbox"] = forged_outbox
+            _rewrite_bridge_state(root, state)
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "settlement.*intent|pre-settlement|provenance",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:20:01+00:00",
+                )
+
+            self.assertIs(
+                reopened_runtime.snapshot().phase,
+                AgentLoopPhase.WAIT_OUTCOME,
+            )
+
+
+    def test_acked_reward_rejects_later_conflicting_settlement_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            state_path = root / "paper_learning_bridge.json"
+            exact_acked_state = state_path.read_bytes()
+            before = runtime.snapshot()
+            correction = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="corrected-result",
+                quote_outcomes={leg.quote_key: "loss"},
+                evidence_id="corrected-evidence",
+                evidence_sha256="f" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "successor settlement/reward generation required",
+            ):
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(correction,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:00+00:00",
+                )
+
+            after = runtime.snapshot()
+            self.assertEqual(after.transition_id, before.transition_id)
+            self.assertEqual(after.reward_id, before.reward_id)
+            durable = json.loads(state_path.read_text(encoding="utf-8"))
+            binding = durable["bindings"][ticket.ticket_id]
+            self.assertEqual(binding["status"], "INVALIDATED")
+            self.assertEqual(
+                binding["outbox"]["known_quote_outcomes"],
+                {leg.quote_key: "win"},
+            )
+            invalidation = binding["invalidation"]
+            self.assertEqual(
+                invalidation["reason"],
+                "ACKED_REWARD_CONTRADICTED_BY_LATER_SETTLEMENT",
+            )
+            self.assertEqual(
+                invalidation["prior_outbox_id"],
+                binding["outbox"]["outbox_id"],
+            )
+            self.assertEqual(invalidation["prior_reward_id"], before.reward_id)
+            self.assertEqual(
+                invalidation["prior_settlement_bundle_sha256"],
+                binding["outbox"]["settlement_bundle_sha256"],
+            )
+            self.assertEqual(
+                invalidation["conflicts"],
+                [
+                    {
+                        "quote_key": leg.quote_key,
+                        "previous_outcome": "win",
+                        "replacement_outcome": "loss",
+                    }
+                ],
+            )
+            self.assertEqual(
+                invalidation["invalidation_id"],
+                _canonical_digest(
+                    {
+                        key: value
+                        for key, value in invalidation.items()
+                        if key != "invalidation_id"
+                    }
+                ),
+            )
+            frozen_invalidated_state = state_path.read_bytes()
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                state_path,
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.campaign_plan_anchor(ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.bind_campaign_plan_anchor(
+                    ticket_id=ticket.ticket_id,
+                    plan_id="a" * 64,
+                    reflection_available_at="2026-09-19T21:22:01+00:00",
+                )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.resolution_witness(ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.next_checkpoint(ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:01+00:00",
+                )
+            self.assertEqual(state_path.read_bytes(), frozen_invalidated_state)
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durably invalidated",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(correction,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:02+00:00",
+                )
+            self.assertEqual(state_path.read_bytes(), frozen_invalidated_state)
+
+            tampered = json.loads(state_path.read_text(encoding="utf-8"))
+            tampered["bindings"][ticket.ticket_id]["invalidation"]["reason"] = "FORGED"
+            _rewrite_bridge_state(root, tampered)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "invalidation digest mismatch",
+            ):
+                PaperSettlementLearningBridge(
+                    state_path,
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+            state_path.write_bytes(frozen_invalidated_state)
+            resigned = json.loads(state_path.read_text(encoding="utf-8"))
+            resigned_invalidation = resigned["bindings"][ticket.ticket_id]["invalidation"]
+            resigned_invalidation["conflicts"][0]["replacement_outcome"] = "void"
+            resigned_invalidation["invalidation_id"] = _canonical_digest(
+                {
+                    key: value
+                    for key, value in resigned_invalidation.items()
+                    if key != "invalidation_id"
+                }
+            )
+            _rewrite_bridge_state(root, resigned)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "conflicts differ from source evidence",
+            ):
+                PaperSettlementLearningBridge(
+                    state_path,
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+            state_path.write_bytes(exact_acked_state)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "rollback authority",
+            ):
+                PaperSettlementLearningBridge(
+                    state_path,
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+    def test_acked_reward_accepts_later_confirmatory_settlement_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            before = runtime.snapshot()
+            confirmation = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="confirming-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="confirming-evidence",
+                evidence_sha256="e" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(confirmation,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:00+00:00",
+                ),
+                (),
+            )
+            after = runtime.snapshot()
+            self.assertEqual(after.transition_id, before.transition_id)
+            self.assertEqual(after.reward_id, before.reward_id)
+
+    def test_acked_loss_allows_later_evidence_for_previously_unknown_leg(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legs = (
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="event-2",
+                    market_id="winner",
+                    selection_id="away",
+                    locked_odds=Decimal("3.00"),
+                    sport="table_tennis",
+                ),
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=legs)
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={legs[0].quote_key: "loss"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            before = runtime.snapshot()
+            later_other_leg = SettlementResolution(
+                event_identity=f"provider-a:{legs[1].event_id}",
+                settlement_ref="later-other-leg-result",
+                quote_outcomes={legs[1].quote_key: "win"},
+                evidence_id="later-other-leg-evidence",
+                evidence_sha256="d" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+
+            self.assertEqual(
+                bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(later_other_leg,),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:22:00+00:00",
+                ),
+                (),
+            )
+            after = runtime.snapshot()
+            self.assertEqual(after.transition_id, before.transition_id)
+            self.assertEqual(after.reward_id, before.reward_id)
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                durable["bindings"][ticket.ticket_id]["outbox"]["known_quote_outcomes"],
+                {legs[0].quote_key: "loss"},
+            )
 
 
 if __name__ == "__main__":

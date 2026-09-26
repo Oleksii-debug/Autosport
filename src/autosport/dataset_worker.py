@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import builtins
 import queue
 import threading
 from dataclasses import dataclass
@@ -12,46 +11,14 @@ from .dataset import ReplayDataset
 DatasetValidationTask = Callable[[], ReplayDataset]
 
 
-def _build_safe_exception_type_label():
-    """Freeze trusted built-in exception identities before caller code can relabel them."""
-
-    trusted_types: tuple[tuple[type[BaseException], str], ...] = tuple(
-        (candidate, type.__getattribute__(candidate, "__name__"))
-        for candidate in tuple(vars(builtins).values())
-        if type(candidate) is type
-        and issubclass(candidate, BaseException)
-        and type(type.__getattribute__(candidate, "__name__")) is str
-    )
-
-    def safe_exception_type_label(exc: BaseException) -> str:
-        """Return only an import-time trusted built-in exception category."""
-
-        try:
-            exception_type = type(exc)
-            mro = type.__getattribute__(exception_type, "__mro__")
-        except BaseException:
-            return "BaseException"
-
-        if type(mro) is not tuple:
-            return "BaseException"
-
-        for candidate_type in mro:
-            for trusted_type, trusted_name in trusted_types:
-                if candidate_type is trusted_type:
-                    return trusted_name
-        return "BaseException"
-
-    return safe_exception_type_label
-
-
-_safe_exception_type_label = _build_safe_exception_type_label()
-del _build_safe_exception_type_label
-
-
 def _safe_worker_error(exc: BaseException) -> str:
-    """Render a bounded terminal failure without inspecting exception detail."""
+    """Render a constant terminal failure without inspecting caller-controlled metadata."""
 
-    return f"{_safe_exception_type_label(exc)}: dataset validation failed"
+    # Exception detail, class names, MROs and the mutable ``builtins`` namespace are
+    # deliberately not consulted here. This is an operator presentation boundary,
+    # not an exception-classification authority.
+    del exc
+    return "DatasetValidationError: dataset validation failed"
 
 
 @dataclass(frozen=True, slots=True)

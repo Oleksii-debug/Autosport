@@ -7,6 +7,7 @@ from autosport.dataset_worker import OneShotDatasetValidationWorker, _safe_worke
 
 _SECRET = "sk-live-do-not-leak"
 _PRIVATE_PATH = r"C:\Users\owner\private\dataset-response.txt"
+_SAFE_ERROR = "DatasetValidationError: dataset validation failed"
 
 
 class _SecretBearingError(RuntimeError):
@@ -29,7 +30,7 @@ def test_safe_worker_error_never_renders_exception_detail() -> None:
     _SecretBearingError.stringify_calls = 0
     rendered = _safe_worker_error(_SecretBearingError())
 
-    assert rendered == "RuntimeError: dataset validation failed"
+    assert rendered == _SAFE_ERROR
     assert _SecretBearingError.stringify_calls == 0
     assert _SECRET not in rendered
     assert _PRIVATE_PATH not in rendered
@@ -40,7 +41,7 @@ def test_safe_worker_error_handles_hostile_stringification_without_calling_it() 
     _UnrenderableError.stringify_calls = 0
     rendered = _safe_worker_error(_UnrenderableError())
 
-    assert rendered == "RuntimeError: dataset validation failed"
+    assert rendered == _SAFE_ERROR
     assert _UnrenderableError.stringify_calls == 0
     assert _SECRET not in rendered
 
@@ -51,7 +52,7 @@ def test_safe_worker_error_does_not_publish_arbitrary_runtime_error_body() -> No
         RuntimeError(f"{_PRIVATE_PATH}: {response_body}")
     )
 
-    assert rendered == "RuntimeError: dataset validation failed"
+    assert rendered == _SAFE_ERROR
     assert _PRIVATE_PATH not in rendered
     assert response_body not in rendered
 
@@ -64,19 +65,20 @@ def test_safe_worker_error_ignores_hostile_custom_exception_class_name() -> None
     )
     rendered = _safe_worker_error(hostile_type("private body"))
 
-    assert rendered == "RuntimeError: dataset validation failed"
+    assert rendered == _SAFE_ERROR
     assert "api_key" not in rendered
     assert _SECRET not in rendered
 
 
-def test_safe_worker_error_ignores_late_builtins_namespace_relabeling(monkeypatch) -> None:
+def test_safe_worker_error_ignores_mutated_builtins_namespace(monkeypatch) -> None:
     hostile_name = "api_key_sk_live_do_not_leak"
     hostile_type = type(hostile_name, (RuntimeError,), {})
     monkeypatch.setattr(builtins, hostile_name, hostile_type, raising=False)
+    monkeypatch.setattr(builtins, "RuntimeError", hostile_type)
 
     rendered = _safe_worker_error(hostile_type("private body"))
 
-    assert rendered == "RuntimeError: dataset validation failed"
+    assert rendered == _SAFE_ERROR
     assert hostile_name not in rendered
     assert _SECRET not in rendered
 
@@ -93,7 +95,7 @@ def test_worker_terminal_message_never_publishes_raw_detail() -> None:
 
     assert message is not None
     assert message.result is None
-    assert message.error == "RuntimeError: dataset validation failed"
+    assert message.error == _SAFE_ERROR
     assert _SecretBearingError.stringify_calls == 0
     assert _SECRET not in message.error
     assert _PRIVATE_PATH not in message.error

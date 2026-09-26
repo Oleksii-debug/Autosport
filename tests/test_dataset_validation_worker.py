@@ -73,7 +73,7 @@ class DatasetValidationWorkerTests(unittest.TestCase):
         self.assertIsNone(failed.result)
         self.assertEqual(
             failed.error,
-            "BaseException: dataset validation failed",
+            "DatasetValidationError: dataset validation failed",
         )
         self.assertFalse(worker.busy)
         self._assert_retry_succeeds(worker)

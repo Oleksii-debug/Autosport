@@ -2,6 +2,18 @@ from __future__ import annotations
 
 import sys
 
+from autosport.secret_redaction import safe_exception_detail
+
+
+# Expected failures are an operator-presentation boundary, not an extensible exception
+# registry. Capture the concrete interpreter-owned classes and canonical redactor once
+# so later module-global or builtins rebinding cannot mint presentation authority.
+_CANONICAL_VALUE_ERROR = ValueError
+_CANONICAL_OS_ERROR = OSError
+_CANONICAL_FILE_NOT_FOUND_ERROR = FileNotFoundError
+_CANONICAL_SAFE_EXCEPTION_DETAIL = safe_exception_detail
+_EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
+
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
 
@@ -117,21 +129,27 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    # Formatting belongs to the same packaged fail-closed boundary as dispatch.
-    # Exception subclasses are caller/library supplied: neither custom type metadata,
-    # __str__(), nor methods on a returned str subclass may recreate a traceback.
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = exception_type
-    detail = " ".join(rendered.splitlines()).strip()
-    if not detail:
-        detail = exception_type
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={exception_type}: {detail}"
+    # Type labels are selected only from captured interpreter-owned classes. Custom
+    # exception metadata and the mutable builtins namespace never become presentation
+    # authority. Unknown OSError subclasses intentionally collapse to OSError.
+    if isinstance(exc, _CANONICAL_VALUE_ERROR):
+        error_label = "ValueError"
+    elif isinstance(exc, _CANONICAL_FILE_NOT_FOUND_ERROR):
+        error_label = "FileNotFoundError"
+    else:
+        error_label = "OSError"
+
+    if safe_exception_detail is not _CANONICAL_SAFE_EXCEPTION_DETAIL:
+        error_label = "ExpectedFailure"
+        detail = "exception details unavailable"
+    else:
+        detail = _CANONICAL_SAFE_EXCEPTION_DETAIL(
+            exc,
+            unavailable_detail="exception details unavailable",
+        )
+    detail = " ".join(detail.splitlines()).strip()
+    suffix = "" if not detail else f": {detail}"
+    return f"Autosport-Data: {command}=FAIL_CLOSED error={error_label}{suffix}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     command, forwarded = args[0], args[1:]
     try:
         return _dispatch(command, forwarded)
-    except (OSError, ValueError) as exc:
+    except _EXPECTED_FAILURE_TYPES as exc:
         # This executable is a packaged user-facing boundary. Expected malformed
         # local input and filesystem failures must be recoverable without a Python
         # traceback. Deliberately do not catch RuntimeError, SystemExit or

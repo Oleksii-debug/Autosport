@@ -140,3 +140,33 @@ def test_profile_constructor_global_rebinding_fails_before_hostile_dispatch(
         _resolve(registry)
 
     assert not hostile_called
+
+
+def test_registry_class_alias_rebinding_cannot_mint_current_governance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class SurrogateRegistry(BookmakerCapabilityRegistry):
+        pass
+
+    registry = SurrogateRegistry(tmp_path / "surrogate-registry.json")
+    observed_at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    registry.register_governance(
+        BookmakerGovernanceEvidence(
+            venue_id="provider-x",
+            account_id="account-1",
+            jurisdiction="SK",
+            terms_version="terms-v1",
+            automation_permission=GovernancePermissionState.PERMITTED,
+            observed_at=observed_at,
+            source_ref="https://provider.example/terms-v1",
+            source_payload_sha256="b" * 64,
+        )
+    )
+    monkeypatch.setattr(currentness, "BookmakerCapabilityRegistry", SurrogateRegistry)
+
+    with pytest.raises(
+        currentness.GovernanceCurrentnessError,
+        match="governance registry reader dependency authority changed",
+    ):
+        _resolve(registry)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.bookmaker_capability as capability_module
 import autosport.governance_currentness as currentness
 from autosport.bookmaker_capability_registry import (
     BookmakerCapabilityRegistry,
@@ -85,6 +86,56 @@ def test_profile_reader_instance_shadow_fails_before_hostile_dispatch(
     with pytest.raises(
         currentness.GovernanceCurrentnessError,
         match="governance registry reader dispatch authority changed",
+    ):
+        _resolve(registry)
+
+    assert not hostile_called
+
+
+def test_profile_identity_property_rebinding_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    hostile_called = False
+
+    def hostile(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile profile_id property executed")
+
+    monkeypatch.setattr(
+        capability_module.BookmakerCapabilityProfile,
+        "profile_id",
+        property(hostile),
+    )
+
+    with pytest.raises(
+        currentness.GovernanceCurrentnessError,
+        match="governance registry data dependency authority changed",
+    ):
+        _resolve(registry)
+
+    assert not hostile_called
+
+
+def test_profile_constructor_global_rebinding_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    hostile_called = False
+
+    def hostile(*args, **kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile profile validation helper executed")
+
+    monkeypatch.setattr(capability_module, "_text", hostile)
+
+    with pytest.raises(
+        currentness.GovernanceCurrentnessError,
+        match="governance registry global dependency authority changed",
     ):
         _resolve(registry)
 

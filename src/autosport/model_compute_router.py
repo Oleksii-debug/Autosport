@@ -1330,9 +1330,9 @@ def _candidate_map(
 ) -> dict[str, ComputeCandidate]:
     result: dict[str, ComputeCandidate] = {}
     for candidate in candidates:
-        if not isinstance(candidate, ComputeCandidate):
+        if type(candidate) is not ComputeCandidate:
             raise TypeError(
-                "candidates must contain ComputeCandidate values"
+                "candidates must contain exact ComputeCandidate values"
             )
         if candidate.candidate_id in result:
             raise ModelComputeRouterError(

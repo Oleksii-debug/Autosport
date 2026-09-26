@@ -224,11 +224,15 @@ class _DispatchState:
         return self._trusted_datetime.now(self._trusted_utc)
 
     def open(self, authority):
-        constructor_guard = object.__getattribute__(self, "_constructor_guard")
-        constructor_guard()
+        # Full graph validation at the canonical-open choke point also protects
+        # reflected predecessor issue/resolve callables: those originals resolve
+        # _open_canonical_authorities dynamically and therefore cannot skip the
+        # current product dispatch graph merely by being recovered reflectively.
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
         original_open = object.__getattribute__(self, "_DispatchState__original_open")
         registry, store = original_open(authority)
-        constructor_guard()
+        common_guard()
         if type(store) is not self._store_type:
             raise self._error_type(
                 "product PolicyEvaluation issuance authority was rebound: "
@@ -331,6 +335,30 @@ def _build_dispatch_guards():
     resolve_dispatch = state.resolve
     verify_dispatch = state.verify
 
+    # This snapshot lives outside the reflectable _DispatchState object.  It is
+    # populated only after bind_public() has installed the final public wrappers.
+    # object.__setattr__(state, ...) can bypass the class' syntactic write guard,
+    # but it cannot update this independently held exact-identity witness.
+    state_instance_snapshot = None
+
+    def require_state_instance_authority() -> None:
+        snapshot = state_instance_snapshot
+        if snapshot is None:
+            raise error_type("policy issuance dispatch state witness is unavailable")
+        for name, expected in snapshot:
+            try:
+                current = object.__getattribute__(state, name)
+            except AttributeError as exc:
+                raise error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    "dispatch state instance"
+                ) from exc
+            if current is not expected:
+                raise error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    "dispatch state instance"
+                )
+
     def require_state_class_authority() -> None:
         if (
             type(state) is not state_type
@@ -353,9 +381,10 @@ def _build_dispatch_guards():
 
     def guarded_open(authority: ProductPolicyEvaluationWorkspace):
         require_state_class_authority()
-        if object.__getattribute__(state, "_sealed") is not True:
-            raise error_type("policy issuance dispatch state is not sealed")
-        return open_dispatch(authority)
+        require_state_instance_authority()
+        result = open_dispatch(authority)
+        require_state_instance_authority()
+        return result
 
     def guarded_issue(
         authority: ProductPolicyEvaluationWorkspace,
@@ -365,14 +394,15 @@ def _build_dispatch_guards():
         baseline_kind: BaselineKind | None = None,
     ) -> IssuedPolicyEvaluationRef:
         require_state_class_authority()
-        if object.__getattribute__(state, "_sealed") is not True:
-            raise error_type("policy issuance dispatch state is not sealed")
-        return issue_dispatch(
+        require_state_instance_authority()
+        result = issue_dispatch(
             authority,
             protocol,
             source_evaluation_bundle_id=source_evaluation_bundle_id,
             baseline_kind=baseline_kind,
         )
+        require_state_instance_authority()
+        return result
 
     def guarded_resolve(
         authority: ProductPolicyEvaluationWorkspace,
@@ -380,9 +410,10 @@ def _build_dispatch_guards():
         reference: IssuedPolicyEvaluationRef,
     ) -> PolicyEvaluation:
         require_state_class_authority()
-        if object.__getattribute__(state, "_sealed") is not True:
-            raise error_type("policy issuance dispatch state is not sealed")
-        return resolve_dispatch(authority, protocol, reference)
+        require_state_instance_authority()
+        result = resolve_dispatch(authority, protocol, reference)
+        require_state_instance_authority()
+        return result
 
     def guarded_verify(
         authority: ProductPolicyEvaluationWorkspace,
@@ -391,11 +422,16 @@ def _build_dispatch_guards():
         claimed: PolicyEvaluation,
     ) -> PolicyEvaluation:
         require_state_class_authority()
-        if object.__getattribute__(state, "_sealed") is not True:
-            raise error_type("policy issuance dispatch state is not sealed")
-        return verify_dispatch(authority, protocol, reference, claimed)
+        require_state_instance_authority()
+        result = verify_dispatch(authority, protocol, reference, claimed)
+        require_state_instance_authority()
+        return result
 
     state.bind_public(guarded_open, guarded_issue, guarded_resolve, guarded_verify)
+    state_instance_snapshot = tuple(
+        (name, object.__getattribute__(state, name))
+        for name in state_type.__slots__
+    )
     return guarded_open, guarded_issue, guarded_resolve, guarded_verify
 
 

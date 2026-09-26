@@ -74,8 +74,8 @@ class AnnouncementEvent:
     episode_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.kind, AnnouncementKind):
-            raise TypeError("kind must be AnnouncementKind")
+        if type(self.kind) is not AnnouncementKind:
+            raise TypeError("kind must be exact AnnouncementKind")
         _require_trimmed("text", self.text)
         _require_trimmed("state_token", self.state_token)
 
@@ -111,8 +111,8 @@ class AnnouncementDecision:
     def __post_init__(self) -> None:
         if type(self.emit) is not bool:
             raise TypeError("emit must be bool")
-        if not isinstance(self.priority, AnnouncementPriority):
-            raise TypeError("priority must be AnnouncementPriority")
+        if type(self.priority) is not AnnouncementPriority:
+            raise TypeError("priority must be exact AnnouncementPriority")
         if type(self.move_focus) is not bool:
             raise TypeError("move_focus must be bool")
         if self.emit:
@@ -132,30 +132,6 @@ class AnnouncementDecision:
         _require_trimmed("reason", self.reason)
 
 
-def _issue_announcement_decision(
-    *,
-    emit: bool,
-    priority: AnnouncementPriority,
-    text: str | None,
-    reason: str,
-    activity_id: str | None = None,
-    move_focus: bool = False,
-) -> AnnouncementDecision:
-    """Issue one validated decision from the product-owned policy path."""
-
-    decision = object.__new__(AnnouncementDecision)
-    for name, value in (
-        ("emit", emit),
-        ("priority", priority),
-        ("text", text),
-        ("reason", reason),
-        ("activity_id", activity_id),
-        ("move_focus", move_focus),
-    ):
-        object.__setattr__(decision, name, value)
-    decision.__post_init__()
-    return decision
-
 
 class AnnouncementGate:
     """Bound and deduplicate machine announcement decisions.
@@ -171,13 +147,16 @@ class AnnouncementGate:
     to bypass deduplication.
     """
 
-    __slots__ = ("_max_history", "_history")
+    __slots__ = ("_max_history", "_history", "_issued_for_emission")
 
     def __init__(self, *, max_history: int = 128) -> None:
-        if isinstance(max_history, bool) or not isinstance(max_history, int) or max_history <= 0:
-            raise ValueError("max_history must be a positive integer")
+        if type(max_history) is not int:
+            raise ValueError("max_history must be an exact positive integer")
+        if max_history <= 0:
+            raise ValueError("max_history must be an exact positive integer")
         self._max_history = max_history
         self._history: OrderedDict[tuple[str, ...], None] = OrderedDict()
+        self._issued_for_emission: OrderedDict[int, AnnouncementDecision] = OrderedDict()
 
     @property
     def history_size(self) -> int:
@@ -188,19 +167,36 @@ class AnnouncementGate:
         return self._max_history
 
     def decide(self, event: AnnouncementEvent) -> AnnouncementDecision:
-        if not isinstance(event, AnnouncementEvent):
-            raise TypeError("event must be AnnouncementEvent")
+        if type(event) is not AnnouncementEvent:
+            raise TypeError("event must be exact AnnouncementEvent")
 
-        intended = _PRIORITY_BY_KIND[event.kind]
+        # Snapshot and revalidate authority-bearing fields at the gate.
+        kind = event.kind
+        text = event.text
+        state_token = event.state_token
+        episode_id = event.episode_id
+        if type(kind) is not AnnouncementKind:
+            raise TypeError("event.kind must be exact AnnouncementKind")
+        _require_trimmed("event.text", text)
+        _require_trimmed("event.state_token", state_token)
+
+        intended = _PRIORITY_BY_KIND[kind]
+        if intended is AnnouncementPriority.ASSERTIVE:
+            if episode_id is None:
+                raise ValueError("assertive announcement event requires episode_id")
+            _require_trimmed("event.episode_id", episode_id)
+        elif episode_id is not None:
+            raise ValueError("episode_id is valid only for assertive announcement events")
+
         if intended is AnnouncementPriority.SILENT:
             return _suppressed("HIGH_FREQUENCY_CHURN")
 
         if intended is AnnouncementPriority.ASSERTIVE:
-            assert event.episode_id is not None
-            key = ("ASSERTIVE", event.episode_id)
+            assert episode_id is not None
+            key = ("ASSERTIVE", episode_id)
             duplicate_reason = "DUPLICATE_CRITICAL_EPISODE"
         else:
-            key = ("POLITE", event.state_token)
+            key = ("POLITE", state_token)
             duplicate_reason = "DUPLICATE_STATE_TRANSITION"
 
         if key in self._history:
@@ -208,26 +204,51 @@ class AnnouncementGate:
             return _suppressed(duplicate_reason)
 
         self._remember(key)
-        return _issue_announcement_decision(
-            emit=True,
-            priority=intended,
-            text=event.text,
-            reason="EMIT",
-            activity_id=_activity_id_for_key(key),
-            move_focus=False,
-        )
+
+        # Deliberately inline construction: no generic module-level mint can
+        # manufacture emitter-eligible decisions. Eligibility additionally
+        # requires this exact gate-issued object identity and is one-shot.
+        decision = object.__new__(AnnouncementDecision)
+        for name, value in (
+            ("emit", True),
+            ("priority", intended),
+            ("text", text),
+            ("reason", "EMIT"),
+            ("activity_id", _activity_id_for_key(key)),
+            ("move_focus", False),
+        ):
+            object.__setattr__(decision, name, value)
+        decision.__post_init__()
+        self._remember_issued_for_emission(decision)
+        return decision
+
+    def consume_for_emission(self, decision: AnnouncementDecision) -> AnnouncementDecision:
+        """Consume one exact gate-issued emitted decision exactly once."""
+
+        if type(decision) is not AnnouncementDecision:
+            raise TypeError("decision must be exact AnnouncementDecision")
+        registered = self._issued_for_emission.get(id(decision))
+        if registered is not decision:
+            raise ValueError("decision was not issued for emission by this AnnouncementGate")
+        del self._issued_for_emission[id(decision)]
+        return decision
 
     def _remember(self, key: tuple[str, ...]) -> None:
         self._history[key] = None
         while len(self._history) > self._max_history:
             self._history.popitem(last=False)
 
+    def _remember_issued_for_emission(self, decision: AnnouncementDecision) -> None:
+        self._issued_for_emission[id(decision)] = decision
+        while len(self._issued_for_emission) > self._max_history:
+            self._issued_for_emission.popitem(last=False)
+
 
 def priority_for_kind(kind: AnnouncementKind) -> AnnouncementPriority:
     """Return product-owned priority without allowing caller escalation."""
 
-    if not isinstance(kind, AnnouncementKind):
-        raise TypeError("kind must be AnnouncementKind")
+    if type(kind) is not AnnouncementKind:
+        raise TypeError("kind must be exact AnnouncementKind")
     return _PRIORITY_BY_KIND[kind]
 
 
@@ -265,16 +286,23 @@ def _validate_activity_id(
 
 
 def _suppressed(reason: str) -> AnnouncementDecision:
-    return _issue_announcement_decision(
-        emit=False,
-        priority=AnnouncementPriority.SILENT,
-        text=None,
-        reason=reason,
-        activity_id=None,
-        move_focus=False,
-    )
+    _require_trimmed("reason", reason)
+    decision = object.__new__(AnnouncementDecision)
+    for name, value in (
+        ("emit", False),
+        ("priority", AnnouncementPriority.SILENT),
+        ("text", None),
+        ("reason", reason),
+        ("activity_id", None),
+        ("move_focus", False),
+    ):
+        object.__setattr__(decision, name, value)
+    decision.__post_init__()
+    return decision
 
 
 def _require_trimmed(name: str, value: object) -> None:
-    if not isinstance(value, str) or not value or value.strip() != value:
-        raise ValueError(f"{name} must be a non-empty trimmed string")
+    if type(value) is not str:
+        raise ValueError(f"{name} must be an exact non-empty trimmed string")
+    if not value or value.strip() != value:
+        raise ValueError(f"{name} must be an exact non-empty trimmed string")

@@ -512,6 +512,7 @@ assert_exact_capability_fences()
 def test_runtime_repair_self_reload_keeps_pristine_delegates_and_one_finder() -> None:
     script = r'''
 import importlib
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -533,6 +534,8 @@ def finder_count():
 
 
 def assert_fail_closed_bind_and_holdout_load(root: Path):
+    lineage_root = (root / "lineage-authority").resolve()
+    os.environ["AUTOSPORT_MONOTONIC_AUTHORITY_ROOT"] = str(lineage_root)
     workspace = root / "feature-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     feature_set = FeatureSet(

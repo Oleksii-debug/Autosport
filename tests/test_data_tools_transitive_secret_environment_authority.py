@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport import data_tools_entry, secret_redaction
@@ -58,6 +59,60 @@ def test_transitive_sensitive_key_classifier_rebinding_cannot_publish_bare_secre
         secret_redaction,
         "is_sensitive_key",
         lambda _key: False,
+    ):
+        output = _render_with_configured_secret(secret)
+
+    _assert_fail_closed(output, secret)
+
+
+def test_transitive_os_module_rebinding_cannot_hide_configured_secret() -> None:
+    """The canonical resolver must not late-resolve a substituted `os` module."""
+
+    secret = "AS-DATATOOLS-TRANSITIVE-OS-SENTINEL-b31c"
+    with patch.dict(
+        os.environ,
+        {"AUTOSPORT_TEST_API_KEY": secret},
+        clear=False,
+    ), patch.object(
+        secret_redaction,
+        "os",
+        SimpleNamespace(environ={}),
+    ):
+        output = _render_with_configured_secret(secret)
+
+    _assert_fail_closed(output, secret)
+
+
+def test_transitive_re_sub_rebinding_fails_closed_before_redaction() -> None:
+    """Sensitive-key normalization must retain the canonical regex dispatch."""
+
+    secret = "AS-DATATOOLS-TRANSITIVE-RE-SENTINEL-583e"
+    with patch.dict(
+        os.environ,
+        {"AUTOSPORT_TEST_API_KEY": secret},
+        clear=False,
+    ), patch.object(
+        secret_redaction.re,
+        "sub",
+        lambda _pattern, _replacement, _value: "",
+    ):
+        output = _render_with_configured_secret(secret)
+
+    _assert_fail_closed(output, secret)
+
+
+def test_transitive_url_decoder_rebinding_fails_closed_before_redaction() -> None:
+    """Query-key classification must retain the canonical URL decoder dispatch."""
+
+    secret = "AS-DATATOOLS-TRANSITIVE-URLDECODER-SENTINEL-e3f4"
+    with patch.dict(
+        os.environ,
+        {"AUTOSPORT_TEST_API_KEY": secret},
+        clear=False,
+    ), patch.object(
+        secret_redaction,
+        "unquote_plus",
+        lambda _value: "market",
     ):
         output = _render_with_configured_secret(secret)
 

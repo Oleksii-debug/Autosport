@@ -140,6 +140,11 @@ def _install_expected_failure_message():
     canonical_file_not_found_error = FileNotFoundError
     redaction_module = _secret_redaction
     canonical_redactor = safe_exception_detail
+    canonical_os = redaction_module.os
+    canonical_environ = canonical_os.environ
+    canonical_re = redaction_module.re
+    canonical_re_sub = canonical_re.sub
+    canonical_unquote_plus = redaction_module.unquote_plus
     callable_names = (
         "redact_operator_text",
         "_secret_values",
@@ -184,6 +189,11 @@ def _install_expected_failure_message():
             _secret_redaction is not redaction_module
             or safe_exception_detail is not canonical_redactor
             or getattr(canonical_redactor, "__code__", None) is not canonical_redactor_code
+            or redaction_module.os is not canonical_os
+            or canonical_os.environ is not canonical_environ
+            or redaction_module.re is not canonical_re
+            or canonical_re.sub is not canonical_re_sub
+            or redaction_module.unquote_plus is not canonical_unquote_plus
         ):
             return False
         for name, expected, expected_code in callable_witnesses:

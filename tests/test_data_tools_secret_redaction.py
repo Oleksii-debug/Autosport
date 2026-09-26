@@ -167,6 +167,31 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
         self.assertIn("exception details unavailable", output)
         self.assertNotIn(secret, output)
 
+    def test_expected_failure_renderer_rebinding_cannot_publish_raw_secret(self) -> None:
+        secret = "AS-DATATOOLS-RENDERER-REBIND-SENTINEL-4a37"
+        stderr = io.StringIO()
+
+        with patch(
+            "autosport.data_tools_entry._dispatch",
+            side_effect=ValueError(f"Authorization: Bearer {secret}"),
+        ):
+            with patch.object(
+                data_tools_entry,
+                "_expected_failure_message",
+                lambda _command, exc: f"RAW {exc}",
+            ):
+                with redirect_stderr(stderr):
+                    result = data_tools_entry.main(
+                        ["verify-dataset", "dataset-dir"]
+                    )
+
+        self.assertEqual(result, 3)
+        output = stderr.getvalue()
+        self.assertIn("error=ExpectedFailure", output)
+        self.assertIn("exception details unavailable", output)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("RAW", output)
+
     def test_unknown_command_never_echoes_caller_controlled_text(self) -> None:
         secret = "AS-DATATOOLS-UNKNOWN-COMMAND-SECRET-58a1"
         stdout = io.StringIO()

@@ -459,6 +459,71 @@ def test_checkpoint_parser_rejects_unknown_fields_and_boolean_version(tmp_path):
         )
 
 
+
+def test_checkpoint_restart_rejects_duplicate_authority_root_key(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint_path.write_text(
+        (
+            "{"
+            f'"schema":{json.dumps(payload["schema"])},'
+            f'"version":{payload["version"]},'
+            f'"identity_root_sha256":{json.dumps("0" * 64)},'
+            f'"identity_root_sha256":{json.dumps(payload["identity_root_sha256"])},'
+            f'"opponent_root_sha256":{json.dumps(payload["opponent_root_sha256"])},'
+            f'"generation_sha256":{json.dumps(payload["generation_sha256"])}'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="cannot load sport-memory authority checkpoint",
+    ):
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path, identity, opponent
+        )
+
+
+def test_opponent_source_projection_rejects_duplicate_performances_key(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    raw = opponent.path.read_text(encoding="utf-8")
+    assert '"performances": [' in raw
+    opponent.path.write_text(
+        raw.replace(
+            '"performances": [',
+            '"performances": [],\n  "performances": [',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="cannot read opponent canonical store",
+    ):
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path, identity, opponent
+        )
+
+
+
 def test_checkpoint_rejects_store_bound_to_different_registry_object(tmp_path):
     identity, opponent = _canonical_stores(tmp_path)
     other_identity = ParticipantIdentityRegistry.initialize_pristine(
@@ -476,6 +541,101 @@ def test_checkpoint_rejects_store_bound_to_different_registry_object(tmp_path):
             other_identity,
             opponent,
         )
+
+
+def test_bound_runtime_rejects_authority_binding_reassignment(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    other_root = tmp_path / "other-lineage"
+    other_root.mkdir()
+    other_identity, other_opponent = _canonical_stores(other_root)
+    other_checkpoint_path, other_runtime_path = _paths(other_root)
+    other_runtime = initialize_or_open_bound_sport_memory_runtime(
+        other_runtime_path,
+        other_checkpoint_path,
+        other_identity,
+        other_opponent,
+    )
+
+    replacements = {
+        "_bound_checkpoint_path": other_checkpoint_path,
+        "_bound_identity_selector": other_identity,
+        "_bound_opponent_selector": other_opponent,
+        "path": other_runtime_path,
+        "opponent_authority": other_opponent,
+        "authority_generation_sha256": other_runtime.authority_generation_sha256,
+    }
+    for name, value in replacements.items():
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="binding is immutable",
+        ):
+            setattr(runtime, name, value)
+
+
+def test_bound_runtime_detects_direct_dict_and_selector_path_drift(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    other_root = tmp_path / "other-lineage"
+    other_root.mkdir()
+    other_identity, other_opponent = _canonical_stores(other_root)
+    other_checkpoint_path, other_runtime_path = _paths(other_root)
+
+    original_checkpoint = runtime.__dict__["_bound_checkpoint_path"]
+    runtime.__dict__["_bound_checkpoint_path"] = other_checkpoint_path
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="binding seal mismatch",
+    ):
+        runtime._refresh_bound_authority()
+    runtime.__dict__["_bound_checkpoint_path"] = original_checkpoint
+
+    original_runtime_path = runtime.__dict__["path"]
+    runtime.__dict__["path"] = other_runtime_path
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="binding path drift",
+    ):
+        runtime._refresh_bound_authority()
+    runtime.__dict__["path"] = original_runtime_path
+
+    original_identity_path = identity.path
+    identity.path = other_identity.path
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="binding path drift",
+    ):
+        runtime._refresh_bound_authority()
+    identity.path = original_identity_path
+
+    original_opponent_path = opponent.path
+    opponent.path = other_opponent.path
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="binding path drift",
+    ):
+        runtime._refresh_bound_authority()
+    opponent.path = original_opponent_path
+
+    # Restoring the exact frozen selectors/paths preserves the legitimate
+    # internal refresh path.
+    refreshed = runtime._refresh_bound_authority()
+    assert refreshed.path == opponent.path
+    assert refreshed.identity_registry.path == identity.path
 
 
 def test_existing_runtime_without_checkpoint_cannot_self_attest_generation(tmp_path):

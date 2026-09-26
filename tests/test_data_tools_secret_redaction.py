@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
+import autosport.secret_redaction as secret_redaction
 from autosport import data_tools_entry
 
 
@@ -143,6 +144,24 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
             )
         finally:
             canonical.__code__ = original_code
+
+        self.assertIn("error=ExpectedFailure", output)
+        self.assertIn("exception details unavailable", output)
+        self.assertNotIn(secret, output)
+
+    def test_transitive_text_redactor_rebinding_cannot_publish_raw_secret(self) -> None:
+        secret = "AS-DATATOOLS-TRANSITIVE-REDISPATCH-SENTINEL-73bc"
+        exc = ValueError(f"Authorization: Bearer {secret}")
+
+        with patch.object(
+            secret_redaction,
+            "redact_operator_text",
+            lambda text, **_kwargs: text,
+        ):
+            output = data_tools_entry._expected_failure_message(
+                "verify-dataset",
+                exc,
+            )
 
         self.assertIn("error=ExpectedFailure", output)
         self.assertIn("exception details unavailable", output)

@@ -65,7 +65,7 @@ def _startup_focus_target(script: str) -> str:
     )
     assert ready is not None, "canonical WebView startup handler must exist"
     target_matches = re.findall(
-        r'byId\\((?:\"([^\"]+)\"|([0-9]+))\\)\\.focus\\(\\);',
+        r'byId\((?:"([^"]+)"|([0-9]+))\)\.focus\(\);',
         ready.group("body"),
     )
     targets = [quoted or numeric for quoted, numeric in target_matches]

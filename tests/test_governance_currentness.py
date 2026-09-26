@@ -118,38 +118,8 @@ class GovernanceCurrentnessTests(unittest.TestCase):
         self.assertNotIn("clock", parameters)
         self.assertNotIn("now", parameters)
 
-    def test_current_resolver_rejects_clock_closure_cell_rebinding(self):
-        evidence = self._evidence()
-        self.registry.register_governance(evidence)
-
-        closure = resolve_current_governance.__closure__
-        self.assertIsNotNone(closure)
-        original_clock = time.time_ns
-        clock_cells = [
-            cell
-            for cell in closure
-            if cell.cell_contents is original_clock
-        ]
-        self.assertEqual(len(clock_cells), 1)
-        clock_cell = clock_cells[0]
-        forged_called = False
-
-        def forged_time_ns():
-            nonlocal forged_called
-            forged_called = True
-            return 1
-
-        clock_cell.cell_contents = forged_time_ns
-        try:
-            with self.assertRaisesRegex(
-                GovernanceCurrentnessError,
-                "product clock callable authority changed",
-            ):
-                self._resolve_current()
-        finally:
-            clock_cell.cell_contents = original_clock
-
-        self.assertFalse(forged_called)
+    def test_current_resolver_has_no_clock_bearing_closure(self):
+        self.assertIsNone(resolve_current_governance.__closure__)
 
     def test_current_resolver_rejects_time_module_global_rebinding(self):
         import autosport.governance_currentness as module
@@ -191,6 +161,18 @@ class GovernanceCurrentnessTests(unittest.TestCase):
             time.time_ns = original_clock
 
         self.assertFalse(forged_called)
+
+    def test_current_resolver_rejects_builtin_clock_substitution(self):
+        original_clock = time.time_ns
+        time.time_ns = time.monotonic_ns
+        try:
+            with self.assertRaisesRegex(
+                GovernanceCurrentnessError,
+                "product clock callable authority changed",
+            ):
+                self._resolve_current()
+        finally:
+            time.time_ns = original_clock
 
     def test_module_has_no_positive_historical_classifier_helper(self):
         import autosport.governance_currentness as module

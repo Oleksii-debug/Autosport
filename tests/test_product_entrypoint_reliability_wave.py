@@ -86,6 +86,76 @@ def _stop_request(*, requested: bool = False) -> SimpleNamespace:
     )
 
 
+def test_product_control_scalars_reject_numeric_subclasses_before_runtime_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HostileInt(int):
+        def __lt__(self, _other):
+            raise AssertionError("hostile int comparison must not run")
+
+        def __le__(self, _other):
+            raise AssertionError("hostile int comparison must not run")
+
+        def __gt__(self, _other):
+            raise AssertionError("hostile int comparison must not run")
+
+        def __ge__(self, _other):
+            raise AssertionError("hostile int comparison must not run")
+
+    class HostileFloat(float):
+        def __float__(self):
+            raise AssertionError("hostile float conversion must not run")
+
+        def __lt__(self, _other):
+            raise AssertionError("hostile float comparison must not run")
+
+    def fail_source(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("invalid control scalars must fail before source/runtime construction")
+
+    monkeypatch.setattr(entrypoint, "_validated_source", fail_source)
+
+    with pytest.raises(ValueError, match="max_cycles"):
+        entrypoint.run_product(
+            workspace="unused",
+            source_factory="unused:factory",
+            max_cycles=HostileInt(-1),
+            poll_seconds=0,
+            install_signal_handlers=False,
+        )
+
+    with pytest.raises(ValueError, match="poll_seconds"):
+        entrypoint.run_product(
+            workspace="unused",
+            source_factory="unused:factory",
+            max_cycles=1,
+            poll_seconds=HostileFloat(-1.0),
+            install_signal_handlers=False,
+        )
+
+
+def test_product_control_scalars_preserve_builtin_bounded_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime()
+    _install_runtime(monkeypatch, runtime)
+    waits: list[float] = []
+
+    code = entrypoint.run_product(
+        workspace="unused",
+        source_factory="unused:factory",
+        max_cycles=2,
+        poll_seconds=3,
+        sleep=waits.append,
+        install_signal_handlers=False,
+    )
+
+    assert code == 0
+    assert runtime.tick_calls == 2
+    assert runtime.stop_calls == ["max_cycles_reached"]
+    assert runtime.close_calls == 1
+    assert waits == [3.0]
+
+
 def test_secret_safe_parser_never_echoes_rejected_cli_value() -> None:
     sentinel = "S3CR3T-CANARY-DO-NOT-ECHO"
     stderr = io.StringIO()

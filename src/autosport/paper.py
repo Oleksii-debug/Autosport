@@ -95,7 +95,33 @@ def _make_ticket_opening_authority_registry():
                     "PaperBook ticket opening economic identity changed after admission"
                 )
 
-    return register_book, record, install_validated_snapshot, require_current
+    def require_candidate(source_book: object, candidate_book: object) -> None:
+        with guard:
+            current = authorities.get(source_book)
+            if current is None:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            expected = dict(current)
+        candidate_tickets = getattr(candidate_book, "tickets", None)
+        if type(candidate_tickets) is not dict or set(candidate_tickets) != set(expected):
+            raise ValueError(
+                "PaperBook serialized candidate ticket set differs from product-issued opening authority"
+            )
+        for ticket_id, ticket in candidate_tickets.items():
+            if (
+                type(ticket) is not PaperTicket
+                or _ticket_opening_commitment(ticket) != expected[ticket_id]
+            ):
+                raise ValueError(
+                    "PaperBook serialized candidate opening economic identity differs from product-issued authority"
+                )
+
+    return (
+        register_book,
+        record,
+        install_validated_snapshot,
+        require_current,
+        require_candidate,
+    )
 
 
 (
@@ -103,6 +129,7 @@ def _make_ticket_opening_authority_registry():
     _record_ticket_opening_authority,
     _install_validated_ticket_opening_authority,
     _require_ticket_opening_authority,
+    _require_snapshot_candidate_opening_authority,
 ) = _make_ticket_opening_authority_registry()
 
 
@@ -401,6 +428,13 @@ class PaperBook:
             ],
             "lifecycle": self._lifecycle_to_json(),
         }
+
+        # The raw snapshot is detached from the mutable live object. Validate
+        # that exact candidate against product-issued opening commitments before
+        # any durable replacement, closing coherent mutation during collection.
+        candidate = self._from_raw_snapshot(raw)
+        _require_snapshot_candidate_opening_authority(self, candidate)
+
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(

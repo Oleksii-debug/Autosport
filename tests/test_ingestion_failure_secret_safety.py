@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.ingestion_health as ingestion_health
 from autosport.ingestion_health import SourceHealthStore
 from autosport.providers import ProviderUnavailableError
 
@@ -85,6 +86,34 @@ class IngestionFailureSecretSafetyTests(unittest.TestCase):
                 state.last_error,
                 "Exception: exception details unavailable",
             )
+
+    def test_in_place_redactor_code_swap_cannot_persist_raw_secret(self) -> None:
+        secret = "AS-INGESTION-DURABLE-REDISPATCH-SENTINEL-82ca"
+        canonical = ingestion_health.safe_exception_text
+        original_code = canonical.__code__
+
+        def forged(exc, **_kwargs):
+            return str(exc)
+
+        try:
+            canonical.__code__ = forged.__code__
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "source_health.json"
+                store = SourceHealthStore(path)
+                state = store.record_failure(
+                    "fixture-source",
+                    now=_NOW,
+                    error=ProviderUnavailableError(
+                        f"Authorization: Bearer {secret}"
+                    ),
+                )
+                raw = path.read_text(encoding="utf-8")
+        finally:
+            canonical.__code__ = original_code
+
+        self.assertEqual(state.status, "failed")
+        self.assertNotIn(secret, state.last_error or "")
+        self.assertNotIn(secret, raw)
 
     def test_ordinary_failure_detail_remains_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 
+import autosport.secret_redaction as _secret_redaction
 from autosport.secret_redaction import safe_exception_detail
 
 
@@ -132,15 +133,28 @@ def _install_expected_failure_message():
     """Seal the product-owned presentation authorities in a closure.
 
     Function-object identity alone is insufficient in Python because ordinary caller
-    code can replace a function object's ``__code__`` in place. Capture both the
-    canonical redactor object and its executable identity and fail closed before and
-    after redaction if either changes.
+    code can replace a function object's ``__code__`` in place. The canonical exception
+    renderer also dispatches through the secret-redaction module, so capture that direct
+    dependency as part of this boundary and fail closed if either hop changes.
     """
 
     canonical_value_error = ValueError
     canonical_file_not_found_error = FileNotFoundError
+    redaction_module = _secret_redaction
     canonical_redactor = safe_exception_detail
     canonical_redactor_code = canonical_redactor.__code__
+    canonical_text_redactor = redaction_module.redact_operator_text
+    canonical_text_redactor_code = canonical_text_redactor.__code__
+
+    def redaction_dispatch_is_canonical() -> bool:
+        return (
+            _secret_redaction is redaction_module
+            and safe_exception_detail is canonical_redactor
+            and getattr(canonical_redactor, "__code__", None) is canonical_redactor_code
+            and redaction_module.redact_operator_text is canonical_text_redactor
+            and getattr(canonical_text_redactor, "__code__", None)
+            is canonical_text_redactor_code
+        )
 
     def expected_failure_message(command: str, exc: OSError | ValueError) -> str:
         if isinstance(exc, canonical_value_error):
@@ -150,11 +164,7 @@ def _install_expected_failure_message():
         else:
             error_label = "OSError"
 
-        redactor_is_canonical = (
-            safe_exception_detail is canonical_redactor
-            and getattr(canonical_redactor, "__code__", None) is canonical_redactor_code
-        )
-        if not redactor_is_canonical:
+        if not redaction_dispatch_is_canonical():
             error_label = "ExpectedFailure"
             detail = "exception details unavailable"
         else:
@@ -162,11 +172,7 @@ def _install_expected_failure_message():
                 exc,
                 unavailable_detail="exception details unavailable",
             )
-            if (
-                safe_exception_detail is not canonical_redactor
-                or getattr(canonical_redactor, "__code__", None)
-                is not canonical_redactor_code
-            ):
+            if not redaction_dispatch_is_canonical():
                 error_label = "ExpectedFailure"
                 detail = "exception details unavailable"
 

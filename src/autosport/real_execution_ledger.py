@@ -118,11 +118,11 @@ def _decimal(value: Decimal | str | int, name: str) -> Decimal:
     return parsed
 
 
-def _decimal_text(value: Decimal) -> str:
-    # Decimal.normalize() applies the ambient Decimal Context and can round
-    # exact money/odds before durable persistence. Formatting the original
-    # coefficient/exponent is context-independent, but fixed-point formatting
-    # can amplify a tiny exponent-form input into an attacker-sized string.
+def _validate_decimal_text_resource_bound(value: Decimal) -> None:
+    # Fixed-point formatting can expand exponent-form Decimals by orders of
+    # magnitude. Compute the prospective representation size without
+    # allocating that representation so callers can preflight every economic
+    # field before formatting any sibling field.
     sign, digits, exponent = value.as_tuple()
     if not isinstance(exponent, int):
         raise ValueError("decimal fixed-point representation must be finite")
@@ -135,6 +135,13 @@ def _decimal_text(value: Decimal) -> str:
         rendered_length += 1
     if rendered_length > _MAX_EXECUTION_DECIMAL_TEXT_LENGTH:
         raise ValueError("decimal fixed-point representation exceeds resource limit")
+
+
+def _decimal_text(value: Decimal) -> str:
+    # Decimal.normalize() applies the ambient Decimal Context and can round
+    # exact money/odds before durable persistence. Formatting the original
+    # coefficient/exponent is context-independent.
+    _validate_decimal_text_resource_bound(value)
     text = format(value, "f")
     # Trim only representational fractional trailing zeros so numerically
     # equivalent scales canonicalize.
@@ -239,6 +246,11 @@ class ExecutionAction:
         )
 
     def to_dict(self) -> dict[str, str]:
+        # Preflight the complete economic tuple before formatting either
+        # member. A hostile exponent in one field must fail before a benign
+        # sibling causes any fixed-point allocation.
+        _validate_decimal_text_resource_bound(self.requested_odds)
+        _validate_decimal_text_resource_bound(self.requested_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -353,6 +365,12 @@ class ExternalAcknowledgement:
             )
 
     def to_dict(self) -> dict[str, Any]:
+        # Preflight every accepted economic value before formatting any of
+        # them, matching ExecutionAction's fail-before-allocation boundary.
+        if self.accepted_odds is not None:
+            _validate_decimal_text_resource_bound(self.accepted_odds)
+        if self.accepted_stake is not None:
+            _validate_decimal_text_resource_bound(self.accepted_stake)
         return {
             "attempt_id": self.attempt_id,
             "external_receipt_id": self.external_receipt_id,
@@ -2117,6 +2135,10 @@ class RealExecutionLedger:
                     submitted_events[-1]["payload"]["submitted_at"],
                     "submitted_at",
                 )
+                if observed_time < submitted_time:
+                    raise ExecutionStateError(
+                        "UNKNOWN observed_at cannot precede attempt submission"
+                    )
                 causal_boundaries.append(submitted_time)
             provider_evidence_events = [
                 event

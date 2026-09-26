@@ -121,7 +121,11 @@ def _timestamp(value: object, name: str) -> str:
 
 
 def _finite_decimal(value: object, name: str, *, positive: bool = False) -> Decimal:
-    if not isinstance(value, Decimal):
+    # Economic evidence must not dispatch validation/arithmetic through caller-defined
+    # Decimal subclasses. A subclass can override is_finite/as_tuple/comparison or
+    # copy_negate and otherwise forge the canonical money path while still passing
+    # isinstance(value, Decimal).
+    if type(value) is not Decimal:
         raise _error("INVALID_EVENT", f"{name} must be an exact Decimal")
     if not value.is_finite():
         raise _error("INVALID_EVENT", f"{name} must be finite")

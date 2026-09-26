@@ -8,7 +8,6 @@ from .domain import MarketEvent, TicketLeg
 from .integrity import atomic_write_json
 from .paper import PaperBook
 from .replay import ReplayEngine, ReplayLeakageFirewall
-from .secret_redaction import redact_operator_text, safe_exception_text
 from .storage import SQLiteMarketStore
 
 
@@ -20,7 +19,12 @@ def _sanitize_utf8_text(text: str) -> str:
 
 
 def _render_exception(exc: BaseException) -> str:
-    return _sanitize_utf8_text(safe_exception_text(exc))
+    exception_type = type(exc).__name__
+    try:
+        details = str(exc)
+    except BaseException:
+        return f"{exception_type}: exception details unavailable"
+    return _sanitize_utf8_text(f"{exception_type}: {details}")
 
 
 def run_machine_diagnostic(output_path: str | Path) -> int:
@@ -80,8 +84,6 @@ def run_machine_diagnostic(output_path: str | Path) -> int:
         }
         error_notes = getattr(exc, "__notes__", None)
         if error_notes:
-            payload["error_notes"] = [
-                _sanitize_utf8_text(redact_operator_text(note)) for note in error_notes
-            ]
+            payload["error_notes"] = [_sanitize_utf8_text(note) for note in error_notes]
         atomic_write_json(destination, payload)
         return 1

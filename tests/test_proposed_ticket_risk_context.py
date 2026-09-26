@@ -157,15 +157,16 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
                 quotes=(self._quote(first),),
             )
 
+        invalid_quote = self._quote(first)
+        object.__setattr__(
+            invalid_quote,
+            "observed_ts",
+            "2026-09-16T15:00:00",
+        )
         with self.assertRaisesRegex(ValueError, "invalid quote"):
             ProposedTicketRiskContext(
                 legs=(first,),
-                quotes=(
-                    self._quote(
-                        first,
-                        observed_ts="2026-09-16T15:00:00",
-                    ),
-                ),
+                quotes=(invalid_quote,),
             )
 
     def test_optional_bankroll_currency_and_measurement_window_fail_closed(self) -> None:

@@ -108,7 +108,7 @@ class OneShotEvidenceExportWorker:
                 target=self._run_when_committed,
                 args=(workspace_path, output_path, start_gate, cancelled),
                 name="autosport-evidence-export",
-                daemon=True,
+                daemon=False,
             )
         except BaseException as exc:
             self._release_unstarted_slot()

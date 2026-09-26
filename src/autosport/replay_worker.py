@@ -31,6 +31,7 @@ def _terminal_error(exc: BaseException) -> str:
 
     return safe_exception_text(exc)
 
+
 class OneShotReplayWorker:
     """Run one economic replay away from Tk without abandoning it on process shutdown."""
 

@@ -9,6 +9,7 @@ from weakref import WeakKeyDictionary
 
 import pytest
 
+from autosport import betfair_account_identity as _identity
 from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
     BetfairAccountIdentityError,
@@ -341,7 +342,7 @@ def test_k07_uses_one_existing_origin_registry_not_parallel_snapshot_state() -> 
     origin_registries = [
         registry
         for registry in registries
-        if type(registry.get(client)).__name__ == "_CanonicalClientOrigin"
+        if type(registry.get(client)) is _identity._CanonicalClientOrigin
     ]
 
     # The closure graph may legitimately expose unrelated weak registries owned by

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 
@@ -402,7 +402,11 @@ def _require_text(value: str, field: str) -> None:
 
 def _require_aware(value: datetime, field: str) -> None:
     # Retention timestamps participate directly in deadline arithmetic and ordering.
-    # A datetime subclass can override __add__/comparison/utcoffset and otherwise
-    # move a binding deletion boundary while still passing isinstance(datetime).
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise ParlayApiRetentionError(f"{field} must be exact timezone-aware datetime")
+    # Reject both datetime subclasses and caller-defined tzinfo implementations:
+    # either can override arithmetic/comparison/UTC-offset behavior and move a
+    # binding deletion boundary. Built-in datetime.timezone is fixed-offset and
+    # non-subclassable, so later comparisons cannot change its offset dynamically.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ParlayApiRetentionError(
+            f"{field} must be exact timezone-aware datetime with built-in fixed-offset timezone"
+        )

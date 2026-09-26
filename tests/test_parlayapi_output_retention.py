@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 
@@ -59,6 +59,41 @@ def test_datetime_subclasses_cannot_move_retention_or_deletion_boundaries() -> N
     hostile_as_of = HostileDatetime(2026, 4, 1, tzinfo=timezone.utc)
     with pytest.raises(ParlayApiRetentionError, match="exact timezone-aware datetime"):
         evidence.evaluate(as_of=hostile_as_of)
+
+
+def test_custom_tzinfo_cannot_shift_retention_boundary_after_validation() -> None:
+    class HostileTimezone(tzinfo):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def utcoffset(self, _dt):
+            self.calls += 1
+            if self.calls == 1:
+                return timedelta(0)
+            return timedelta(hours=-23)
+
+        def dst(self, _dt):
+            return timedelta(0)
+
+        def tzname(self, _dt):
+            return "hostile"
+
+    hostile_capture = datetime(2026, 1, 1, tzinfo=HostileTimezone())
+    with pytest.raises(ParlayApiRetentionError, match="built-in fixed-offset timezone"):
+        capture(captured_at=hostile_capture, available_at=hostile_capture)
+
+    evidence = capture()
+    hostile_as_of = datetime(2026, 4, 1, tzinfo=HostileTimezone())
+    with pytest.raises(ParlayApiRetentionError, match="built-in fixed-offset timezone"):
+        evidence.evaluate(as_of=hostile_as_of)
+
+
+def test_builtin_fixed_offset_timezone_remains_supported() -> None:
+    fixed = timezone(timedelta(hours=2))
+    captured = datetime(2026, 1, 1, tzinfo=fixed)
+    evidence = capture(captured_at=captured, available_at=captured)
+
+    assert evidence.effective_retention_deadline() == captured + LINE_LEVEL_MAX_RETENTION
 
 
 def test_line_level_pricing_has_hard_90_day_cap_without_consent_authority() -> None:

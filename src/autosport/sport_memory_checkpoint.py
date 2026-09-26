@@ -419,10 +419,40 @@ def _verify_runtime_snapshot_bindings(
 
 
 class BoundSportMemoryRuntime(SportMemoryRuntime):
-    """Product-owned runtime that refreshes canonical source authority per write."""
+    """Product-owned runtime with immutable canonical authority bindings."""
+
+    __slots__ = (
+        "_bound_checkpoint_path",
+        "_bound_identity_selector",
+        "_bound_opponent_selector",
+        "_bound_runtime_path",
+        "_bound_identity_path",
+        "_bound_opponent_path",
+        "_bound_generation_sha256",
+        "_bound_current_opponent_authority",
+        "_bound_sealed",
+    )
+
+    _BOUND_SLOT_FIELDS = frozenset(__slots__)
+    _BOUND_PROTECTED_FIELDS = frozenset(
+        {
+            "path",
+            "opponent_authority",
+            "authority_generation_sha256",
+            *(__slots__),
+        }
+    )
 
     def __setattr__(self, name: str, value: object) -> None:
-        # Positive authority is dispatched through this exact concrete runtime.
+        try:
+            sealed = object.__getattribute__(self, "_bound_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in type(self)._BOUND_PROTECTED_FIELDS:
+            raise SportMemoryCheckpointError(
+                f"bound sport-memory runtime authority binding is immutable: {name}"
+            )
+
         # Never allow an instance attribute to shadow a class/inherited member:
         # doing so could replace verification/write methods while preserving the
         # exact BoundSportMemoryRuntime type checked by product binders.
@@ -434,9 +464,9 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         object.__setattr__(self, name, value)
 
     def __getattribute__(self, name: str):
-        # Also fail closed on direct __dict__ injection, which bypasses
-        # __setattr__. Special-method dispatch resolves this guard on the class,
-        # so an instance shadow cannot bypass the check itself.
+        # Fail closed on direct __dict__ method injection, which bypasses
+        # __setattr__. Slot-backed binding fields are additionally checked for
+        # forged same-name dictionary entries by _assert_bound_authority_seal().
         instance_state = object.__getattribute__(self, "__dict__")
         if name in instance_state:
             for authority_class in type(self).__mro__:
@@ -444,6 +474,14 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
                     raise SportMemoryCheckpointError(
                         f"bound sport-memory runtime detected instance authority shadow: {name}"
                     )
+
+        if name in type(self)._BOUND_PROTECTED_FIELDS:
+            try:
+                sealed = object.__getattribute__(self, "_bound_sealed")
+            except AttributeError:
+                sealed = False
+            if sealed:
+                object.__getattribute__(self, "_assert_bound_authority_seal")()
         return object.__getattribute__(self, name)
 
     def __init__(
@@ -456,36 +494,165 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         identity_registry: ParticipantIdentityRegistry,
         opponent_store: OpponentIntelligenceStore,
     ) -> None:
+        if type(identity_registry) is not ParticipantIdentityRegistry:
+            raise SportMemoryCheckpointError(
+                "bound sport memory requires exact canonical identity registry"
+            )
+        if type(opponent_store) is not OpponentIntelligenceStore:
+            raise SportMemoryCheckpointError(
+                "bound sport memory requires exact canonical opponent selector"
+            )
         if type(opponent_authority) is not OpponentIntelligenceStore:
             raise SportMemoryCheckpointError(
                 "bound sport memory requires exact canonical opponent store"
             )
-        self._bound_checkpoint_path = Path(checkpoint_path)
-        self._bound_identity_selector = identity_registry
-        self._bound_opponent_selector = opponent_store
+
+        object.__setattr__(self, "_bound_sealed", False)
+        object.__setattr__(self, "_bound_checkpoint_path", Path(checkpoint_path))
+        object.__setattr__(self, "_bound_identity_selector", identity_registry)
+        object.__setattr__(self, "_bound_opponent_selector", opponent_store)
+        object.__setattr__(self, "_bound_runtime_path", Path(path))
+        object.__setattr__(self, "_bound_identity_path", identity_registry.path)
+        object.__setattr__(self, "_bound_opponent_path", opponent_store.path)
+        object.__setattr__(
+            self, "_bound_generation_sha256", authority_generation_sha256
+        )
+        object.__setattr__(
+            self, "_bound_current_opponent_authority", opponent_authority
+        )
+
         super().__init__(
             path,
             opponent_authority,
             authority_generation_sha256=authority_generation_sha256,
         )
 
-    def _refresh_bound_authority(self) -> OpponentIntelligenceStore:
-        authority, verified_opponent = _load_verified_checkpoint_and_opponent(
-            self._bound_checkpoint_path,
-            self._bound_identity_selector,
-            self._bound_opponent_selector,
+        # Re-capture the validated generation emitted by the canonical base
+        # constructor, then freeze the binding. Slot descriptors ensure direct
+        # __dict__ insertion cannot override these canonical captures.
+        instance_state = object.__getattribute__(self, "__dict__")
+        object.__setattr__(
+            self,
+            "_bound_generation_sha256",
+            instance_state["authority_generation_sha256"],
         )
-        if authority.generation_sha256 != self.authority_generation_sha256:
+        object.__setattr__(
+            self,
+            "_bound_current_opponent_authority",
+            instance_state["opponent_authority"],
+        )
+        object.__setattr__(self, "_bound_sealed", True)
+        self._assert_bound_authority_seal()
+
+    @staticmethod
+    def _same_path_binding(current: object, expected: Path) -> bool:
+        return (
+            type(current) is type(expected)
+            and current == expected
+            and _resolved(Path(current)) == _resolved(expected)
+        )
+
+    def _assert_bound_authority_seal(self) -> None:
+        instance_state = object.__getattribute__(self, "__dict__")
+
+        # A subclass slot is a data descriptor, so same-name __dict__ insertion
+        # cannot override normal reads. Treat any such insertion as tampering
+        # rather than silently ignoring it.
+        for name in type(self)._BOUND_SLOT_FIELDS:
+            if name in instance_state:
+                raise SportMemoryCheckpointError(
+                    f"bound sport-memory runtime detected direct binding injection: {name}"
+                )
+
+        runtime_path = object.__getattribute__(self, "_bound_runtime_path")
+        checkpoint_path = object.__getattribute__(self, "_bound_checkpoint_path")
+        identity_path = object.__getattribute__(self, "_bound_identity_path")
+        opponent_path = object.__getattribute__(self, "_bound_opponent_path")
+        generation = object.__getattribute__(self, "_bound_generation_sha256")
+        identity_selector = object.__getattribute__(self, "_bound_identity_selector")
+        opponent_selector = object.__getattribute__(self, "_bound_opponent_selector")
+        current_opponent = object.__getattribute__(
+            self, "_bound_current_opponent_authority"
+        )
+
+        if not self._same_path_binding(instance_state.get("path"), runtime_path):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime path binding changed"
+            )
+        if instance_state.get("authority_generation_sha256") != generation:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory authority generation binding changed"
+            )
+        if instance_state.get("opponent_authority") is not current_opponent:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory opponent authority binding changed"
+            )
+
+        if type(identity_selector) is not ParticipantIdentityRegistry:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory identity selector binding changed"
+            )
+        if type(opponent_selector) is not OpponentIntelligenceStore:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory opponent selector binding changed"
+            )
+        if type(current_opponent) is not OpponentIntelligenceStore:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory opponent authority binding changed"
+            )
+
+        if not self._same_path_binding(identity_selector.path, identity_path):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory identity selector path changed"
+            )
+        if not self._same_path_binding(opponent_selector.path, opponent_path):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory opponent selector path changed"
+            )
+        if not self._same_path_binding(current_opponent.path, opponent_path):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory opponent authority path changed"
+            )
+        if _resolved(checkpoint_path) == _resolved(runtime_path):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory checkpoint/runtime path binding collapsed"
+            )
+
+    def _refresh_bound_authority(self) -> OpponentIntelligenceStore:
+        self._assert_bound_authority_seal()
+        checkpoint_path = object.__getattribute__(self, "_bound_checkpoint_path")
+        identity_selector = object.__getattribute__(self, "_bound_identity_selector")
+        opponent_selector = object.__getattribute__(self, "_bound_opponent_selector")
+        authority, verified_opponent = _load_verified_checkpoint_and_opponent(
+            checkpoint_path,
+            identity_selector,
+            opponent_selector,
+        )
+        if authority.generation_sha256 != object.__getattribute__(
+            self, "_bound_generation_sha256"
+        ):
             raise SportMemoryCheckpointError(
                 "bound sport-memory authority generation changed"
             )
-        self.opponent_authority = verified_opponent
+
+        # This exact verified refresh is the only allowed post-bind replacement
+        # of the base opponent_authority reference.
+        object.__setattr__(self, "opponent_authority", verified_opponent)
+        object.__setattr__(
+            self, "_bound_current_opponent_authority", verified_opponent
+        )
+        self._assert_bound_authority_seal()
         return verified_opponent
+
+    def _persist(self) -> None:
+        self._assert_bound_authority_seal()
+        super()._persist()
 
     def matchup_as_of(self, *args, **kwargs):
         """Read decision-time memory only under the current canonical roots."""
-        identity_path = Path(self._bound_identity_selector.path)
-        opponent_path = Path(self._bound_opponent_selector.path)
+        self._assert_bound_authority_seal()
+        identity_path = object.__getattribute__(self, "_bound_identity_path")
+        opponent_path = object.__getattribute__(self, "_bound_opponent_path")
         first_path, second_path = sorted(
             (identity_path, opponent_path), key=lambda path: str(_resolved(path))
         )
@@ -503,8 +670,9 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         # generation. Fence both canonical stores for the complete verified
         # publication transaction. Sorting resolved paths gives every caller the
         # same lock order, while atomic_write_json can safely re-enter either lock.
-        identity_path = Path(self._bound_identity_selector.path)
-        opponent_path = Path(self._bound_opponent_selector.path)
+        self._assert_bound_authority_seal()
+        identity_path = object.__getattribute__(self, "_bound_identity_path")
+        opponent_path = object.__getattribute__(self, "_bound_opponent_path")
         first_path, second_path = sorted(
             (identity_path, opponent_path), key=lambda path: str(_resolved(path))
         )

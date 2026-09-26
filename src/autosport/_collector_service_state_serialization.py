@@ -21,6 +21,7 @@ from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 _State = _collector_service._CollectorServiceState
 _ORIGINAL_UPDATE_ANCHOR = "_collector_service_state_original_update_v1"
 _SERIALIZED_UPDATE_ANCHOR = "_collector_service_state_serialized_update_v1"
+_STOP_FIELDS = frozenset({"stopped_at", "stop_reason"})
 
 
 def _load_original_update():
@@ -73,10 +74,38 @@ class _CollectorServiceStateMutationLock(WorkspaceEconomicLock):
             ) from exc
 
 
+def _fence_post_stop_mutation(mutate):
+    """Allow explicit resume/STOP control only after durable STOP already exists."""
+
+    def guarded(raw) -> None:
+        stopped_before = raw.get("stopped_at") is not None
+        before = dict(raw) if stopped_before else None
+        mutate(raw)
+        if not stopped_before:
+            return
+
+        # Explicit resume is the only supported transition that clears STOP.
+        if raw.get("stopped_at") is None and raw.get("stop_reason") is None:
+            return
+
+        assert before is not None
+        changed_non_stop = any(
+            raw.get(name) != value
+            for name, value in before.items()
+            if name not in _STOP_FIELDS
+        )
+        if changed_non_stop:
+            raise _collector_service.CollectorServiceStoppedError(
+                "collector run is durably STOPPED; terminal mutation is forbidden until explicit resume"
+            )
+
+    return guarded
+
+
 def _serialized_update(self, mutate) -> None:
     try:
         with _CollectorServiceStateMutationLock(self.path.parent):
-            _ORIGINAL_UPDATE(self, mutate)
+            _ORIGINAL_UPDATE(self, _fence_post_stop_mutation(mutate))
     except WorkspaceEconomicLockError as exc:
         raise _collector_service.CollectorServiceError(
             "cannot serialize collector service durable state mutation"

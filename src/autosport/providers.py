@@ -12,6 +12,7 @@ from .domain import MarketEvent, MarketType
 _MAX_PROVIDER_METADATA_NESTING = 64
 _SQLITE_SEQUENCE_MIN = -(1 << 63)
 _SQLITE_SEQUENCE_MAX = (1 << 63) - 1
+_EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
 def _validate_source_id(source_id: object) -> str:
@@ -69,6 +70,13 @@ def _validate_sport(value: object) -> str:
     if sport in {"unknown", "mixed"}:
         raise ValueError("sport must not use a reserved dataset scope identity")
     return sport
+
+
+def _validate_exchange_side(value: object) -> str:
+    side = _validate_provider_text(value, "exchange_side")
+    if side not in _EXCHANGE_SIDES:
+        raise ValueError("exchange_side must be canonical 'back' or 'lay'")
+    return side
 
 
 def _validate_provider_timestamp(value: object, name: str) -> str:
@@ -154,6 +162,7 @@ class ProviderQuote:
     score_state: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     sport: str | None = None
+    exchange_side: str | None = None
 
     def __post_init__(self) -> None:
         _validate_provider_event_id(self.provider_event_id)
@@ -162,6 +171,8 @@ class ProviderQuote:
         _validate_sequence(self.sequence)
         if self.sport is not None:
             _validate_sport(self.sport)
+        if self.exchange_side is not None:
+            _validate_exchange_side(self.exchange_side)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +258,7 @@ class CanonicalNormalizer:
             score_state=score_state,
             metadata=metadata,
             sport=quote.sport,
+            exchange_side=quote.exchange_side,
         )
 
 

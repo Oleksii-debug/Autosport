@@ -2,6 +2,7 @@ name: Endurance
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
     paths:
       - 'src/autosport/endurance.py'
       - 'src/autosport/providers.py'
@@ -40,12 +41,18 @@ on:
       - '.github/workflows/endurance.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: endurance-${{ github.event.pull_request.number || github.ref }}
+  group: endurance-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
   cancel-in-progress: true
 
 jobs:
   endurance:
+    # Draft/closed PRs do not need fresh endurance qualification. Keep the
+    # cross-platform evidence for integration-capable heads; lifecycle runs shed work.
+    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.draft == false)
     name: endurance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -56,11 +63,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Verify exact pristine source checkout before endurance
@@ -79,7 +87,7 @@ jobs:
           tests/test_causal_collector.py::CollectorDeltaTests::test_consumer_rechecks_peer_ack_after_serialization_boundary
       - name: Upload endurance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: endurance-${{ runner.os }}
           path: endurance-report.json

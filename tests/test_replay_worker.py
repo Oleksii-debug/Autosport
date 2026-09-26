@@ -182,7 +182,7 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(failed.result)
         self.assertEqual(
             failed.error,
-            "BrokenStringError: exception details unavailable",
+            "Exception: exception details unavailable",
         )
         self.assertFalse(worker.busy)
 
@@ -221,7 +221,7 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(worker._thread)
         failed = self._terminal(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "BrokenNameError: thread metadata failed")
+        self.assertEqual(failed.error, "Exception: thread metadata failed")
         self.assertFalse(worker.busy)
 
         sentinel = object()
@@ -269,7 +269,7 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertIsNone(failed.result)
         self.assertEqual(
             failed.error,
-            "BrokenStringBaseError: exception details unavailable",
+            "BaseException: exception details unavailable",
         )
         self.assertFalse(worker.busy)
 
@@ -298,7 +298,7 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         failed = self._terminal(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "BrokenNameBaseError: task metadata failed")
+        self.assertEqual(failed.error, "BaseException: task metadata failed")
         self.assertFalse(worker.busy)
 
         sentinel = object()
@@ -325,7 +325,7 @@ class ReplayWorkerTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         failed = self._terminal(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "HostileRenderedError: rendered safely")
+        self.assertEqual(failed.error, "BaseException: rendered safely")
         self.assertFalse(worker.busy)
 
         sentinel = object()

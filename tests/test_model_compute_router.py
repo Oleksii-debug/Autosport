@@ -1586,7 +1586,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-load-cloud"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(cloud_decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                cloud_decision.reason,
+            )
             cloud_execution = store.record_execution(
                 execution_id="exec-load-cloud",
                 request_id=cloud_request.request_id,
@@ -1602,8 +1606,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 cloud_execution.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("execution identity", cloud_execution.reason)
 
             original = path.read_text(encoding="utf-8")
 
@@ -1646,18 +1651,6 @@ class ModelComputeRouterTests(unittest.TestCase):
             ):
                 self.router_store(path)
 
-            raw = json.loads(original)
-            next(
-                item
-                for item in raw["executions"]
-                if item["execution_id"] == "exec-load-cloud"
-            )["actual_cost"] = "10.01"
-            rewrite_store_with_valid_state_hash(path, raw)
-            with self.assertRaisesRegex(
-                ModelComputeRouterError,
-                "accepted cloud execution cost exceeds policy",
-            ):
-                self.router_store(path)
 
     def test_restart_rejects_rehashed_rejected_execution_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1932,12 +1925,14 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 first.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
             self.assertEqual(
                 second.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("execution identity", first.reason)
+            self.assertIn("execution identity", second.reason)
             raw = json.loads(path.read_text(encoding="utf-8"))
             raw["executions"] = [
                 item
@@ -2071,6 +2066,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 "first_cost": Decimal("1.25"),
                 "second_cost": Decimal("0.80"),
                 "retry_cost": Decimal("0.70"),
+                "first_disposition": ExecutionDisposition.ACCEPTED,
+                "second_disposition": ExecutionDisposition.REJECTED_COST,
             },
             {
                 "name": "cloud",
@@ -2087,6 +2084,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 "first_cost": Decimal("6"),
                 "second_cost": Decimal("4.01"),
                 "retry_cost": Decimal("4"),
+                "first_disposition": ExecutionDisposition.REJECTED_IDENTITY,
+                "second_disposition": ExecutionDisposition.REJECTED_IDENTITY,
             },
         )
         for case in cases:
@@ -2130,11 +2129,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         first.disposition,
-                        ExecutionDisposition.ACCEPTED,
+                        case["first_disposition"],
                     )
                     self.assertEqual(
                         second.disposition,
-                        ExecutionDisposition.REJECTED_COST,
+                        case["second_disposition"],
                     )
 
                     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -2574,7 +2573,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-actual-cloud-budget"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(cloud_decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                cloud_decision.reason,
+            )
             cloud_overrun = store.record_execution(
                 execution_id="exec-cloud-budget-overrun",
                 request_id=cloud_request.request_id,
@@ -2590,9 +2593,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 cloud_overrun.disposition,
-                ExecutionDisposition.REJECTED_COST,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("policy cloud-cost", cloud_overrun.reason)
+            self.assertIn("execution identity", cloud_overrun.reason)
 
             reopened = self.router_store(path)
             self.assertEqual(
@@ -2693,8 +2696,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 first_cloud.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("execution identity", first_cloud.reason)
             second_cloud = store.record_execution(
                 execution_id="exec-cumulative-cloud-2",
                 request_id=cloud_request.request_id,
@@ -2710,12 +2714,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 second_cloud.disposition,
-                ExecutionDisposition.REJECTED_COST,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn(
-                "cumulative actual cloud execution cost",
-                second_cloud.reason,
-            )
+            self.assertIn("execution identity", second_cloud.reason)
             self.assertEqual(
                 store.total_actual_cost(cloud_request.request_id),
                 Decimal("10.01"),
@@ -2861,8 +2862,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 accepted_cloud_tail.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("execution identity", accepted_cloud_tail.reason)
             original = path.read_text(encoding="utf-8")
 
             for execution_id in (

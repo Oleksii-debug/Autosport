@@ -308,6 +308,7 @@ def _build_register_evidence_method():
 
     canonical_registry_type = ProviderSportMappingRegistry
     canonical_clock = _utc_now
+    canonical_clock_code = canonical_clock.__code__
     parser_descriptor = vars(ProviderSportEvidence).get("from_exact_bytes")
     if type(parser_descriptor) is not classmethod:
         raise RuntimeError("ProviderSportEvidence.from_exact_bytes must remain a classmethod")
@@ -367,7 +368,7 @@ def _build_register_evidence_method():
     ) -> ProviderSportBinding:
         if type(self) is not canonical_registry_type:
             raise ProviderSportMappingError("canonical provider sport registry type is required")
-        if globals().get("_utc_now") is not canonical_clock:
+        if globals().get("_utc_now") is not canonical_clock or canonical_clock.__code__ is not canonical_clock_code:
             raise ProviderSportMappingError("product recording clock authority changed")
         current_parser_descriptor = vars(ProviderSportEvidence).get("from_exact_bytes")
         if current_parser_descriptor is not parser_descriptor or canonical_parser.__code__ is not canonical_parser_code:
@@ -391,6 +392,8 @@ def _build_register_evidence_method():
             canonical_load(self)
             evidence = canonical_parser(ProviderSportEvidence, source_snapshot_bytes)
             recorded_at = canonical_clock()
+            if globals().get("_utc_now") is not canonical_clock or canonical_clock.__code__ is not canonical_clock_code:
+                raise ProviderSportMappingError("product recording clock authority changed")
             if _instant("recorded_at", recorded_at) < _instant(
                 "evidence_available_at", evidence.evidence_available_at
             ):

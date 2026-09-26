@@ -116,6 +116,30 @@ class _HostilePairedVOCEvaluation(PairedVOCEvaluation):
         raise AssertionError("hostile PairedVOCEvaluation payload dispatch executed")
 
 
+class _HostileOutcomeDerivedVOCScore(OutcomeDerivedVOCScore):
+    __slots__ = ()
+    field_hook_calls = 0
+    dispatch_enabled = False
+
+    def __getattribute__(self, name):
+        if (
+            type(self).dispatch_enabled
+            and name
+            in {
+                "available_at",
+                "evaluation_id",
+                "outcome_evidence_sha256",
+                "scoring_rule_sha256",
+                "research_protocol_sha256",
+                "holdout_access_id",
+                "multiple_comparison_control_sha256",
+            }
+        ):
+            type(self).field_hook_calls += 1
+            raise AssertionError("hostile OutcomeDerivedVOCScore field dispatch executed")
+        return super().__getattribute__(name)
+
+
 def evaluation(**overrides):
     values = dict(
         evaluation_id="voc-eval-1",
@@ -473,6 +497,21 @@ def outcome_score(value):
     )
 
 
+
+def hostile_outcome_score(value):
+    source = outcome_score(value)
+    _HostileOutcomeDerivedVOCScore.dispatch_enabled = False
+    hostile = _HostileOutcomeDerivedVOCScore(
+        **{
+            name: object.__getattribute__(source, name)
+            for name in OutcomeDerivedVOCScore.__dataclass_fields__
+        }
+    )
+    _HostileOutcomeDerivedVOCScore.field_hook_calls = 0
+    _HostileOutcomeDerivedVOCScore.dispatch_enabled = True
+    return hostile
+
+
 class PairedVOCEvaluationTests(unittest.TestCase):
     @staticmethod
     def _hostile_evaluation(value=None):
@@ -815,6 +854,36 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         score_authority.publish(outcome_score(paired))
         resolver.outcome_score_authority = score_authority
         return resolver, paired
+
+    def test_production_resolver_rejects_outcome_score_subclass_before_field_dispatch(self):
+        resolver, paired = self._production_resolver_fixture()
+        hostile = hostile_outcome_score(paired)
+        resolver.outcome_score_authority._records[paired.evaluation_id] = hostile
+
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical outcome-derived VOC score is invalid",
+        ):
+            resolver.resolve(paired, as_of=T2)
+        self.assertEqual(_HostileOutcomeDerivedVOCScore.field_hook_calls, 0)
+        _HostileOutcomeDerivedVOCScore.dispatch_enabled = False
+
+    def test_production_resolver_rejects_episode_score_subclass_before_field_dispatch(self):
+        resolver, paired = self._production_resolver_fixture()
+        canonical_authority = resolver.outcome_score_authority
+        hostile = hostile_outcome_score(paired)
+        resolver.outcome_score_authority = SimpleNamespace(
+            resolve=canonical_authority.resolve,
+            resolve_episode=lambda evaluation_id, *, as_of: hostile,
+        )
+
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical outcome-derived VOC episode score is missing",
+        ):
+            resolver.resolve(paired, as_of=T2)
+        self.assertEqual(_HostileOutcomeDerivedVOCScore.field_hook_calls, 0)
+        _HostileOutcomeDerivedVOCScore.dispatch_enabled = False
 
     def test_production_resolver_binds_decision_protocol_and_outcome_scope(self):
         resolver, paired = self._production_resolver_fixture()

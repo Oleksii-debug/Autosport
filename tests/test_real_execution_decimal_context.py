@@ -14,7 +14,9 @@ from autosport.real_execution_ledger import (
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExternalAcknowledgement,
+    ExternalEffectReconciliation,
     RealExecutionLedger,
+    ReconciliationSnapshot,
 )
 
 
@@ -71,6 +73,66 @@ class _HostileDecimal(Decimal):
     def __format__(self, format_spec: str) -> str:
         type(self).format_calls += 1
         return "999999"
+
+
+class _HostileExecutionAction(ExecutionAction):
+    serialization_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.serialization_calls = 0
+
+    def to_dict(self) -> dict[str, str]:
+        type(self).serialization_calls += 1
+        return super().to_dict()
+
+
+class _HostileExecutionPlan(ExecutionPlan):
+    serialization_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.serialization_calls = 0
+
+    def to_dict(self) -> dict[str, object]:
+        type(self).serialization_calls += 1
+        return super().to_dict()
+
+
+class _HostileAcknowledgement(ExternalAcknowledgement):
+    serialization_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.serialization_calls = 0
+
+    def to_dict(self) -> dict[str, object]:
+        type(self).serialization_calls += 1
+        return super().to_dict()
+
+
+class _HostileExternalEffectReconciliation(ExternalEffectReconciliation):
+    serialization_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.serialization_calls = 0
+
+    def to_dict(self) -> dict[str, object]:
+        type(self).serialization_calls += 1
+        return super().to_dict()
+
+
+class _HostileReconciliationSnapshot(ReconciliationSnapshot):
+    serialization_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.serialization_calls = 0
+
+    def to_dict(self) -> dict[str, object]:
+        type(self).serialization_calls += 1
+        return super().to_dict()
 
 
 class RealExecutionDecimalContextTests(unittest.TestCase):
@@ -311,6 +373,106 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
 
             self.assertEqual(ledger_path.read_bytes(), original_bytes)
 
+
+
+    def test_execution_plan_rejects_action_subclass_before_serialization(self) -> None:
+        base = _plan()
+        action = base.actions[0]
+        hostile = _HostileExecutionAction(
+            action_id=action.action_id,
+            bookmaker_id=action.bookmaker_id,
+            account_id=action.account_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
+            side=action.side,
+            requested_odds=action.requested_odds,
+            requested_stake=action.requested_stake,
+            quote_id=action.quote_id,
+            quote_observed_at=action.quote_observed_at,
+            expires_at=action.expires_at,
+        )
+        _HostileExecutionAction.reset_calls()
+
+        with self.assertRaisesRegex(
+            ValueError, r"execution plan requires exact ExecutionAction items"
+        ):
+            ExecutionPlan(
+                plan_id=base.plan_id,
+                bookmaker_profile_version=base.bookmaker_profile_version,
+                decision_id=base.decision_id,
+                approval_id=base.approval_id,
+                created_at=base.created_at,
+                actions=(hostile,),
+            )
+
+        self.assertEqual(_HostileExecutionAction.serialization_calls, 0)
+
+    def test_ledger_rejects_model_subclasses_before_virtual_serialization(self) -> None:
+        base = _plan()
+        hostile_plan = _HostileExecutionPlan(
+            plan_id=base.plan_id,
+            bookmaker_profile_version=base.bookmaker_profile_version,
+            decision_id=base.decision_id,
+            approval_id=base.approval_id,
+            created_at=base.created_at,
+            actions=base.actions,
+        )
+        hostile_acknowledgement = _HostileAcknowledgement(
+            attempt_id="attempt-hostile-model",
+            external_receipt_id="receipt-hostile-model",
+            status=AcknowledgementStatus.REJECTED,
+            acknowledged_at="2026-09-21T20:00:03+00:00",
+        )
+        hostile_reconciliation = _HostileExternalEffectReconciliation(
+            attempt_id="attempt-hostile-model",
+            evidence_id="evidence-hostile-model",
+            external_receipt_id="receipt-hostile-model",
+            observed_at="2026-09-21T20:00:04+00:00",
+            source="provider-readback",
+        )
+        hostile_snapshot = _HostileReconciliationSnapshot(
+            attempt_id="attempt-hostile-model",
+            evidence_id="absence-hostile-model",
+            observed_at="2026-09-21T20:00:04+00:00",
+            external_effect_found=False,
+            source="provider-readback",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            ledger = RealExecutionLedger(
+                Path(temporary_directory) / "real-execution.jsonl"
+            )
+            cases = (
+                (
+                    _HostileExecutionPlan,
+                    lambda: ledger.reserve_plan(hostile_plan),
+                    r"plan must be exact ExecutionPlan",
+                ),
+                (
+                    _HostileAcknowledgement,
+                    lambda: ledger.acknowledge(hostile_acknowledgement),
+                    r"acknowledgement must be exact ExternalAcknowledgement",
+                ),
+                (
+                    _HostileExternalEffectReconciliation,
+                    lambda: ledger.reconcile_found(hostile_reconciliation),
+                    r"reconciliation must be exact ExternalEffectReconciliation",
+                ),
+                (
+                    _HostileReconciliationSnapshot,
+                    lambda: ledger.reconcile_not_found(hostile_snapshot),
+                    r"snapshot must be exact ReconciliationSnapshot",
+                ),
+            )
+            for hostile_type, operation, expected_error in cases:
+                with self.subTest(hostile_type=hostile_type.__name__):
+                    hostile_type.reset_calls()
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        operation()
+                    self.assertEqual(hostile_type.serialization_calls, 0)
+
+            self.assertFalse(ledger.path.exists())
 
 if __name__ == "__main__":
     unittest.main()

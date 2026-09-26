@@ -6,7 +6,8 @@ function identity alone is not sufficient, however: caller code can mutate a rea
 function object's ``__code__`` without rebinding that object. Likewise, a caller-owned
 subclass of the public acquisition DTO must not cross the conditional-acquisition seam
 and virtual-dispatch authority-bearing prior fields before the canonical validator runs.
-This package guard pins both boundaries and fails closed before or after acquisition.
+This package guard pins both boundaries and the exact redirect-refusal policy, failing
+closed before or after acquisition.
 
 No second provider client, store, scheduler, or origin authority is introduced.
 """
@@ -41,6 +42,10 @@ def _install_guard() -> None:
     product_transport = _catalog._default_transport
     product_transport_code = product_transport.__code__
 
+    redirect_handler_type = _catalog._PRODUCT_REDIRECT_HANDLER
+    redirect_request = redirect_handler_type.redirect_request
+    redirect_request_code = getattr(redirect_request, "__code__", None)
+
     request_type = _catalog.urllib.request.Request
     request_init = request_type.__init__
     request_init_code = getattr(request_init, "__code__", None)
@@ -54,6 +59,9 @@ def _install_guard() -> None:
             or _catalog.ParlaySportCatalogAcquisition is not acquisition_type
             or _catalog._default_transport is not product_transport
             or getattr(product_transport, "__code__", None) is not product_transport_code
+            or _catalog._PRODUCT_REDIRECT_HANDLER is not redirect_handler_type
+            or redirect_handler_type.redirect_request is not redirect_request
+            or getattr(redirect_request, "__code__", None) is not redirect_request_code
         ):
             raise error_type("Parlay sport-catalog product acquirer dispatch changed")
 

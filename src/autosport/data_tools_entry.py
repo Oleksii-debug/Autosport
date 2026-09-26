@@ -133,7 +133,7 @@ def _install_expected_failure_message():
     Function-object identity alone is insufficient in Python because ordinary caller
     code can replace a function object's ``__code__`` in place. The canonical exception
     renderer also dispatches through the secret-redaction module, so capture that direct
-    dependency as part of this boundary and fail closed if either hop changes.
+    dependency chain and fail closed if any hop changes.
     """
 
     canonical_value_error = ValueError
@@ -143,6 +143,8 @@ def _install_expected_failure_message():
     canonical_redactor_code = canonical_redactor.__code__
     canonical_text_redactor = redaction_module.redact_operator_text
     canonical_text_redactor_code = canonical_text_redactor.__code__
+    canonical_secret_values = redaction_module._secret_values
+    canonical_secret_values_code = canonical_secret_values.__code__
 
     def redaction_dispatch_is_canonical() -> bool:
         return (
@@ -152,6 +154,9 @@ def _install_expected_failure_message():
             and redaction_module.redact_operator_text is canonical_text_redactor
             and getattr(canonical_text_redactor, "__code__", None)
             is canonical_text_redactor_code
+            and redaction_module._secret_values is canonical_secret_values
+            and getattr(canonical_secret_values, "__code__", None)
+            is canonical_secret_values_code
         )
 
     def expected_failure_message(command: str, exc: OSError | ValueError) -> str:

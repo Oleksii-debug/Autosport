@@ -19,6 +19,7 @@ from .parlayapi_provider import (
     ProviderPayloadError,
     ProviderTransportError,
 )
+from .secret_redaction import safe_exception_detail
 
 
 _BUNDLE_KIND = "parlayapi_historical_acquisition_bundle"
@@ -305,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             results_priced_only=args.results_priced_only,
         )
     except (ProviderTransportError, ProviderPayloadError, ValueError, OSError) as exc:
-        print(f"historical_acquisition=FAIL_CLOSED error={exc}")
+        print(f"historical_acquisition=FAIL_CLOSED error={safe_exception_detail(exc)}")
         return 3
 
     print(

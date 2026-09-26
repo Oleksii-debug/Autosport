@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest import mock
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from autosport import historical_acquisition
 from autosport.historical_acquisition import capture_historical_acquisition_bundle
 from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider, ProviderPayloadError
 
@@ -247,6 +252,44 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 )
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
         self.assertEqual(transport.urls, [])
+
+
+    def test_cli_redacts_failure_detail_without_changing_exit_contract(self) -> None:
+        secret = "historical-secret-321"
+        output = StringIO()
+        argv = [
+            "--at",
+            "2026-09-12T10:03:00Z",
+            "--results-date",
+            "2026-09-10",
+        ]
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"AUTOSPORT_PARLAYAPI_KEY": secret},
+                clear=False,
+            ),
+            mock.patch.object(
+                historical_acquisition,
+                "ParlayApiTableTennisProvider",
+                return_value=object(),
+            ),
+            mock.patch.object(
+                historical_acquisition,
+                "capture_historical_acquisition_bundle",
+                side_effect=ValueError("password=" + secret + " region=us"),
+            ),
+            redirect_stdout(output),
+        ):
+            result = historical_acquisition.main(argv)
+
+        rendered = output.getvalue()
+        self.assertEqual(result, 3)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("historical_acquisition=FAIL_CLOSED", rendered)
+        self.assertIn("password=[REDACTED]", rendered)
+        self.assertIn("region=us", rendered)
 
 
 if __name__ == "__main__":

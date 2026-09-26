@@ -189,7 +189,7 @@ def _sample_insufficiency_reason(
     algorithm = _text(algorithm_version, "algorithm_version")
     if algorithm not in _SUPPORTED_DRIFT_ALGORITHM_VERSIONS:
         raise ValueError("unsupported drift algorithm version")
-    if isinstance(min_samples, bool) or not isinstance(min_samples, int):
+    if type(min_samples) is not int:
         raise ValueError("min_samples must be an integer")
     if min_samples <= 0:
         raise ValueError("min_samples must be positive")
@@ -525,7 +525,7 @@ class DriftReference:
             raise ValueError("baseline window timestamps are inconsistent")
         if training > start:
             raise DriftCausalityError("baseline window predates the model training cutoff")
-        if isinstance(self.min_samples, bool) or not isinstance(self.min_samples, int):
+        if type(self.min_samples) is not int:
             raise ValueError("min_samples must be an integer")
         if self.min_samples <= 0:
             raise ValueError("min_samples must be positive")
@@ -986,7 +986,7 @@ class DriftMonitor:
             raise TypeError("metric must be DriftMetric")
         if metric is not DriftMetric.MEAN_ABSOLUTE_SHIFT:
             raise ValueError("unsupported drift metric")
-        if isinstance(min_samples, bool) or not isinstance(min_samples, int):
+        if type(min_samples) is not int:
             raise ValueError("min_samples must be an integer")
         if min_samples <= 0:
             raise ValueError("min_samples must be positive")

@@ -113,13 +113,7 @@ def has_older_current_head_attempt(
     workflow_name: str,
     current_run_id: int,
 ) -> bool:
-    """Return whether an older active run already owns this exact-head heavy gate.
-
-    Admission is read-only and oldest-active-wins. A later duplicate rerun therefore
-    cannot consume another matrix/Windows slot while an earlier attempt on the same
-    PR, workflow, and exact head is still queued or running. We deliberately do not
-    prefer the newest run: doing so would repeatedly restart long qualification work.
-    """
+    """Return whether an older active run already owns this exact-head heavy gate."""
 
     pr_number = _require_positive_int(pr_number, field="pull request number")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
@@ -233,20 +227,18 @@ def admit_current_head(
     event_head_sha: str,
     workflow_name: str | None = None,
     current_run_id: int | None = None,
+    dedupe_same_head: bool = False,
 ) -> CancellationResult:
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     live_head_sha = api.live_pr_head(pr_number)
     if event_head_sha != live_head_sha:
         return CancellationResult(current_head=False, cancelled_run_ids=())
 
-    # Legacy/programmatic callers may ask only the head-currentness question. Workflow
-    # admission supplies both fields and additionally suppresses duplicate exact-head
-    # attempts without requiring actions:write.
-    if workflow_name is None and current_run_id is None:
+    if not dedupe_same_head:
         return CancellationResult(current_head=True, cancelled_run_ids=())
     if workflow_name is None or current_run_id is None:
         raise CancellationError(
-            "workflow_name and current_run_id must be supplied together for run admission"
+            "workflow_name and current_run_id are required for same-head dedup"
         )
 
     active_runs = api.active_runs()
@@ -309,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workflow-name", required=True)
     parser.add_argument("--current-run-id", type=int, required=True)
     parser.add_argument("--admission-only", action="store_true")
+    parser.add_argument("--dedupe-same-head", action="store_true")
     args = parser.parse_args(argv)
     try:
         api = GitHubApi(
@@ -322,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
                 event_head_sha=args.event_head_sha,
                 workflow_name=args.workflow_name,
                 current_run_id=args.current_run_id,
+                dedupe_same_head=args.dedupe_same_head,
             )
         else:
             result = cancel_superseded(

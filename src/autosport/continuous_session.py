@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
@@ -43,6 +42,107 @@ class SessionStoppedError(ContinuousSessionError):
     """Raised when work is attempted while the session is durably STOPPED."""
 
 
+def _bind_canonical_settlement_engine(method):
+    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+
+    canonical_engine_type = SettlementEngine
+
+    def guarded(self, *args, **kwargs):
+        if "_settlement_engine_type" in kwargs:
+            raise TypeError("settlement engine origin is internal product authority")
+        kwargs["_settlement_engine_type"] = canonical_engine_type
+        return method(self, *args, **kwargs)
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
+def _seal_settlement_consumer_entry(method):
+    """Return an immutable built-in descriptor with a closure-owned dispatch target."""
+
+    def resolve(instance):
+        return method.__get__(instance, type(instance))
+
+    def reject_set(_instance, _value) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    def reject_delete(_instance) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    return property(resolve, reject_set, reject_delete, method.__doc__)
+
+
+def _build_settlement_consumer_class_guard(name: str):
+    """Keep type-level replacement from bypassing the installed data descriptor."""
+
+    class SettlementConsumerClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            binding = instance.__dict__[name]
+            return binding.__get__(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    return SettlementConsumerClassGuard()
+
+
+class _ContinuousSessionCoordinatorMeta(type):
+    """Seal the trusted settlement consumer entry inside the process TCB."""
+
+    def __init_subclass__(mcls, **kwargs) -> None:
+        raise TypeError("canonical settlement consumer metaclass is not extensible")
+
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        protected = {"_settle", "_settlement_consumer_bindings_sealed"}
+        inherits_sealed_consumer = any(
+            any(
+                ancestor.__dict__.get(
+                    "_settlement_consumer_bindings_sealed",
+                    False,
+                )
+                for ancestor in base.__mro__
+            )
+            for base in bases
+        )
+        if inherits_sealed_consumer and protected.intersection(namespace):
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in {
+            "_settle",
+            "_settlement_consumer_bindings_sealed",
+        }:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in {
+            "_settle",
+            "_settlement_consumer_bindings_sealed",
+        }:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        super().__delattr__(name)
+
+
 class SessionState(StrEnum):
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
@@ -69,31 +169,12 @@ class SettlementResolution:
         available = _instant(self.available_at, "available_at")
         if available > cutoff:
             raise ValueError("settlement evidence is not causally available at session cutoff")
-        if (
-            type(self.quote_outcomes) is not dict
-            and not isinstance(self.quote_outcomes, _ValidatedQuoteOutcomes)
-        ) or not self.quote_outcomes:
+        if type(self.quote_outcomes) is not dict or not self.quote_outcomes:
             raise ValueError("quote_outcomes must be a non-empty exact dict")
         for quote_key, outcome in self.quote_outcomes.items():
             _text(quote_key, "quote_outcomes quote_key")
             if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
                 raise ValueError("quote_outcomes contains unsupported outcome")
-
-        quote_outcomes_sha256 = _settlement_quote_outcomes_sha256(self.quote_outcomes)
-        if isinstance(self.quote_outcomes, _ValidatedQuoteOutcomes):
-            if self.quote_outcomes.validated_sha256 != quote_outcomes_sha256:
-                raise ValueError(
-                    "settlement resolution quote_outcomes changed after validation"
-                )
-        else:
-            object.__setattr__(
-                self,
-                "quote_outcomes",
-                _ValidatedQuoteOutcomes(
-                    self.quote_outcomes,
-                    validated_sha256=quote_outcomes_sha256,
-                ),
-            )
 
 
 class SettlementOutcomeAuthority(Protocol):
@@ -160,7 +241,7 @@ class ContinuousSessionStatus:
     last_success_at: str | None
     last_error_code: str | None
     last_full_refresh_at: str | None
-    settlement_evidence: tuple[dict[str, str | None], ...]
+    settlement_evidence: tuple[dict[str, str], ...]
     source_provider_unavailable: bool = False
     source_last_success_at: str | None = None
     source_last_error_code: str | None = None
@@ -199,54 +280,9 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
-class _ValidatedQuoteOutcomes(dict[str, str]):
-    """Mutable compatibility view carrying the exact content sealed at validation."""
-
-    __slots__ = ("_validated_sha256",)
-
-    def __init__(
-        self,
-        values: Any = (),
-        *,
-        validated_sha256: str | None = None,
-    ) -> None:
-        super().__init__(values)
-        self._validated_sha256 = (
-            _settlement_quote_outcomes_sha256(self)
-            if validated_sha256 is None
-            else _sha256(validated_sha256, "validated_sha256")
-        )
-
-    @property
-    def validated_sha256(self) -> str:
-        return self._validated_sha256
-
-
-def _settlement_quote_outcomes_sha256(outcomes: dict[str, str]) -> str:
-    if (
-        type(outcomes) is not dict
-        and not isinstance(outcomes, _ValidatedQuoteOutcomes)
-    ) or not outcomes:
-        raise ValueError("quote_outcomes must be a non-empty exact dict")
-    canonical: list[list[str]] = []
-    for quote_key in sorted(outcomes):
-        _text(quote_key, "quote_outcomes quote_key")
-        outcome = outcomes[quote_key]
-        if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
-            raise ValueError("quote_outcomes contains unsupported outcome")
-        canonical.append([quote_key, outcome])
-    payload = json.dumps(
-        canonical,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _LEGACY_VERSION = 2
-    _VERSION = 3
+    _VERSION = 2
     _FIELDS = {
         "schema",
         "schema_version",
@@ -324,66 +360,31 @@ class _ContinuousSessionState:
             )
             self._read()
 
-    @classmethod
-    def _validate_settlement_evidence(
-        cls,
-        raw: object,
-        *,
-        schema_version: int,
-    ) -> tuple[dict[str, str | None], ...]:
+    @staticmethod
+    def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
-        values: list[dict[str, str | None]] = []
-        seen_evidence_ids: set[str] = set()
-        legacy_fields = {
-            "event_identity",
-            "settlement_ref",
-            "evidence_id",
-            "evidence_sha256",
-            "available_at",
-        }
-        current_fields = legacy_fields | {"quote_outcomes_sha256"}
-        if schema_version == cls._LEGACY_VERSION:
-            expected_fields = legacy_fields
-        elif schema_version == cls._VERSION:
-            expected_fields = current_fields
-        else:
-            raise ContinuousSessionError(
-                "unsupported continuous session settlement evidence schema"
-            )
-
+        values: list[dict[str, str]] = []
         for item in raw:
             if type(item) is not dict:
                 raise ContinuousSessionError(
                     "settlement_evidence entries must be objects"
                 )
-            if set(item) != expected_fields:
+            if set(item) != {
+                "event_identity",
+                "settlement_ref",
+                "evidence_id",
+                "evidence_sha256",
+                "available_at",
+            }:
                 raise ContinuousSessionError(
                     "settlement_evidence entry fields mismatch"
                 )
             _text(item["event_identity"], "settlement_evidence event_identity")
             _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            evidence_id = _text(
-                item["evidence_id"],
-                "settlement_evidence evidence_id",
-            )
-            if evidence_id in seen_evidence_ids:
-                raise ContinuousSessionError(
-                    "settlement_evidence evidence_id values must be unique"
-                )
-            seen_evidence_ids.add(evidence_id)
+            _text(item["evidence_id"], "settlement_evidence evidence_id")
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
-            quote_outcomes_sha256 = (
-                None
-                if schema_version == cls._LEGACY_VERSION
-                else item["quote_outcomes_sha256"]
-            )
-            if quote_outcomes_sha256 is not None:
-                _sha256(
-                    quote_outcomes_sha256,
-                    "settlement_evidence quote_outcomes_sha256",
-                )
             values.append(
                 {
                     "event_identity": item["event_identity"],
@@ -391,7 +392,6 @@ class _ContinuousSessionState:
                     "evidence_id": item["evidence_id"],
                     "evidence_sha256": item["evidence_sha256"],
                     "available_at": item["available_at"],
-                    "quote_outcomes_sha256": quote_outcomes_sha256,
                 }
             )
         return tuple(values)
@@ -407,7 +407,7 @@ class _ContinuousSessionState:
             type(raw) is not dict
             or set(raw) != self._FIELDS
             or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] not in {self._LEGACY_VERSION, self._VERSION}
+            or raw["schema_version"] != self._VERSION
             or raw["source_id"] != self.source_id
         ):
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
@@ -425,11 +425,7 @@ class _ContinuousSessionState:
                 _instant(raw[name], name)
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
-        schema_version = raw["schema_version"]
-        evidence = self._validate_settlement_evidence(
-            raw["settlement_evidence"],
-            schema_version=schema_version,
-        )
+        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -479,7 +475,6 @@ class _ContinuousSessionState:
                 "unresolved source gaps require DETECTED/GAP_DETECTED projection"
             )
         raw["state"] = state.value
-        raw["schema_version"] = self._VERSION
         raw["settlement_evidence"] = [dict(item) for item in evidence]
         return raw
 
@@ -528,14 +523,9 @@ class _ContinuousSessionState:
         self._update(mutate)
 
     @staticmethod
-    def _quote_outcomes_sha256(evidence: SettlementResolution) -> str:
-        evidence.validate(as_of=evidence.available_at)
-        return _settlement_quote_outcomes_sha256(evidence.quote_outcomes)
-
-    @staticmethod
     def _normalized_settlement_evidence(
         evidence: SettlementResolution,
-    ) -> dict[str, str | None]:
+    ) -> dict[str, str]:
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
@@ -545,9 +535,6 @@ class _ContinuousSessionState:
                 evidence.available_at,
                 "available_at",
             ).isoformat(),
-            "quote_outcomes_sha256": _ContinuousSessionState._quote_outcomes_sha256(
-                evidence
-            ),
         }
 
     def validate_settlement_evidence(
@@ -563,16 +550,10 @@ class _ContinuousSessionState:
         for evidence in settlement_evidence:
             normalized = self._normalized_settlement_evidence(evidence)
             existing = known.get(evidence.evidence_id)
-            if existing is not None:
-                if existing["quote_outcomes_sha256"] is None:
-                    raise ContinuousSessionError(
-                        "legacy settlement evidence cannot be safely rebound without "
-                        "an outcome fingerprint"
-                    )
-                if existing != normalized:
-                    raise ContinuousSessionError(
-                        "settlement evidence id conflicts with durable evidence"
-                    )
+            if existing is not None and existing != normalized:
+                raise ContinuousSessionError(
+                    "settlement evidence id conflicts with durable evidence"
+                )
             known[evidence.evidence_id] = normalized
 
     def record_source_projection(
@@ -648,11 +629,6 @@ class _ContinuousSessionState:
                 existing = known.get(evidence.evidence_id)
                 normalized = self._normalized_settlement_evidence(evidence)
                 if existing is not None:
-                    if existing["quote_outcomes_sha256"] is None:
-                        raise ContinuousSessionError(
-                            "legacy settlement evidence cannot be safely rebound without "
-                            "an outcome fingerprint"
-                        )
                     if existing != normalized:
                         raise ContinuousSessionError(
                             "settlement evidence id conflicts with durable evidence"
@@ -670,13 +646,15 @@ class _ContinuousSessionState:
         self._update(lambda raw: raw.__setitem__("last_error_code", code))
 
 
-class ContinuousSessionCoordinator:
+class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     """Compose existing collector/lifecycle/mirror/settlement authorities into one durable loop.
 
     The coordinator owns only session identity/checkpoint and sequencing. It never becomes
     a market store, delta store, lifecycle store, scheduler, outcome authority, or LLM
     decision engine.
     """
+
+    _settlement_consumer_bindings_sealed = False
 
     def __init__(
         self,
@@ -909,21 +887,7 @@ class ContinuousSessionCoordinator:
                     "settlement evidence reference does not match lifecycle evidence"
                 )
             resolution.validate(as_of=as_of)
-            (snapshot,) = self._settlement_handoff_snapshot(
-                (resolution,),
-                as_of=as_of,
-            )
-            # The detached object, not the authority-owned object, is the final
-            # lifecycle-bound truth crossing into session economics.
-            if snapshot.event_identity != record.identity:
-                raise ContinuousSessionError(
-                    "settlement snapshot event identity does not match lifecycle identity"
-                )
-            if snapshot.settlement_ref != record.settlement_ref:
-                raise ContinuousSessionError(
-                    "settlement snapshot reference does not match lifecycle evidence"
-                )
-            resolutions.append(snapshot)
+            resolutions.append(resolution)
         return tuple(resolutions)
 
     def _load_book(self) -> PaperBook:
@@ -931,76 +895,32 @@ class ContinuousSessionCoordinator:
             return PaperBook.load(self.paper_book_path)
         return PaperBook(self.initial_bankroll)
 
-    @staticmethod
-    def _settlement_handoff_snapshot(
-        resolutions: tuple[SettlementResolution, ...],
-        *,
-        as_of: str | None = None,
-    ) -> tuple[SettlementResolution, ...]:
-        """Detach one exact validated settlement snapshot from caller-owned state."""
-
-        detached: list[SettlementResolution] = []
-        for resolution in resolutions:
-            if not isinstance(resolution, SettlementResolution):
-                raise TypeError(
-                    "resolutions must contain SettlementResolution values"
-                )
-            validation_cutoff = resolution.available_at if as_of is None else as_of
-            resolution.validate(as_of=validation_cutoff)
-            outcomes = resolution.quote_outcomes
-            if not isinstance(outcomes, _ValidatedQuoteOutcomes):
-                raise ContinuousSessionError(
-                    "validated settlement outcomes lost canonical seal"
-                )
-            validated_sha256 = outcomes.validated_sha256
-            copied_outcomes = dict(outcomes)
-            if (
-                _settlement_quote_outcomes_sha256(copied_outcomes)
-                != validated_sha256
-            ):
-                raise ContinuousSessionError(
-                    "settlement outcomes changed while creating canonical snapshot"
-                )
-            snapshot = SettlementResolution(
-                event_identity=resolution.event_identity,
-                settlement_ref=resolution.settlement_ref,
-                quote_outcomes=copied_outcomes,
-                evidence_id=resolution.evidence_id,
-                evidence_sha256=resolution.evidence_sha256,
-                available_at=resolution.available_at,
-            )
-            snapshot.validate(as_of=validation_cutoff)
-            snapshot_outcomes = snapshot.quote_outcomes
-            if (
-                not isinstance(snapshot_outcomes, _ValidatedQuoteOutcomes)
-                or snapshot_outcomes.validated_sha256 != validated_sha256
-            ):
-                raise ContinuousSessionError(
-                    "canonical settlement snapshot digest mismatch"
-                )
-            detached.append(snapshot)
-        return tuple(detached)
-
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_engine
     def _settle(
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
-        # Never carry a caller-reachable mutable SettlementResolution across the
-        # economic-lock boundary.  The private execution snapshot is detached only
-        # after its current content has been rebound to the exact validated digest.
-        execution_resolutions = self._settlement_handoff_snapshot(resolutions)
+        if SettlementEngine is not _settlement_engine_type:
+            raise ContinuousSessionError(
+                "settlement engine constructor origin changed"
+            )
         unique: dict[str, SettlementResolution] = {}
-        for resolution in execution_resolutions:
+        for resolution in resolutions:
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):
             book = self._load_book()
-            engine = SettlementEngine()
+            engine = _settlement_engine_type()
+            if type(engine) is not _settlement_engine_type:
+                raise ContinuousSessionError(
+                    "settlement engine constructor returned non-canonical type"
+                )
             for resolution in unique.values():
-                self._require_settlement_causal_for_open_tickets(book, resolution)
                 allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
                 scoped = {
                     quote_key: outcome
@@ -1014,39 +934,6 @@ class ContinuousSessionCoordinator:
                 book.save(self.paper_book_path)
 
         return settled, tuple(unique)
-
-    @staticmethod
-    def _require_settlement_causal_for_open_tickets(
-        book: PaperBook,
-        resolution: SettlementResolution,
-    ) -> None:
-        available_at = _instant(
-            resolution.available_at,
-            "settlement available_at",
-        )
-        event_parts = {resolution.event_identity}
-        if ":" in resolution.event_identity:
-            event_parts.add(resolution.event_identity.split(":", 1)[1])
-        resolution_quote_keys = set(resolution.quote_outcomes)
-
-        for ticket in book.tickets.values():
-            if ticket.status.value != "open":
-                continue
-            matches_resolution = any(
-                leg.event_id in event_parts
-                and leg.quote_key in resolution_quote_keys
-                for leg in ticket.legs
-            )
-            if not matches_resolution:
-                continue
-            placed_at = _instant(
-                ticket.placed_at,
-                f"ticket {ticket.ticket_id} placed_at",
-            )
-            if available_at < placed_at:
-                raise ContinuousSessionError(
-                    "settlement evidence predates matching open ticket placement"
-                )
 
     @staticmethod
     def _open_quote_keys_for_book(
@@ -1150,25 +1037,11 @@ class ContinuousSessionCoordinator:
                 if input_id not in newly_registered:
                     newly_registered.append(input_id)
 
-            authority_resolutions = self._settlement_resolutions(as_of=now)
-            # From this point onward, durable/economic truth uses only a private
-            # detached snapshot.  The outcome authority may retain and mutate the
-            # object it returned without rewriting this cycle's validated result.
-            resolutions = self._settlement_handoff_snapshot(
-                authority_resolutions,
-                as_of=now,
-            )
+            resolutions = self._settlement_resolutions(as_of=now)
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
-            handoff_resolutions: tuple[SettlementResolution, ...] | None = None
             if self.settlement_learning_handoff is not None:
-                # Learning gets a separate copy so callback mutation cannot affect
-                # settlement or the durable receipt published by this cycle.
-                handoff_resolutions = self._settlement_handoff_snapshot(
-                    resolutions,
-                    as_of=now,
-                )
                 prepare = getattr(
                     self.settlement_learning_handoff,
                     "prepare_settlement",
@@ -1177,19 +1050,14 @@ class ContinuousSessionCoordinator:
                 if prepare is not None:
                     prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=handoff_resolutions,
+                        resolutions=resolutions,
                         at=now,
                     )
-                    # A preparatory callback may not rewrite the outcome payload that
-                    # canonical settlement is about to consume.
-                    for resolution in handoff_resolutions:
-                        resolution.validate(as_of=resolution.available_at)
             settled, evidence_ids = self._settle(resolutions=resolutions)
             if self.settlement_learning_handoff is not None:
-                assert handoff_resolutions is not None
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,
-                    resolutions=handoff_resolutions,
+                    resolutions=resolutions,
                     settled_ticket_ids=settled,
                     at=now,
                 )
@@ -1221,3 +1089,10 @@ class ContinuousSessionCoordinator:
         except Exception as exc:
             self._state.record_failure(code=type(exc).__name__)
             raise
+
+# Seal the consumer entry after class creation. The metaclass data descriptor also
+# makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.
+_ContinuousSessionCoordinatorMeta._settle = _build_settlement_consumer_class_guard(
+    "_settle"
+)
+ContinuousSessionCoordinator._settlement_consumer_bindings_sealed = True

@@ -258,175 +258,174 @@ def resolve_governance_for_decision(
     )
 
 
-def _build_current_resolver():
-    # Pin both the import-time time module object and its exact wall-clock
-    # callable. The two bindings live on different mutation surfaces (module global
-    # vs closure) and are cross-checked immediately before every sample. Rebinding a
-    # closure cell, the module global, or time.time_ns itself therefore fails closed
-    # before caller-selected time can become positive currentness authority.
-    product_time_module = time
-    product_time_ns = product_time_module.time_ns
+def _product_time_ns() -> int:
+    """Sample only the canonical built-in time.time_ns product wall clock."""
 
-    def resolve_current_governance(
-        registry: BookmakerCapabilityRegistry,
-        *,
-        venue_id: str,
-        account_id: str,
-        jurisdiction: str,
-        max_age_seconds: int,
-    ) -> GovernanceDecisionEvidence:
-        """Qualify durable governance evidence for the current product instant only."""
+    canonical_time = __import__("time")
+    if canonical_time is not time:
+        raise GovernanceCurrentnessError("product clock module authority changed")
 
-        if time is not product_time_module:
-            raise GovernanceCurrentnessError(
-                "product clock module authority changed"
-            )
-        if product_time_module.time_ns is not product_time_ns:
-            raise GovernanceCurrentnessError(
-                "product clock callable authority changed"
-            )
-
-        _validate_request(
-            registry,
-            venue_id=venue_id,
-            account_id=account_id,
-            jurisdiction=jurisdiction,
-            max_age_seconds=max_age_seconds,
+    clock = getattr(canonical_time, "time_ns", None)
+    if (
+        type(clock) is not type(abs)
+        or getattr(clock, "__name__", None) != "time_ns"
+        or getattr(clock, "__module__", None) != "time"
+        or getattr(clock, "__self__", None) is not canonical_time
+    ):
+        raise GovernanceCurrentnessError(
+            "product clock callable authority changed"
         )
-        now_ns = product_time_ns()
-        if type(now_ns) is not int or now_ns < 0:
-            raise GovernanceCurrentnessError("product clock returned an invalid value")
-        seconds, remainder_ns = divmod(now_ns, 1_000_000_000)
-        decision_time = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(
-            microsecond=remainder_ns // 1_000
+
+    now_ns = clock()
+    if type(now_ns) is not int or now_ns < 0:
+        raise GovernanceCurrentnessError("product clock returned an invalid value")
+    return now_ns
+
+
+def resolve_current_governance(
+    registry: BookmakerCapabilityRegistry,
+    *,
+    venue_id: str,
+    account_id: str,
+    jurisdiction: str,
+    max_age_seconds: int,
+) -> GovernanceDecisionEvidence:
+    """Qualify durable governance evidence for the current product instant only."""
+
+    _validate_request(
+        registry,
+        venue_id=venue_id,
+        account_id=account_id,
+        jurisdiction=jurisdiction,
+        max_age_seconds=max_age_seconds,
+    )
+    now_ns = _product_time_ns()
+    seconds, remainder_ns = divmod(now_ns, 1_000_000_000)
+    decision_time = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(
+        microsecond=remainder_ns // 1_000
+    )
+    decision_at = _canonical_utc(decision_time)
+
+    history = registry.governance_history(venue_id, account_id)
+    if any(type(item) is not BookmakerGovernanceEvidence for item in history):
+        raise GovernanceCurrentnessError(
+            "registry returned non-canonical governance evidence"
         )
-        decision_at = _canonical_utc(decision_time)
 
-        history = registry.governance_history(venue_id, account_id)
-        if any(type(item) is not BookmakerGovernanceEvidence for item in history):
-            raise GovernanceCurrentnessError(
-                "registry returned non-canonical governance evidence"
-            )
-
-        scoped = tuple(item for item in history if item.jurisdiction == jurisdiction)
-        eligible = tuple(
-            item
-            for item in scoped
-            if _timestamp(item.observed_at, "observed_at") <= decision_time
-        )
-        if not eligible:
-            return _result(
-                venue_id=venue_id,
-                account_id=account_id,
-                jurisdiction=jurisdiction,
-                decision_at=decision_at,
-                max_age_seconds=max_age_seconds,
-                state=GovernanceEvidenceState.UNKNOWN,
-                reason=GovernanceCurrentnessReason.NO_ELIGIBLE_EVIDENCE,
-            )
-
-        latest_time = max(
-            _timestamp(item.observed_at, "observed_at") for item in eligible
-        )
-        latest = tuple(
-            item
-            for item in eligible
-            if _timestamp(item.observed_at, "observed_at") == latest_time
-        )
-        if len(latest) != 1:
-            return _result(
-                venue_id=venue_id,
-                account_id=account_id,
-                jurisdiction=jurisdiction,
-                decision_at=decision_at,
-                max_age_seconds=max_age_seconds,
-                state=GovernanceEvidenceState.UNKNOWN,
-                reason=GovernanceCurrentnessReason.AMBIGUOUS_LATEST,
-            )
-
-        candidate = latest[0]
-        age = decision_time - latest_time
-        age_seconds = float(age.total_seconds())
-
-        same_terms_digests = {
-            item.source_payload_sha256
-            for item in eligible
-            if item.terms_version == candidate.terms_version
-        }
-        if len(same_terms_digests) != 1:
-            return _result(
-                venue_id=venue_id,
-                account_id=account_id,
-                jurisdiction=jurisdiction,
-                decision_at=decision_at,
-                max_age_seconds=max_age_seconds,
-                state=GovernanceEvidenceState.UNKNOWN,
-                reason=GovernanceCurrentnessReason.TERMS_DOCUMENT_CONFLICT,
-                evidence=candidate,
-                evidence_age_seconds=age_seconds,
-            )
-
-        same_document_permissions = {
-            item.automation_permission
-            for item in eligible
-            if (
-                item.terms_version == candidate.terms_version
-                and item.source_payload_sha256 == candidate.source_payload_sha256
-            )
-        }
-        if len(same_document_permissions) != 1:
-            return _result(
-                venue_id=venue_id,
-                account_id=account_id,
-                jurisdiction=jurisdiction,
-                decision_at=decision_at,
-                max_age_seconds=max_age_seconds,
-                state=GovernanceEvidenceState.UNKNOWN,
-                reason=GovernanceCurrentnessReason.TERMS_PERMISSION_CONFLICT,
-                evidence=candidate,
-                evidence_age_seconds=age_seconds,
-            )
-
-        if _freshness_limit_exceeded(latest_time, decision_time, max_age_seconds):
-            return _result(
-                venue_id=venue_id,
-                account_id=account_id,
-                jurisdiction=jurisdiction,
-                decision_at=decision_at,
-                max_age_seconds=max_age_seconds,
-                state=GovernanceEvidenceState.UNKNOWN,
-                reason=GovernanceCurrentnessReason.STALE,
-                evidence=candidate,
-                evidence_age_seconds=age_seconds,
-            )
-
-        if candidate.automation_permission is GovernancePermissionState.UNKNOWN:
-            state = GovernanceEvidenceState.UNKNOWN
-            reason = GovernanceCurrentnessReason.RECORDED_UNKNOWN
-        elif candidate.automation_permission is GovernancePermissionState.PERMITTED:
-            state = GovernanceEvidenceState.SUPPORTS_PERMITTED
-            reason = GovernanceCurrentnessReason.QUALIFIED_PERMITTED
-        elif candidate.automation_permission is GovernancePermissionState.PROHIBITED:
-            state = GovernanceEvidenceState.SUPPORTS_PROHIBITED
-            reason = GovernanceCurrentnessReason.QUALIFIED_PROHIBITED
-        else:
-            raise GovernanceCurrentnessError(
-                "unsupported governance permission state"
-            )
-
+    scoped = tuple(item for item in history if item.jurisdiction == jurisdiction)
+    eligible = tuple(
+        item
+        for item in scoped
+        if _timestamp(item.observed_at, "observed_at") <= decision_time
+    )
+    if not eligible:
         return _result(
             venue_id=venue_id,
             account_id=account_id,
             jurisdiction=jurisdiction,
             decision_at=decision_at,
             max_age_seconds=max_age_seconds,
-            state=state,
-            reason=reason,
+            state=GovernanceEvidenceState.UNKNOWN,
+            reason=GovernanceCurrentnessReason.NO_ELIGIBLE_EVIDENCE,
+        )
+
+    latest_time = max(
+        _timestamp(item.observed_at, "observed_at") for item in eligible
+    )
+    latest = tuple(
+        item
+        for item in eligible
+        if _timestamp(item.observed_at, "observed_at") == latest_time
+    )
+    if len(latest) != 1:
+        return _result(
+            venue_id=venue_id,
+            account_id=account_id,
+            jurisdiction=jurisdiction,
+            decision_at=decision_at,
+            max_age_seconds=max_age_seconds,
+            state=GovernanceEvidenceState.UNKNOWN,
+            reason=GovernanceCurrentnessReason.AMBIGUOUS_LATEST,
+        )
+
+    candidate = latest[0]
+    age = decision_time - latest_time
+    age_seconds = float(age.total_seconds())
+
+    same_terms_digests = {
+        item.source_payload_sha256
+        for item in eligible
+        if item.terms_version == candidate.terms_version
+    }
+    if len(same_terms_digests) != 1:
+        return _result(
+            venue_id=venue_id,
+            account_id=account_id,
+            jurisdiction=jurisdiction,
+            decision_at=decision_at,
+            max_age_seconds=max_age_seconds,
+            state=GovernanceEvidenceState.UNKNOWN,
+            reason=GovernanceCurrentnessReason.TERMS_DOCUMENT_CONFLICT,
             evidence=candidate,
             evidence_age_seconds=age_seconds,
         )
 
-    return resolve_current_governance
+    same_document_permissions = {
+        item.automation_permission
+        for item in eligible
+        if (
+            item.terms_version == candidate.terms_version
+            and item.source_payload_sha256 == candidate.source_payload_sha256
+        )
+    }
+    if len(same_document_permissions) != 1:
+        return _result(
+            venue_id=venue_id,
+            account_id=account_id,
+            jurisdiction=jurisdiction,
+            decision_at=decision_at,
+            max_age_seconds=max_age_seconds,
+            state=GovernanceEvidenceState.UNKNOWN,
+            reason=GovernanceCurrentnessReason.TERMS_PERMISSION_CONFLICT,
+            evidence=candidate,
+            evidence_age_seconds=age_seconds,
+        )
 
+    if _freshness_limit_exceeded(latest_time, decision_time, max_age_seconds):
+        return _result(
+            venue_id=venue_id,
+            account_id=account_id,
+            jurisdiction=jurisdiction,
+            decision_at=decision_at,
+            max_age_seconds=max_age_seconds,
+            state=GovernanceEvidenceState.UNKNOWN,
+            reason=GovernanceCurrentnessReason.STALE,
+            evidence=candidate,
+            evidence_age_seconds=age_seconds,
+        )
 
-resolve_current_governance = _build_current_resolver()
+    if candidate.automation_permission is GovernancePermissionState.UNKNOWN:
+        state = GovernanceEvidenceState.UNKNOWN
+        reason = GovernanceCurrentnessReason.RECORDED_UNKNOWN
+    elif candidate.automation_permission is GovernancePermissionState.PERMITTED:
+        state = GovernanceEvidenceState.SUPPORTS_PERMITTED
+        reason = GovernanceCurrentnessReason.QUALIFIED_PERMITTED
+    elif candidate.automation_permission is GovernancePermissionState.PROHIBITED:
+        state = GovernanceEvidenceState.SUPPORTS_PROHIBITED
+        reason = GovernanceCurrentnessReason.QUALIFIED_PROHIBITED
+    else:
+        raise GovernanceCurrentnessError(
+            "unsupported governance permission state"
+        )
+
+    return _result(
+        venue_id=venue_id,
+        account_id=account_id,
+        jurisdiction=jurisdiction,
+        decision_at=decision_at,
+        max_age_seconds=max_age_seconds,
+        state=state,
+        reason=reason,
+        evidence=candidate,
+        evidence_age_seconds=age_seconds,
+    )

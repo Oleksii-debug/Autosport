@@ -54,6 +54,10 @@ class RiskSamplingDependenceError(RuntimeError):
 def _canonical_text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise RiskSamplingDependenceError(f"{name} must be a non-empty canonical string")
+    if "\r" in value or "\n" in value:
+        raise RiskSamplingDependenceError(
+            f"{name} must not contain CR/LF delimiters"
+        )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:

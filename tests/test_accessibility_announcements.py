@@ -234,6 +234,49 @@ def test_invalid_history_bound_fails_closed(value):
         AnnouncementGate(max_history=value)
 
 
+def test_history_bound_rejects_hostile_int_subclass_before_comparison():
+    class HostileInt(int):
+        def __le__(self, _other):
+            raise AssertionError("hostile max_history comparison must not run")
+
+    with pytest.raises(ValueError, match="max_history must be a positive integer"):
+        AnnouncementGate(max_history=HostileInt(-1))
+
+
+@pytest.mark.parametrize("field", ("text", "state_token", "episode_id"))
+def test_event_rejects_hostile_string_subclasses_before_dispatch(field):
+    class HostileText(str):
+        def strip(self):
+            raise AssertionError("hostile string strip must not run")
+
+        def encode(self, *_args, **_kwargs):
+            raise AssertionError("hostile string encode must not run")
+
+    kwargs = {
+        "kind": AnnouncementKind.CRITICAL_ERROR,
+        "text": "Критична помилка",
+        "state_token": "state-1",
+        "episode_id": "episode-1",
+    }
+    kwargs[field] = HostileText("forged")
+
+    with pytest.raises(ValueError, match=field):
+        AnnouncementEvent(**kwargs)
+
+
+def test_gate_rejects_announcement_event_subclass_before_attribute_dispatch():
+    class HostileEvent(AnnouncementEvent):
+        def __getattribute__(self, name):
+            if name in {"kind", "state_token", "episode_id", "text"}:
+                raise AssertionError("hostile event attribute dispatch must not run")
+            return super().__getattribute__(name)
+
+    hostile = object.__new__(HostileEvent)
+
+    with pytest.raises(TypeError, match="event must be AnnouncementEvent"):
+        AnnouncementGate().decide(hostile)
+
+
 @pytest.mark.parametrize("field,value", [("text", ""), ("text", " x "), ("state_token", ""), ("state_token", " x ")])
 def test_event_text_and_state_token_must_be_nonempty_trimmed(field, value):
     kwargs = {"kind": AnnouncementKind.STOP_COMPLETED, "text": "Готово", "state_token": "done-1"}
@@ -249,6 +292,11 @@ def test_assertive_episode_identity_is_required_and_trimmed():
 
     with pytest.raises(ValueError, match="valid only for assertive"):
         _event(AnnouncementKind.OPERATION_STARTED, episode="unexpected")
+
+
+def test_priority_lookup_rejects_noncanonical_kind_object():
+    with pytest.raises(TypeError, match="kind must be AnnouncementKind"):
+        priority_for_kind("STOP_COMPLETED")  # type: ignore[arg-type]
 
 
 def test_runtime_types_fail_closed():

@@ -74,7 +74,7 @@ class AnnouncementEvent:
     episode_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.kind, AnnouncementKind):
+        if type(self.kind) is not AnnouncementKind:
             raise TypeError("kind must be AnnouncementKind")
         _require_trimmed("text", self.text)
         _require_trimmed("state_token", self.state_token)
@@ -174,7 +174,7 @@ class AnnouncementGate:
     __slots__ = ("_max_history", "_history")
 
     def __init__(self, *, max_history: int = 128) -> None:
-        if isinstance(max_history, bool) or not isinstance(max_history, int) or max_history <= 0:
+        if type(max_history) is not int or max_history <= 0:
             raise ValueError("max_history must be a positive integer")
         self._max_history = max_history
         self._history: OrderedDict[tuple[str, ...], None] = OrderedDict()
@@ -188,7 +188,7 @@ class AnnouncementGate:
         return self._max_history
 
     def decide(self, event: AnnouncementEvent) -> AnnouncementDecision:
-        if not isinstance(event, AnnouncementEvent):
+        if type(event) is not AnnouncementEvent:
             raise TypeError("event must be AnnouncementEvent")
 
         intended = _PRIORITY_BY_KIND[event.kind]
@@ -226,7 +226,7 @@ class AnnouncementGate:
 def priority_for_kind(kind: AnnouncementKind) -> AnnouncementPriority:
     """Return product-owned priority without allowing caller escalation."""
 
-    if not isinstance(kind, AnnouncementKind):
+    if type(kind) is not AnnouncementKind:
         raise TypeError("kind must be AnnouncementKind")
     return _PRIORITY_BY_KIND[kind]
 
@@ -245,7 +245,7 @@ def _validate_activity_id(
     priority: AnnouncementPriority,
 ) -> str:
     _require_trimmed("activity_id", value)
-    assert isinstance(value, str)
+    assert type(value) is str
     if not value.isascii() or not value.startswith(_ACTIVITY_ID_PREFIX):
         raise ValueError("activity_id must be a product-issued non-localized ASCII identity")
     suffix = value[len(_ACTIVITY_ID_PREFIX):]
@@ -276,5 +276,5 @@ def _suppressed(reason: str) -> AnnouncementDecision:
 
 
 def _require_trimmed(name: str, value: object) -> None:
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{name} must be a non-empty trimmed string")

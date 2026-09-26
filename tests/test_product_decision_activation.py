@@ -2072,7 +2072,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
     def test_oversized_activation_state_fails_before_json_decode(self) -> None:
         self._initialize()
         self.store.path.write_bytes(
-            b"{" + (b"x" * activation_module._MAX_DURABLE_JSON_BYTES)
+            b"{" + (b"x" * activation_module._MAX_ACTIVATION_STATE_BYTES)
         )
 
         with self.assertRaisesRegex(

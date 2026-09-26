@@ -1032,3 +1032,142 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
     )
     with pytest.raises(PromotionEvidenceError, match="unconsumed confirmation holdout"):
         registry.record_promotion(decision)
+
+
+def test_champion_survives_restart_and_evaluated_challenger_cannot_rewrite_history(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+
+    champion_evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="champion-forward-persistence",
+        rollback_identity="NONE",
+    )
+    registry.append(champion_evidence)
+    registry.record_promotion(
+        PromotionDecision(
+            "promotion-champion-forward",
+            PromotionAction.PROMOTE,
+            "strategy-1",
+            "protocol-1",
+            foundation["protocol"].protocol_sha256,
+            "eval-1",
+            foundation["bundle"].bundle_sha256,
+            T3,
+            candidate_model_version_id="model-1",
+            promotion_evidence_id=champion_evidence.promotion_evidence_id,
+        )
+    )
+
+    challenger_created_at = "2026-01-05T00:00:00+00:00"
+    challenger_decided_at = "2026-01-06T00:00:00+00:00"
+    challenger = StrategyVersion(
+        "strategy-2",
+        "canonical-strategy",
+        SHA_C,
+        SHA_D,
+        SHA_B,
+        challenger_created_at,
+        model_version_id="model-1",
+        predecessor_strategy_version_id="strategy-1",
+    )
+    challenger_bundle = EvaluationBundleRef(
+        "eval-2",
+        SHA_A,
+        SHA_C,
+        "dataset-1",
+        foundation["protocol"].protocol_sha256,
+        (SHA_B,),
+        challenger_created_at,
+        evaluated_strategy_version_id="strategy-2",
+        evaluated_model_version_id="model-1",
+        effective_sample_size=5,
+        effect_interval_low="-0.15",
+        effect_interval_high="-0.05",
+        practical_improvement="-0.1",
+    )
+    challenger_experiment = ExperimentRecord(
+        "experiment-2",
+        "protocol-1",
+        "dataset-1",
+        "features-1",
+        "strategy-2",
+        "eval-2",
+        7,
+        SHA_B,
+        ResearchOutcome.NEGATIVE,
+        challenger_created_at,
+        model_version_id="model-1",
+        completed_at=challenger_created_at,
+        notes="untouched-forward challenger did not beat the durable champion",
+    )
+    for record in (challenger, challenger_bundle, challenger_experiment):
+        registry.append(record)
+
+    assert registry.champion_strategy(
+        as_of="2026-01-02T23:59:59+00:00",
+        canonical_strategy_id="canonical-strategy",
+    ) is None
+    assert registry.champion_strategy(
+        as_of=T3,
+        canonical_strategy_id="canonical-strategy",
+    ) == "strategy-1"
+    assert registry.champion_strategy(
+        as_of=challenger_created_at,
+        canonical_strategy_id="canonical-strategy",
+    ) == "strategy-1"
+
+    registry.record_promotion(
+        PromotionDecision(
+            "retain-challenger-forward",
+            PromotionAction.RETAIN,
+            "strategy-2",
+            "protocol-1",
+            foundation["protocol"].protocol_sha256,
+            "eval-2",
+            challenger_bundle.bundle_sha256,
+            challenger_decided_at,
+            predecessor_strategy_version_id="strategy-1",
+            candidate_model_version_id="model-1",
+            reason="negative untouched-forward result keeps the incumbent champion",
+        )
+    )
+
+    reopened = ScientificRegistry(path)
+    assert reopened.champion_strategy(
+        as_of=challenger_decided_at,
+        canonical_strategy_id="canonical-strategy",
+    ) == "strategy-1"
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="cannot be backdated before durable promotion history",
+    ):
+        reopened.record_promotion(
+            PromotionDecision(
+                "reject-backdated-challenger",
+                PromotionAction.REJECT,
+                "strategy-2",
+                "protocol-1",
+                foundation["protocol"].protocol_sha256,
+                "eval-2",
+                challenger_bundle.bundle_sha256,
+                "2026-01-05T12:00:00+00:00",
+                predecessor_strategy_version_id="strategy-1",
+                candidate_model_version_id="model-1",
+                reason="late writer must not insert a decision into durable history",
+            )
+        )
+
+    assert reopened.champion_strategy(
+        as_of="2026-01-07T00:00:00+00:00",
+        canonical_strategy_id="canonical-strategy",
+    ) == "strategy-1"

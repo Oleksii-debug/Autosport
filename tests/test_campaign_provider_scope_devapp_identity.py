@@ -140,6 +140,35 @@ def test_developer_app_identity_changes_with_provider_ids(
     assert base.account_identity_sha256 != other_version.account_identity_sha256
 
 
+def test_developer_app_identity_uses_sealed_client_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _canonical_client()
+    fixed = datetime(2026, 9, 21, 12, 34, 56, tzinfo=timezone.utc)
+
+    def fixed_clock() -> datetime:
+        return fixed
+
+    origin = devapp._CANONICAL_CLIENT_ORIGINS[client]
+    client._clock = fixed_clock
+    devapp._CANONICAL_CLIENT_ORIGINS[client] = devapp._CanonicalClientOrigin(
+        origin.transport,
+        fixed_clock,
+        origin.credentials,
+    )
+    monkeypatch.setattr(
+        UrllibBetfairHttpTransport,
+        "post",
+        lambda self, url, *, headers, body, timeout_seconds: _response(
+            _developer_app(), 1
+        ),
+    )
+
+    identity = devapp._read_developer_account_identity(client)
+
+    assert identity.observed_at == fixed.isoformat()
+
+
 @pytest.mark.parametrize(
     "result",
     (

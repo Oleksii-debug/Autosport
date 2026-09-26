@@ -2,16 +2,36 @@ from __future__ import annotations
 
 import sys
 
-from autosport.secret_redaction import safe_exception_text
+from autosport.secret_redaction import safe_exception_detail, safe_exception_text
 
 
 # Expected failures are an operator-presentation boundary, not an extensible exception
-# registry. Capture the concrete interpreter-owned classes once so later mutation of
-# ``builtins`` cannot turn a caller-defined subclass name into presentation authority.
+# registry. Capture concrete interpreter-owned classes and the canonical redaction
+# callables once so later mutation cannot mint presentation authority.
 _CANONICAL_VALUE_ERROR = ValueError
 _CANONICAL_OS_ERROR = OSError
+_CANONICAL_SAFE_EXCEPTION_DETAIL = safe_exception_detail
 _CANONICAL_SAFE_EXCEPTION_TEXT = safe_exception_text
 _EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
+_EXPECTED_FAILURE_LABELS = (
+    (BlockingIOError, "BlockingIOError"),
+    (ChildProcessError, "ChildProcessError"),
+    (BrokenPipeError, "BrokenPipeError"),
+    (ConnectionAbortedError, "ConnectionAbortedError"),
+    (ConnectionRefusedError, "ConnectionRefusedError"),
+    (ConnectionResetError, "ConnectionResetError"),
+    (ConnectionError, "ConnectionError"),
+    (FileExistsError, "FileExistsError"),
+    (FileNotFoundError, "FileNotFoundError"),
+    (InterruptedError, "InterruptedError"),
+    (IsADirectoryError, "IsADirectoryError"),
+    (NotADirectoryError, "NotADirectoryError"),
+    (PermissionError, "PermissionError"),
+    (ProcessLookupError, "ProcessLookupError"),
+    (TimeoutError, "TimeoutError"),
+    (_CANONICAL_OS_ERROR, "OSError"),
+    (_CANONICAL_VALUE_ERROR, "ValueError"),
+)
 
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
@@ -127,16 +147,39 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
     return 2
 
 
+def _expected_failure_type_label(
+    exc: BaseException,
+    _labels: tuple[tuple[type[BaseException], str], ...] = _EXPECTED_FAILURE_LABELS,
+) -> str:
+    try:
+        mro = type.__getattribute__(type(exc), "__mro__")
+    except BaseException:
+        return "ExpectedFailure"
+    for candidate in mro:
+        for expected_type, label in _labels:
+            if candidate is expected_type:
+                return label
+    return "ExpectedFailure"
+
+
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    if safe_exception_text is not _CANONICAL_SAFE_EXCEPTION_TEXT:
-        rendered = "ExpectedFailure: exception details unavailable"
+    if (
+        safe_exception_text is not _CANONICAL_SAFE_EXCEPTION_TEXT
+        or safe_exception_detail is not _CANONICAL_SAFE_EXCEPTION_DETAIL
+    ):
+        error_type = "ExpectedFailure"
+        detail = "exception details unavailable"
     else:
-        rendered = _CANONICAL_SAFE_EXCEPTION_TEXT(
+        error_type = _expected_failure_type_label(exc)
+        detail = _CANONICAL_SAFE_EXCEPTION_DETAIL(
             exc,
             unavailable_detail="exception details unavailable",
         )
-    rendered = " ".join(rendered.splitlines()).strip()
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={rendered}"
+        detail = " ".join(detail.splitlines()).strip()
+    return (
+        f"Autosport-Data: {command}=FAIL_CLOSED error={error_type}"
+        + (f": {detail}" if detail else "")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

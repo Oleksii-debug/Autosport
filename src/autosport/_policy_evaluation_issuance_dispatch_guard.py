@@ -458,6 +458,26 @@ def _build_dispatch_guards():
     state_issue = state_type.issue
     state_resolve = state_type.resolve
     state_verify = state_type.verify
+    state_method_code_witnesses = (
+        ("__getattribute__", state_getattribute, state_getattribute.__code__),
+        ("__setattr__", state_setattr, state_setattr.__code__),
+        ("bind_public", state_bind_public, state_bind_public.__code__),
+        (
+            "_require_store_constructor_authority",
+            state_constructor_guard,
+            state_constructor_guard.__code__,
+        ),
+        (
+            "_require_common_dispatch",
+            state_common_guard,
+            state_common_guard.__code__,
+        ),
+        ("trusted_clock", state_trusted_clock, state_trusted_clock.__code__),
+        ("open", state_open, state_open.__code__),
+        ("issue", state_issue, state_issue.__code__),
+        ("resolve", state_resolve, state_resolve.__code__),
+        ("verify", state_verify, state_verify.__code__),
+    )
 
     open_dispatch = state.open
     issue_dispatch = state.issue
@@ -489,6 +509,12 @@ def _build_dispatch_guards():
                 )
 
     def require_state_class_authority() -> None:
+        for _name, method, expected_code in state_method_code_witnesses:
+            if getattr(method, "__code__", None) is not expected_code:
+                raise error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    "dispatch state class executable"
+                )
         if (
             type(state) is not state_type
             or state_type.__getattribute__ is not state_getattribute

@@ -16,6 +16,7 @@ from .betfair_historical_import import (
     build_parser,
     import_betfair_historical,
 )
+from .secret_redaction import redact_operator_text, safe_exception_detail
 
 
 _COPY_CHUNK_BYTES = 1024 * 1024
@@ -183,6 +184,14 @@ def import_betfair_historical_read_once(
         )
 
 
+def _expected_failure_detail(exc: OSError | ValueError) -> str:
+    detail = safe_exception_detail(exc)
+    detail = " ".join(detail.splitlines()).strip()
+    if not detail:
+        detail = "exception details unavailable"
+    return redact_operator_text(detail)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -197,7 +206,10 @@ def main(argv: list[str] | None = None) -> int:
             allowed_market_types=args.market_types or ("MATCH_ODDS",),
         )
     except (OSError, ValueError) as exc:
-        print(f"betfair_historical_import=FAIL_CLOSED error={exc}")
+        print(
+            "betfair_historical_import=FAIL_CLOSED "
+            f"error={_expected_failure_detail(exc)}"
+        )
         return 3
 
     print(

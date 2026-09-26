@@ -222,22 +222,40 @@ def _bind_product_evaluator_resolver(
     evaluator_resolve,
 ):
     resolver_code = None
+    resolver_impl_code = resolver_impl.__code__
+    evaluator_init_code = evaluator_init.__code__
+    evaluator_resolve_code = evaluator_resolve.__code__
 
     def _resolve_product_evaluator_result(
         workspace: Path,
         result_id: str,
     ) -> IssuedRiskOfRuinResult:
-        if _resolve_product_evaluator_result.__code__ is not resolver_code:
+        if (
+            _resolve_product_evaluator_result.__code__ is not resolver_code
+            or resolver_impl.__code__ is not resolver_impl_code
+            or evaluator_init.__code__ is not evaluator_init_code
+            or evaluator_resolve.__code__ is not evaluator_resolve_code
+        ):
             raise RiskOfRuinIssuanceError(
                 "risk-of-ruin product evaluator resolver executable changed"
             )
-        return resolver_impl(
+        result = resolver_impl(
             workspace,
             result_id,
             evaluator_class=evaluator_class,
             evaluator_init=evaluator_init,
             evaluator_resolve=evaluator_resolve,
         )
+        if (
+            _resolve_product_evaluator_result.__code__ is not resolver_code
+            or resolver_impl.__code__ is not resolver_impl_code
+            or evaluator_init.__code__ is not evaluator_init_code
+            or evaluator_resolve.__code__ is not evaluator_resolve_code
+        ):
+            raise RiskOfRuinIssuanceError(
+                "risk-of-ruin product evaluator resolver executable changed during resolution"
+            )
+        return result
 
     resolver_code = _resolve_product_evaluator_result.__code__
     return _resolve_product_evaluator_result

@@ -610,6 +610,118 @@ def test_provider_revision_advances_without_rewriting_decision_quote(
     assert final.finalized is True
 
 
+def test_revision_rejects_cross_snapshot_bet_id_rebinding(
+    tmp_path: Path,
+) -> None:
+    plan, ledger, provider_ref = _prepared(tmp_path)
+    previous = _resolve(
+        plan,
+        ledger,
+        _capture(
+            provider_ref,
+            current_orders=[
+                _current_order(
+                    provider_ref,
+                    bet_id="bet-1",
+                    average_price_matched=3.1,
+                    size_matched=4.0,
+                    size_remaining=6.0,
+                )
+            ],
+            observed_at=datetime(
+                2026,
+                9,
+                21,
+                9,
+                55,
+                tzinfo=timezone.utc,
+            ),
+        ),
+    )
+    current = _resolve(
+        plan,
+        ledger,
+        _capture(
+            provider_ref,
+            current_orders=[
+                _current_order(
+                    provider_ref,
+                    bet_id="bet-2",
+                    average_price_matched=3.1,
+                    size_matched=4.0,
+                    size_remaining=6.0,
+                )
+            ],
+            observed_at=datetime(
+                2026,
+                9,
+                21,
+                9,
+                56,
+                tzinfo=timezone.utc,
+            ),
+        ),
+    )
+
+    previous.assert_authoritative()
+    current.assert_authoritative()
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="changes provider bet identity",
+    ):
+        validate_betfair_realized_match_revision(previous, current)
+
+
+def test_revision_allows_first_bet_id_after_incomplete_evidence(
+    tmp_path: Path,
+) -> None:
+    plan, ledger, provider_ref = _prepared(tmp_path)
+    previous = _resolve(
+        plan,
+        ledger,
+        _capture(
+            provider_ref,
+            observed_at=datetime(
+                2026,
+                9,
+                21,
+                9,
+                55,
+                tzinfo=timezone.utc,
+            ),
+        ),
+    )
+    current = _resolve(
+        plan,
+        ledger,
+        _capture(
+            provider_ref,
+            current_orders=[
+                _current_order(
+                    provider_ref,
+                    bet_id="bet-1",
+                    average_price_matched=3.1,
+                    size_matched=4.0,
+                    size_remaining=6.0,
+                )
+            ],
+            observed_at=datetime(
+                2026,
+                9,
+                21,
+                9,
+                56,
+                tzinfo=timezone.utc,
+            ),
+        ),
+    )
+
+    selected = validate_betfair_realized_match_revision(previous, current)
+    assert previous.bet_id is None
+    assert selected is current
+    assert selected.bet_id == "bet-1"
+
+
 def test_revision_rejects_decreasing_matched_stake(tmp_path: Path) -> None:
     plan, ledger, provider_ref = _prepared(tmp_path)
     previous = _resolve(

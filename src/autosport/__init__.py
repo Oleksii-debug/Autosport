@@ -176,3 +176,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Registered-strategy live feature issuance runs under a private ContextVar. Seal
+# every authority-bearing module dependency before that issuance token becomes active.
+from . import _registered_strategy_live_feature_dispatch_guard as _registered_strategy_live_feature_dispatch_guard  # noqa: F401,E402

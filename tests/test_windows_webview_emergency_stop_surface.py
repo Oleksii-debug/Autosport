@@ -208,9 +208,13 @@ def test_emergency_stop_frontend_reuses_shared_ordered_dispatch():
     script = _asset("emergency_stop.js")
 
     assert "globalThis.autosportDispatch = dispatch;" in app_script
+    assert "const usePostRefresh = options.postRefresh !== false;" in app_script
+    assert "if (usePostRefresh) await refreshState();" in app_script
     assert "const dispatch = globalThis.autosportDispatch;" in script
     assert '"emergency_stop.activate",' in script
-    assert "{ globalAnnouncement: false, resultFocus: false }" in script
+    assert "globalAnnouncement: false" in script
+    assert "resultFocus: false" in script
+    assert "postRefresh: false" in script
     assert 'getElementById("emergency-stop-action")' in script
     assert 'getElementById("emergency-stop-status")' in script
     assert "globalThis.pywebview.api.dispatch" not in script
@@ -221,7 +225,7 @@ def test_emergency_stop_frontend_reuses_shared_ordered_dispatch():
     assert "Ctrl+Shift+S" not in script
 
 
-def test_emergency_stop_announces_truthful_pending_state_before_ordered_refresh():
+def test_emergency_stop_announces_truthful_pending_state_before_backend_confirmation():
     script = _asset("emergency_stop.js")
 
     pending = script.index("Аварійний STOP: запит передано.")
@@ -233,6 +237,57 @@ def test_emergency_stop_announces_truthful_pending_state_before_ordered_refresh(
     pre_dispatch = script[:awaited_dispatch]
     assert "STOP ПІДТВЕРДЖЕНО" not in pre_dispatch
     assert "execution_blocked" not in pre_dispatch
+
+
+def test_emergency_stop_backend_result_is_focused_without_synchronous_state_refresh():
+    app_script = _asset("app.js")
+    script = _asset("emergency_stop.js")
+
+    dispatch_start = app_script.index(
+        "async function dispatch(actionId, payload = {}, options = {})"
+    )
+    dispatch_end = app_script.index(
+        "// The dedicated emergency-STOP asset reuses this frontend ordering fence.",
+        dispatch_start,
+    )
+    dispatch_body = app_script[dispatch_start:dispatch_end]
+    assert dispatch_body.count("invalidateStateProjection();") >= 2
+    assert "const usePostRefresh = options.postRefresh !== false;" in dispatch_body
+    assert "if (usePostRefresh) await refreshState();" in dispatch_body
+
+    awaited_dispatch = script.index("const result = await dispatch(")
+    projected_result = script.index("result.message", awaited_dispatch)
+    focused_result = script.index("focusStatus();", projected_result)
+    assert awaited_dispatch < projected_result < focused_result
+    assert "postRefresh: false" in script
+    assert "refreshState" not in script
+
+
+def test_packaged_keyboard_audit_rejects_emergency_stop_post_refresh_regression(
+    monkeypatch,
+    tmp_path,
+):
+    html = web_shell_index_path().read_text(encoding="utf-8")
+    emergency_script = _asset("emergency_stop.js")
+    emergency_script = _replace_once(
+        emergency_script,
+        "postRefresh: false,",
+        "postRefresh: true,",
+    )
+
+    _, keyboard = _audit_candidate(
+        monkeypatch,
+        tmp_path,
+        html,
+        emergency_script=emergency_script,
+    )
+
+    assert keyboard["status"] == "FAIL"
+    assert any(
+        "emergency STOP keyboard wiring marker missing" in failure
+        and "postRefresh: false" in failure
+        for failure in keyboard["failures"]
+    )
 
 
 def test_package_data_policy_includes_the_emergency_stop_script():
@@ -278,8 +333,9 @@ def test_emergency_stop_uses_one_live_region_announcement_authority():
     assert app_script.count("if (useGlobalAnnouncement) {") == 2
 
     assert '"emergency_stop.activate",' in emergency_script
-    assert "{ globalAnnouncement: false, resultFocus: false }" in emergency_script
-    assert 'result.status !== "completed"' in emergency_script
+    assert "globalAnnouncement: false" in emergency_script
+    assert "resultFocus: false" in emergency_script
+    assert "postRefresh: false" in emergency_script
     assert "result.message" in emergency_script
     assert 'getElementById("emergency-stop-status")' in emergency_script
 

@@ -14,6 +14,7 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
 
     assert "Add-Type -AssemblyName UIAutomationClient" in audit
     assert "Add-Type -AssemblyName UIAutomationTypes" in audit
+    assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
 def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> None:
@@ -23,7 +24,10 @@ def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> N
     assert "[System.Windows.Automation.LegacyIAccessiblePattern]" not in audit
     assert "$legacyObject.Current.DefaultAction" in audit
     assert "$action.Pattern.DoDefaultAction()" in audit
-    assert "control exposes neither InvokePattern nor LegacyIAccessible default action" in audit
+    assert "Kind = 'KeyboardButton'" in audit
+    assert "$Element.SetFocus()" in audit
+    assert "[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')" in audit
+    assert "keyboard-actionable Button semantics" in audit
 
 
 def test_external_uia_audit_requires_semantic_control_type_for_critical_controls() -> None:

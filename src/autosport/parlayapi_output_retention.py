@@ -401,5 +401,8 @@ def _require_text(value: str, field: str) -> None:
 
 
 def _require_aware(value: datetime, field: str) -> None:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise ParlayApiRetentionError(f"{field} must be timezone-aware datetime")
+    # Retention timestamps participate directly in deadline arithmetic and ordering.
+    # A datetime subclass can override __add__/comparison/utcoffset and otherwise
+    # move a binding deletion boundary while still passing isinstance(datetime).
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise ParlayApiRetentionError(f"{field} must be exact timezone-aware datetime")

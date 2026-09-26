@@ -494,10 +494,14 @@ def run_product_command(
             output_format=output_format,
         )
     except ProductRuntimeError as exc:
+        cause = exc.__cause__
+        error_type = _safe_exception_type_label(
+            cause if isinstance(cause, BaseException) else exc
+        )
         _print_failure(
             kind="product_runtime_failure",
             error_code="product_runtime_failed",
-            error_type=exc.error_type,
+            error_type=error_type,
             output_format=output_format,
         )
         return 4

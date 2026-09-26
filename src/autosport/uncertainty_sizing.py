@@ -77,7 +77,11 @@ def _sha256(name: str, value: object) -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or isinstance(value, bool) or not value.is_finite():
+    # Risk/economic ingress must not dispatch through caller-defined Decimal
+    # subclasses before the sizing authority has accepted the value.
+    if type(value) is not Decimal:
+        raise UncertaintySizingError(f"{name} must be a finite exact Decimal")
+    if not value.is_finite():
         raise UncertaintySizingError(f"{name} must be a finite exact Decimal")
     return value
 

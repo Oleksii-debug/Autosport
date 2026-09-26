@@ -142,7 +142,7 @@ def test_market_set_mismatch_fails_whole_snapshot():
 
 def test_unexpected_ladder_depth_fails_closed_instead_of_dropping_levels():
     p=provider(Transport([
-        response(extra_for='<ForSidePrices Price="2.020" Stake="1.00" />')
+        response(extra_for='<ForSidePrices Price="1.980" Stake="1.00" />')
     ]))
     with pytest.raises(BetdaqSoapProtocolError, match="deeper ladder"):
         p.read_batch()

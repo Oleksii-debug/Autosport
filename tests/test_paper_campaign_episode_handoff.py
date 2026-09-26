@@ -12,6 +12,7 @@ from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
 )
+from autosport.learning_environment import EnvironmentIdentity
 from autosport.paper_campaign_episode_handoff import (
     PaperCampaignEpisodeHandoff,
     PaperCampaignEpisodeHandoffError,
@@ -375,6 +376,127 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
                 "independent intent authority",
             ):
                 handoff.committed_children()
+
+
+    def test_child_authority_subclasses_are_rejected_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = self._terminal_parent(root)
+            parent_snapshot = runtime.agent_loop.snapshot()
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+
+            canonical_registry = ScientificRegistry.initialize_pristine(
+                root / "registry.json"
+            )
+            canonical_artifact_store = FactoryArtifactStore(root / "artifacts")
+            canonical_identity = environment.identity
+            canonical_actions = frozenset({"PAPER_PROPOSAL"})
+
+            class HostileRegistry(ScientificRegistry):
+                armed = False
+                field_hook_calls = 0
+
+                def __getattribute__(self, name):
+                    if name != "__class__" and type(self).armed:
+                        type(self).field_hook_calls += 1
+                        raise AssertionError("registry subclass hook executed")
+                    return super().__getattribute__(name)
+
+            class HostileArtifactStore(FactoryArtifactStore):
+                armed = False
+                field_hook_calls = 0
+
+                def __getattribute__(self, name):
+                    if name != "__class__" and type(self).armed:
+                        type(self).field_hook_calls += 1
+                        raise AssertionError("artifact-store subclass hook executed")
+                    return super().__getattribute__(name)
+
+            class HostileIdentity(EnvironmentIdentity):
+                armed = False
+                field_hook_calls = 0
+
+                def __getattribute__(self, name):
+                    if name != "__class__" and type(self).armed:
+                        type(self).field_hook_calls += 1
+                        raise AssertionError("identity subclass hook executed")
+                    return super().__getattribute__(name)
+
+            class HostileActions(frozenset):
+                hook_calls = 0
+
+                def __len__(self):
+                    type(self).hook_calls += 1
+                    raise AssertionError("actions length hook executed")
+
+                def __iter__(self):
+                    type(self).hook_calls += 1
+                    raise AssertionError("actions iteration hook executed")
+
+                def issubset(self, other):
+                    del other
+                    type(self).hook_calls += 1
+                    raise AssertionError("actions subset hook executed")
+
+            hostile_registry = HostileRegistry(root / "registry.json")
+            hostile_artifact_store = HostileArtifactStore(root / "artifacts")
+            hostile_identity = HostileIdentity(
+                source_id=canonical_identity.source_id,
+                config_id=canonical_identity.config_id,
+                data_id=canonical_identity.data_id,
+                protocol_id=canonical_identity.protocol_id,
+                cutoff_ts=canonical_identity.cutoff_ts,
+                seed=canonical_identity.seed,
+            )
+            hostile_actions = HostileActions({"PAPER_PROPOSAL"})
+            HostileRegistry.armed = True
+            HostileArtifactStore.armed = True
+            HostileIdentity.armed = True
+
+            def invoke(
+                *,
+                registry=canonical_registry,
+                artifact_store=canonical_artifact_store,
+                identity=canonical_identity,
+                admissible_actions=canonical_actions,
+            ):
+                return handoff.start_next_episode(
+                    root / "child-agent-loop.json",
+                    registry,
+                    artifact_store,
+                    identity=identity,
+                    as_of=_legacy.T4,
+                    canonical_strategy_id="campaign-champion",
+                    config_sha256=parent_snapshot.config_sha256,
+                    episode_key="campaign-episode-2",
+                    admissible_actions=admissible_actions,
+                    loop_id="campaign-loop-2",
+                    economic_goal_fingerprint=(
+                        parent_snapshot.economic_goal_fingerprint
+                    ),
+                    risk_fingerprint=parent_snapshot.risk_fingerprint,
+                    source_sha256=parent_snapshot.source_sha256,
+                    at=_legacy.T4,
+                )
+
+            with self.assertRaisesRegex(TypeError, "exact ScientificRegistry"):
+                invoke(registry=hostile_registry)
+            self.assertEqual(HostileRegistry.field_hook_calls, 0)
+
+            with self.assertRaisesRegex(TypeError, "exact FactoryArtifactStore"):
+                invoke(artifact_store=hostile_artifact_store)
+            self.assertEqual(HostileArtifactStore.field_hook_calls, 0)
+
+            with self.assertRaisesRegex(TypeError, "exact EnvironmentIdentity"):
+                invoke(identity=hostile_identity)
+            self.assertEqual(HostileIdentity.field_hook_calls, 0)
+
+            with self.assertRaisesRegex(
+                PaperCampaignEpisodeHandoffError,
+                "non-empty exact frozenset",
+            ):
+                invoke(admissible_actions=hostile_actions)
+            self.assertEqual(HostileActions.hook_calls, 0)
 
 
 if __name__ == "__main__":  # pragma: no cover

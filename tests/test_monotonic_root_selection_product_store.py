@@ -117,6 +117,25 @@ def test_product_store_fails_closed_if_frozen_clone_globals_are_mutated() -> Non
         implementation.__globals__["os"] = original_os
 
 
+def test_product_store_fails_closed_if_frozen_clone_code_is_mutated() -> None:
+    public = root_binding.stable_root_selection_store
+    implementation = _implementation(public, "stable_root_selection_store")
+    original_code = implementation.__code__
+
+    def forged_store():
+        raise AssertionError("forged root-selection implementation must not execute")
+
+    implementation.__code__ = forged_store.__code__
+    try:
+        with pytest.raises(
+            root_binding.AuthorityRootSelectionConfigurationError,
+            match=r"frozen root-selection store executable code was rebound",
+        ):
+            public()
+    finally:
+        implementation.__code__ = original_code
+
+
 def test_preflight_fails_closed_if_frozen_context_dispatch_is_mutated(tmp_path: Path) -> None:
     public = root_binding.preflight_authority_root_selection
     implementation = _implementation(public, "preflight_authority_root_selection")

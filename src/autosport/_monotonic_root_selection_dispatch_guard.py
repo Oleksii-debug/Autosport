@@ -16,7 +16,7 @@ No new root, registry, journal, or persistence format is introduced.
 """
 from __future__ import annotations
 
-from types import FunctionType, SimpleNamespace
+from types import CodeType, FunctionType, SimpleNamespace
 from typing import Callable
 
 from . import monotonic_authority_root_binding as _root
@@ -81,22 +81,30 @@ def _install_guard() -> None:
 
     missing = object()
 
-    def snapshot_globals(function: FunctionType) -> tuple[tuple[str, object], ...]:
-        """Capture every global binding this exact code object can directly read."""
+    def snapshot_function(
+        function: FunctionType,
+    ) -> tuple[CodeType, tuple[tuple[str, object], ...]]:
+        """Capture the exact executable and every global binding it can directly read."""
 
+        code = function.__code__
         names = sorted(
-            name for name in set(function.__code__.co_names) if name in function.__globals__
+            name for name in set(code.co_names) if name in function.__globals__
         )
         if "__builtins__" in function.__globals__:
             names.append("__builtins__")
-        return tuple((name, function.__globals__[name]) for name in names)
+        return code, tuple((name, function.__globals__[name]) for name in names)
 
     def require_snapshot(
         function: FunctionType,
-        snapshot: tuple[tuple[str, object], ...],
+        snapshot: tuple[CodeType, tuple[tuple[str, object], ...]],
         label: str,
     ) -> None:
-        for name, expected in snapshot:
+        expected_code, globals_snapshot = snapshot
+        if function.__code__ is not expected_code:
+            raise canonical_configuration_error(
+                f"frozen {label} executable code was rebound"
+            )
+        for name, expected in globals_snapshot:
             if function.__globals__.get(name, missing) is not expected:
                 raise canonical_configuration_error(
                     f"frozen {label} global {name!r} was rebound"
@@ -247,7 +255,7 @@ def _install_guard() -> None:
             "AuthorityRootSelectionConfigurationError": canonical_configuration_error,
         },
     )
-    store_snapshot = snapshot_globals(frozen_store)
+    store_snapshot = snapshot_function(frozen_store)
 
     frozen_lexical = _clone_function(
         original_lexical,
@@ -256,7 +264,7 @@ def _install_guard() -> None:
             "AuthorityRootSelectionConfigurationError": canonical_configuration_error,
         },
     )
-    lexical_snapshot = snapshot_globals(frozen_lexical)
+    lexical_snapshot = snapshot_function(frozen_lexical)
 
     frozen_resolved = _clone_function(
         original_resolved,
@@ -266,7 +274,7 @@ def _install_guard() -> None:
             "AuthorityRootSelectionConfigurationError": canonical_configuration_error,
         },
     )
-    resolved_snapshot = snapshot_globals(frozen_resolved)
+    resolved_snapshot = snapshot_function(frozen_resolved)
 
     def sealed_store():
         if root_module.stable_root_selection_store is not sealed_store:
@@ -307,7 +315,7 @@ def _install_guard() -> None:
             "AuthorityRootSelectionConfigurationError": canonical_configuration_error,
         },
     )
-    context_snapshot = snapshot_globals(frozen_context_impl)
+    context_snapshot = snapshot_function(frozen_context_impl)
 
     def sealed_context(*, workspace, authority_root):
         if root_module.stable_root_selection_store is not sealed_store:
@@ -337,7 +345,7 @@ def _install_guard() -> None:
             "_read_strict_object": sealed_read_strict_object,
         },
     )
-    preflight_snapshot = snapshot_globals(frozen_preflight_impl)
+    preflight_snapshot = snapshot_function(frozen_preflight_impl)
 
     def sealed_preflight(
         *,
@@ -369,7 +377,7 @@ def _install_guard() -> None:
         original_resolve,
         globals_overrides={"_selection_context": sealed_context},
     )
-    resolve_snapshot = snapshot_globals(frozen_resolve_impl)
+    resolve_snapshot = snapshot_function(frozen_resolve_impl)
 
     def sealed_resolve(
         cls,
@@ -429,7 +437,7 @@ def _install_guard() -> None:
             "resolve_monotonic_authority_root": canonical_authority_root_resolver,
         },
     )
-    authority_init_snapshot = snapshot_globals(frozen_authority_init_impl)
+    authority_init_snapshot = snapshot_function(frozen_authority_init_impl)
 
     def sealed_authority_init(self, *args, **kwargs):
         if authority_module.MonotonicWorkspaceAuthority.__init__ is not sealed_authority_init:

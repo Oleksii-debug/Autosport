@@ -12,10 +12,47 @@ from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
 from autosport.risk_day_window import ProductDayRiskWindowStore
 from autosport.risk_turnover_evidence import (
+    PaperDayTurnoverEvidenceError,
     PaperDayTurnoverEvidenceIncompleteError,
     PaperDayTurnoverEvidenceMismatchError,
     PaperDayTurnoverResolver,
 )
+
+
+class _HostileText(str):
+    hook_calls = 0
+
+    def __ne__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile text inequality executed")
+
+    def strip(self, *args: object, **kwargs: object) -> str:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile text strip executed")
+
+
+class _HostileInt(int):
+    hook_calls = 0
+
+    def __ne__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile integer inequality executed")
+
+    def __le__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile integer comparison executed")
+
+
+class _HostileDecimal(Decimal):
+    hook_calls = 0
+
+    def is_finite(self) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile Decimal predicate executed")
+
+    def __lt__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile Decimal comparison executed")
 
 
 def _store(tmp_path):
@@ -129,6 +166,47 @@ def test_current_day_turnover_counts_ticket_stake_once_for_parlay(tmp_path):
     assert not evidence.atomic_admission_authority
     assert not evidence.account_wide_provider_turnover_complete
     assert not evidence.real_money_execution_authorized
+
+
+def test_evidence_value_contract_rejects_scalar_subclasses_before_hooks(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    book = _book()
+    _open(book, window, stake="25", suffix="scalar-fence")
+    evidence = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=_goal_store(store),
+        window_store=store,
+        window_evidence=window,
+    )
+
+    _HostileText.hook_calls = 0
+    _HostileInt.hook_calls = 0
+    _HostileDecimal.hook_calls = 0
+
+    with pytest.raises(PaperDayTurnoverEvidenceError):
+        replace(evidence, schema=_HostileText(evidence.schema))
+    with pytest.raises(PaperDayTurnoverEvidenceError):
+        replace(
+            evidence,
+            schema_version=_HostileInt(evidence.schema_version),
+        )
+    with pytest.raises(PaperDayTurnoverEvidenceError):
+        replace(
+            evidence,
+            goal_revision=_HostileInt(evidence.goal_revision),
+        )
+    with pytest.raises(PaperDayTurnoverEvidenceError):
+        replace(
+            evidence,
+            confirmed_turnover=_HostileDecimal(
+                str(evidence.confirmed_turnover)
+            ),
+        )
+
+    assert _HostileText.hook_calls == 0
+    assert _HostileInt.hook_calls == 0
+    assert _HostileDecimal.hook_calls == 0
 
 
 def test_previous_day_ticket_does_not_enter_current_utc_day(tmp_path):

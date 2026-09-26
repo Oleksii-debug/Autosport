@@ -223,6 +223,50 @@ class PaperDayTurnoverEvidence:
     scope_class: str = _SCOPE_CLASS
 
     def __post_init__(self) -> None:
+        for name in (
+            "goal_id",
+            "goal_contract_sha256",
+            "bankroll_id",
+            "currency",
+            "day_key",
+            "window_start",
+            "window_end_exclusive",
+            "window_state_sha256",
+            "constituent_sha256",
+            "evidence_sha256",
+            "schema",
+            "metric_class",
+            "scope_class",
+        ):
+            if type(object.__getattribute__(self, name)) is not str:
+                raise PaperDayTurnoverEvidenceError(
+                    f"{name} must use the exact built-in string type"
+                )
+        for name in (
+            "goal_revision",
+            "window_authority_generation",
+            "constituent_count",
+            "schema_version",
+        ):
+            if type(object.__getattribute__(self, name)) is not int:
+                raise PaperDayTurnoverEvidenceError(
+                    f"{name} must use the exact built-in integer type"
+                )
+        for name in (
+            "initial_bankroll",
+            "confirmed_turnover",
+            "turnover_cap",
+            "residual_headroom",
+        ):
+            if type(object.__getattribute__(self, name)) is not Decimal:
+                raise PaperDayTurnoverEvidenceError(
+                    f"{name} must use the exact Decimal type"
+                )
+        if type(object.__getattribute__(self, "breached")) is not bool:
+            raise PaperDayTurnoverEvidenceError(
+                "breached must use the exact built-in boolean type"
+            )
+
         if self.schema != _SCHEMA or self.schema_version != _SCHEMA_VERSION:
             raise PaperDayTurnoverEvidenceError(
                 "turnover evidence schema identity is invalid"

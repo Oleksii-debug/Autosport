@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -60,6 +61,46 @@ def test_issued_lease_does_not_expose_mutable_raw_handle(
 
     lease.release()
     assert closed == [321]
+    assert lease.released is True
+
+
+def test_concurrent_release_closes_raw_handle_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        lease_module,
+        "_create_exclusive_windows_handle",
+        lambda _path: 777,
+    )
+    entered = threading.Barrier(3)
+    close_gate = threading.Event()
+    closed: list[int] = []
+
+    def close(handle: int) -> None:
+        closed.append(handle)
+        close_gate.wait(timeout=2)
+
+    monkeypatch.setattr(lease_module, "_close_windows_handle", close)
+    lease = acquire_windows_launch_lease(
+        lease_root=tmp_path,
+        user_scope="user-A",
+    )
+
+    def releaser() -> None:
+        entered.wait()
+        lease.release()
+
+    threads = [threading.Thread(target=releaser) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    entered.wait()
+    close_gate.set()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+    assert closed == [777]
     assert lease.released is True
 
 

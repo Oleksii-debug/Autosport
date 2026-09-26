@@ -1680,6 +1680,18 @@ class PortfolioPlan:
                 raise ValueError("positive portfolio action requires bound dependency graph")
             if self.economic_goal_contract_sha256 is None:
                 raise ValueError("positive portfolio action requires economic-goal identity")
+            if sum(stake > 0 for stake in self.stakes) > 1:
+                proof = self.terminal_economics
+                if (
+                    proof is None
+                    or not proof.outcome_authority_sha256s
+                    or not proof.outcome_space_exhaustive
+                ):
+                    raise ValueError(
+                        "joint-positive portfolio action requires separate verified "
+                        "authoritative exhaustive terminal economics; empirical dependency "
+                        "evidence cannot authorize completeness"
+                    )
             outcome_independent_positive = any(
                 stake > 0
                 and StrategyClass(opportunity_class)
@@ -2639,20 +2651,20 @@ def build_portfolio_plan(
         for intent, signal in zip(intents, allocation_signals, strict=True)
         if signal > 0
     }
-    # The current canonical RiskPolicy has no authority that proves an exhaustive
-    # dependency/correlation graph.  A caller-supplied edge list therefore cannot
-    # prove *absence* of an omitted dependency.  Until the canonical scenario/dependency
-    # authority is bound here, fail closed for every joint-positive vector and for
-    # every new positive candidate evaluated alongside an already-open position.
-    # This makes omission non-authoritative rather than treating an empty edge list
-    # as evidence of independence.
-    if len(positive_candidates) > 1 and terminal_state_evidence is None and dependency_evidence is None:
+    # Neither a caller-supplied edge list nor caller-constructible empirical
+    # PortfolioDependencyEvidence proves *absence* of omitted dependence.  Empirical
+    # evidence can conservatively haircut a vector, but it is not completeness
+    # authority.  Until a separate complete scenario/dependency authority is bound,
+    # fail closed for every joint-positive vector and for every new positive
+    # candidate evaluated alongside an already-open position.
+    if len(positive_candidates) > 1 and terminal_state_evidence is None:
         return _terminal_plan(
             decision_ts=decision_ts,
             action=PortfolioAction.WAIT,
             reason=(
                 "multiple positive candidates require complete canonical joint-dependency "
-                "proof; caller-supplied dependency edges cannot prove omitted correlations absent"
+                "proof; caller-supplied dependency edges or empirical dependency evidence "
+                "cannot prove omitted correlations absent"
             ),
             intents=intents,
             portfolio_sha256=portfolio_sha256,
@@ -2773,7 +2785,6 @@ def build_portfolio_plan(
         )
         needs_complete_dependency = (
             len(actual_positive) > 1
-            and dependency_evidence is None
             or (
                 bool(actual_positive)
                 and any(

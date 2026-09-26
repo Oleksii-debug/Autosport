@@ -556,7 +556,7 @@ class PortfolioPlanTests(unittest.TestCase):
             )
 
 
-    def test_typed_dependency_evidence_is_required_to_admit_correlated_predictive_candidates(self) -> None:
+    def test_caller_dependency_evidence_cannot_admit_correlated_predictive_candidates(self) -> None:
         goal = self._goal()
         first = self._intent(goal, suffix="joint-a", signal=Decimal("0.05"))
         second = self._intent(goal, suffix="joint-b", signal=Decimal("0.04"))
@@ -570,11 +570,12 @@ class PortfolioPlanTests(unittest.TestCase):
         evidence = self._dependency_evidence(
             book,
             intents,
-            dependency=Decimal("0.20"),
-            uncertainty=Decimal("0.05"),
-            fee=Decimal("0.01"),
-            partial_fill=Decimal("0.05"),
+            dependency=Decimal("0"),
+            uncertainty=Decimal("0"),
+            fee=Decimal("0"),
+            partial_fill=Decimal("0"),
         )
+
         plan = build_portfolio_plan(
             book,
             intents,
@@ -583,12 +584,12 @@ class PortfolioPlanTests(unittest.TestCase):
             dependency_graph=graph,
             dependency_evidence=evidence,
         )
-        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
-        self.assertEqual(plan.stakes, (
-            Decimal("35.74"),
-            Decimal("28.59"),
-        ))
-        self.assertIn("endogenous whole-portfolio stake vector", plan.reason)
+
+        self.assertTrue(evidence.support_qualified)
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("complete canonical joint-dependency proof", plan.reason)
+        self.assertIn("empirical dependency evidence", plan.reason)
 
     def test_robust_dependency_evidence_rejects_future_or_incomplete_provenance(self) -> None:
         goal = self._goal()
@@ -802,7 +803,9 @@ class PortfolioPlanTests(unittest.TestCase):
             dependency_graph=graph,
             dependency_evidence=boundary,
         )
-        self.assertEqual(boundary_plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(boundary_plan.action, PortfolioAction.WAIT)
+        self.assertEqual(boundary_plan.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn("complete canonical joint-dependency proof", boundary_plan.reason)
 
         other = self._intent(goal, suffix="mismatch")
         mismatch = self._dependency_evidence(book, (first, second))
@@ -848,16 +851,27 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertEqual(Decimal(payload["base_stakes"][0]), exact)
         self.assertEqual(Decimal(payload["proposed_stakes"][0]), exact)
 
-    def test_correlated_positive_candidates_use_robust_haircut_and_remain_exact_decimal(self) -> None:
+    def test_correlated_positive_candidates_use_robust_haircut_only_with_separate_terminal_authority(self) -> None:
         goal = self._goal()
-        first = self._intent(goal, suffix="robust-a", signal=Decimal("0.05"))
-        second = self._intent(goal, suffix="robust-b", signal=Decimal("0.04"))
-        intents = (first, second)
+        base_intents = (
+            self._intent(goal, suffix="robust-a", signal=Decimal("0.05")),
+            self._intent(goal, suffix="robust-b", signal=Decimal("0.04")),
+        )
+        groups = (
+            ScenarioGroup(
+                "robust-complete-joint-state",
+                tuple(
+                    ScenarioOutcome(quote_key=intent.risk_context.legs[0].quote_key)
+                    for intent in base_intents
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state(base_intents, groups)
         book = PaperBook("1000")
         graph = self._graph(
             book,
             intents,
-            dependency_edges=(tuple(sorted((first.candidate_sha256, second.candidate_sha256))),),
+            dependency_edges=(tuple(sorted((intents[0].candidate_sha256, intents[1].candidate_sha256))),),
         )
         evidence = self._dependency_evidence(
             book,
@@ -867,6 +881,7 @@ class PortfolioPlanTests(unittest.TestCase):
             fee=Decimal("0.01"),
             partial_fill=Decimal("0.10"),
         )
+        terminal = self._terminal_witness(book, intents, graph, groups)
         proposal = RobustPortfolioProposal.derive((Decimal("50.00"), Decimal("40.00")), evidence)
         expected_scale = (
             Decimal("0.75")
@@ -889,15 +904,23 @@ class PortfolioPlanTests(unittest.TestCase):
             self.DECISION_TS,
             dependency_graph=graph,
             dependency_evidence=evidence,
+            terminal_state_evidence=terminal,
         )
         self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
         self.assertEqual(plan.stakes, proposal.proposed_stakes)
+        self.assertIsNotNone(plan.terminal_economics)
         self.assertTrue(all(stake >= 0 for stake in plan.stakes))
         self.assertTrue(all(isinstance(stake, Decimal) for stake in plan.stakes))
         self.assertEqual(plan.dependency_evidence, evidence)
         self.assertEqual(plan.robust_proposal, proposal)
         self.assertEqual(plan.dependency_evidence_sha256, evidence.evidence_sha256)
         self.assertEqual(plan.robust_proposal_sha256, proposal.proposal_sha256)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "joint-positive portfolio action requires separate verified terminal economics",
+        ):
+            replace(plan, terminal_economics=None)
 
         payload = plan.to_dict()
         self.assertEqual(payload["schema_version"], 5)

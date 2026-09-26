@@ -322,6 +322,7 @@ def _build_register_evidence_method():
         "_time_text": _time_text,
         "_instant": _instant,
         "ProviderSportMappingError": ProviderSportMappingError,
+        "ProviderSportBinding": ProviderSportBinding,
         "hashlib": hashlib,
         "json": json,
         "unicodedata": unicodedata,
@@ -568,7 +569,7 @@ class ProviderSportMappingRegistry:
                 object_pairs_hook=reject_duplicate_keys,
                 parse_constant=lambda value: (_ for _ in ()).throw(
                     ProviderSportMappingError(
-                        f"provider sport mapping registry has invalid JSON constant {value!r}"
+                        f"provider sport mapping registry has invalid JSON constant {value!r}")
                     )
                 ),
             )

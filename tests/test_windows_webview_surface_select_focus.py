@@ -53,4 +53,4 @@ def test_only_explicit_surface_navigation_button_moves_focus() -> None:
     assert 'dispatch("surface.select"' in change_block
     assert ".focus()" not in change_block
     assert "selectedSurfaceTarget()" in button_block
-    assert "target.focus()" in button_block
+    assert "focusOperatorTarget(byId(selectedSurfaceTarget()))" in button_block

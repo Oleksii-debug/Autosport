@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Final
 
 from .json_integrity import strict_json_loads
-from .workspace_lock import WorkspaceEconomicLock
+from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 
 ROOT_SELECTION_SCHEMA: Final = "autosport.monotonic_authority.root_selection"
@@ -63,6 +63,7 @@ _NAMESPACE_ACTIVATION_KEYS: Final = frozenset(
     }
 )
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
+_MAX_RECEIPT_BYTES: Final = 64 * 1024
 
 
 class AuthorityRootSelectionError(RuntimeError):
@@ -302,19 +303,132 @@ def _read_strict_object(
     label: str,
 ) -> dict[str, object]:
     try:
-        metadata = path.lstat()
+        path_before = os.stat(path, follow_symlinks=False)
     except OSError as exc:
         raise AuthorityRootSelectionIntegrityError(
             f"cannot inspect {label} path"
         ) from exc
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+    if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
         raise AuthorityRootSelectionIntegrityError(
             f"{label} must be a single-link regular file"
         )
+    if path_before.st_size < 0 or path_before.st_size > _MAX_RECEIPT_BYTES:
+        raise AuthorityRootSelectionIntegrityError(
+            f"{label} exceeds bounded root-selection receipt size"
+        )
+
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise AuthorityRootSelectionIntegrityError(f"cannot read {label}") from exc
+        descriptor = _open_read_only_descriptor(path)
+    except OSError as exc:
+        raise AuthorityRootSelectionIntegrityError(
+            f"cannot open {label} safely"
+        ) from exc
+
+    primary_error: BaseException | None = None
+    try:
+        opened_before = os.fstat(descriptor)
+        verification = _open_read_only_descriptor(path)
+        try:
+            same_file = os.path.sameopenfile(descriptor, verification)
+            verified_stat = os.fstat(verification)
+        finally:
+            os.close(verification)
+
+        if (
+            opened_before.st_size < 0
+            or opened_before.st_size > _MAX_RECEIPT_BYTES
+            or verified_stat.st_size < 0
+            or verified_stat.st_size > _MAX_RECEIPT_BYTES
+        ):
+            raise AuthorityRootSelectionIntegrityError(
+                f"{label} exceeds bounded root-selection receipt size"
+            )
+        if (
+            not same_file
+            or not os.path.samestat(path_before, opened_before)
+            or not stat.S_ISREG(opened_before.st_mode)
+            or opened_before.st_nlink != 1
+            or not stat.S_ISREG(verified_stat.st_mode)
+            or verified_stat.st_nlink != 1
+        ):
+            raise AuthorityRootSelectionIntegrityError(
+                f"{label} path changed during verification"
+            )
+
+        chunks: list[bytes] = []
+        total_bytes = 0
+        while True:
+            remaining = (_MAX_RECEIPT_BYTES + 1) - total_bytes
+            if remaining <= 0:
+                raise AuthorityRootSelectionIntegrityError(
+                    f"{label} exceeds bounded root-selection receipt size"
+                )
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_RECEIPT_BYTES:
+                raise AuthorityRootSelectionIntegrityError(
+                    f"{label} exceeds bounded root-selection receipt size"
+                )
+
+        opened_after = os.fstat(descriptor)
+        path_after = os.stat(path, follow_symlinks=False)
+        if (
+            opened_after.st_size < 0
+            or opened_after.st_size > _MAX_RECEIPT_BYTES
+            or path_after.st_size < 0
+            or path_after.st_size > _MAX_RECEIPT_BYTES
+        ):
+            raise AuthorityRootSelectionIntegrityError(
+                f"{label} exceeds bounded root-selection receipt size"
+            )
+
+        final_verification = _open_read_only_descriptor(path)
+        try:
+            same_final_file = os.path.sameopenfile(descriptor, final_verification)
+        finally:
+            os.close(final_verification)
+
+        if (
+            not same_final_file
+            or not os.path.samestat(opened_after, path_after)
+            or not stat.S_ISREG(opened_after.st_mode)
+            or opened_after.st_nlink != 1
+            or not stat.S_ISREG(path_after.st_mode)
+            or path_after.st_nlink != 1
+            or opened_before.st_mode != opened_after.st_mode
+            or opened_before.st_size != opened_after.st_size
+            or opened_before.st_mtime_ns != opened_after.st_mtime_ns
+            or opened_before.st_ctime_ns != opened_after.st_ctime_ns
+        ):
+            raise AuthorityRootSelectionIntegrityError(
+                f"{label} changed while it was being read"
+            )
+
+        try:
+            text = b"".join(chunks).decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise AuthorityRootSelectionIntegrityError(
+                f"cannot read {label}"
+            ) from exc
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as close_error:
+            if primary_error is None:
+                raise AuthorityRootSelectionIntegrityError(
+                    f"cannot close {label} descriptor"
+                ) from close_error
+            try:
+                primary_error.add_note(f"{label} descriptor close also failed")
+            except BaseException:
+                pass
+
     try:
         raw = strict_json_loads(text)
     except (TypeError, ValueError) as exc:

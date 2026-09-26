@@ -99,7 +99,11 @@ def _foundation(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     TrialFamilyAccountingStore.initialize_workspace(workspace)
-    authority_root = tmp_path / "machine-authority"
+    # ScientificRegistry publication and trial-family accounting share one
+    # canonical workspace root-selection decision. The suite-wide fixture supplies
+    # an isolated default monotonic root, so do not introduce a second explicit
+    # root when this helper is nested inside the same test.
+    authority_root = None
     registry = ScientificRegistry.initialize_pristine(workspace / "scientific.json")
     question = _question()
     hypothesis = _hypothesis()

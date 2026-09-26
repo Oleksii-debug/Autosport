@@ -79,6 +79,30 @@ def test_hidden_decoder_code_rebinding_fails_closed_before_client_build() -> Non
         sealed_decode.__code__ = original_code
 
 
+def test_hidden_account_details_reader_code_rebinding_fails_closed_before_identity_resolution() -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token")
+    )
+    reader = _reachable_named(
+        build_betfair_authenticated_client,
+        "read_account_details",
+    )
+    original_code = reader.__code__
+
+    def forged_reader(_self):
+        raise AssertionError("forged account-details reader must never execute")
+
+    reader.__code__ = forged_reader.__code__
+    try:
+        with pytest.raises(
+            BetfairAccountIdentityError,
+            match="frozen K07 Betfair account-details reader code was rebound",
+        ):
+            resolve_betfair_authenticated_account_identity(client)
+    finally:
+        reader.__code__ = original_code
+
+
 def test_transient_hidden_decoder_code_swap_during_io_cannot_launder_identity(
     monkeypatch,
 ) -> None:

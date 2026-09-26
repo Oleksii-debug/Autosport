@@ -3,11 +3,11 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from autosport.domain import MarketEvent
 from autosport.gui import AUTOMATION_IDS
 from autosport.keyboard_audit import (
     _ACTION_BINDINGS,
@@ -27,18 +27,18 @@ from autosport.replay_worker import OneShotReplayWorker, run_workspace_dataset_o
 from autosport.windows_replay_stop import REPLAY_STOP_AUTOMATION_ID, _stop_control_enabled
 
 
-@dataclass(frozen=True)
-class _ReplayEvent:
-    observed_ts: str
-    sequence: int
-    dedupe_key: str
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "observed_ts": self.observed_ts,
-            "sequence": self.sequence,
-            "dedupe_key": self.dedupe_key,
+def _event(event_id: str, observed_ts: str, sequence: int) -> MarketEvent:
+    return MarketEvent.from_dict(
+        {
+            "event_id": event_id,
+            "market_id": "winner",
+            "selection_id": "selection",
+            "decimal_odds": "2.0",
+            "observed_ts": observed_ts,
+            "source_id": "replay-stop-test",
+            "sequence": sequence,
         }
+    )
 
 
 class ReplayStopTests(unittest.TestCase):
@@ -62,8 +62,8 @@ class ReplayStopTests(unittest.TestCase):
         first_event_seen = threading.Event()
         firewall = ReplayLeakageFirewall({"event-2": "winner"})
         events = [
-            _ReplayEvent("2026-09-21T00:00:00+00:00", 1, "event-1"),
-            _ReplayEvent("2026-09-21T00:10:00+00:00", 2, "event-2"),
+            _event("event-1", "2026-09-21T00:00:00+00:00", 1),
+            _event("event-2", "2026-09-21T00:10:00+00:00", 2),
         ]
         worker = OneShotReplayWorker()
 

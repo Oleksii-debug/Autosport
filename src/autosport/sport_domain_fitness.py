@@ -1,7 +1,6 @@
 """Causal sport-domain fitness evidence and bounded compute-routing guidance."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 
 _SCHEMA = "autosport.sport_domain_fitness"
 _VERSION = 1
@@ -462,8 +462,8 @@ class SportDomainFitnessStore:
     
     def _load(self) -> None:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
             raise SportDomainFitnessError("cannot load fitness evidence store") from exc
         if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
             raise SportDomainFitnessError("unsupported fitness evidence store schema")

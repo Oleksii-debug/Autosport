@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Iterator
 
 from .domain import MarketEvent, utc_now_iso
 from .json_integrity import jsonl_bytes_are_blank, strict_json_loads
+from .market_mirror import MarketMirror, MirrorUpdate
 
 
 _REPLAY_STOP_CONTEXT = threading.local()
@@ -89,12 +90,7 @@ class ReplayStopToken:
 
 @contextmanager
 def replay_stop_scope(stop_token: ReplayStopToken | None) -> Iterator[None]:
-    """Bind one cooperative STOP token to only the current replay worker thread.
-
-    The token is deliberately thread-local: concurrent independent replays cannot
-    stop each other, and callers outside the worker keep the historical replay API.
-    Nested scopes restore the prior binding exactly.
-    """
+    """Bind one cooperative STOP token to only the current replay worker thread."""
 
     had_previous = hasattr(_REPLAY_STOP_CONTEXT, "token")
     previous = getattr(_REPLAY_STOP_CONTEXT, "token", None)
@@ -184,14 +180,37 @@ class ReplayRun:
     completed_at: str
 
 
+def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
+    """Own one canonical value snapshot without retaining caller metadata aliases."""
+
+    if not isinstance(event, MarketEvent):
+        raise TypeError("replay events must be MarketEvent values")
+    try:
+        # Dispatch through the canonical base-class serializer so subclasses cannot
+        # replace replay identity through an overridden to_dict implementation.
+        return MarketEvent.from_dict(MarketEvent.to_dict(event))
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("replay event must be canonical") from exc
+
+
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
-        self.events = sorted(
-            events,
-            key=lambda e: (_iso_datetime(e.observed_ts), e.sequence, e.dedupe_key),
-        )
+        # Snapshot each yielded value immediately. MarketEvent is frozen but nested
+        # metadata is mutable, so retaining caller objects would allow strategy-visible
+        # replay bytes to drift after dataset_hash was frozen.
+        raw_events = [_snapshot_replay_event(event) for event in events]
+        self._events = tuple(sorted(raw_events, key=_replay_order_key))
         self.firewall = firewall or ReplayLeakageFirewall()
-        self.dataset_hash = _dataset_hash(self.events)
+        # Dataset identity preserves the pre-causal-delivery ordering contract.
+        # Delivery order may evolve to match live availability semantics without
+        # silently changing durable experiment/dataset identity for the same input.
+        self.dataset_hash = _dataset_hash(raw_events)
+
+    @property
+    def events(self) -> tuple[MarketEvent, ...]:
+        """Return detached audit snapshots without exposing hash-bound engine state."""
+
+        return tuple(_snapshot_replay_event(event) for event in self._events)
 
     @classmethod
     def from_jsonl(cls, path: str | Path, firewall: ReplayLeakageFirewall | None = None) -> "ReplayEngine":
@@ -218,23 +237,22 @@ class ReplayEngine:
         on_event: Callable[[MarketEvent], None],
         speed: float = 0.0,
         run_id: str | None = None,
+        on_raw_event: Callable[[MarketEvent], object] | None = None,
     ) -> ReplayRun:
         stop_token = _active_replay_stop_token()
-        # STOP is checked before claiming the firewall so an already-requested
-        # cancellation cannot retire a fresh firewall merely by entering run().
+        # An already accepted STOP must not retire a fresh firewall merely by
+        # entering run(). The completion capability remains private to this run.
         _checkpoint_replay_stop()
-        # Claim before any strategy-visible callback. The raw completion capability
-        # remains local to this run; the firewall stores only its digest. A failed
-        # run deliberately leaves the firewall retired IN_USE and therefore sealed.
         completion_capability = self.firewall._claim_for_replay()
         previous: float | None = None
         started = utc_now_iso()
         count = 0
+        replay_mirror = MarketMirror()
         try:
-            for event in self.events:
+            for event in self._events:
                 _checkpoint_replay_stop()
                 if speed > 0:
-                    current = _iso_seconds(event.observed_ts)
+                    current = _event_available_datetime(event).timestamp()
                     if previous is not None:
                         delay = max(0.0, current - previous) / speed
                         if delay > 0:
@@ -244,10 +262,23 @@ class ReplayEngine:
                                 raise ReplayStopRequested("paper replay stopped by operator")
                     previous = current
                 _checkpoint_replay_stop()
-                on_event(event)
+
+                # Preserve the live durable-first boundary: every causally ordered
+                # raw arrival may be persisted before source-local current-state
+                # semantics decide whether it is strategy-visible.
+                if on_raw_event is not None:
+                    on_raw_event(_snapshot_replay_event(event))
+
+                # A STOP accepted after raw durable publication may still prevent
+                # strategy visibility and economic work for this event.
+                _checkpoint_replay_stop()
+                update = replay_mirror.apply(event)
                 count += 1
-            # Completion and STOP acknowledgement are serialized on the same token
-            # lock. A request can therefore never return True after result unlock.
+                if update.status == MirrorUpdate.APPLIED:
+                    on_event(_snapshot_replay_event(event))
+
+            # Completion and STOP acknowledgement share one token lock, so request()
+            # cannot report acceptance after result unlock has won the boundary.
             if stop_token is None:
                 self.firewall._complete_replay(completion_capability)
             else:
@@ -266,25 +297,50 @@ class ReplayEngine:
             completed_at=utc_now_iso(),
         )
 
-
 def _dataset_hash(events: list[MarketEvent]) -> str:
     digest = hashlib.sha256()
-    for event in events:
+    for event in sorted(events, key=_dataset_identity_order_key):
         canonical = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest.update(canonical.encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
 
 
-def _iso_datetime(value: str) -> datetime:
+def _dataset_identity_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
+    """Preserve the historical ReplayEngine dataset-hash ordering contract."""
+    return (
+        _iso_datetime(event.observed_ts, field_name="observed_ts"),
+        event.sequence,
+        event.dedupe_key,
+    )
+
+
+def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ValueError(f"invalid replay observed_ts: {value}") from exc
+        raise ValueError(f"invalid replay {field_name}: {value}") from exc
     if parsed.tzinfo is None:
-        raise ValueError("replay observed_ts must include timezone")
+        raise ValueError(f"replay {field_name} must include timezone")
     return parsed
 
 
-def _iso_seconds(value: str) -> float:
-    return _iso_datetime(value).timestamp()
+def _event_available_datetime(event: MarketEvent) -> datetime:
+    """Return the first instant when a replay callback may know this event.
+
+    Live decisions cannot consume an event before either its local observation
+    instant or its durable ingestion/receipt instant.  Using the later clock
+    prevents a late-arriving older observation from being replayed into the
+    strategy before the live system could have received it.
+    """
+
+    observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
+    ingested = _iso_datetime(event.ingest_ts, field_name="ingest_ts")
+    return max(observed, ingested)
+
+
+def _replay_order_key(event: MarketEvent) -> tuple[datetime, datetime, int, str]:
+    available = _event_available_datetime(event)
+    observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
+    return (available, observed, event.sequence, event.dedupe_key)
+

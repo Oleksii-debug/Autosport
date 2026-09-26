@@ -21,4 +21,4 @@ def test_task_cannot_self_mint_operator_stop_without_accepted_request() -> None:
     assert message.stopped is False
     assert message.result is None
     assert message.error is not None
-    assert "ReplayStopRequested" in message.error
+    assert message.error.startswith("RuntimeError:")

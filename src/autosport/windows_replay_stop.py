@@ -27,9 +27,9 @@ require_keys(REPLAY_STOP_LOCALIZATION_KEYS)
 def _stop_control_enabled(worker) -> bool:
     """Keep STOP discoverable when idle; disable only during an un-stoppable flight."""
 
-    if worker is None or not worker.busy:
+    if worker is None or not bool(getattr(worker, "busy", False)):
         return True
-    return bool(worker.stop_available)
+    return bool(getattr(worker, "stop_available", False))
 
 
 def _set_stop_control_state(button, worker) -> None:
@@ -43,7 +43,8 @@ def _set_stop_control_state(button, worker) -> None:
 
 def _request_replay_stop(app) -> None:
     worker = app.__dict__.get("replay_worker")
-    if worker is None or not worker.request_stop():
+    request_stop = getattr(worker, "request_stop", None)
+    if not callable(request_stop) or not request_stop():
         # Idle STOP remains a real, focusable action so keyboard/NVDA users can
         # discover it and receive truthful "nothing to stop" feedback. If a
         # worker is in the narrow post-completion/pre-poll window, keep it disabled.
@@ -119,7 +120,7 @@ def install_windows_replay_stop() -> None:
 
     def poll_windows_replay_worker_with_stop(self) -> None:
         worker = self.replay_worker
-        if not worker.stopped_pending:
+        if not bool(getattr(worker, "stopped_pending", False)):
             return original_windows_poll_replay_worker(self)
 
         message = worker.poll()

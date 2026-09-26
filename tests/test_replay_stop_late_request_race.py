@@ -55,4 +55,4 @@ def test_forged_stop_closes_late_request_window_before_classification() -> None:
     assert message.stopped is False
     assert message.result is None
     assert message.error is not None
-    assert "ReplayStopRequested" in message.error
+    assert message.error.startswith("RuntimeError:")

@@ -33,6 +33,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 PAPER_RISK_POLICY_SCHEMA: Final = "autosport.paper_risk_policy"
 PAPER_RISK_POLICY_SCHEMA_VERSION: Final = 1
+_MAX_DURABLE_JSON_BYTES: Final = 64 * 1024
 
 _AUTHORITY_DOMAIN: Final = "autosport.paper-risk-policy.v1"
 _POLICY_KEYS: Final = frozenset(
@@ -297,11 +298,17 @@ class PaperRiskPolicyStore:
                 "persisted paper risk policy must be a regular file"
             )
         try:
-            return self.path.read_bytes()
+            with self.path.open("rb") as handle:
+                raw = handle.read(_MAX_DURABLE_JSON_BYTES + 1)
         except OSError as exc:
             raise PaperRiskPolicyStoreError(
                 f"cannot read persisted paper risk policy: {exc}"
             ) from exc
+        if len(raw) > _MAX_DURABLE_JSON_BYTES:
+            raise PaperRiskPolicyStoreError(
+                "persisted paper risk policy exceeds bounded durable-state size"
+            )
+        return raw
 
     def _observed_state_sha256(self) -> str | None:
         if self.path.is_symlink():

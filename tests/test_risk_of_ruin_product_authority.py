@@ -3,7 +3,8 @@ from decimal import Decimal
 import subprocess
 import sys
 
-
+import autosport.risk as risk_module
+import autosport.risk_of_ruin_authority as authority_module
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
@@ -446,3 +447,160 @@ def test_vector_evidence_requires_exact_product_issued_result(tmp_path) -> None:
         risk_of_ruin_vector_evidence=evidence,
     )
     assert asserted_only.action != "STAKE_VECTOR"
+
+def test_rebound_policy_authority_helper_cannot_grant_positive_stake(
+    monkeypatch,
+) -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = _single_evidence(policy, book, context)
+    attacker_calls = 0
+
+    def forged_verifier(*args, **kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del args, kwargs
+        return True, "forged positive authority"
+
+    monkeypatch.setattr(
+        risk_module,
+        "_verify_product_risk_of_ruin_authority",
+        forged_verifier,
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "product authority dispatch changed" in decision.reason
+    assert attacker_calls == 0
+
+
+def test_policy_authority_helper_code_swap_cannot_grant_positive_stake(
+    monkeypatch,
+) -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = _single_evidence(policy, book, context)
+    canonical = risk_module._verify_product_risk_of_ruin_authority
+
+    def forged_verifier(*args, **kwargs):
+        del args, kwargs
+        return True, "forged positive authority"
+
+    monkeypatch.setattr(canonical, "__code__", forged_verifier.__code__)
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "product authority dispatch changed" in decision.reason
+
+
+def test_registry_read_code_swap_fails_closed_before_authority_use(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    registry = _registry(tmp_path)
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evidence_id="registry-read-code-swap",
+    )
+    _issue(registry, evidence, kind="single")
+    canonical = ScientificRegistry._read
+
+    def forged_read(self):
+        del self
+        return {"schema_version": 1, "records": []}
+
+    monkeypatch.setattr(canonical, "__code__", forged_read.__code__)
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "durable authority is invalid" in decision.reason
+
+
+def test_registry_validator_code_swap_fails_closed_before_authority_use(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    registry = _registry(tmp_path)
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evidence_id="registry-validator-code-swap",
+    )
+    _issue(registry, evidence, kind="single")
+    canonical = ScientificRegistry._validate_entry
+
+    def forged_validate(raw):
+        del raw
+        return None
+
+    monkeypatch.setattr(canonical, "__code__", forged_validate.__code__)
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "durable authority is invalid" in decision.reason
+
+
+def test_rebound_product_evaluator_resolver_fails_before_attacker_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    registry = _registry(tmp_path)
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evidence_id="rebound-product-resolver",
+    )
+    _issue(registry, evidence, kind="single")
+    attacker_calls = 0
+
+    def forged_resolver(*args, **kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del args, kwargs
+        raise AssertionError("forged resolver executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_resolve_product_evaluator_result",
+        forged_resolver,
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "lacks canonical product-issued evaluator authority" in decision.reason
+    assert attacker_calls == 0
+

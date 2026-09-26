@@ -49,6 +49,64 @@ T3 = "2026-01-01T00:00:30Z"
 T4 = "2026-01-01T00:00:40Z"
 
 
+class _HostileDecimal(Decimal):
+    hook_calls = 0
+
+    def _hook(self):
+        type(self).hook_calls += 1
+
+    def is_finite(self):
+        self._hook()
+        return True
+
+    def __lt__(self, other):
+        self._hook()
+        return False
+
+    def __le__(self, other):
+        self._hook()
+        return True
+
+    def __gt__(self, other):
+        self._hook()
+        return False
+
+    def __ge__(self, other):
+        self._hook()
+        return True
+
+    def __add__(self, other):
+        self._hook()
+        return Decimal(self) + other
+
+    def __sub__(self, other):
+        self._hook()
+        return Decimal(self) - other
+
+
+class _HostileInt(int):
+    hook_calls = 0
+
+    def _hook(self):
+        type(self).hook_calls += 1
+
+    def __lt__(self, other):
+        self._hook()
+        return False
+
+    def __le__(self, other):
+        self._hook()
+        return True
+
+    def __gt__(self, other):
+        self._hook()
+        return False
+
+    def __ge__(self, other):
+        self._hook()
+        return True
+
+
 def evaluation(**overrides):
     values = dict(
         evaluation_id="voc-eval-1",
@@ -407,6 +465,45 @@ def outcome_score(value):
 
 
 class PairedVOCEvaluationTests(unittest.TestCase):
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        _HostileDecimal.hook_calls = 0
+        with self.assertRaisesRegex(VOCEvaluationError, "finite Decimal"):
+            evaluation(baseline_utility=_HostileDecimal("1"))
+        self.assertEqual(_HostileDecimal.hook_calls, 0)
+
+    def test_paired_sample_int_subclasses_are_rejected_before_comparison(self):
+        for field, value in (
+            ("paired_sample_count", 20),
+            ("effective_sample_size", 12),
+        ):
+            with self.subTest(field=field):
+                _HostileInt.hook_calls = 0
+                with self.assertRaisesRegex(VOCEvaluationError, "positive integer"):
+                    evaluation(**{field: _HostileInt(value)})
+                self.assertEqual(_HostileInt.hook_calls, 0)
+
+    def test_routing_minimum_ess_int_subclass_is_rejected_before_comparison(self):
+        paired = evaluation()
+        _HostileInt.hook_calls = 0
+        with self.assertRaisesRegex(VOCEvaluationError, "must be positive"):
+            paired.routing_ineligibility_reason(
+                as_of=T2,
+                minimum_effective_sample_size=_HostileInt(8),
+            )
+        self.assertEqual(_HostileInt.hook_calls, 0)
+
+    def test_outcome_score_sample_int_subclasses_are_rejected_before_comparison(self):
+        score = outcome_score(evaluation())
+        for field, value in (
+            ("paired_sample_count", 20),
+            ("effective_sample_size", 12),
+        ):
+            with self.subTest(field=field):
+                _HostileInt.hook_calls = 0
+                with self.assertRaisesRegex(VOCEvaluationError, "positive"):
+                    replace(score, **{field: _HostileInt(value)})
+                self.assertEqual(_HostileInt.hook_calls, 0)
+
     def _production_resolver_fixture(
         self,
         value=None,

@@ -133,31 +133,67 @@ def _install_expected_failure_message():
     Function-object identity alone is insufficient in Python because ordinary caller
     code can replace a function object's ``__code__`` in place. The canonical exception
     renderer also dispatches through the secret-redaction module, so capture that direct
-    dependency chain and fail closed if any hop changes.
+    dependency chain and fail closed if any authority-sensitive hop changes.
     """
 
     canonical_value_error = ValueError
     canonical_file_not_found_error = FileNotFoundError
     redaction_module = _secret_redaction
     canonical_redactor = safe_exception_detail
+    callable_names = (
+        "redact_operator_text",
+        "_secret_values",
+        "_environment_secret_values",
+        "is_sensitive_key",
+        "_normalized_key",
+        "_decode_escaped_key_for_classification",
+        "_redacted_value_literal",
+        "_key_value_match_key",
+        "_redact_overlapping_sensitive_key_values",
+    )
+    callable_witnesses = tuple(
+        (name, getattr(redaction_module, name), getattr(redaction_module, name).__code__)
+        for name in callable_names
+    )
+    object_names = (
+        "REDACTED",
+        "_SENSITIVE_NORMALIZED_KEYS",
+        "_SENSITIVE_SUFFIXES",
+        "_SENSITIVE_WRAPPER_SUFFIXES",
+        "_URL_USERINFO_RE",
+        "_QUERY_PARAM_RE",
+        "_AUTHORIZATION_COMMA_VALUE_RE",
+        "_AUTHORIZATION_VALUE_RE",
+        "_BEARER_RE",
+        "_KEY_VALUE_RE",
+        "_OVERLAPPING_KEY_VALUE_RE",
+        "_COOKIE_HEADER_RE",
+        "_SPACED_SENSITIVE_KEY_VALUE_RE",
+        "_KEY_ESCAPE_RE",
+        "_KEY_SIMPLE_ESCAPE_RE",
+        "_KEY_OCTAL_ESCAPE_RE",
+    )
+    object_witnesses = tuple(
+        (name, getattr(redaction_module, name)) for name in object_names
+    )
+    simple_escape_items = tuple(sorted(redaction_module._KEY_SIMPLE_ESCAPES.items()))
     canonical_redactor_code = canonical_redactor.__code__
-    canonical_text_redactor = redaction_module.redact_operator_text
-    canonical_text_redactor_code = canonical_text_redactor.__code__
-    canonical_secret_values = redaction_module._secret_values
-    canonical_secret_values_code = canonical_secret_values.__code__
 
     def redaction_dispatch_is_canonical() -> bool:
-        return (
-            _secret_redaction is redaction_module
-            and safe_exception_detail is canonical_redactor
-            and getattr(canonical_redactor, "__code__", None) is canonical_redactor_code
-            and redaction_module.redact_operator_text is canonical_text_redactor
-            and getattr(canonical_text_redactor, "__code__", None)
-            is canonical_text_redactor_code
-            and redaction_module._secret_values is canonical_secret_values
-            and getattr(canonical_secret_values, "__code__", None)
-            is canonical_secret_values_code
-        )
+        if (
+            _secret_redaction is not redaction_module
+            or safe_exception_detail is not canonical_redactor
+            or getattr(canonical_redactor, "__code__", None) is not canonical_redactor_code
+        ):
+            return False
+        for name, expected, expected_code in callable_witnesses:
+            current = getattr(redaction_module, name, None)
+            if current is not expected or getattr(expected, "__code__", None) is not expected_code:
+                return False
+        for name, expected in object_witnesses:
+            if getattr(redaction_module, name, None) is not expected:
+                return False
+        return tuple(sorted(redaction_module._KEY_SIMPLE_ESCAPES.items())) == simple_escape_items
 
     def expected_failure_message(command: str, exc: OSError | ValueError) -> str:
         if isinstance(exc, canonical_value_error):

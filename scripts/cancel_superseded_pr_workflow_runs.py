@@ -22,6 +22,11 @@ class CancellationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _AllowedHttpError:
+    status_code: int
+
+
+@dataclass(frozen=True)
 class WorkflowRun:
     run_id: int
     head_sha: str
@@ -115,7 +120,13 @@ class GitHubApi:
         self._repository = repository
         self._token = token
 
-    def _request(self, path: str, *, method: str = "GET") -> object:
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
         request = Request(
             f"https://api.github.com/repos/{self._repository}{path}",
             method=method,
@@ -129,7 +140,13 @@ class GitHubApi:
         try:
             with urlopen(request, timeout=20) as response:
                 body = response.read()
-        except (HTTPError, URLError, TimeoutError) as exc:
+        except HTTPError as exc:
+            if exc.code in allowed_http_errors:
+                return _AllowedHttpError(exc.code)
+            raise CancellationError(
+                f"GitHub API request failed: {type(exc).__name__}"
+            ) from exc
+        except (URLError, TimeoutError) as exc:
             raise CancellationError(
                 f"GitHub API request failed: {type(exc).__name__}"
             ) from exc
@@ -189,9 +206,31 @@ class GitHubApi:
             runs.extend(self._active_runs_for_status(status))
         return tuple(runs)
 
+    def workflow_run_status(self, run_id: int) -> str:
+        run_id = _require_positive_int(run_id, field="run id")
+        payload = self._request(f"/actions/runs/{run_id}")
+        if not isinstance(payload, dict):
+            raise CancellationError("invalid workflow-run response")
+        status = payload.get("status")
+        if status != "completed" and status not in _ACTIVE_STATUSES:
+            raise CancellationError("invalid workflow-run status")
+        return status
+
     def cancel(self, run_id: int) -> None:
         run_id = _require_positive_int(run_id, field="run id")
-        payload = self._request(f"/actions/runs/{run_id}/cancel", method="POST")
+        payload = self._request(
+            f"/actions/runs/{run_id}/cancel",
+            method="POST",
+            allowed_http_errors=frozenset({409}),
+        )
+        if isinstance(payload, _AllowedHttpError):
+            if payload.status_code != 409:
+                raise CancellationError("unexpected allowed cancellation HTTP status")
+            if self.workflow_run_status(run_id) == "completed":
+                return
+            raise CancellationError(
+                "workflow run cancellation conflicted while run remains active"
+            )
         if payload is not None:
             raise CancellationError("unexpected cancel response body")
 

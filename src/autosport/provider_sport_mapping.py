@@ -330,11 +330,30 @@ def _build_register_evidence_method():
         "_EVIDENCE_VERSION": _EVIDENCE_VERSION,
     }
     canonical_load = vars(canonical_registry_type)["_load"]
+    canonical_load_code = canonical_load.__code__
     canonical_persist = vars(canonical_registry_type)["_persist"]
+    canonical_persist_code = canonical_persist.__code__
     overlap_descriptor = vars(canonical_registry_type)["_assert_no_overlap"]
     if type(overlap_descriptor) is not staticmethod:
         raise RuntimeError("ProviderSportMappingRegistry._assert_no_overlap must remain static")
     canonical_overlap = overlap_descriptor.__func__
+    canonical_overlap_code = canonical_overlap.__code__
+    binding_decoder_descriptor = vars(ProviderSportBinding).get("from_payload")
+    if type(binding_decoder_descriptor) is not classmethod:
+        raise RuntimeError("ProviderSportBinding.from_payload must remain a classmethod")
+    canonical_binding_decoder = binding_decoder_descriptor.__func__
+    canonical_binding_decoder_code = canonical_binding_decoder.__code__
+
+    def _assert_durable_dispatch() -> None:
+        if vars(canonical_registry_type).get("_load") is not canonical_load or canonical_load.__code__ is not canonical_load_code:
+            raise ProviderSportMappingError("canonical registry load authority changed")
+        if vars(canonical_registry_type).get("_persist") is not canonical_persist or canonical_persist.__code__ is not canonical_persist_code:
+            raise ProviderSportMappingError("canonical registry persist authority changed")
+        if vars(canonical_registry_type).get("_assert_no_overlap") is not overlap_descriptor or canonical_overlap.__code__ is not canonical_overlap_code:
+            raise ProviderSportMappingError("canonical registry overlap authority changed")
+        current_decoder = vars(ProviderSportBinding).get("from_payload")
+        if current_decoder is not binding_decoder_descriptor or canonical_binding_decoder.__code__ is not canonical_binding_decoder_code:
+            raise ProviderSportMappingError("canonical persisted binding decoder authority changed")
 
     def register_evidence(
         self: "ProviderSportMappingRegistry",
@@ -349,12 +368,9 @@ def _build_register_evidence_method():
         for name, expected in parser_dispatch.items():
             if globals().get(name) is not expected:
                 raise ProviderSportMappingError("canonical evidence parser authority changed")
-        if vars(canonical_registry_type).get("_load") is not canonical_load:
-            raise ProviderSportMappingError("canonical registry load authority changed")
-        if vars(canonical_registry_type).get("_persist") is not canonical_persist:
-            raise ProviderSportMappingError("canonical registry persist authority changed")
-        if vars(canonical_registry_type).get("_assert_no_overlap") is not overlap_descriptor:
-            raise ProviderSportMappingError("canonical registry overlap authority changed")
+        _assert_durable_dispatch()
+        if "_load" in vars(self) or "_persist" in vars(self) or "_assert_no_overlap" in vars(self):
+            raise ProviderSportMappingError("canonical registry instance authority changed")
 
         with durable_path_lock(self.path):
             if not self.path.exists():
@@ -587,5 +603,110 @@ class ProviderSportMappingRegistry:
         self._bindings = bindings
 
 
+def _build_resolve_method():
+    """Seal durable decoding before issuing positive canonical sport resolution."""
+
+    canonical_registry_type = ProviderSportMappingRegistry
+    canonical_load = vars(canonical_registry_type)["_load"]
+    canonical_load_code = canonical_load.__code__
+    binding_decoder_descriptor = vars(ProviderSportBinding).get("from_payload")
+    if type(binding_decoder_descriptor) is not classmethod:
+        raise RuntimeError("ProviderSportBinding.from_payload must remain a classmethod")
+    canonical_binding_decoder = binding_decoder_descriptor.__func__
+    canonical_binding_decoder_code = canonical_binding_decoder.__code__
+    overlap_descriptor = vars(canonical_registry_type)["_assert_no_overlap"]
+    if type(overlap_descriptor) is not staticmethod:
+        raise RuntimeError("ProviderSportMappingRegistry._assert_no_overlap must remain static")
+    canonical_overlap = overlap_descriptor.__func__
+    canonical_overlap_code = canonical_overlap.__code__
+    canonical_registry_sha_property = vars(canonical_registry_type)["registry_sha256"]
+    canonical_helpers = {
+        "_canonical_text": _canonical_text,
+        "_opaque_provider_id": _opaque_provider_id,
+        "_instant": _instant,
+        "_time_text": _time_text,
+        "_sha256": _sha256,
+        "_digest": _digest,
+        "json": json,
+        "hashlib": hashlib,
+        "unicodedata": unicodedata,
+        "datetime": datetime,
+        "timezone": timezone,
+        "ProviderSportMappingError": ProviderSportMappingError,
+        "ProviderSportBinding": ProviderSportBinding,
+        "CanonicalSportResolution": CanonicalSportResolution,
+        "_SCHEMA": _SCHEMA,
+        "_VERSION": _VERSION,
+        "_HEX": _HEX,
+        "_RESERVED_SPORTS": _RESERVED_SPORTS,
+    }
+
+    def resolve(
+        self: "ProviderSportMappingRegistry",
+        *,
+        provider_namespace: str,
+        provider_sport_id: str,
+        as_of: str,
+    ) -> CanonicalSportResolution:
+        if type(self) is not canonical_registry_type:
+            raise ProviderSportMappingError("canonical provider sport registry type is required")
+        if "_load" in vars(self) or "_assert_no_overlap" in vars(self):
+            raise ProviderSportMappingError("canonical registry instance authority changed")
+        if vars(canonical_registry_type).get("_load") is not canonical_load or canonical_load.__code__ is not canonical_load_code:
+            raise ProviderSportMappingError("canonical registry load executable authority changed")
+        if vars(canonical_registry_type).get("_assert_no_overlap") is not overlap_descriptor or canonical_overlap.__code__ is not canonical_overlap_code:
+            raise ProviderSportMappingError("canonical registry overlap authority changed")
+        current_decoder = vars(ProviderSportBinding).get("from_payload")
+        if current_decoder is not binding_decoder_descriptor or canonical_binding_decoder.__code__ is not canonical_binding_decoder_code:
+            raise ProviderSportMappingError("canonical persisted binding decoder authority changed")
+        if vars(canonical_registry_type).get("registry_sha256") is not canonical_registry_sha_property:
+            raise ProviderSportMappingError("canonical registry digest authority changed")
+        for name, expected in canonical_helpers.items():
+            if globals().get(name) is not expected:
+                raise ProviderSportMappingError("canonical provider sport resolution authority changed")
+
+        namespace = _canonical_text("provider_namespace", provider_namespace)
+        opaque_id = _opaque_provider_id("provider_sport_id", provider_sport_id)
+        instant = _instant("as_of", as_of)
+        canonical_as_of = instant.isoformat().replace("+00:00", "Z")
+        with durable_path_lock(self.path):
+            if not self.path.exists():
+                raise ProviderSportMappingError("durable provider sport mapping registry is missing")
+            canonical_load(self)
+        candidates: list[ProviderSportBinding] = []
+        for binding in self._bindings:
+            if binding.provider_namespace != namespace or binding.provider_sport_id != opaque_id:
+                continue
+            if instant < _instant("valid_from", binding.valid_from):
+                continue
+            if binding.valid_until is not None and instant >= _instant("valid_until", binding.valid_until):
+                continue
+            if instant < _instant("evidence_available_at", binding.evidence_available_at):
+                continue
+            if instant < _instant("recorded_at", binding.recorded_at):
+                continue
+            candidates.append(binding)
+        if not candidates:
+            raise ProviderSportMappingError("provider sport identity has no causal canonical mapping at as_of")
+        if len(candidates) != 1:
+            raise ProviderSportMappingError("provider sport identity resolves ambiguously at as_of")
+        binding = candidates[0]
+        return CanonicalSportResolution(
+            provider_namespace=binding.provider_namespace,
+            provider_sport_id=binding.provider_sport_id,
+            canonical_sport=binding.canonical_sport,
+            as_of=canonical_as_of,
+            binding_id=binding.binding_id,
+            source_snapshot_sha256=binding.source_snapshot_sha256,
+            registry_sha256=canonical_registry_sha_property.fget(self),
+        )
+
+    resolve.__name__ = "resolve"
+    resolve.__qualname__ = "ProviderSportMappingRegistry.resolve"
+    return resolve
+
+
 ProviderSportMappingRegistry.register_evidence = _build_register_evidence_method()
+ProviderSportMappingRegistry.resolve = _build_resolve_method()
 del _build_register_evidence_method
+del _build_resolve_method

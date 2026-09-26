@@ -462,7 +462,7 @@ def test_success_requires_exact_false_connection_closed(
     assert not transport.is_authenticated
 
 
-def test_success_without_connection_closed_never_issues_authority(
+def test_success_without_connection_closed_issues_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload: dict[str, object] = {
@@ -473,11 +473,11 @@ def test_success_without_connection_closed_never_issues_authority(
     tail = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
     transport, fake = _transport(monkeypatch, tail)
 
-    with pytest.raises(BetfairAuthenticatedStreamError, match="not acknowledged SUCCESS"):
-        _open(transport)
+    subscription = _open(transport)
 
-    assert fake.closed
-    assert not transport.is_authenticated
+    subscription.assert_issued()
+    assert not fake.closed
+    assert transport.is_authenticated
 
 
 def test_prior_post_auth_frame_prevents_subscription_relabeling(

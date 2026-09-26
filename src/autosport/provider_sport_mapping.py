@@ -1,9 +1,8 @@
 """Causal provider-sport to canonical-sport mapping authority.
 
-Provider sport identifiers are opaque provider facts. They become Autosport canonical
-sport identities only through an explicit, time-bounded, snapshot-bound mapping in
-this registry. This module deliberately does not guess aliases from display names and
-does not grant strategy, risk, execution, settlement, or real-money authority.
+Provider sport identifiers are opaque provider facts. Positive canonical resolution is
+issued only from exact source-evidence bytes mechanically verified by this authority.
+The product recording chronology is owned by this module and is not caller-injectable.
 """
 
 from __future__ import annotations
@@ -14,13 +13,15 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .integrity import atomic_write_json, durable_path_lock
 
 
 _SCHEMA = "autosport.provider_sport_mapping"
-_VERSION = 1
+_VERSION = 2
+_EVIDENCE_SCHEMA = "autosport.provider_sport_mapping_evidence"
+_EVIDENCE_VERSION = 1
 _HEX = frozenset("0123456789abcdef")
 _RESERVED_SPORTS = frozenset({"unknown", "mixed"})
 
@@ -92,23 +93,94 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _intervals_overlap(
-    left_from: str,
-    left_until: str | None,
-    right_from: str,
-    right_until: str | None,
-) -> bool:
-    left_start = _instant("valid_from", left_from)
-    right_start = _instant("valid_from", right_from)
-    left_end = None if left_until is None else _instant("valid_until", left_until)
-    right_end = None if right_until is None else _instant("valid_until", right_until)
-    return (right_end is None or left_start < right_end) and (
-        left_end is None or right_start < left_end
-    )
-
-
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _strict_json_object(raw_bytes: bytes) -> dict[str, object]:
+    if type(raw_bytes) is not bytes or not raw_bytes:
+        raise ProviderSportMappingError("source_snapshot_bytes must be non-empty exact bytes")
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeError as exc:
+        raise ProviderSportMappingError("source snapshot must be UTF-8 JSON") from exc
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ProviderSportMappingError(f"source snapshot has duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        parsed = json.loads(
+            raw_text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ProviderSportMappingError(f"source snapshot has invalid JSON constant {value!r}")
+            ),
+        )
+    except json.JSONDecodeError as exc:
+        raise ProviderSportMappingError("source snapshot is invalid JSON") from exc
+    if type(parsed) is not dict:
+        raise ProviderSportMappingError("source snapshot must be a JSON object")
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSportEvidence:
+    provider_namespace: str
+    provider_sport_id: str
+    canonical_sport: str
+    valid_from: str
+    valid_until: str | None
+    evidence_available_at: str
+    source_snapshot_sha256: str
+
+    @classmethod
+    def from_exact_bytes(cls, raw_bytes: bytes) -> "ProviderSportEvidence":
+        raw = _strict_json_object(raw_bytes)
+        expected = {
+            "schema",
+            "schema_version",
+            "provider_namespace",
+            "provider_sport_id",
+            "canonical_sport",
+            "valid_from",
+            "valid_until",
+            "evidence_available_at",
+        }
+        if set(raw) != expected:
+            raise ProviderSportMappingError("source snapshot evidence shape is invalid")
+        if raw["schema"] != _EVIDENCE_SCHEMA or raw["schema_version"] != _EVIDENCE_VERSION:
+            raise ProviderSportMappingError("unsupported provider sport mapping evidence schema")
+        namespace = _canonical_text("provider_namespace", raw["provider_namespace"])
+        opaque_id = _opaque_provider_id("provider_sport_id", raw["provider_sport_id"])
+        canonical_sport = _canonical_sport(raw["canonical_sport"])
+        valid_from = _time_text("valid_from", raw["valid_from"])
+        valid_until_raw = raw["valid_until"]
+        if valid_until_raw is not None:
+            valid_until = _time_text("valid_until", valid_until_raw)
+        else:
+            valid_until = None
+        available = _time_text("evidence_available_at", raw["evidence_available_at"])
+        start = _instant("valid_from", valid_from)
+        if valid_until is not None and _instant("valid_until", valid_until) <= start:
+            raise ProviderSportMappingError("valid_until must be after valid_from")
+        if _instant("evidence_available_at", available) < start:
+            raise ProviderSportMappingError(
+                "mapping evidence cannot be available before the mapping valid_from boundary"
+            )
+        return cls(
+            provider_namespace=namespace,
+            provider_sport_id=opaque_id,
+            canonical_sport=canonical_sport,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            evidence_available_at=available,
+            source_snapshot_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,28 +206,22 @@ class ProviderSportBinding:
         if self.valid_until is not None:
             object.__setattr__(self, "valid_until", _time_text("valid_until", self.valid_until))
         object.__setattr__(
-            self,
-            "evidence_available_at",
-            _time_text("evidence_available_at", self.evidence_available_at),
+            self, "evidence_available_at", _time_text("evidence_available_at", self.evidence_available_at)
         )
         object.__setattr__(
             self, "source_snapshot_sha256", _sha256("source_snapshot_sha256", self.source_snapshot_sha256)
         )
         object.__setattr__(self, "recorded_at", _time_text("recorded_at", self.recorded_at))
-
         start = _instant("valid_from", self.valid_from)
         if self.valid_until is not None and _instant("valid_until", self.valid_until) <= start:
             raise ProviderSportMappingError("valid_until must be after valid_from")
         available = _instant("evidence_available_at", self.evidence_available_at)
-        recorded = _instant("recorded_at", self.recorded_at)
         if available < start:
             raise ProviderSportMappingError(
                 "mapping evidence cannot be available before the mapping valid_from boundary"
             )
-        if recorded < available:
-            raise ProviderSportMappingError(
-                "mapping cannot be recorded before its evidence is available"
-            )
+        if _instant("recorded_at", self.recorded_at) < available:
+            raise ProviderSportMappingError("mapping cannot be recorded before its evidence is available")
 
     def semantic_payload(self) -> dict[str, str | None]:
         return {
@@ -178,15 +244,9 @@ class ProviderSportBinding:
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "ProviderSportBinding":
         expected = {
-            "provider_namespace",
-            "provider_sport_id",
-            "canonical_sport",
-            "valid_from",
-            "valid_until",
-            "evidence_available_at",
-            "source_snapshot_sha256",
-            "recorded_at",
-            "binding_id",
+            "provider_namespace", "provider_sport_id", "canonical_sport", "valid_from",
+            "valid_until", "evidence_available_at", "source_snapshot_sha256",
+            "recorded_at", "binding_id",
         }
         if set(payload) != expected:
             raise ProviderSportMappingError("provider sport binding payload has unexpected fields")
@@ -232,36 +292,31 @@ class CanonicalSportResolution:
 
     @property
     def resolution_sha256(self) -> str:
-        return _digest(
-            {
-                "provider_namespace": self.provider_namespace,
-                "provider_sport_id": self.provider_sport_id,
-                "canonical_sport": self.canonical_sport,
-                "as_of": self.as_of,
-                "binding_id": self.binding_id,
-                "source_snapshot_sha256": self.source_snapshot_sha256,
-                "registry_sha256": self.registry_sha256,
-            }
-        )
+        return _digest({
+            "provider_namespace": self.provider_namespace,
+            "provider_sport_id": self.provider_sport_id,
+            "canonical_sport": self.canonical_sport,
+            "as_of": self.as_of,
+            "binding_id": self.binding_id,
+            "source_snapshot_sha256": self.source_snapshot_sha256,
+            "registry_sha256": self.registry_sha256,
+        })
 
 
 class ProviderSportMappingRegistry:
-    """Append-only causal mapping registry for provider sport identities."""
+    """Append-only causal registry whose positive entries derive from exact evidence bytes."""
 
-    def __init__(self, path: str | Path, *, clock: Callable[[], str] = _utc_now) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.clock = clock
         self._bindings: list[ProviderSportBinding] = []
         with durable_path_lock(self.path):
             if self.path.exists():
                 self._load()
 
     @classmethod
-    def initialize_pristine(
-        cls, path: str | Path, *, clock: Callable[[], str] = _utc_now
-    ) -> "ProviderSportMappingRegistry":
+    def initialize_pristine(cls, path: str | Path) -> "ProviderSportMappingRegistry":
         target = Path(path)
-        registry = cls(target, clock=clock)
+        registry = cls(target)
         with durable_path_lock(target):
             if target.exists():
                 raise ProviderSportMappingError("provider sport mapping registry already exists")
@@ -276,30 +331,27 @@ class ProviderSportMappingRegistry:
     def registry_sha256(self) -> str:
         return _digest(self._unsigned_payload(self._bindings))
 
-    def register(
-        self,
-        *,
-        provider_namespace: str,
-        provider_sport_id: str,
-        canonical_sport: str,
-        valid_from: str,
-        valid_until: str | None,
-        evidence_available_at: str,
-        source_snapshot_sha256: str,
-    ) -> ProviderSportBinding:
+    def register_evidence(self, source_snapshot_bytes: bytes) -> ProviderSportBinding:
+        evidence = ProviderSportEvidence.from_exact_bytes(source_snapshot_bytes)
         with durable_path_lock(self.path):
             if self.path.exists():
                 self._load()
-            now = self.clock()
+            recorded_at = _utc_now()
+            if _instant("recorded_at", recorded_at) < _instant(
+                "evidence_available_at", evidence.evidence_available_at
+            ):
+                raise ProviderSportMappingError(
+                    "mapping evidence availability cannot be in the future of product recording time"
+                )
             candidate = ProviderSportBinding(
-                provider_namespace=provider_namespace,
-                provider_sport_id=provider_sport_id,
-                canonical_sport=canonical_sport,
-                valid_from=valid_from,
-                valid_until=valid_until,
-                evidence_available_at=evidence_available_at,
-                source_snapshot_sha256=source_snapshot_sha256,
-                recorded_at=now,
+                provider_namespace=evidence.provider_namespace,
+                provider_sport_id=evidence.provider_sport_id,
+                canonical_sport=evidence.canonical_sport,
+                valid_from=evidence.valid_from,
+                valid_until=evidence.valid_until,
+                evidence_available_at=evidence.evidence_available_at,
+                source_snapshot_sha256=evidence.source_snapshot_sha256,
+                recorded_at=recorded_at,
             )
             for existing in self._bindings:
                 if existing.binding_id == candidate.binding_id:
@@ -319,6 +371,11 @@ class ProviderSportMappingRegistry:
             self._persist(updated)
             self._bindings = updated
             return candidate
+
+    def register(self, **_: object) -> ProviderSportBinding:
+        raise ProviderSportMappingError(
+            "caller-authored mapping fields are not positive authority; use register_evidence(exact_bytes)"
+        )
 
     def resolve(
         self, *, provider_namespace: str, provider_sport_id: str, as_of: str
@@ -344,13 +401,9 @@ class ProviderSportMappingRegistry:
                 continue
             candidates.append(binding)
         if not candidates:
-            raise ProviderSportMappingError(
-                "provider sport identity has no causal canonical mapping at as_of"
-            )
+            raise ProviderSportMappingError("provider sport identity has no causal canonical mapping at as_of")
         if len(candidates) != 1:
-            raise ProviderSportMappingError(
-                "provider sport identity resolves ambiguously at as_of"
-            )
+            raise ProviderSportMappingError("provider sport identity resolves ambiguously at as_of")
         binding = candidates[0]
         return CanonicalSportResolution(
             provider_namespace=binding.provider_namespace,
@@ -366,21 +419,22 @@ class ProviderSportMappingRegistry:
     def _assert_no_overlap(
         candidate: ProviderSportBinding, existing_bindings: list[ProviderSportBinding]
     ) -> None:
+        def overlap(left: ProviderSportBinding, right: ProviderSportBinding) -> bool:
+            left_start = _instant("valid_from", left.valid_from)
+            right_start = _instant("valid_from", right.valid_from)
+            left_end = None if left.valid_until is None else _instant("valid_until", left.valid_until)
+            right_end = None if right.valid_until is None else _instant("valid_until", right.valid_until)
+            return (right_end is None or left_start < right_end) and (
+                left_end is None or right_start < left_end
+            )
+
         for existing in existing_bindings:
             if (
-                existing.provider_namespace != candidate.provider_namespace
-                or existing.provider_sport_id != candidate.provider_sport_id
+                existing.provider_namespace == candidate.provider_namespace
+                and existing.provider_sport_id == candidate.provider_sport_id
+                and overlap(existing, candidate)
             ):
-                continue
-            if _intervals_overlap(
-                existing.valid_from,
-                existing.valid_until,
-                candidate.valid_from,
-                candidate.valid_until,
-            ):
-                raise ProviderSportMappingError(
-                    "overlapping provider sport mappings are ambiguous"
-                )
+                raise ProviderSportMappingError("overlapping provider sport mappings are ambiguous")
 
     @staticmethod
     def _unsigned_payload(bindings: list[ProviderSportBinding]) -> dict[str, object]:
@@ -426,25 +480,18 @@ class ProviderSportMappingRegistry:
         except json.JSONDecodeError as exc:
             raise ProviderSportMappingError("provider sport mapping registry is invalid JSON") from exc
         if type(raw) is not dict or set(raw) != {
-            "schema",
-            "schema_version",
-            "bindings",
-            "registry_sha256",
+            "schema", "schema_version", "bindings", "registry_sha256"
         }:
             raise ProviderSportMappingError("provider sport mapping registry shape is invalid")
         if raw["schema"] != _SCHEMA or raw["schema_version"] != _VERSION:
             raise ProviderSportMappingError("unsupported provider sport mapping registry schema")
-        if type(raw["bindings"]) is not list:
-            raise ProviderSportMappingError("provider sport mapping bindings must be a list")
-        if type(raw["registry_sha256"]) is not str:
-            raise ProviderSportMappingError("provider sport mapping registry digest is invalid")
-        expected_digest = _digest(
-            {
-                "schema": raw["schema"],
-                "schema_version": raw["schema_version"],
-                "bindings": raw["bindings"],
-            }
-        )
+        if type(raw["bindings"]) is not list or type(raw["registry_sha256"]) is not str:
+            raise ProviderSportMappingError("provider sport mapping registry payload is invalid")
+        expected_digest = _digest({
+            "schema": raw["schema"],
+            "schema_version": raw["schema_version"],
+            "bindings": raw["bindings"],
+        })
         if raw["registry_sha256"] != expected_digest:
             raise ProviderSportMappingError("provider sport mapping registry digest mismatch")
 

@@ -10,6 +10,7 @@ from autosport.secret_redaction import safe_exception_detail
 # ``builtins`` cannot turn a caller-defined subclass name into presentation authority.
 _CANONICAL_VALUE_ERROR = ValueError
 _CANONICAL_OS_ERROR = OSError
+_CANONICAL_SAFE_EXCEPTION_DETAIL = safe_exception_detail
 _EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
 _EXPECTED_FAILURE_LABELS = (
     (BlockingIOError, "BlockingIOError"),
@@ -162,10 +163,13 @@ def _expected_failure_type_label(
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
     error_type = _expected_failure_type_label(exc)
-    detail = safe_exception_detail(
-        exc,
-        unavailable_detail="exception details unavailable",
-    )
+    if safe_exception_detail is not _CANONICAL_SAFE_EXCEPTION_DETAIL:
+        detail = "exception details unavailable"
+    else:
+        detail = _CANONICAL_SAFE_EXCEPTION_DETAIL(
+            exc,
+            unavailable_detail="exception details unavailable",
+        )
     detail = " ".join(detail.splitlines()).strip()
     return (
         f"Autosport-Data: {command}=FAIL_CLOSED error={error_type}"

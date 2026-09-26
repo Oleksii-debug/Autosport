@@ -284,8 +284,8 @@ def _attempt_binding(
     ledger: RealExecutionLedger,
     attempt_id: str,
 ) -> _AttemptBinding:
-    if not isinstance(plan, ExecutionPlan):
-        raise TypeError("plan must be ExecutionPlan")
+    if type(plan) is not ExecutionPlan:
+        raise TypeError("plan must be exact ExecutionPlan")
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be exact RealExecutionLedger")
     if type(attempt_id) is not str or not attempt_id.strip():
@@ -823,6 +823,10 @@ def validate_betfair_realized_match_revision(
     ):
         raise RealizedMatchEvidenceError(
             "realized match revision changes immutable execution identity"
+        )
+    if previous.bet_id is not None and current.bet_id != previous.bet_id:
+        raise RealizedMatchEvidenceError(
+            "realized match revision changes provider bet identity"
         )
     if _timestamp(
         current.readback_observed_at,

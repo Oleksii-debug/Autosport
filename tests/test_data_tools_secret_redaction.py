@@ -125,6 +125,29 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
         self.assertIn("exception details unavailable", output)
         self.assertNotIn(secret, output)
 
+    def test_in_place_redactor_code_swap_cannot_publish_raw_secret(self) -> None:
+        secret = "AS-DATATOOLS-CODE-SWAP-SENTINEL-91ce"
+        exc = ValueError(f"Authorization: Bearer {secret}")
+        canonical = data_tools_entry.safe_exception_detail
+        original_code = canonical.__code__
+
+        def forged(_exc, *, unavailable_detail):
+            del _exc, unavailable_detail
+            return f"Authorization: Bearer {secret}"
+
+        try:
+            canonical.__code__ = forged.__code__
+            output = data_tools_entry._expected_failure_message(
+                "verify-dataset",
+                exc,
+            )
+        finally:
+            canonical.__code__ = original_code
+
+        self.assertIn("error=ExpectedFailure", output)
+        self.assertIn("exception details unavailable", output)
+        self.assertNotIn(secret, output)
+
 
 if __name__ == "__main__":
     unittest.main()

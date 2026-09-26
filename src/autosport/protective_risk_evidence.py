@@ -14,6 +14,7 @@ from decimal import (
 )
 from enum import StrEnum
 import hashlib
+from itertools import islice
 import json
 import re
 from typing import Any, Mapping, Sequence
@@ -536,12 +537,12 @@ def build_protective_risk_flow_evidence(
 
     if isinstance(events, (str, bytes)) or not isinstance(events, Sequence):
         raise _error("INVALID_EVENT", "events must be an ordered sequence")
-    if len(events) > _MAX_EVENTS:
+    canonical_events = tuple(islice(events, _MAX_EVENTS + 1))
+    if len(canonical_events) > _MAX_EVENTS:
         raise _error(
             "EVIDENCE_RESOURCE_LIMIT",
             "event count exceeds the supported evidence domain",
         )
-    canonical_events = tuple(events)
     if not canonical_events:
         raise _error("FLOW_ORDER_AMBIGUOUS", "at least one valuation is required")
     if any(type(event) is not ProtectiveRiskEvent for event in canonical_events):

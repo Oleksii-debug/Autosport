@@ -331,7 +331,6 @@ def verify_risk_of_ruin_authority(
     *,
     kind: str,
     available_by: str,
-    _product_evaluator_resolver=_resolve_product_evaluator_result,
 ) -> tuple[bool, str]:
     """Re-resolve one risk result from durable product-owned scientific history."""
 
@@ -438,7 +437,7 @@ def verify_risk_of_ruin_authority(
     # observation/dataset/IID inputs gain product-owned authority, so this bridge
     # cannot accidentally open the positive path early.
     try:
-        product_result = _product_evaluator_resolver(
+        product_result = _resolve_product_evaluator_result(
             resolved_registry_path.parent,
             getattr(evidence, "evidence_id"),
         )

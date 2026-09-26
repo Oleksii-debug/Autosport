@@ -114,13 +114,13 @@ _KEY_ESCAPE_RE = re.compile(
 )
 _KEY_SIMPLE_ESCAPE_RE = re.compile(r"\\(?P<simple>[abfnrtv])")
 _KEY_SIMPLE_ESCAPES = {
-    "a": "\\a",
-    "b": "\\b",
-    "f": "\\f",
-    "n": "\\n",
-    "r": "\\r",
-    "t": "\\t",
-    "v": "\\v",
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
 }
 _KEY_OCTAL_ESCAPE_RE = re.compile(r"\\(?P<octal>[0-7]{1,3})")
 

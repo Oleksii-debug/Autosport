@@ -1448,5 +1448,98 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+    def test_provider_assigned_order_id_is_restart_stable_and_immutable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action(bookmaker_id="prophetx")))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.bind_provider_order_reference(
+                attempt_id="try-1", provider_id="prophetx"
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+
+            self.assertEqual(
+                ledger.bind_provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                    provider_order_id="provider-order-A",
+                ),
+                "provider-order-A",
+            )
+            event_count = ledger.verify_integrity()
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(
+                restarted.provider_assigned_order_id(
+                    attempt_id="try-1", provider_id="prophetx"
+                ),
+                "provider-order-A",
+            )
+            self.assertEqual(
+                restarted.bind_provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                    provider_order_id="provider-order-A",
+                ),
+                "provider-order-A",
+            )
+            self.assertEqual(restarted.verify_integrity(), event_count)
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "different provider assigned order id",
+            ):
+                restarted.bind_provider_assigned_order_id(
+                    attempt_id="try-1",
+                    provider_id="prophetx",
+                    provider_order_id="provider-order-B",
+                )
+
+    def test_provider_assigned_order_id_cannot_alias_across_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(
+                plan(action("a1", bookmaker_id="prophetx"), plan_id="p1")
+            )
+            ledger.reserve_plan(
+                plan(action("a2", bookmaker_id="prophetx"), plan_id="p2")
+            )
+            for plan_id, action_id, attempt_id in (
+                ("p1", "a1", "try-1"),
+                ("p2", "a2", "try-2"),
+            ):
+                ledger.begin_attempt(
+                    plan_id=plan_id,
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    reserved_at=RESERVED_AT,
+                )
+                ledger.bind_provider_order_reference(
+                    attempt_id=attempt_id, provider_id="prophetx"
+                )
+                ledger.mark_submitted(attempt_id, submitted_at=SUBMITTED_AT)
+
+            ledger.bind_provider_assigned_order_id(
+                attempt_id="try-1",
+                provider_id="prophetx",
+                provider_order_id="shared-provider-order",
+            )
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "collision across attempts",
+            ):
+                ledger.bind_provider_assigned_order_id(
+                    attempt_id="try-2",
+                    provider_id="prophetx",
+                    provider_order_id="shared-provider-order",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

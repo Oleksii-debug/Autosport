@@ -60,6 +60,7 @@ def test_cleanup_notes_classify_failures_without_copying_secret_messages(
         )
 
     notes = "\n".join(getattr(raised.value, "__notes__", ()))
-    assert "SecretStopFailure" in notes
-    assert "SecretCloseFailure" in notes
+    assert notes.count("RuntimeError") >= 2
+    assert "SecretStopFailure" not in notes
+    assert "SecretCloseFailure" not in notes
     assert _CANARY not in notes

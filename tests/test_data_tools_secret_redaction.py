@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import io
 import unittest
 from contextlib import redirect_stderr
@@ -21,7 +22,7 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
         self.assertEqual(result, 3)
         output = stderr.getvalue()
         self.assertIn(
-            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError",
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ExpectedFailure",
             output,
         )
         self.assertNotIn("Traceback", output)
@@ -61,6 +62,21 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
 
         self.assertNotIn(api_key, output)
         self.assertNotIn(session_token, output)
+
+    def test_exception_type_metadata_cannot_become_operator_output(self) -> None:
+        secret_type_name = "AS_DATATOOLS_SECRET_TYPE_SENTINEL_81f2"
+        hostile_type = type(secret_type_name, (ValueError,), {})
+        exc = hostile_type("ordinary failure")
+
+        with patch.dict(vars(builtins), {secret_type_name: hostile_type}):
+            output = data_tools_entry._expected_failure_message(
+                "verify-dataset",
+                exc,
+            )
+
+        self.assertIn("error=ExpectedFailure", output)
+        self.assertIn("ordinary failure", output)
+        self.assertNotIn(secret_type_name, output)
 
 
 if __name__ == "__main__":

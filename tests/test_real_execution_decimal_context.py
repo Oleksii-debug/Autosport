@@ -51,6 +51,24 @@ def _plan() -> ExecutionPlan:
     )
 
 
+class _HostileText(str):
+    strip_calls = 0
+    encode_calls = 0
+
+    @classmethod
+    def reset_calls(cls) -> None:
+        cls.strip_calls = 0
+        cls.encode_calls = 0
+
+    def strip(self, *args: object, **kwargs: object) -> str:
+        type(self).strip_calls += 1
+        return "looks-valid"
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        type(self).encode_calls += 1
+        return b"looks-valid"
+
+
 class _HostileDecimal(Decimal):
     validation_calls = 0
     comparison_calls = 0
@@ -136,6 +154,27 @@ class _HostileReconciliationSnapshot(ReconciliationSnapshot):
 
 
 class RealExecutionDecimalContextTests(unittest.TestCase):
+
+    def test_hostile_string_subclass_fails_before_text_hooks_or_persistence(self) -> None:
+        action = _plan().actions[0]
+        hostile = _HostileText("")
+        _HostileText.reset_calls()
+
+        with self.assertRaisesRegex(
+            ValueError, r"action_id must be non-empty text"
+        ):
+            replace(action, action_id=hostile)
+
+        self.assertEqual(_HostileText.strip_calls, 0)
+        self.assertEqual(_HostileText.encode_calls, 0)
+
+        # The attack matters because Python's JSON encoder serializes the
+        # underlying str value, not a subclass's forged strip/encode result.
+        self.assertEqual(
+            json.dumps({"action_id": hostile}, separators=(",", ":")),
+            '{"action_id":""}',
+        )
+
     def test_plan_payload_and_fingerprint_ignore_ambient_decimal_context(self) -> None:
         plan = _plan()
 

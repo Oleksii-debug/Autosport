@@ -102,6 +102,7 @@ def test_family_close_rejects_store_constructor_rebind_before_forged_init(
 
     assert forged_called is False
 
+
 def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
     seen: set[int] = set()
     found: list[FunctionType] = []

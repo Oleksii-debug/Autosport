@@ -13,6 +13,7 @@ _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
         "apikey",
         "xapikey",
+        "appkey",
         "applicationkey",
         "authentication",
         "xapplication",
@@ -40,6 +41,7 @@ _SENSITIVE_NORMALIZED_KEYS = frozenset(
 )
 _SENSITIVE_SUFFIXES = (
     "apikey",
+    "appkey",
     "applicationkey",
     "authentication",
     "sessiontoken",
@@ -58,6 +60,7 @@ _SENSITIVE_SUFFIXES = (
     "credential",
     "credentials",
 )
+_SENSITIVE_WRAPPER_SUFFIXES = ("value", "header")
 
 _URL_USERINFO_RE = re.compile(
     r"\b(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<userinfo>[^/@\s]+)@"
@@ -161,8 +164,28 @@ def is_sensitive_key(key: object) -> bool:
     normalized = _normalized_key(key)
     if not normalized:
         return False
-    return normalized in _SENSITIVE_NORMALIZED_KEYS or normalized.endswith(
-        _SENSITIVE_SUFFIXES
+
+    # Provider/config payloads frequently decorate credential names with
+    # presentation/container suffixes such as Value/Header. Classify at most
+    # two bounded wrappers without broad substring matching, so ordinary keys
+    # (for example market_value) stay non-sensitive while appKeyValue and
+    # betfairAppKeyHeader retain the underlying credential identity.
+    candidates = [normalized]
+    candidate = normalized
+    for _ in range(2):
+        stripped = None
+        for wrapper in _SENSITIVE_WRAPPER_SUFFIXES:
+            if candidate.endswith(wrapper) and len(candidate) > len(wrapper):
+                stripped = candidate[: -len(wrapper)]
+                break
+        if stripped is None:
+            break
+        candidate = stripped
+        candidates.append(candidate)
+
+    return any(
+        item in _SENSITIVE_NORMALIZED_KEYS or item.endswith(_SENSITIVE_SUFFIXES)
+        for item in candidates
     )
 
 

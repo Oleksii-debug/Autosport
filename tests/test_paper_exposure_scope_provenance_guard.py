@@ -17,6 +17,7 @@ from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PreparedPaperExecution,
 )
@@ -444,7 +445,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     Exception,
-                    "prepared-execution verification metadata were rebound",
+                    "prepared-execution verification metadata was rebound",
                 ):
                     agent.on_market_event(event, context)
             finally:

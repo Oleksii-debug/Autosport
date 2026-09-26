@@ -1955,7 +1955,6 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         context: ProposedTicketRiskContext,
     ) -> RiskDecision | None:
         base_decision = _PaperRiskPolicyCore._risk_of_ruin_evidence_decision(
-            self,
             book,
             amount,
             goal,
@@ -1983,7 +1982,6 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         evidence: RiskOfRuinVectorEvidence | None,
     ) -> RiskDecision | None:
         base_decision = _PaperRiskPolicyCore._risk_of_ruin_vector_evidence_decision(
-            self,
             book,
             goal,
             contexts,

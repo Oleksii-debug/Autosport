@@ -324,7 +324,7 @@ def open_authenticated_market_subscription(
         provider_error = raw_status.get("error")
         if (
             raw_status.get("statusCode") != "SUCCESS"
-            or raw_status.get("connectionClosed") is True
+            or raw_status.get("connectionClosed") is not False
             or "errorCode" in raw_status
             or "errorMessage" in raw_status
             or (provider_error_present and provider_error is not False)

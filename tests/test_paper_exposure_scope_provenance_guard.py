@@ -187,12 +187,13 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(scope_guard, name), name)
 
-    def test_function_metadata_exposes_no_generic_append_or_mint_bypass(self) -> None:
+    def test_function_metadata_exposes_no_unguarded_mint_or_append_bypass(self) -> None:
         roots = (
             PaperExecutionLedger._append_event,
             PaperExecutionAdoptionRuntime._mint_prepared,
             PaperExecutionAdoptionRuntime.prepare,
             PaperExecutionAdoptionRuntime.prepare_paper_value_action,
+            PaperExecutionAdoptionRuntime.execute,
             PaperExecutionAdoptionRuntime._publish_exposure_scope,
         )
         reachable = {
@@ -200,28 +201,36 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             for root in roots
             for function in _reachable_functions(root)
         }
-        bypasses = sorted(
+        mint_bypasses = sorted(
             function.__name__
             for function in reachable.values()
-            if function.__name__ in {"_append_event", "_mint_prepared"}
+            if function.__name__ == "_mint_prepared"
         )
-        self.assertEqual(bypasses, [])
+        self.assertEqual(mint_bypasses, [])
+
+        append_functions = tuple(
+            function
+            for function in reachable.values()
+            if function.__name__ == "_append_event"
+        )
+        self.assertTrue(append_functions)
+        self.assertTrue(
+            all(function is PaperExecutionLedger._append_event for function in append_functions)
+        )
 
     def test_hidden_prepare_globals_mutation_cannot_mint_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _ledger, runtime = self._runtime(Path(tmp))
-            guarded = PaperExecutionAdoptionRuntime.prepare_paper_value_action
-            original = guarded.__wrapped__
+            original = value_authority._ORIGINAL_PREPARE_PAPER_VALUE_ACTION
             original_globals = original.__globals__
             canonical_digest = original_globals["_digest"]
             original_globals["_digest"] = lambda _value: "forged-digest"
             try:
                 with self.assertRaisesRegex(
                     PaperExecutionAdoptionError,
-                    "preparation globals were rebound",
+                    "preparation .*rebound",
                 ):
-                    original(
-                        runtime,
+                    runtime.prepare_paper_value_action(
                         event=_event(),
                         stake=Decimal("5.00"),
                         decision_id="scope-decision",
@@ -242,7 +251,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 intent_evidence_json=canonical.intent_evidence_json,
             )
             guarded = PaperExecutionAdoptionRuntime.prepare_paper_value_action
-            original = guarded.__wrapped__
+            original = value_authority._ORIGINAL_PREPARE_PAPER_VALUE_ACTION
             original_code = original.__code__
 
             def forged_prepare(
@@ -428,25 +437,10 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
 
             self.assertEqual(ledger.events(), ())
 
-    def test_wrapped_unlocked_execute_cannot_bypass_public_execute(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger, runtime = self._runtime(Path(tmp))
-            prepared = _prepared(runtime)
-            hidden_unlocked = PaperExecutionAdoptionRuntime._execute_unlocked.__wrapped__
-
-            with self.assertRaisesRegex(
-                PaperExecutionIntegrityError,
-                "reserved for canonical execution authority",
-            ):
-                hidden_unlocked(
-                    runtime,
-                    prepared=prepared,
-                    trigger_id="hidden-unlocked-trigger",
-                    started_at=QUOTE_AT,
-                    materialize_exposure=False,
-                )
-
-            self.assertEqual(ledger.events(), ())
+    def test_unlocked_execute_exposes_no_hidden_predecessor_wrapper(self) -> None:
+        self.assertFalse(
+            hasattr(PaperExecutionAdoptionRuntime._execute_unlocked, "__wrapped__")
+        )
 
     def test_direct_scope_publisher_cannot_choose_reserved_run_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -154,6 +154,15 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
+# Resolve the product-owned selector location through platform callables captured
+# before the broader executable-dispatch composition freezes the selection chain.
+from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_selection_os_resolver_guard  # noqa: F401,E402
+
+# The machine-state root selector is only an independent trust root if its executable
+# store resolver cannot be replaced after package import. Freeze that dispatch and
+# MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
+from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
+
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.

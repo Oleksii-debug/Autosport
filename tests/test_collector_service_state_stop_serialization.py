@@ -5,7 +5,10 @@ import threading
 import unittest
 from pathlib import Path
 
-from autosport.collector_service import _CollectorServiceState
+from autosport.collector_service import (
+    CollectorServiceStoppedError,
+    _CollectorServiceState,
+)
 
 
 class CollectorServiceStateStopSerializationTests(unittest.TestCase):
@@ -90,6 +93,42 @@ class CollectorServiceStateStopSerializationTests(unittest.TestCase):
             self.assertEqual(snapshot["last_error_code"], "PROVIDER_UNAVAILABLE")
             self.assertEqual(snapshot["stopped_at"], self.STOPPED_AT)
             self.assertEqual(snapshot["stop_reason"], "operator_stop")
+
+    def test_durable_stop_rejects_terminal_mutations_until_explicit_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collector_state.json"
+            state, observer = self._state_pair(path)
+            state.stop(at=self.STOPPED_AT, reason="operator_stop")
+            stopped = observer.snapshot()
+
+            with self.assertRaises(CollectorServiceStoppedError):
+                state.record_success(
+                    at="2026-09-25T17:00:11+00:00",
+                    committed=1,
+                    duplicates=0,
+                )
+            with self.assertRaises(CollectorServiceStoppedError):
+                state.record_provider_failure(code="PROVIDER_UNAVAILABLE")
+            with self.assertRaises(CollectorServiceStoppedError):
+                state.record_local_failure(code="LOCAL_FAILURE")
+
+            self.assertEqual(observer.snapshot(), stopped)
+
+            state.resume(at="2026-09-25T17:00:12+00:00")
+            state.record_success(
+                at="2026-09-25T17:00:13+00:00",
+                committed=1,
+                duplicates=0,
+            )
+            resumed = observer.snapshot()
+            self.assertIsNone(resumed["stopped_at"])
+            self.assertIsNone(resumed["stop_reason"])
+            self.assertEqual(resumed["cycles_succeeded"], 1)
+            self.assertEqual(resumed["deltas_committed"], 1)
+            self.assertEqual(
+                resumed["last_success_at"],
+                "2026-09-25T17:00:13+00:00",
+            )
 
 
 if __name__ == "__main__":

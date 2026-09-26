@@ -42,6 +42,107 @@ class SessionStoppedError(ContinuousSessionError):
     """Raised when work is attempted while the session is durably STOPPED."""
 
 
+def _bind_canonical_settlement_engine(method):
+    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+
+    canonical_engine_type = SettlementEngine
+
+    def guarded(self, *args, **kwargs):
+        if "_settlement_engine_type" in kwargs:
+            raise TypeError("settlement engine origin is internal product authority")
+        kwargs["_settlement_engine_type"] = canonical_engine_type
+        return method(self, *args, **kwargs)
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
+def _seal_settlement_consumer_entry(method):
+    """Return an immutable built-in descriptor with a closure-owned dispatch target."""
+
+    def resolve(instance):
+        return method.__get__(instance, type(instance))
+
+    def reject_set(_instance, _value) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    def reject_delete(_instance) -> None:
+        raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    return property(resolve, reject_set, reject_delete, method.__doc__)
+
+
+def _build_settlement_consumer_class_guard(name: str):
+    """Keep type-level replacement from bypassing the installed data descriptor."""
+
+    class SettlementConsumerClassGuard:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            binding = instance.__dict__[name]
+            return binding.__get__(None, instance)
+
+        def __set__(self, _instance, _value) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+
+    return SettlementConsumerClassGuard()
+
+
+class _ContinuousSessionCoordinatorMeta(type):
+    """Seal the trusted settlement consumer entry inside the process TCB."""
+
+    def __init_subclass__(mcls, **kwargs) -> None:
+        raise TypeError("canonical settlement consumer metaclass is not extensible")
+
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        protected = {"_settle", "_settlement_consumer_bindings_sealed"}
+        inherits_sealed_consumer = any(
+            any(
+                ancestor.__dict__.get(
+                    "_settlement_consumer_bindings_sealed",
+                    False,
+                )
+                for ancestor in base.__mro__
+            )
+            for base in bases
+        )
+        if inherits_sealed_consumer and protected.intersection(namespace):
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in {
+            "_settle",
+            "_settlement_consumer_bindings_sealed",
+        }:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in {
+            "_settle",
+            "_settlement_consumer_bindings_sealed",
+        }:
+            raise TypeError("canonical settlement consumer entry binding is immutable")
+        super().__delattr__(name)
+
+
 class SessionState(StrEnum):
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
@@ -545,13 +646,15 @@ class _ContinuousSessionState:
         self._update(lambda raw: raw.__setitem__("last_error_code", code))
 
 
-class ContinuousSessionCoordinator:
+class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     """Compose existing collector/lifecycle/mirror/settlement authorities into one durable loop.
 
     The coordinator owns only session identity/checkpoint and sequencing. It never becomes
     a market store, delta store, lifecycle store, scheduler, outcome authority, or LLM
     decision engine.
     """
+
+    _settlement_consumer_bindings_sealed = False
 
     def __init__(
         self,
@@ -792,20 +895,31 @@ class ContinuousSessionCoordinator:
             return PaperBook.load(self.paper_book_path)
         return PaperBook(self.initial_bankroll)
 
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_engine
     def _settle(
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
+        if SettlementEngine is not _settlement_engine_type:
+            raise ContinuousSessionError(
+                "settlement engine constructor origin changed"
+            )
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):
             book = self._load_book()
-            engine = SettlementEngine()
+            engine = _settlement_engine_type()
+            if type(engine) is not _settlement_engine_type:
+                raise ContinuousSessionError(
+                    "settlement engine constructor returned non-canonical type"
+                )
             for resolution in unique.values():
                 allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
                 scoped = {
@@ -975,3 +1089,10 @@ class ContinuousSessionCoordinator:
         except Exception as exc:
             self._state.record_failure(code=type(exc).__name__)
             raise
+
+# Seal the consumer entry after class creation. The metaclass data descriptor also
+# makes direct type.__setattr__/type.__delattr__ respect the same class-level fence.
+_ContinuousSessionCoordinatorMeta._settle = _build_settlement_consumer_class_guard(
+    "_settle"
+)
+ContinuousSessionCoordinator._settlement_consumer_bindings_sealed = True

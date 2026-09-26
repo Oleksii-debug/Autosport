@@ -4,6 +4,8 @@ import argparse
 import json
 import math
 import signal
+import sys
+import threading
 import time
 import unicodedata
 from dataclasses import asdict
@@ -12,6 +14,7 @@ from typing import Callable, Mapping, Sequence
 
 from .collector_service import _load_source_factory
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .secret_redaction import _safe_exception_type_label
 
 
 _OUTPUT_FORMATS = frozenset({"json", "text"})
@@ -34,17 +37,39 @@ class ProductEntrypointError(RuntimeError):
 class ProductRuntimeError(ProductEntrypointError):
     """The product failed only after the canonical runtime had started."""
 
-    def __init__(self, error_type: str) -> None:
+    def __init__(self, exc: BaseException) -> None:
+        if not isinstance(exc, BaseException):
+            raise TypeError("ProductRuntimeError requires a caught exception")
         super().__init__("product runtime failed after start")
-        self.error_type = error_type
+        self.error_type = _safe_exception_type_label(exc)
+
+
+class _SecretSafeArgumentParser(argparse.ArgumentParser):
+    """Argument parser that never echoes rejected caller-controlled values."""
+
+    def error(self, _message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(
+            2,
+            f"{self.prog}: error: invalid command-line arguments; use --help\n",
+        )
 
 
 class _SignalStopRequest:
     def __init__(self) -> None:
         self.signal_number: int | None = None
+        self._event = threading.Event()
 
     def handle(self, signum: int, _frame: object) -> None:
+        if self.signal_number is not None:
+            return
         self.signal_number = signum
+        self._event.set()
+
+    def wait(self, timeout: float) -> bool:
+        """Wait for a stop request, returning early when a signal handler fires."""
+
+        return self._event.wait(timeout)
 
     @property
     def requested(self) -> bool:
@@ -65,6 +90,16 @@ class _SignalStopRequest:
         if self.signal_number is None:
             return 0
         return 128 + self.signal_number
+
+
+def _product_stop_signals() -> tuple[int, ...]:
+    """Return console stop signals supported by the running platform."""
+
+    signals = [int(signal.SIGINT), int(signal.SIGTERM)]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None and int(sigbreak) not in signals:
+        signals.append(int(sigbreak))
+    return tuple(signals)
 
 
 def _normalized_workspace(value: object, *, label: str) -> Path:
@@ -89,9 +124,6 @@ def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
                 f"product source must provide callable {method}"
             )
 
-    # A source that owns durable product state must be bound to the same canonical
-    # workspace as the supported runtime before the composition root creates any
-    # runtime files. Generic stateless/external source factories remain compatible.
     source_workspace = getattr(source, "workspace", None)
     if source_workspace is not None:
         expected_workspace = _normalized_workspace(workspace, label="product runtime")
@@ -198,11 +230,7 @@ def _append_text_lines(lines: list[str], prefix: str, value: object) -> None:
 
 
 def _format_text_record(record: Mapping[str, object]) -> str:
-    """Return a stable line-oriented record suitable for keyboard/screen-reader use.
-
-    Every semantic value is paired with a textual label and strings are JSON-escaped,
-    so provider-controlled control characters cannot become ANSI/terminal commands.
-    """
+    """Return a stable line-oriented record suitable for keyboard/screen-reader use."""
 
     lines = ["AUTOSPORT RECORD"]
     handled: set[str] = set()
@@ -281,34 +309,21 @@ def run_product(
     sleep: Callable[[float], None] = time.sleep,
     install_signal_handlers: bool = True,
 ) -> int:
-    """Run the canonical headless PAPER product from one supported boundary.
-
-    Provider credentials and acquisition policy live behind ``source_factory``. This
-    command owns no provider truth, market store, PAPER book, settlement, or learning
-    authority; it only constructs the integrated product composition root and drives
-    its canonical ticks.
-    """
+    """Run the canonical headless PAPER product from one supported boundary."""
 
     output_format = _validated_output_format(output_format)
     if max_cycles is not None and (
-        isinstance(max_cycles, bool)
-        or not isinstance(max_cycles, int)
-        or max_cycles <= 0
+        type(max_cycles) is not int or max_cycles <= 0
     ):
         raise ValueError("max_cycles must be a positive integer or None")
-    if (
-        isinstance(poll_seconds, bool)
-        or not isinstance(poll_seconds, (int, float))
-        or not math.isfinite(float(poll_seconds))
-        or poll_seconds < 0
-    ):
+    if type(poll_seconds) not in (int, float):
         raise ValueError("poll_seconds must be a finite non-negative number")
-    if max_cycles is None and float(poll_seconds) == 0.0:
+    poll_interval = float(poll_seconds)
+    if not math.isfinite(poll_interval) or poll_interval < 0:
+        raise ValueError("poll_seconds must be a finite non-negative number")
+    if max_cycles is None and poll_interval == 0.0:
         raise ValueError("unbounded product run requires a positive poll interval")
 
-    # Validate the complete production source capability before the composition root
-    # creates a workspace or durable manifest. Missing event resolution or a split
-    # source/runtime workspace must never be hidden by runtime initialization.
     source = _validated_source(source_factory, workspace=workspace)
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
@@ -316,17 +331,21 @@ def run_product(
         initial_bankroll=initial_bankroll,
     )
     stop_request = _SignalStopRequest()
-    previous_handlers: dict[signal.Signals, object] = {}
-    if install_signal_handlers:
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM)
-        }
-        for signum in previous_handlers:
-            signal.signal(signum, stop_request.handle)
-
+    previous_handlers: dict[int, object] = {}
+    installed_handlers: list[int] = []
     started = False
+    terminalized = False
+    terminal_stop_attempted = False
     try:
+        if install_signal_handlers:
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in _product_stop_signals()
+            }
+            for signum in previous_handlers:
+                signal.signal(signum, stop_request.handle)
+                installed_handlers.append(signum)
+
         start_status = runtime.start()
         started = True
         _print_record(
@@ -336,12 +355,17 @@ def run_product(
             output_format=output_format,
         )
         cycles = 0
+        exit_code = 0
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
+                exit_code = stop_request.exit_code
+                terminal_stop_attempted = True
+                stop_status = runtime.stop(stop_request.reason)
+                terminalized = True
                 _print_record(
                     "product_status",
                     runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
+                    value=stop_status,
                     output_format=output_format,
                 )
                 break
@@ -355,40 +379,96 @@ def run_product(
                 output_format=output_format,
             )
 
-            if max_cycles is not None and cycles >= max_cycles:
-                _print_record(
-                    "product_status",
-                    runtime=runtime,
-                    value=runtime.stop("max_cycles_reached"),
-                    output_format=output_format,
-                )
-                break
             if stop_request.requested:
+                exit_code = stop_request.exit_code
+                terminal_stop_attempted = True
+                stop_status = runtime.stop(stop_request.reason)
+                terminalized = True
                 _print_record(
                     "product_status",
                     runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
+                    value=stop_status,
                     output_format=output_format,
                 )
                 break
-            sleep(float(poll_seconds))
-        return stop_request.exit_code
-    except Exception as exc:
+            if max_cycles is not None and cycles >= max_cycles:
+                terminal_stop_attempted = True
+                stop_status = runtime.stop("max_cycles_reached")
+                terminalized = True
+                _print_record(
+                    "product_status",
+                    runtime=runtime,
+                    value=stop_status,
+                    output_format=output_format,
+                )
+                break
+            if install_signal_handlers and sleep is time.sleep:
+                stop_request.wait(poll_interval)
+            else:
+                sleep(poll_interval)
+        return exit_code
+    except BaseException as exc:
         if started:
             if isinstance(exc, ProductRuntimeError):
                 raise
-            raise ProductRuntimeError(type(exc).__name__) from exc
+            raise ProductRuntimeError(exc) from exc
         raise
     finally:
+        primary_failure = sys.exc_info()[1]
+        cleanup_failure: BaseException | None = None
+
+        if (
+            started
+            and not terminalized
+            and not terminal_stop_attempted
+            and primary_failure is not None
+        ):
+            try:
+                terminal_stop_attempted = True
+                runtime.stop("runtime_error")
+                terminalized = True
+            except BaseException as stop_error:
+                try:
+                    primary_failure.add_note(
+                        "runtime STOP also failed during exceptional cleanup: "
+                        f"{_safe_exception_type_label(stop_error)}"
+                    )
+                except BaseException:
+                    pass
+
         try:
             runtime.close()
-        except Exception as exc:
+        except BaseException as exc:
+            if primary_failure is None:
+                cleanup_failure = exc
+            else:
+                try:
+                    primary_failure.add_note(
+                        "runtime close also failed during cleanup: "
+                        f"{_safe_exception_type_label(exc)}"
+                    )
+                except BaseException:
+                    pass
+
+        for signum in reversed(installed_handlers):
+            try:
+                signal.signal(signum, previous_handlers[signum])
+            except BaseException as exc:
+                if primary_failure is None and cleanup_failure is None:
+                    cleanup_failure = exc
+                elif primary_failure is not None:
+                    try:
+                        primary_failure.add_note(
+                            "signal handler restoration also failed during cleanup: "
+                            f"{_safe_exception_type_label(exc)}"
+                        )
+                    except BaseException:
+                        pass
+
+        if cleanup_failure is not None:
             if started:
-                raise ProductRuntimeError(type(exc).__name__) from exc
-            raise
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+                raise ProductRuntimeError(cleanup_failure) from cleanup_failure
+            raise cleanup_failure
 
 
 def run_product_command(
@@ -410,18 +490,18 @@ def run_product_command(
             output_format=output_format,
         )
     except ProductRuntimeError as exc:
+        cause = exc.__cause__
+        error_type = _safe_exception_type_label(
+            cause if isinstance(cause, BaseException) else exc
+        )
         _print_failure(
             kind="product_runtime_failure",
             error_code="product_runtime_failed",
-            error_type=exc.error_type,
+            error_type=error_type,
             output_format=output_format,
         )
         return 4
-    except Exception as exc:
-        # Product stdout is a public/machine-readable boundary. Arbitrary exception
-        # messages may contain provider credentials, response bodies or other secrets,
-        # so only stable classification is emitted here. Detailed diagnostics belong
-        # behind an explicitly secret-safe internal logging boundary.
+    except BaseException as exc:
         try:
             output_format = _validated_output_format(output_format)
         except ValueError:
@@ -429,14 +509,14 @@ def run_product_command(
         _print_failure(
             kind="product_start_failure",
             error_code="product_start_failed",
-            error_type=type(exc).__name__,
+            error_type=_safe_exception_type_label(exc),
             output_format=output_format,
         )
         return 3
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SecretSafeArgumentParser(
         prog="autosport-product",
         description=(
             "Run the canonical durable Autosport PAPER product. Provider credentials "

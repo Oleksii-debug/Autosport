@@ -166,8 +166,11 @@ def cancel_superseded(
     live_head_sha = api.live_pr_head(pr_number)
     if event_head_sha != live_head_sha:
         return ()
+    active_runs = api.active_runs()
+    if api.live_pr_head(pr_number) != live_head_sha:
+        return ()
     selected = select_superseded_runs(
-        api.active_runs(),
+        active_runs,
         pr_number=pr_number,
         live_head_sha=live_head_sha,
         workflow_name=workflow_name,

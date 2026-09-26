@@ -267,6 +267,61 @@ def test_caller_policy_mutation_cannot_extend_issued_freshness_authority(
     )
 
 
+def test_policy_mutation_after_structural_evaluation_cannot_widen_retained_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    identity = _identity()
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(publish_time_ms=publish_time_ms),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    caller_policy = BetfairStreamFreshnessPolicy(max_age_ms=10_000)
+    original_evaluate = runtime._freshness.evaluate
+
+    def mutate_caller_after_structural_evaluation(
+        identity_arg: BetfairQuoteIdentity,
+        *,
+        as_of_ms: int,
+        policy: BetfairStreamFreshnessPolicy,
+    ):
+        result = original_evaluate(
+            identity_arg,
+            as_of_ms=as_of_ms,
+            policy=policy,
+        )
+        object.__setattr__(caller_policy, "max_age_ms", 60_000)
+        return result
+
+    monkeypatch.setattr(
+        runtime._freshness,
+        "evaluate",
+        mutate_caller_after_structural_evaluation,
+    )
+
+    decision = runtime.evaluate(identity, policy=caller_policy)
+    assert (
+        decision.verdict
+        is BetfairAuthenticatedFreshnessVerdict.FRESH_AUTHENTICATED_PROVIDER_PUBLISH
+    )
+    authority = auth._ISSUED_DECISIONS[decision]
+    assert caller_policy.max_age_ms == 60_000
+    assert authority.policy is not caller_policy
+    assert authority.policy.max_age_ms == 10_000
+    assert not runtime._decision_is_current(
+        decision,
+        identity,
+        authority.policy,
+        decision.evaluated_at_ms + 20_000,
+    )
+
+
 def test_public_clock_rebinding_revokes_already_issued_positive_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

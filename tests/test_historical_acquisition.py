@@ -580,6 +580,35 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
+    def test_output_created_during_publication_is_not_overwritten(self) -> None:
+        transport = _Transport()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            real_atomic_write_json = historical_acquisition.atomic_write_json
+
+            def create_destination_after_bundle_staging(path, payload):
+                result = real_atomic_write_json(path, payload)
+                if Path(path).name == "bundle.json":
+                    root.mkdir()
+                return result
+
+            with patch.object(
+                historical_acquisition,
+                "atomic_write_json",
+                side_effect=create_destination_after_bundle_staging,
+            ):
+                with self.assertRaisesRegex(ValueError, "appeared during acquisition"):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+
+            self.assertTrue(root.is_dir())
+            self.assertEqual(list(root.iterdir()), [])
+            self.assertEqual(list(Path(tmp).iterdir()), [root])
+
     def test_existing_output_is_never_overwritten(self) -> None:
         transport = _Transport()
         with tempfile.TemporaryDirectory() as tmp:

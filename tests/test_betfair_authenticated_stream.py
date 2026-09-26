@@ -276,7 +276,7 @@ def test_policy_mutation_after_structural_evaluation_cannot_widen_retained_autho
     publish_time_ms = time.time_ns() // 1_000_000
     transport, _ = _transport(
         monkeypatch,
-        _subscription_status() + _mcm(publish_time_ms=publish_time_ms),
+        _subscription_status() + _mcm(pt=publish_time_ms),
     )
     subscription = _open(transport)
     runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)

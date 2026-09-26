@@ -71,15 +71,19 @@ def test_ci_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -
     assert "github.run_attempt == 1 && 'fresh'" not in workflow
 
 
-def test_other_heavy_gates_keep_existing_fresh_vs_rerun_lane() -> None:
-    workflows = {
-        "windows-candidate": _workflow(".github/workflows/windows-build.yml"),
-        "endurance": _workflow(".github/workflows/endurance.yml"),
-    }
+def test_windows_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -> None:
+    workflow = _workflow(".github/workflows/windows-build.yml")
+    assert "cancel-in-progress: true" in workflow
+    assert "github.run_id" in workflow
+    assert "format('pr-{0}-run-{1}'" in workflow
+    assert "github.run_attempt == 1 && 'fresh'" not in workflow
 
-    for name, workflow in workflows.items():
-        assert "cancel-in-progress: true" in workflow, name
-        assert "github.run_attempt == 1" in workflow, name
-        assert "'fresh'" in workflow, name
-        assert _RERUN_LANE in workflow, name
-        assert "github.event.pull_request.head.sha || github.sha" in workflow, name
+
+def test_endurance_keeps_existing_fresh_vs_rerun_lane() -> None:
+    workflow = _workflow(".github/workflows/endurance.yml")
+
+    assert "cancel-in-progress: true" in workflow
+    assert "github.run_attempt == 1" in workflow
+    assert "'fresh'" in workflow
+    assert _RERUN_LANE in workflow
+    assert "github.event.pull_request.head.sha || github.sha" in workflow

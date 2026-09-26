@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal, localcontext
+import http.client as _http_client
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import autosport.betfair_pretrade_reservation as reservation_module
-from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_funds_precheck import (
     evaluate_betfair_account_funds,
 )
@@ -46,18 +46,32 @@ EXPIRES = "2026-09-23T19:00:00+00:00"
 
 
 class _Response:
+    status = 200
+    code = 200
+    reason = "OK"
+    msg = "OK"
+
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+
+    def info(self):
+        return {}
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, traceback):
+        self.close()
         return False
 
-    def read(self, limit: int) -> bytes:
+    def read(self, limit: int | None = None) -> bytes:
+        if limit is None:
+            return self._payload
         assert limit >= len(self._payload)
         return self._payload
+
+    def close(self) -> None:
+        return None
 
 
 def _install_provider(
@@ -66,12 +80,34 @@ def _install_provider(
     balance: object = 1000,
     currency: str = "EUR",
 ) -> list[str]:
+    """Stub below the canonical K07 opener/transport boundary."""
+
     methods: list[str] = []
 
-    def urlopen(request, timeout: float):
-        assert timeout > 0
-        rpc = json.loads(request.data.decode("utf-8"))
+    def fake_request(
+        connection,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        assert method == "POST"
+        assert url.endswith("/exchange/account/json-rpc/v1")
+        assert isinstance(body, bytes)
+        rpc = json.loads(body.decode("utf-8"))
         methods.append(rpc["method"])
+        normalized_headers = {
+            key.lower(): value for key, value in (headers or {}).items()
+        }
+        assert normalized_headers["x-application"]
+        assert normalized_headers["x-authentication"]
+        connection._autosport_pretrade_request = rpc
+        connection._autosport_pretrade_encode_chunked = encode_chunked
+
+    def fake_getresponse(connection):
+        rpc = connection._autosport_pretrade_request
         if rpc["method"].endswith("getAccountDetails"):
             result = {
                 "currencyCode": currency,
@@ -101,7 +137,8 @@ def _install_provider(
             ).encode("utf-8")
         )
 
-    monkeypatch.setattr(_readonly, "urlopen", urlopen)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "request", fake_request)
+    monkeypatch.setattr(_http_client.HTTPSConnection, "getresponse", fake_getresponse)
     return methods
 
 

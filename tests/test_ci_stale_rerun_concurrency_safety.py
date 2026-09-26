@@ -30,12 +30,13 @@ def _concurrency_group_expression(workflow_text: str) -> str:
 def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     workflow_path: Path,
 ) -> None:
-    """A later obsolete rerun must never pre-cancel current exact-head qualification.
+    """Every PR workflow run must reach admission before cancellation can occur.
 
-    GitHub evaluates workflow concurrency before job-level admission checks. Therefore a
-    single last-writer-wins PR/ref group with ``cancel-in-progress: true`` is unsafe.
-    Either head/attempt identity or the stronger per-run identity must isolate PR runs
-    until the lightweight live-head admission has executed.
+    GitHub evaluates workflow concurrency before job-level admission checks. Head or
+    run-attempt identity is not enough: two distinct fresh lifecycle events for the
+    same PR/head both have attempt 1, while a stale rerun can still collide with a
+    useful run under a head-derived group. A per-run scheduler key is the only local
+    proof that no PR event can pre-cancel another before live-head admission runs.
     """
 
     text = workflow_path.read_text(encoding="utf-8")
@@ -43,17 +44,7 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
 
     assert "cancel-in-progress: true" in text
     assert "github.event.pull_request.number" in group or "github.ref" in group
-
-    has_pre_admission_isolation = any(
-        token in group
-        for token in (
-            "github.run_id",
-            "github.run_attempt",
-            "github.sha",
-            "github.event.pull_request.head.sha",
-        )
-    )
-    assert has_pre_admission_isolation, (
-        f"{workflow_path} uses a symmetric PR/ref concurrency group: {group!r}; "
-        "a later obsolete PR event could cancel useful qualification before admission"
+    assert "github.run_id" in group, (
+        f"{workflow_path} does not isolate each PR workflow run before admission: "
+        f"{group!r}; distinct PR lifecycle events could cancel useful qualification"
     )

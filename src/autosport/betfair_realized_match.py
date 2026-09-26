@@ -924,6 +924,38 @@ def _install_realized_match_authority() -> None:
         ),
         ("evidence builder", "_make_evidence", _make_evidence, _make_evidence.__code__),
     )
+    external_callable_witnesses = (
+        (
+            "ledger verified snapshot",
+            "_LEDGER_VERIFIED_SNAPSHOT",
+            _LEDGER_VERIFIED_SNAPSHOT,
+            _LEDGER_VERIFIED_SNAPSHOT.__code__,
+        ),
+        (
+            "ledger saga",
+            "_LEDGER_SAGA",
+            _LEDGER_SAGA,
+            _LEDGER_SAGA.__code__,
+        ),
+        (
+            "ledger provider order reference",
+            "_LEDGER_PROVIDER_ORDER_REFERENCE",
+            _LEDGER_PROVIDER_ORDER_REFERENCE,
+            _LEDGER_PROVIDER_ORDER_REFERENCE.__code__,
+        ),
+        (
+            "readback assert authoritative",
+            "_READBACK_ASSERT_AUTHORITATIVE",
+            _READBACK_ASSERT_AUTHORITATIVE,
+            _READBACK_ASSERT_AUTHORITATIVE.__code__,
+        ),
+        (
+            "readback authority fingerprint",
+            "_READBACK_AUTHORITY_FINGERPRINT",
+            _READBACK_AUTHORITY_FINGERPRINT,
+            _READBACK_AUTHORITY_FINGERPRINT.__code__,
+        ),
+    )
     resolver_global_witnesses = (
         ("AttemptState", AttemptState),
         ("ExecutionAction", ExecutionAction),
@@ -969,6 +1001,14 @@ def _install_realized_match_authority() -> None:
             ):
                 raise error_type(
                     "canonical realized match helper dispatch changed: " + label
+                )
+        for label, name, function, expected_code in external_callable_witnesses:
+            if (
+                module_globals.get(name) is not function
+                or getattr(function, "__code__", None) is not expected_code
+            ):
+                raise error_type(
+                    "canonical realized match external callable changed: " + label
                 )
         for name, expected in resolver_global_witnesses:
             if module_globals.get(name) is not expected:

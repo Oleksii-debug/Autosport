@@ -313,5 +313,147 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
             PaperBook.load(self.path)
 
 
+    def test_private_causal_history_rejects_coherent_winner_to_loss_rewrite(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        settlement_time = "2026-09-14T10:00:00+00:00"
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at=settlement_time,
+        )
+        book.save(self.path)
+        durable_before = self.path.read_bytes()
+
+        # Rewrite every visible settlement fact into a self-consistent loss while
+        # leaving the product-issued opening facts untouched.
+        ticket.status = TicketStatus.LOST
+        ticket.payout = Decimal("0")
+        book.balance = Decimal("90")
+        book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
+        self.assertEqual(book._settlement_times[ticket.ticket_id], settlement_time)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal history changed outside product-issued transitions",
+        ):
+            book.save(self.path)
+        self.assertEqual(self.path.read_bytes(), durable_before)
+
+    def test_serialized_candidate_rejects_post_validation_causal_rewrite(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        settlement_time = "2026-09-14T10:00:00+00:00"
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at=settlement_time,
+        )
+        book.save(self.path)
+        durable_before = self.path.read_bytes()
+
+        original_descriptor = PaperBook.__dict__["_validate_loaded_state"]
+        original_validate = original_descriptor.__func__
+        injected = False
+
+        def validate_then_rewrite(cls, candidate):
+            nonlocal injected
+            result = original_validate(cls, candidate)
+            if candidate is book and not injected:
+                injected = True
+                ticket.status = TicketStatus.LOST
+                ticket.payout = Decimal("0")
+                book.balance = Decimal("90")
+                book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
+            return result
+
+        PaperBook._validate_loaded_state = classmethod(validate_then_rewrite)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serialized candidate causal history differs from product-issued authority",
+            ):
+                book.save(self.path)
+        finally:
+            PaperBook._validate_loaded_state = original_descriptor
+
+        self.assertTrue(injected)
+        self.assertEqual(self.path.read_bytes(), durable_before)
+
+    def test_private_causal_history_rejects_coherent_reopen_before_second_settlement(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at="2026-09-14T10:00:00+00:00",
+        )
+
+        # Reconstruct a structurally coherent pre-settlement epoch. Structural
+        # replay alone accepts it; private product history must not.
+        ticket.status = TicketStatus.OPEN
+        ticket.payout = Decimal("0")
+        ticket.settled_at = None
+        book.balance = Decimal("90")
+        book._lifecycle[:] = [("open", ticket.ticket_id, (), ())]
+        book._settlement_times.clear()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal history changed outside product-issued transitions",
+        ):
+            book.settle(
+                ticket.ticket_id,
+                {leg.quote_key},
+                settled_at="2026-09-14T11:00:00+00:00",
+            )
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+
+
+    def test_committed_stake_rejects_status_rewrite_inconsistent_with_causal_history(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at="2026-09-14T10:00:00+00:00",
+        )
+        self.assertEqual(book.committed_stake, Decimal("0"))
+
+        # Caller-visible status alone is not opening identity. A readout must
+        # validate it against the product-issued causal settlement witness.
+        ticket.status = TicketStatus.OPEN
+        ticket.payout = Decimal("0")
+        ticket.settled_at = None
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settled_at is inconsistent with lifecycle provenance",
+        ):
+            _ = book.committed_stake
+
+
 if __name__ == "__main__":
     unittest.main()

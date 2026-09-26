@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
+from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PaperExposureBinding,
     PreparedPaperExecution,
@@ -26,7 +29,13 @@ STARTED_AT = "2026-09-20T06:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T06:01:00+00:00"
 
 
-def action(action_id: str, *, odds: str = "2.50", stake: str = "10.00"):
+def action(
+    action_id: str,
+    *,
+    odds: str = "2.50",
+    stake: str = "10.00",
+    side: str = "BACK",
+):
     return ExecutionAction(
         action_id=action_id,
         bookmaker_id="paper-venue",
@@ -34,7 +43,7 @@ def action(action_id: str, *, odds: str = "2.50", stake: str = "10.00"):
         event_id=f"event-{action_id}",
         market_id=f"market-{action_id}",
         selection_id=f"selection-{action_id}",
-        side="BACK",
+        side=side,
         requested_odds=odds,
         requested_stake=stake,
         quote_id=f"quote-{action_id}",
@@ -116,6 +125,22 @@ def evidence(
     )
 
 
+def market_event(exchange_side: str | None) -> MarketEvent:
+    return MarketEvent(
+        event_id="event-side",
+        market_id="market-side",
+        selection_id="selection-side",
+        decimal_odds=Decimal("2.50"),
+        observed_ts=QUOTE_AT,
+        source_id="paper-venue",
+        sequence=1,
+        source_ts=QUOTE_AT,
+        ingest_ts=QUOTE_AT,
+        sport="soccer",
+        exchange_side=exchange_side,
+    )
+
+
 class PaperExecutionAdoptionTests(unittest.TestCase):
     def runtime(self, tmp: str, *, model=None):
         book = PaperBook("100.00")
@@ -128,6 +153,59 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             paper_book_path=Path(tmp) / "paper-book.json",
         )
         return book, ledger, runtime
+
+    def test_paper_value_lay_fails_before_execution_or_book_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "LAY PAPER adoption is unavailable",
+            ):
+                runtime.prepare_paper_value_action(
+                    event=market_event("lay"),
+                    stake=Decimal("10.00"),
+                    decision_id="decision-lay",
+                    account_id="paper-account",
+                    bankroll_id="paper-bankroll",
+                    currency="EUR",
+                )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_paper_value_back_and_legacy_side_remain_back_compatible(self):
+        for exchange_side in ("back", None):
+            with self.subTest(exchange_side=exchange_side), tempfile.TemporaryDirectory() as tmp:
+                _book, _ledger, runtime = self.runtime(tmp)
+                current = runtime.prepare_paper_value_action(
+                    event=market_event(exchange_side),
+                    stake=Decimal("10.00"),
+                    decision_id=f"decision-{exchange_side or 'legacy'}",
+                    account_id="paper-account",
+                    bankroll_id="paper-bankroll",
+                    currency="EUR",
+                )
+                self.assertEqual(current.execution_plan.actions[0].side, "BACK")
+
+    def test_materializer_rejects_non_back_action_before_attempt_adoption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            binding = PaperExposureBinding(
+                action_id="lay-action",
+                sport="soccer",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook materialization supports BACK execution only",
+            ):
+                runtime._materialize_attempt(
+                    attempt=object(),
+                    action=action("lay-action", side="LAY"),
+                    binding=binding,
+                    decision_id="decision-lay",
+                )
 
     def test_moved_accepted_quote_materializes_execution_truth_once(self):
         with tempfile.TemporaryDirectory() as tmp:

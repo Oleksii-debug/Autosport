@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
+import autosport._predictive_uncertainty_semantics_guard as uncertainty_guard
 from autosport.forecasting import ForecastRecord
 from autosport.predictive_qualification import (
     ForecastCalibrationQualification,
@@ -114,6 +116,29 @@ def test_explicit_descriptive_rating_radius_cannot_authorize_probability_risk(
                 ),
             ),
         )
+
+
+def test_module_helper_rebinding_cannot_disable_uncertainty_semantic_fence(
+    tmp_path,
+) -> None:
+    forecast = _forecast(
+        uncertainty=Decimal("0.05"),
+        uncertainty_semantics="max-descriptive-rating-radius-not-probability-ci",
+    )
+    # The original implementation late-resolved this module-global helper on every
+    # positive-authority call. A caller could replace it with a no-op. The installed
+    # resolver must now use only its closure-captured semantic checker.
+    with patch.object(
+        uncertainty_guard,
+        "_require_supported_uncertainty_semantics",
+        lambda _forecast: None,
+        create=True,
+    ):
+        with pytest.raises(
+            PredictiveQualificationError,
+            match="uncertainty semantics are not absolute_probability_radius_v1",
+        ):
+            _resolve(tmp_path, forecast)
 
 
 def test_legacy_nonzero_uncertainty_keeps_existing_fail_closed_registry_order(

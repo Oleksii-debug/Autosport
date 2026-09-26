@@ -13,6 +13,7 @@ from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityIntegrityError,
     MonotonicWorkspaceAuthority,
 )
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 
 def _sha(text: str) -> str:
@@ -497,7 +498,12 @@ def test_concurrent_first_bootstrap_selects_one_root_before_journal_creation(
     failures = [result for result in results if isinstance(result, BaseException)]
     assert len(successes) == 1
     assert len(failures) == 1
-    assert isinstance(failures[0], MonotonicAuthorityConfigurationError)
+    failure_index = 0 if isinstance(results[0], BaseException) else 1
+    if isinstance(failures[0], WorkspaceEconomicLockBusyError):
+        retried = attempt(authorities[failure_index], "tx-loser-retry")
+        assert isinstance(retried, MonotonicAuthorityConfigurationError)
+    else:
+        assert isinstance(failures[0], MonotonicAuthorityConfigurationError)
 
     winner_root = (
         root_a

@@ -104,7 +104,7 @@ def test_root_selection_sha256_attribute_rebinding_fails_closed(
 
 def test_product_store_fails_closed_if_frozen_clone_globals_are_mutated() -> None:
     public = root_binding.stable_root_selection_store
-    implementation = _implementation(public, "stable_root_selection_store")
+    implementation = _implementation(public, "_sealed_stable_root_selection_store")
     original_os = implementation.__globals__["os"]
     implementation.__globals__["os"] = object()
     try:
@@ -119,7 +119,7 @@ def test_product_store_fails_closed_if_frozen_clone_globals_are_mutated() -> Non
 
 def test_product_store_fails_closed_if_frozen_clone_code_is_mutated() -> None:
     public = root_binding.stable_root_selection_store
-    implementation = _implementation(public, "stable_root_selection_store")
+    implementation = _implementation(public, "_sealed_stable_root_selection_store")
     original_code = implementation.__code__
 
     def forged_store():

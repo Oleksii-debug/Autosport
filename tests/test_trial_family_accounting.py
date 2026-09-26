@@ -99,7 +99,7 @@ def _foundation(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     TrialFamilyAccountingStore.initialize_workspace(workspace)
-    authority_root = tmp_path / "machine-authority"
+    authority_root = tmp_path.parent / f"{tmp_path.name}-machine-authority"
     registry = ScientificRegistry.initialize_pristine(workspace / "scientific.json")
     question = _question()
     hypothesis = _hypothesis()

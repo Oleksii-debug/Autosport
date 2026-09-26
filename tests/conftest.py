@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from itertools import count
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,11 @@ if os.name == "nt":
     _real_root_selection_get_folder_path = _real_root_selection_shell32.SHGetFolderPathW
 
     def _pytest_root_selection_get_folder_path(_hwnd, _csidl, _token, _flags, buffer):
-        if _ROOT_SELECTION_TEST_HOME is None:
+        caller_module = sys._getframe(1).f_globals.get("__name__")
+        if (
+            _ROOT_SELECTION_TEST_HOME is None
+            or caller_module != "autosport._monotonic_root_selection_os_resolver_guard"
+        ):
             return _real_root_selection_get_folder_path(
                 _hwnd,
                 _csidl,
@@ -42,7 +47,11 @@ else:
     _real_root_selection_getpwuid = _root_selection_pwd.getpwuid
 
     def _pytest_root_selection_getpwuid(uid):
-        if _ROOT_SELECTION_TEST_HOME is None:
+        caller_module = sys._getframe(1).f_globals.get("__name__")
+        if (
+            _ROOT_SELECTION_TEST_HOME is None
+            or caller_module != "autosport._monotonic_root_selection_os_resolver_guard"
+        ):
             return _real_root_selection_getpwuid(uid)
         return SimpleNamespace(pw_dir=str(_ROOT_SELECTION_TEST_HOME))
 
@@ -63,18 +72,39 @@ from autosport.paper_execution_reality import (
 
 
 _ROOT_SELECTION_PRODUCT_STORE_TEST = "test_monotonic_root_selection_product_store.py"
-_ROOT_SELECTION_SANDBOX_TESTS = frozenset(
+_LEGACY_MONOTONIC_ROOT_COMPOSITION_TESTS = frozenset(
     {
-        "test_monotonic_root_selector_concurrent_instance_fork.py",
-        "test_monotonic_workspace_authority_bootstrap.py",
-        "test_monotonic_workspace_authority_p0_regressions.py",
+        "test_dataset_snapshot_lineage.py",
+        "test_point_in_time_evidence.py",
+        "test_point_in_time_holdout_concurrency.py",
+        "test_trial_family_accounting.py",
+        "test_trial_family_accounting_registry_order.py",
+        "test_trial_family_cross_ledger_witness.py",
+        "test_trial_family_witness_mint_guard.py",
     }
 )
 
 
 @pytest.fixture(autouse=True)
-def _isolate_monotonic_root_selection_store(request, tmp_path):
-    """Keep root-selection tests hermetic without post-import resolver rebinding."""
+def _align_legacy_monotonic_root_composition(request, tmp_path, monkeypatch):
+    """Align default and explicit roots in legacy same-workspace fixtures only."""
+
+    test_file = Path(str(request.node.fspath)).name
+    if test_file not in _LEGACY_MONOTONIC_ROOT_COMPOSITION_TESTS:
+        return
+    authority_root = (
+        tmp_path.parent / f"{tmp_path.name}-machine-authority"
+    ).resolve(strict=False)
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_monotonic_root_selection_store(request, tmp_path_factory):
+    """Isolate selector receipts per test without resolver rebinding.
+
+    The fake account home is visible only to the root-selection resolver guard.
+    Other product account-root resolvers retain the actual OS location.
+    """
 
     global _ROOT_SELECTION_TEST_HOME
 
@@ -82,11 +112,8 @@ def _isolate_monotonic_root_selection_store(request, tmp_path):
     if test_file == _ROOT_SELECTION_PRODUCT_STORE_TEST:
         yield
         return
-    if test_file not in _ROOT_SELECTION_SANDBOX_TESTS:
-        yield
-        return
 
-    sandbox = tmp_path / "root-selection-product-state"
+    sandbox = tmp_path_factory.mktemp("root-selection-product-state")
     previous = _ROOT_SELECTION_TEST_HOME
     _ROOT_SELECTION_TEST_HOME = sandbox
     try:

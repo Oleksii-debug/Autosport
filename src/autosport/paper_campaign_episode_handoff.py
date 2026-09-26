@@ -191,8 +191,8 @@ class PaperCampaignEpisodeHandoff:
         *,
         state_path: str | Path | None = None,
     ) -> None:
-        if not isinstance(campaign, PaperCampaignRuntime):
-            raise TypeError("campaign must be PaperCampaignRuntime")
+        if type(campaign) is not PaperCampaignRuntime:
+            raise TypeError("campaign must be exact PaperCampaignRuntime")
         self.campaign = campaign
         self.state_path = (
             Path(state_path)
@@ -222,8 +222,8 @@ class PaperCampaignEpisodeHandoff:
         canonical handoff path and fail closed when those durable bytes are absent.
         """
 
-        if not isinstance(campaign, PaperCampaignRuntime):
-            raise TypeError("campaign must be PaperCampaignRuntime")
+        if type(campaign) is not PaperCampaignRuntime:
+            raise TypeError("campaign must be exact PaperCampaignRuntime")
         canonical_path = campaign.state_path.with_name(
             f"{campaign.state_path.name}.episode-handoff.json"
         )

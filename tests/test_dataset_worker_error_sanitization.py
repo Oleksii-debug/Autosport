@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import builtins
+
 from autosport.dataset_worker import OneShotDatasetValidationWorker, _safe_worker_error
 
 
@@ -64,6 +66,18 @@ def test_safe_worker_error_ignores_hostile_custom_exception_class_name() -> None
 
     assert rendered == "RuntimeError: dataset validation failed"
     assert "api_key" not in rendered
+    assert _SECRET not in rendered
+
+
+def test_safe_worker_error_ignores_late_builtins_namespace_relabeling(monkeypatch) -> None:
+    hostile_name = "api_key_sk_live_do_not_leak"
+    hostile_type = type(hostile_name, (RuntimeError,), {})
+    monkeypatch.setattr(builtins, hostile_name, hostile_type, raising=False)
+
+    rendered = _safe_worker_error(hostile_type("private body"))
+
+    assert rendered == "RuntimeError: dataset validation failed"
+    assert hostile_name not in rendered
     assert _SECRET not in rendered
 
 

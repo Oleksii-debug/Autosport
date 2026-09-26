@@ -12,32 +12,40 @@ from .dataset import ReplayDataset
 DatasetValidationTask = Callable[[], ReplayDataset]
 
 
-def _safe_exception_type_label(exc: BaseException) -> str:
-    """Return only a trusted built-in exception category for presentation."""
+def _build_safe_exception_type_label():
+    """Freeze trusted built-in exception identities before caller code can relabel them."""
 
-    try:
-        exception_type = type(exc)
-        mro = type.__getattribute__(exception_type, "__mro__")
-    except BaseException:
-        return "BaseException"
+    trusted_types: tuple[tuple[type[BaseException], str], ...] = tuple(
+        (candidate, type.__getattribute__(candidate, "__name__"))
+        for candidate in tuple(vars(builtins).values())
+        if type(candidate) is type
+        and issubclass(candidate, BaseException)
+        and type(type.__getattribute__(candidate, "__name__")) is str
+    )
 
-    if type(mro) is not tuple:
-        return "BaseException"
+    def safe_exception_type_label(exc: BaseException) -> str:
+        """Return only an import-time trusted built-in exception category."""
 
-    for candidate_type in mro:
         try:
-            name = type.__getattribute__(candidate_type, "__name__")
-            if type(name) is not str:
-                continue
-            if (
-                vars(builtins).get(name) is candidate_type
-                and isinstance(candidate_type, type)
-                and issubclass(candidate_type, BaseException)
-            ):
-                return name
+            exception_type = type(exc)
+            mro = type.__getattribute__(exception_type, "__mro__")
         except BaseException:
-            continue
-    return "BaseException"
+            return "BaseException"
+
+        if type(mro) is not tuple:
+            return "BaseException"
+
+        for candidate_type in mro:
+            for trusted_type, trusted_name in trusted_types:
+                if candidate_type is trusted_type:
+                    return trusted_name
+        return "BaseException"
+
+    return safe_exception_type_label
+
+
+_safe_exception_type_label = _build_safe_exception_type_label()
+del _build_safe_exception_type_label
 
 
 def _safe_worker_error(exc: BaseException) -> str:

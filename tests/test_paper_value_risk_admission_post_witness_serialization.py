@@ -114,44 +114,40 @@ def _run_agent(
         done.set()
 
 
-class _PostWitnessBlockingDecisionLedger(JsonlDecisionLedger):
-    """Block one target read without rebinding canonical execution authority."""
+class _PostWitnessBlockingPaperBook(PaperBook):
+    """Block target materialization after the canonical risk witness commits."""
 
-    def __init__(self, path, *, blocked: Event, release: Event) -> None:
-        super().__init__(path)
+    def __init__(self, initial_balance: str, *, blocked: Event, release: Event) -> None:
+        super().__init__(initial_balance)
         self.blocked = blocked
         self.release = release
         self.blocking_thread: Thread | None = None
-        self.target_decision_id: str | None = None
-        self._target_durable_reads = 0
 
-    def verified_records(self):
-        records = super().verified_records()
+    def open_ticket(self, *args, **kwargs):
+        # Canonical PaperValue execution reaches PaperBook materialization only
+        # after _issue_general_risk_admission has durably committed and while the
+        # runtime's execution RLock is still held.  Blocking here preserves the
+        # production authority graph and leaves the exact JsonlDecisionLedger in
+        # place for decision-origin verification.
         if (
             self.blocking_thread is not None
             and current_thread() is self.blocking_thread
-            and self.target_decision_id is not None
-            and any(
-                record.decision_id == self.target_decision_id
-                for record in records
-            )
         ):
-            self._target_durable_reads += 1
-            # Target read 1 verifies the durable decision after append. Read 2
-            # is inside _issue_general_risk_admission while the execution lock
-            # is held and commits the risk witness. Read 3 occurs immediately
-            # after that witness returns, still under the same execution lock.
-            if self._target_durable_reads == 3:
-                self.blocked.set()
-                if not self.release.wait(timeout=5):
-                    raise AssertionError("target execution was not released")
-        return records
-
+            self.blocked.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("target execution was not released")
+        return super().open_ticket(*args, **kwargs)
 
 def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     tmp_path,
 ) -> None:
-    book = PaperBook("100.00")
+    target_post_witness = Event()
+    release_target = Event()
+    book = _PostWitnessBlockingPaperBook(
+        "100.00",
+        blocked=target_post_witness,
+        release=release_target,
+    )
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("0.02"),
         max_committed_fraction=Decimal("0.20"),
@@ -166,13 +162,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     target_agent = _agent(target_event, policy)
     competitor_agent = _agent(competitor_event, policy)
 
-    target_post_witness = Event()
-    release_target = Event()
-    decision_ledger = _PostWitnessBlockingDecisionLedger(
-        tmp_path / "decisions.jsonl",
-        blocked=target_post_witness,
-        release=release_target,
-    )
+    decision_ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
     target_context = AgentContext(
         book,
         replay_run_id="replay-target",
@@ -196,7 +186,6 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         competitor_context,
         competitor_event,
     )
-    decision_ledger.target_decision_id = target_decision_id
 
     target_done = Event()
     competitor_done = Event()
@@ -214,7 +203,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         kwargs={"done": competitor_done, "errors": competitor_errors},
         daemon=True,
     )
-    decision_ledger.blocking_thread = target_thread
+    book.blocking_thread = target_thread
 
     target_thread.start()
     try:

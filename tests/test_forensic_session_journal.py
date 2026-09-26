@@ -9,8 +9,6 @@ from pathlib import Path
 import pytest
 
 import autosport.forensic_session_journal as forensic_session_journal
-from autosport.secret_redaction import is_sensitive_key as canonical_is_sensitive_key
-
 from autosport.forensic_session_journal import (
     REDACTED,
     ForensicSessionJournal,
@@ -22,6 +20,7 @@ from autosport.forensic_session_journal import (
     redact_payload,
     verify_journal,
 )
+from autosport.secret_redaction import is_sensitive_key as canonical_is_sensitive_key
 
 
 class FakeClock:
@@ -124,7 +123,7 @@ def test_redaction_catches_camelcase_and_mixed_separator_credentials() -> None:
 
 
 def test_journal_uses_canonical_sensitive_key_authority() -> None:
-    assert forensic_session_journal.is_sensitive_key is canonical_is_sensitive_key
+    assert forensic_session_journal._canonical_is_sensitive_key is canonical_is_sensitive_key
 
 
 @pytest.mark.parametrize(
@@ -898,6 +897,7 @@ def test_symlink_lock_sidecar_is_rejected_without_touching_target(tmp_path: Path
         ForensicSessionJournal(path, clock=FakeClock(), session_id=str(uuid.UUID(int=54)))
     assert target.read_bytes() == b"AUTOSPORT_FORENSIC_SESSION_LOCK_V1\n"
     assert not path.exists()
+
 
 @pytest.mark.parametrize(
     "key",

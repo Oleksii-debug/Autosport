@@ -367,7 +367,6 @@ class ProtectiveRiskFlowEvidenceTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "EVIDENCE_RESOURCE_LIMIT")
 
-
     def test_decimal_result_is_independent_of_hostile_caller_context(self) -> None:
         events = (
             _valuation(1, "v1", "123456789012345.678901234567890123", T0),

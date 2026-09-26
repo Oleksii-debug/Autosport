@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+from autosport.secret_redaction import safe_exception_text
+
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
 
@@ -118,20 +120,17 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
     # Formatting belongs to the same packaged fail-closed boundary as dispatch.
-    # Exception subclasses are caller/library supplied: neither custom type metadata,
-    # __str__(), nor methods on a returned str subclass may recreate a traceback.
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = exception_type
-    detail = " ".join(rendered.splitlines()).strip()
-    if not detail:
-        detail = exception_type
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={exception_type}: {detail}"
+    # Reuse the canonical presentation redaction authority so provider/library
+    # exception strings cannot disclose credentials through this portable CLI.
+    rendered = safe_exception_text(exc, unavailable_detail="exception details unavailable")
+    error_type, separator, detail = rendered.partition(": ")
+    if not separator:
+        detail = ""
+    detail = " ".join(detail.splitlines()).strip()
+    return (
+        f"Autosport-Data: {command}=FAIL_CLOSED error={error_type}"
+        + (f": {detail}" if detail else "")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

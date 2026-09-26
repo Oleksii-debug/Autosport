@@ -20,8 +20,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# PR runs must reach the lightweight admission job before any supersession decision.
+# If two fresh PR events share a cancel-in-progress group, GitHub can kill the older
+# useful full-suite run before admission can apply oldest-exact-head-wins semantics.
+# Keep branch pushes coalesced, but isolate every PR workflow run at scheduler level;
+# stale/duplicate PR heavy work is rejected read-only by superseded_run_admission.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}-run-{1}', github.event.pull_request.number, github.run_id) || github.ref }}
   cancel-in-progress: true
 
 jobs:

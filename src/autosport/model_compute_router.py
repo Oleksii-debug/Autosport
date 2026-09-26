@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .sport_domain_fitness import (
     CausalView,
     RouteRecommendation,
@@ -2283,8 +2284,8 @@ class ModelComputeRouterStore:
                     "VOC shadow execution authority journal contains a blank record"
                 )
             try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
+                raw = strict_json_loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise ModelComputeRouterError(
                     "VOC shadow execution authority journal contains invalid JSON"
                 ) from exc
@@ -2441,8 +2442,8 @@ class ModelComputeRouterStore:
                     "execution authority journal contains a blank record"
                 )
             try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
+                raw = strict_json_loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise ModelComputeRouterError(
                     "execution authority journal contains invalid JSON"
                 ) from exc
@@ -2817,13 +2818,15 @@ class ModelComputeRouterStore:
 
     def _load(self) -> None:
         try:
-            raw = json.loads(
+            raw = strict_json_loads(
                 self.path.read_text(encoding="utf-8")
             )
         except (
             OSError,
             UnicodeDecodeError,
             json.JSONDecodeError,
+            TypeError,
+            ValueError,
         ) as exc:
             raise ModelComputeRouterError(
                 "routing store is unreadable"

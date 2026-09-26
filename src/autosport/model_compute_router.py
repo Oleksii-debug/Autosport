@@ -1825,18 +1825,25 @@ def route_compute(
             domain_observation_id=domain_observation_id,
         )
 
+    # V3 VOC context cloud fields are durable caller/policy assertions, not an
+    # independently product-issued network permission.  Until a canonical
+    # product permission issuer exists, no positive CLOUD authority can be
+    # minted from ComputeRouteRequest/ComputeRoutingPolicy or their replayed
+    # context.  Preserve every validation above for deterministic diagnostics,
+    # then fail closed to the already-qualified baseline.
     return ComputeRouteDecision.build(
         decision_id=(
-            f"{request.request_id}:{cloud.candidate_id}"
+            f"{request.request_id}:{baseline.candidate_id}"
         ),
         request_id=request.request_id,
         decided_at=as_of,
         policy=policy,
-        tier=ComputeTier.CLOUD,
-        candidate=cloud,
+        tier=baseline.tier,
+        candidate=baseline,
         reason=(
-            "verified sport-domain evidence plus explicit public-data "
-            "cloud permission and fresh positive paired measured VOC evidence"
+            "independent product-issued cloud permission authority is "
+            "unavailable; caller-owned routing policy/context cannot "
+            "authorize cloud compute; fail closed to baseline"
         ),
         voc_evidence_id=voc_evidence.evidence_id,
         domain_observation_id=domain_observation_id,

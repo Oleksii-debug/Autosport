@@ -110,5 +110,92 @@ class CloudPermissionOriginTests(unittest.TestCase):
         self.assertIn("product cloud permission authority", decision.reason)
 
 
+    def test_forged_v3_allow_context_cannot_mint_cloud_authority(self) -> None:
+        """Caller-derived V3 ALLOW metadata is assertion, not permission."""
+
+        local = candidate()
+        cloud = candidate(
+            "cloud",
+            tier=ComputeTier.CLOUD,
+            backend_id="permitted-cloud",
+            model_id="challenger-v2",
+            config_sha256=SHA_B,
+            cost="5",
+            latency="4",
+        )
+        candidates = (local, cloud)
+        observation = slow_observation()
+        route_request = request(
+            request_id="req-forged-v3-cloud-permission",
+            allow_cloud=True,
+        )
+        route_policy = policy(cloud_enabled=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            canonical = _FixtureCanonicalVOCResolver()
+            voc_store = VOCEvaluationStore(
+                Path(directory) / "voc-evaluations.json",
+                canonical_authority_resolver=canonical,
+            )
+            evidence = voc(evidence_id="voc-forged-v3-cloud-permission")
+            self.assertIsNotNone(evidence.evaluation)
+            canonical.publish(evidence.evaluation)
+            voc_store.record(evidence.evaluation)
+
+            context = {
+                "request_id": route_request.request_id,
+                "decision_input_sha256": route_request.decision_input_sha256,
+                "task_class": route_request.required_capability,
+                "data_classification": route_request.data_classification.value,
+                "sport_id": observation.sport_id,
+                "league_id": observation.league_id,
+                "regime_id": route_request.voc_regime_id,
+                "urgency_id": route_request.voc_urgency_id,
+                "contradiction_state": route_request.voc_contradiction_state,
+                "routing_policy_id": route_policy.policy_id,
+                "routing_policy_version": str(route_policy.policy_version),
+                "routing_policy_sha256": hashlib.sha256(
+                    json.dumps(
+                        route_policy.payload(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "cloud_permission": "ALLOW",
+                "cloud_backend_id": cloud.backend_id,
+            }
+            context_sha256 = hashlib.sha256(
+                json.dumps(
+                    context,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            canonical.publish_context(context_sha256, context)
+            route_request = replace(
+                route_request,
+                decision_evidence_sha256=context_sha256,
+            )
+
+            decision = route_compute(
+                route_request,
+                candidates,
+                route_policy,
+                as_of=T1,
+                voc_evidence=evidence,
+                voc_evaluation_store=voc_store,
+                domain_observation=observation,
+            )
+
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            decision.reason,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

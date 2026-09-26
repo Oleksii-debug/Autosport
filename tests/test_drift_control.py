@@ -288,6 +288,81 @@ def test_sample_counts_and_effective_size_require_exact_builtin_int(tmp_path):
     assert type(ordinary.effective_sample_size) is int
 
 
+def test_authority_objects_require_exact_canonical_types_before_dispatch(tmp_path):
+    class HostileRegistry(ScientificRegistry):
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("hostile registry dispatch must not run")
+
+        def append(self, *_args, **_kwargs):
+            raise AssertionError("hostile registry dispatch must not run")
+
+    hostile_registry = object.__new__(HostileRegistry)
+    with pytest.raises(TypeError, match="exact ScientificRegistry"):
+        DriftMonitor(hostile_registry)
+
+    class HostileWindow(DriftWindow):
+        def __getattribute__(self, name):
+            if name in {
+                "dataset_snapshot_id",
+                "source_identity",
+                "revision_id",
+                "window_start",
+                "window_end",
+                "as_of",
+                "evidence_sha256",
+                "sample_count",
+                "mean_fraction",
+                "effective_sample_size",
+                "values",
+                "value_observed_at",
+                "value_available_at",
+            }:
+                raise AssertionError("hostile DriftWindow dispatch must not run")
+            return super().__getattribute__(name)
+
+    baseline = _baseline_window()
+    current = _current_window()
+
+    def hostile_window_from(window):
+        hostile = object.__new__(HostileWindow)
+        fields = object.__getattribute__(window, "__dataclass_fields__")
+        for name in fields:
+            object.__setattr__(
+                hostile,
+                name,
+                object.__getattribute__(window, name),
+            )
+        return hostile
+
+    hostile_baseline = hostile_window_from(baseline)
+    hostile_current = hostile_window_from(current)
+    monitor = DriftMonitor(_registry(tmp_path))
+
+    with pytest.raises(TypeError, match="baseline must be exact DriftWindow"):
+        _reference(monitor, baseline=hostile_baseline)
+
+    with pytest.raises(TypeError, match="window must be exact DriftWindow"):
+        monitor._validate_window_dataset(hostile_current)
+
+    reference = _reference(monitor)
+    with pytest.raises(TypeError, match="current must be exact DriftWindow"):
+        monitor.evaluate(
+            reference.reference_id,
+            hostile_current,
+            evaluated_at=EVALUATED_AT,
+        )
+
+    class HostileFinding(drift_control.DriftFinding):
+        def __getattribute__(self, name):
+            if name == "finding_id":
+                raise AssertionError("hostile finding dispatch must not run")
+            return super().__getattribute__(name)
+
+    hostile_finding = object.__new__(HostileFinding)
+    with pytest.raises(TypeError, match="finding must be exact DriftFinding"):
+        monitor.finding_binding(hostile_finding)
+
+
 def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     baseline = _baseline_window(effective_sample_size=1)
     current = _current_window(effective_sample_size=1)

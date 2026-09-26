@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import tempfile
 import unittest
@@ -158,6 +159,19 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             hasattr(PaperExecutionAdoptionRuntime, "_autosport_exposure_scope_preparation_guard")
         )
         self.assertFalse(hasattr(scope_guard, "_install_preparation_guard"))
+
+    def test_callsite_reload_preserves_installed_exposure_scope_binding(self) -> None:
+        installed_execute = PaperExecutionAdoptionRuntime.execute
+        installed_publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+
+        reloaded = importlib.reload(decision_callsite)
+
+        self.assertIs(PaperExecutionAdoptionRuntime.execute, installed_execute)
+        self.assertIs(reloaded._execute_with_exact_product_callsite, installed_execute)
+        self.assertIs(
+            PaperExecutionAdoptionRuntime._publish_exposure_scope,
+            installed_publisher,
+        )
 
     def test_guard_does_not_publish_original_bypass_callables(self) -> None:
         for owner, names in (

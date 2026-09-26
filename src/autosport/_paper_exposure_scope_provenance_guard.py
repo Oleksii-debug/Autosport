@@ -140,6 +140,27 @@ def bind_canonical_execute(execute_function):
     if getattr(execute_function, "_autosport_exposure_scope_execute_guard", False):
         return execute_function
 
+    # A reload of the decision-origin callsite module constructs a fresh wrapper
+    # object before its idempotent installer runs. Once the product callsite guard
+    # is already installed, that fresh object is not execution authority and must
+    # not replace the exposure-scope publisher's binding. Reuse the exact installed
+    # execute object instead, so module reload repairs mirrors without desynchronizing
+    # the already-composed runtime.
+    installed_execute = runtime_type.execute
+    if (
+        getattr(runtime_type, "_autosport_decision_origin_callsite_guard", False)
+        and installed_execute is not execute_function
+    ):
+        if not getattr(
+            installed_execute,
+            "_autosport_exposure_scope_execute_guard",
+            False,
+        ):
+            raise RuntimeError(
+                "canonical PAPER decision-origin execute binding is unavailable"
+            )
+        return installed_execute
+
     mint_guard = runtime_type._mint_prepared
     prepare_guard = runtime_type.prepare
     prepare_paper_value_guard = runtime_type.prepare_paper_value_action

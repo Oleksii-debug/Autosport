@@ -87,7 +87,9 @@ def _make_ticket_opening_authority_registry():
         with guard:
             current = authorities.get(book)
             if current is None:
-                raise RuntimeError("PaperBook opening authority registry is unavailable")
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued opening authority"
+                )
             expected = dict(current)
         if set(expected) != set(book.tickets):
             raise ValueError(
@@ -103,7 +105,9 @@ def _make_ticket_opening_authority_registry():
         with guard:
             current = authorities.get(source_book)
             if current is None:
-                raise RuntimeError("PaperBook opening authority registry is unavailable")
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued opening authority"
+                )
             expected = dict(current)
         candidate_tickets = getattr(candidate_book, "tickets", None)
         if type(candidate_tickets) is not dict or set(candidate_tickets) != set(expected):

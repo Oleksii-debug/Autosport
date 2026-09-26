@@ -373,7 +373,7 @@ def test_rebound_registry_read_dispatch_cannot_retarget_captured_snapshot(
     )
 
     assert not decision.allowed
-    assert "lacks canonical product-issued evaluator authority" in decision.reason
+    assert "durable authority is invalid" in decision.reason
 
 
 def test_rebound_registry_get_fails_closed_before_authority_use(tmp_path, monkeypatch) -> None:
@@ -448,6 +448,7 @@ def test_vector_evidence_requires_exact_product_issued_result(tmp_path) -> None:
     )
     assert asserted_only.action != "STAKE_VECTOR"
 
+
 def test_rebound_policy_authority_helper_cannot_grant_positive_stake(
     monkeypatch,
 ) -> None:
@@ -477,6 +478,70 @@ def test_rebound_policy_authority_helper_cannot_grant_positive_stake(
 
     assert not decision.allowed
     assert "product authority dispatch changed" in decision.reason
+    assert attacker_calls == 0
+
+
+def test_rebound_transitive_authority_verifier_cannot_grant_positive_stake(
+    monkeypatch,
+) -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = _single_evidence(policy, book, context)
+    attacker_calls = 0
+
+    def forged_verifier(*args, **kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del args, kwargs
+        return True, "forged transitive authority"
+
+    monkeypatch.setattr(
+        authority_module,
+        "verify_risk_of_ruin_authority",
+        forged_verifier,
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "product authority verifier changed" in decision.reason
+    assert attacker_calls == 0
+
+
+def test_injected_module_dispatch_handle_cannot_replace_policy_closure(
+    monkeypatch,
+) -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = _single_evidence(policy, book, context)
+    attacker_calls = 0
+
+    def forged_dispatch(*args, **kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del args, kwargs
+        return True, "forged dispatcher"
+
+    monkeypatch.setattr(
+        risk_module,
+        "_PRODUCT_RISK_AUTHORITY_DISPATCH",
+        forged_dispatch,
+        raising=False,
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
     assert attacker_calls == 0
 
 

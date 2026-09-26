@@ -865,6 +865,7 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         )
         assert binding is not None
         assert binding["evidence_id"] == result.evidence_id
+        assert len(binding["acknowledgement_sha256"]) == 64
         request = transport.calls[0]["request"]
         assert request["method"] == "SportsAPING/v1.0/placeOrders"
         assert request["params"]["async"] is False
@@ -1248,6 +1249,9 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
         assert result.attempt_state is AttemptState.UNKNOWN
         assert result.external_receipt_id == "bet-unmatched"
         assert result.evidence_id is not None
+        binding = ledger.provider_evidence_binding("attempt-unmatched")
+        assert binding is not None
+        assert set(binding) == {"evidence_id", "observed_at", "source"}
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,

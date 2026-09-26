@@ -1017,16 +1017,17 @@ def execute_betfair_supervised_action(
             )
 
     evidence_id = report.evidence_id
-    ledger.bind_provider_evidence(
-        attempt_id=attempt_id,
-        evidence_id=evidence_id,
-        observed_at=report.observed_at,
-        source=f"betfair:placeOrders:{report.response_sha256}",
-    )
+    evidence_source = f"betfair:placeOrders:{report.response_sha256}"
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id
 
     if outcome is PlaceOrdersOutcome.UNKNOWN:
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+        )
         ledger.mark_unknown(
             attempt_id,
             reason="betfair_placeOrders_report_requires_readback",
@@ -1050,6 +1051,12 @@ def execute_betfair_supervised_action(
         )
     else:
         if receipt is None:
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=evidence_source,
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
@@ -1077,6 +1084,13 @@ def execute_betfair_supervised_action(
             accepted_odds=report.instruction.average_price_matched,
             accepted_stake=report.instruction.size_matched,
         )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id=attempt_id,
+        evidence_id=evidence_id,
+        observed_at=report.observed_at,
+        source=evidence_source,
+        acknowledgement=acknowledgement,
+    )
     ledger.acknowledge(acknowledgement)
     return BetfairSupervisedExecutionResult(
         outcome,

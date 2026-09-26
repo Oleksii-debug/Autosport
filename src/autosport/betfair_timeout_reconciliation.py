@@ -34,7 +34,6 @@ from .supervised_provider_evidence import (
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
     VerifiedProviderState,
-    _register_betfair_timeout_absence_authority_assertion,
     verify_betfair_provider_state,
 )
 
@@ -770,9 +769,6 @@ def _install_betfair_timeout_absence_authority() -> None:
                     "provider absence did not pass durable Betfair timeout visibility authority"
                 )
 
-    _register_betfair_timeout_absence_authority_assertion(
-        assert_betfair_timeout_absence_authoritative
-    )
     globals()["resolve_betfair_timeout_provider_state"] = authoritative_resolve
     globals()[
         "assert_betfair_timeout_absence_authoritative"

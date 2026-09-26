@@ -24,28 +24,71 @@ _ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE_CODE = (
     _ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE.__code__
 )
 _CANONICAL_PROVENANCE_FOR = _target.provenance_for
+_CANONICAL_PROVENANCE_FOR_CODE = _CANONICAL_PROVENANCE_FOR.__code__
 _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING = _ledger_module.verify_economic_goal_binding
+_CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING_CODE = (
+    _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING.__code__
+)
 _CANONICAL_DECISION_RECORD_TO_DICT = DecisionRecord.to_dict
+_CANONICAL_DECISION_RECORD_TO_DICT_CODE = _CANONICAL_DECISION_RECORD_TO_DICT.__code__
 _CANONICAL_PORTFOLIO_FROM_DICT = PortfolioPlan.from_dict.__func__
+_CANONICAL_PORTFOLIO_FROM_DICT_CODE = _CANONICAL_PORTFOLIO_FROM_DICT.__code__
 _CANONICAL_DISPOSITION_FROM_JSON = _target.LiveDecisionDisposition.from_json.__func__
+_CANONICAL_DISPOSITION_FROM_JSON_CODE = _CANONICAL_DISPOSITION_FROM_JSON.__code__
 _CANONICAL_REEVALUATION_POLICY_VERIFY = _reevaluation.verify_product_policy_authority
+_CANONICAL_REEVALUATION_POLICY_VERIFY_CODE = _CANONICAL_REEVALUATION_POLICY_VERIFY.__code__
 
 # Every method in this chain is reached by the canonical economic-decision or
 # reevaluation read/write. An exact ledger instance still has a writable __dict__, so
-# instance shadowing is rejected separately from class-level rebinding.
+# instance shadowing is rejected separately from class-level rebinding. Function-object
+# identity is not sufficient in Python because callers can replace ``__code__`` in place;
+# retain the original executable witness too.
 _LEDGER_SURFACES = {
-    "append": JsonlDecisionLedger.append,
-    "_append_validated": JsonlDecisionLedger._append_validated,
-    "verified_economic_decision": JsonlDecisionLedger.verified_economic_decision,
-    "verified_records": JsonlDecisionLedger.verified_records,
-    "verified_snapshot": JsonlDecisionLedger.verified_snapshot,
-    "_verify_bytes": JsonlDecisionLedger._verify_bytes.__func__,
-    "_validate_record": JsonlDecisionLedger._validate_record.__func__,
-    "_validate_json_value": JsonlDecisionLedger._validate_json_value.__func__,
-    "_canonical_record": JsonlDecisionLedger._canonical_record,
-    "_json_object_without_duplicate_keys": JsonlDecisionLedger._json_object_without_duplicate_keys,
-    "_reject_non_finite_json": JsonlDecisionLedger._reject_non_finite_json,
-    "_require_utf8_text": JsonlDecisionLedger._require_utf8_text,
+    "append": (JsonlDecisionLedger.append, JsonlDecisionLedger.append.__code__),
+    "_append_validated": (
+        JsonlDecisionLedger._append_validated,
+        JsonlDecisionLedger._append_validated.__code__,
+    ),
+    "verified_economic_decision": (
+        JsonlDecisionLedger.verified_economic_decision,
+        JsonlDecisionLedger.verified_economic_decision.__code__,
+    ),
+    "verified_records": (
+        JsonlDecisionLedger.verified_records,
+        JsonlDecisionLedger.verified_records.__code__,
+    ),
+    "verified_snapshot": (
+        JsonlDecisionLedger.verified_snapshot,
+        JsonlDecisionLedger.verified_snapshot.__code__,
+    ),
+    "_verify_bytes": (
+        JsonlDecisionLedger._verify_bytes.__func__,
+        JsonlDecisionLedger._verify_bytes.__func__.__code__,
+    ),
+    "_validate_record": (
+        JsonlDecisionLedger._validate_record.__func__,
+        JsonlDecisionLedger._validate_record.__func__.__code__,
+    ),
+    "_validate_json_value": (
+        JsonlDecisionLedger._validate_json_value.__func__,
+        JsonlDecisionLedger._validate_json_value.__func__.__code__,
+    ),
+    "_canonical_record": (
+        JsonlDecisionLedger._canonical_record,
+        JsonlDecisionLedger._canonical_record.__code__,
+    ),
+    "_json_object_without_duplicate_keys": (
+        JsonlDecisionLedger._json_object_without_duplicate_keys,
+        JsonlDecisionLedger._json_object_without_duplicate_keys.__code__,
+    ),
+    "_reject_non_finite_json": (
+        JsonlDecisionLedger._reject_non_finite_json,
+        JsonlDecisionLedger._reject_non_finite_json.__code__,
+    ),
+    "_require_utf8_text": (
+        JsonlDecisionLedger._require_utf8_text,
+        JsonlDecisionLedger._require_utf8_text.__code__,
+    ),
 }
 
 
@@ -56,23 +99,49 @@ def _surface_target(owner: type[JsonlDecisionLedger], name: str):
     return value
 
 
+def _unchanged(current, expected, expected_code) -> bool:
+    return current is expected and getattr(expected, "__code__", None) is expected_code
+
+
 def _dispatch_is_canonical(ledger: JsonlDecisionLedger) -> bool:
     if type(ledger) is not JsonlDecisionLedger:
         return False
     instance_state = vars(ledger)
-    for name, expected in _LEDGER_SURFACES.items():
-        if name in instance_state or _surface_target(JsonlDecisionLedger, name) is not expected:
+    for name, (expected, expected_code) in _LEDGER_SURFACES.items():
+        current = _surface_target(JsonlDecisionLedger, name)
+        if name in instance_state or not _unchanged(current, expected, expected_code):
             return False
     return (
-        _ledger_module.verify_economic_goal_binding
-        is _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING
-        and DecisionRecord.to_dict is _CANONICAL_DECISION_RECORD_TO_DICT
-        and PortfolioPlan.from_dict.__func__ is _CANONICAL_PORTFOLIO_FROM_DICT
-        and _target.LiveDecisionDisposition.from_json.__func__
-        is _CANONICAL_DISPOSITION_FROM_JSON
-        and _target.provenance_for is _CANONICAL_PROVENANCE_FOR
-        and _reevaluation.verify_product_policy_authority
-        is _CANONICAL_REEVALUATION_POLICY_VERIFY
+        _unchanged(
+            _ledger_module.verify_economic_goal_binding,
+            _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING,
+            _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING_CODE,
+        )
+        and _unchanged(
+            DecisionRecord.to_dict,
+            _CANONICAL_DECISION_RECORD_TO_DICT,
+            _CANONICAL_DECISION_RECORD_TO_DICT_CODE,
+        )
+        and _unchanged(
+            PortfolioPlan.from_dict.__func__,
+            _CANONICAL_PORTFOLIO_FROM_DICT,
+            _CANONICAL_PORTFOLIO_FROM_DICT_CODE,
+        )
+        and _unchanged(
+            _target.LiveDecisionDisposition.from_json.__func__,
+            _CANONICAL_DISPOSITION_FROM_JSON,
+            _CANONICAL_DISPOSITION_FROM_JSON_CODE,
+        )
+        and _unchanged(
+            _target.provenance_for,
+            _CANONICAL_PROVENANCE_FOR,
+            _CANONICAL_PROVENANCE_FOR_CODE,
+        )
+        and _unchanged(
+            _reevaluation.verify_product_policy_authority,
+            _CANONICAL_REEVALUATION_POLICY_VERIFY,
+            _CANONICAL_REEVALUATION_POLICY_VERIFY_CODE,
+        )
     )
 
 

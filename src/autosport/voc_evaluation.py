@@ -13,6 +13,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .market_outcomes import MarketSettlementOutcomeAuthority
 from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
@@ -1402,8 +1403,14 @@ class VOCEvaluationStore:
 
     def _load(self) -> dict[str, PairedVOCEvaluation]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise VOCEvaluationError("VOC evaluation store is unreadable") from exc
         if type(raw) is not dict or set(raw) != {
             "schema",

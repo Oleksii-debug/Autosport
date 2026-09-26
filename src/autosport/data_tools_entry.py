@@ -2,7 +2,34 @@ from __future__ import annotations
 
 import sys
 
-from autosport.secret_redaction import safe_exception_text
+from autosport.secret_redaction import safe_exception_detail
+
+
+# Expected failures are an operator-presentation boundary, not an extensible exception
+# registry. Capture the concrete interpreter-owned classes once so later mutation of
+# ``builtins`` cannot turn a caller-defined subclass name into presentation authority.
+_CANONICAL_VALUE_ERROR = ValueError
+_CANONICAL_OS_ERROR = OSError
+_EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
+_EXPECTED_FAILURE_LABELS = (
+    (BlockingIOError, "BlockingIOError"),
+    (ChildProcessError, "ChildProcessError"),
+    (BrokenPipeError, "BrokenPipeError"),
+    (ConnectionAbortedError, "ConnectionAbortedError"),
+    (ConnectionRefusedError, "ConnectionRefusedError"),
+    (ConnectionResetError, "ConnectionResetError"),
+    (ConnectionError, "ConnectionError"),
+    (FileExistsError, "FileExistsError"),
+    (FileNotFoundError, "FileNotFoundError"),
+    (InterruptedError, "InterruptedError"),
+    (IsADirectoryError, "IsADirectoryError"),
+    (NotADirectoryError, "NotADirectoryError"),
+    (PermissionError, "PermissionError"),
+    (ProcessLookupError, "ProcessLookupError"),
+    (TimeoutError, "TimeoutError"),
+    (_CANONICAL_OS_ERROR, "OSError"),
+    (_CANONICAL_VALUE_ERROR, "ValueError"),
+)
 
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
@@ -118,17 +145,27 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
     return 2
 
 
+def _expected_failure_type_label(
+    exc: BaseException,
+    _labels: tuple[tuple[type[BaseException], str], ...] = _EXPECTED_FAILURE_LABELS,
+) -> str:
+    try:
+        mro = type.__getattribute__(type(exc), "__mro__")
+    except BaseException:
+        return "ExpectedFailure"
+    for candidate in mro:
+        for expected_type, label in _labels:
+            if candidate is expected_type:
+                return label
+    return "ExpectedFailure"
+
+
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    # Render only a genuine built-in BaseException category while redacting detail.
-    # Caller/library-defined subclass names and __str__ output are not presentation
-    # authority, but stable built-in labels such as ValueError remain operator-useful.
-    rendered = safe_exception_text(
+    error_type = _expected_failure_type_label(exc)
+    detail = safe_exception_detail(
         exc,
         unavailable_detail="exception details unavailable",
     )
-    error_type, separator, detail = rendered.partition(": ")
-    if not separator:
-        detail = ""
     detail = " ".join(detail.splitlines()).strip()
     return (
         f"Autosport-Data: {command}=FAIL_CLOSED error={error_type}"
@@ -145,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     command, forwarded = args[0], args[1:]
     try:
         return _dispatch(command, forwarded)
-    except (OSError, ValueError) as exc:
+    except _EXPECTED_FAILURE_TYPES as exc:
         # This executable is a packaged user-facing boundary. Expected malformed
         # local input and filesystem failures must be recoverable without a Python
         # traceback. Deliberately do not catch RuntimeError, SystemExit or

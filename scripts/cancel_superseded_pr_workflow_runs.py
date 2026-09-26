@@ -102,7 +102,7 @@ def select_superseded_runs(
     selected = {
         run.run_id
         for run in runs
-        if run.run_id != current_run_id
+        if run.run_id < current_run_id
         and run.workflow_name == workflow_name
         and pr_number in run.pr_numbers
         and run.head_sha != live_head_sha

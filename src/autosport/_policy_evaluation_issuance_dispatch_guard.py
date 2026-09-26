@@ -72,6 +72,7 @@ class _DispatchState:
         "_constructor_guard",
         "_common_guard",
         "_trusted_clock_callable",
+        "_code_witnesses",
         "_sealed",
     )
 
@@ -194,6 +195,32 @@ class _DispatchState:
             trusted_clock_callable,
         )
 
+        # Function-object identity is not enough for executable authority in Python:
+        # callers can replace FunctionType.__code__ in place while preserving the
+        # exact function object. Pin every predecessor/direct helper executable that
+        # the guarded issuer invokes so an in-place code swap fails before dispatch.
+        object.__setattr__(
+            self,
+            "_code_witnesses",
+            (
+                ("predecessor open", object.__getattribute__(self, "_DispatchState__original_open"), object.__getattribute__(self, "_DispatchState__original_open").__code__),
+                ("predecessor issue", object.__getattribute__(self, "_DispatchState__original_issue"), object.__getattribute__(self, "_DispatchState__original_issue").__code__),
+                ("predecessor resolve", object.__getattribute__(self, "_DispatchState__original_resolve"), object.__getattribute__(self, "_DispatchState__original_resolve").__code__),
+                ("predecessor verify", object.__getattribute__(self, "_DispatchState__original_verify"), object.__getattribute__(self, "_DispatchState__original_verify").__code__),
+                ("target", self._target, self._target.__code__),
+                ("issuance id", self._issuance_id, self._issuance_id.__code__),
+                ("source evaluation", self._require_source, self._require_source.__code__),
+                ("derive policy evaluation", self._derive, self._derive.__code__),
+                ("registry get", self._registry_get, self._registry_get.__code__),
+                ("store read", self._store_read, self._store_read.__code__),
+                (
+                    "canonical bundle digest",
+                    self._canonical_bundle_sha256,
+                    self._canonical_bundle_sha256.__code__,
+                ),
+            ),
+        )
+
     def __getattribute__(self, name: str):
         if name.startswith("_DispatchState__original_"):
             raise AttributeError("unguarded predecessor entrypoints are not exposed")
@@ -272,6 +299,12 @@ class _DispatchState:
 
     def _require_common_dispatch(self) -> None:
         issuance_module = self._issuance_module
+        for label, function, expected_code in self._code_witnesses:
+            if getattr(function, "__code__", None) is not expected_code:
+                raise self._error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    f"direct helper executable ({label})"
+                )
         if (
             issuance_module._open_canonical_authorities is not self._public_open
             or issuance_module.issue_product_policy_evaluation is not self._public_issue

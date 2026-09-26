@@ -77,6 +77,7 @@ def test_recovered_predecessor_resolver_rejects_read_cell_rebinding() -> None:
         for function in _reachable_functions(resolve_betfair_authenticated_account_identity)
         if function.__name__ == "read_account_details"
         and function is not guarded_read
+        and function.__globals__ is _readonly.__dict__
     ]
     assert len(original_reads) == 1, [function.__name__ for function in original_reads]
 

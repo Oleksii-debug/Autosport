@@ -43,6 +43,40 @@ def _verify_product_risk_of_ruin_authority(
     )
 
 
+def _build_product_risk_authority_dispatch(verifier):
+    """Pin the exact lazy authority helper executable used by the policy gate."""
+
+    verifier_code = verifier.__code__
+
+    def dispatch(
+        registry_path: str | Path | None,
+        evidence: object,
+        *,
+        kind: str,
+        available_by: str,
+    ) -> tuple[bool, str]:
+        if (
+            _verify_product_risk_of_ruin_authority is not verifier
+            or getattr(verifier, "__code__", None) is not verifier_code
+        ):
+            prefix = "portfolio" if kind == "single" else "portfolio vector"
+            return False, f"{prefix} risk-of-ruin product authority dispatch changed"
+        return verifier(
+            registry_path,
+            evidence,
+            kind=kind,
+            available_by=available_by,
+        )
+
+    return dispatch
+
+
+_PRODUCT_RISK_AUTHORITY_DISPATCH = _build_product_risk_authority_dispatch(
+    _verify_product_risk_of_ruin_authority
+)
+del _build_product_risk_authority_dispatch
+
+
 def _canonical_context_text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be a non-empty canonical string")
@@ -1965,7 +1999,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         evidence = context.risk_of_ruin_evidence
         assert evidence is not None
         assert context.proposal_ts is not None
-        verified, reason = _verify_product_risk_of_ruin_authority(
+        verified, reason = _PRODUCT_RISK_AUTHORITY_DISPATCH(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="single",
@@ -2002,7 +2036,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
                 "portfolio vector risk-of-ruin evidence lacks canonical proposal time",
             )
         available_by = min(proposal_times).astimezone(timezone.utc).isoformat()
-        verified, reason = _verify_product_risk_of_ruin_authority(
+        verified, reason = _PRODUCT_RISK_AUTHORITY_DISPATCH(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="vector",

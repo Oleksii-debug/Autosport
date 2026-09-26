@@ -15,6 +15,15 @@ class ParlayApiRetentionError(ValueError):
     """Raised when retention evidence is structurally unsafe or unusable."""
 
 
+def _line_level_retention_deadline(captured_at: datetime) -> datetime:
+    try:
+        return captured_at + LINE_LEVEL_MAX_RETENTION
+    except (OverflowError, ValueError) as exc:
+        raise ParlayApiRetentionError(
+            "line-level retention exceeds supported datetime range"
+        ) from exc
+
+
 class ParlayApiOutputClass(str, Enum):
     LINE_LEVEL_PRICING = "LINE_LEVEL_PRICING"
     MATCH_RESULT_OR_OTHER_OUTPUT = "MATCH_RESULT_OR_OTHER_OUTPUT"
@@ -78,6 +87,8 @@ class ParlayApiOutputRetentionEvidence:
         _require_aware(self.available_at, "available_at")
         if self.captured_at < self.available_at:
             raise ParlayApiRetentionError("captured_at cannot precede available_at")
+        if self.output_class is ParlayApiOutputClass.LINE_LEVEL_PRICING:
+            _line_level_retention_deadline(self.captured_at)
         _require_text(self.policy_identity, "policy_identity")
         if self.observed_cache_control is not None:
             _require_text(self.observed_cache_control, "observed_cache_control")
@@ -112,7 +123,7 @@ class ParlayApiOutputRetentionEvidence:
 
         candidates: list[datetime] = []
         if self.output_class is ParlayApiOutputClass.LINE_LEVEL_PRICING:
-            candidates.append(self.captured_at + LINE_LEVEL_MAX_RETENTION)
+            candidates.append(_line_level_retention_deadline(self.captured_at))
         elif self.internal_retention_until is None:
             return None
 

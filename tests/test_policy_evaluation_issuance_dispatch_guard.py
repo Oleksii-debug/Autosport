@@ -59,6 +59,28 @@ def test_product_issuer_rejects_same_class_store_constructor_rebind_before_dispa
     assert called is False
 
 
+def test_product_issuer_rejects_in_place_store_constructor_code_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    authority = _bound_workspace(tmp_path, monkeypatch)
+    canonical_init = FactoryArtifactStore.__init__
+    canonical_code = canonical_init.__code__
+
+    def forged_init(self, root, *, clock=None):
+        raise AssertionError("forged constructor code must not execute")
+
+    canonical_init.__code__ = forged_init.__code__
+    try:
+        with pytest.raises(
+            issuance.ProductPolicyEvaluationIssuanceError,
+            match="FactoryArtifactStore constructor/clock dispatch: constructor executable",
+        ):
+            issuance._open_canonical_authorities(authority)
+    finally:
+        canonical_init.__code__ = canonical_code
+
+
 def test_product_issuer_rejects_same_class_store_setattr_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

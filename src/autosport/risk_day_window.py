@@ -86,6 +86,27 @@ class ProductDayRiskWindow:
     timezone: str = "UTC"
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "workspace_instance_id",
+            "day_key",
+            "window_start",
+            "window_end_exclusive",
+            "state_sha256",
+            "timezone",
+        ):
+            if type(getattr(self, field_name)) is not str:
+                raise RiskDayWindowIntegrityError(
+                    f"{field_name} must be an exact built-in string"
+                )
+        if type(self.authority_generation) is not int:
+            raise RiskDayWindowIntegrityError(
+                "authority_generation must be an exact built-in integer"
+            )
+        if type(self.product_clock_authoritative) is not bool:
+            raise RiskDayWindowIntegrityError(
+                "product_clock_authoritative must be an exact built-in boolean"
+            )
+
         day = _parse_day_key(self.day_key)
         expected_start, expected_end = _day_bounds(day)
         if self.timezone != "UTC":
@@ -496,7 +517,7 @@ class ProductDayRiskWindowStore:
     ) -> ProductDayRiskWindow:
         """Re-resolve positive product-clock day authority and reject substitutes."""
 
-        if not isinstance(candidate, ProductDayRiskWindow):
+        if type(candidate) is not ProductDayRiskWindow:
             raise RiskDayWindowMismatchError(
                 "candidate must be ProductDayRiskWindow evidence"
             )

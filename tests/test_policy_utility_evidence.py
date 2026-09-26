@@ -283,6 +283,37 @@ def test_bool_is_not_accepted_as_support_count() -> None:
         )
 
 
+def test_effective_sample_size_cannot_exceed_raw_support_count() -> None:
+    with pytest.raises(PolicyUtilityError, match="cannot exceed support_count"):
+        _evidence(
+            truth_class=UtilityTruthClass.ESTIMATED,
+            support_count=2,
+            effective_sample_size=Decimal("2.0001"),
+            uncertainty=Decimal("0"),
+        )
+
+    boundary = _evidence(
+        truth_class=UtilityTruthClass.ESTIMATED,
+        support_count=2,
+        effective_sample_size=Decimal("2"),
+        uncertainty=Decimal("0"),
+    )
+    assert boundary.effective_sample_size == Decimal("2")
+
+
+def test_deserialization_rejects_effective_sample_size_above_support_count() -> None:
+    raw = _evidence(
+        truth_class=UtilityTruthClass.ESTIMATED,
+        support_count=2,
+        effective_sample_size=Decimal("2"),
+        uncertainty=Decimal("0"),
+    ).to_dict()
+    raw["effective_sample_size"] = "3"
+
+    with pytest.raises(PolicyUtilityError, match="cannot exceed support_count"):
+        PolicyUtilityEvidence.from_dict(raw)
+
+
 def test_authority_refs_must_be_sorted_unique() -> None:
     ref_a = _ref("a-family", "a", SHA_A)
     ref_b = _ref("b-family", "b", SHA_B)

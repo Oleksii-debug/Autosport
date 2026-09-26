@@ -14,6 +14,7 @@ from autosport.risk_day_window import (
     ProductDayRiskWindowStore,
     RiskDayWindowClockRollbackError,
     RiskDayWindowIntegrityError,
+    RiskDayWindowMismatchError,
 )
 
 
@@ -32,6 +33,42 @@ class _FakeClock:
 
     def set(self, value: str) -> None:
         self.value = _epoch_ns(value)
+
+
+class _HostileText(str):
+    hook_calls = 0
+
+    def strip(self, *args: object, **kwargs: object) -> str:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile text strip executed")
+
+    def __eq__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile text equality executed")
+
+    def __ne__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile text inequality executed")
+
+
+class _HostileInt(int):
+    hook_calls = 0
+
+    def __le__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile integer comparison executed")
+
+
+class _HostileWindow(ProductDayRiskWindow):
+    hook_calls = 0
+
+    def __eq__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile window equality executed")
+
+    def __ne__(self, other: object) -> bool:
+        type(self).hook_calls += 1
+        raise AssertionError("hostile window inequality executed")
 
 
 class ProductDayRiskWindowStoreTests(unittest.TestCase):
@@ -147,6 +184,42 @@ class ProductDayRiskWindowStoreTests(unittest.TestCase):
                 product_clock_authoritative=True,
             )
 
+    def test_value_contract_rejects_polymorphic_scalars_before_hooks(self) -> None:
+        valid: dict[str, object] = {
+            "workspace_instance_id": "workspace",
+            "day_key": "2026-09-23",
+            "window_start": "2026-09-23T00:00:00Z",
+            "window_end_exclusive": "2026-09-24T00:00:00Z",
+            "state_sha256": "0" * 64,
+            "authority_generation": 1,
+            "product_clock_authoritative": True,
+            "timezone": "UTC",
+        }
+        _HostileText.hook_calls = 0
+        _HostileInt.hook_calls = 0
+
+        for field_name in (
+            "workspace_instance_id",
+            "day_key",
+            "window_start",
+            "window_end_exclusive",
+            "state_sha256",
+            "timezone",
+        ):
+            values = dict(valid)
+            values[field_name] = _HostileText(str(values[field_name]))
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(RiskDayWindowIntegrityError):
+                    ProductDayRiskWindow(**values)
+
+        values = dict(valid)
+        values["authority_generation"] = _HostileInt(1)
+        with self.assertRaises(RiskDayWindowIntegrityError):
+            ProductDayRiskWindow(**values)
+
+        self.assertEqual(_HostileText.hook_calls, 0)
+        self.assertEqual(_HostileInt.hook_calls, 0)
+
     def test_injected_clock_cannot_pass_positive_revalidation(self) -> None:
         store = self._store()
         evidence = store.current()
@@ -223,6 +296,31 @@ class ProductClockBoundaryTests(unittest.TestCase):
 
             self.assertTrue(evidence.product_clock_authoritative)
             self.assertEqual(store.require_current(evidence), evidence)
+
+    def test_require_current_rejects_window_subclass_before_equality(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            _HostileWindow.hook_calls = 0
+            hostile = _HostileWindow(
+                workspace_instance_id=evidence.workspace_instance_id,
+                day_key=evidence.day_key,
+                window_start=evidence.window_start,
+                window_end_exclusive=evidence.window_end_exclusive,
+                state_sha256=evidence.state_sha256,
+                authority_generation=evidence.authority_generation,
+                product_clock_authoritative=evidence.product_clock_authoritative,
+                timezone=evidence.timezone,
+            )
+
+            with self.assertRaises(RiskDayWindowMismatchError):
+                store.require_current(hostile)
+
+            self.assertEqual(_HostileWindow.hook_calls, 0)
 
     def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
         original = day_window._PRODUCT_TIME_NS

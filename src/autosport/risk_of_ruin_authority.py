@@ -7,6 +7,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from ._scientific_registry_read_authority import (
+    ScientificRegistryReadAuthorityError,
+    require_scientific_registry_read_authority,
+)
 from .risk_of_ruin_evaluator import (
     IssuedRiskOfRuinResult,
     ProductRiskOfRuinEvaluator,
@@ -20,17 +24,10 @@ _AUTHORITY_KIND = "autosport.risk-of-ruin-product-authority.v2"
 _BOUND_SEMANTICS = "probability_upper_bound"
 _CONFIDENCE_SEMANTICS = "protocol_defined_upper_bound"
 
-# Keep this authority fence local to the risk consumer. Importing the stronger
-# process-wide ScientificRegistry read-authority hook here would mutate
-# ScientificRegistry._read for every consumer merely because autosport.risk was
-# imported. These captured functions instead let this verifier detect runtime
-# class/instance rebinding without widening unrelated registry semantics.
-_SCIENTIFIC_REGISTRY_GET = ScientificRegistry.get
-_SCIENTIFIC_REGISTRY_READ = ScientificRegistry._read
-_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY = ScientificRegistry._validate_entry
-_SCIENTIFIC_REGISTRY_GET_CODE = ScientificRegistry.get.__code__
-_SCIENTIFIC_REGISTRY_READ_CODE = ScientificRegistry._read.__code__
-_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY_CODE = ScientificRegistry._validate_entry.__code__
+# Reuse the canonical process-wide ScientificRegistry executable/source authority.
+# This module is imported only when the ruin-authority path is evaluated, so the
+# canonical read guard is installed at the exact authority boundary rather than
+# by ordinary autosport.risk import.
 
 
 def _canonical_decimal(value: Decimal) -> str:
@@ -150,43 +147,22 @@ def risk_of_ruin_result_sha256(
 
 
 def _read_exact_registry_state(registry: ScientificRegistry) -> dict[str, Any]:
-    """Read one generation only through the exact captured registry implementation."""
+    """Read one generation through the canonical ScientificRegistry authority."""
 
     if type(registry) is not ScientificRegistry:
         raise ValueError("risk-of-ruin registry must be exact ScientificRegistry")
     if set(vars(registry)) != {"path"}:
         raise ValueError("risk-of-ruin registry instance read authority was rebound")
 
-    def _require_live_bindings() -> None:
-        # Generic get() is not used for resolution, but a rebound public read
-        # surface is still evidence that this registry object is not the exact
-        # supported authority shape.  _read itself is intentionally NOT compared
-        # here: other canonical product modules may install the verified
-        # process-wide reader after this module imports.  We invoke the captured
-        # implementation directly, so such later dispatch changes cannot retarget
-        # this verifier or make its behavior test-order dependent.
-        if (
-            ScientificRegistry.get is not _SCIENTIFIC_REGISTRY_GET
-            or getattr(_SCIENTIFIC_REGISTRY_GET, "__code__", None)
-            is not _SCIENTIFIC_REGISTRY_GET_CODE
-            or getattr(_SCIENTIFIC_REGISTRY_READ, "__code__", None)
-            is not _SCIENTIFIC_REGISTRY_READ_CODE
-            or ScientificRegistry._validate_entry is not _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY
-            or getattr(_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY, "__code__", None)
-            is not _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY_CODE
-        ):
-            raise ValueError("risk-of-ruin registry executable read authority was rebound")
-
-    _require_live_bindings()
-    state = _SCIENTIFIC_REGISTRY_READ(registry)
-    # Revalidate every returned envelope through the captured validator rather
-    # than trusting any dynamically-dispatched validation used inside _read.
+    read_fn, validate_entry, _get_fn, _causal_fn = (
+        require_scientific_registry_read_authority()
+    )
+    state = read_fn(registry)
     records = state.get("records")
     if type(records) is not list:
         raise ValueError("risk-of-ruin registry records must be a list")
     for raw in records:
-        _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY(raw)
-    _require_live_bindings()
+        validate_entry(raw)
     return state
 
 
@@ -422,7 +398,13 @@ def verify_risk_of_ruin_authority(
         artifacts = bundle.get("artifact_hashes")
         if type(artifacts) is not list or result_sha256 not in artifacts:
             return False, f"{prefix} risk-of-ruin durable result digest does not match"
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (
+        AttributeError,
+        OSError,
+        ScientificRegistryReadAuthorityError,
+        TypeError,
+        ValueError,
+    ):
         return False, f"{prefix} risk-of-ruin durable authority is invalid"
 
     # Generic ScientificRegistry rows prove scientific provenance/integrity only.

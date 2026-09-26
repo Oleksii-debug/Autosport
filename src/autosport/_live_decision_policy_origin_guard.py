@@ -1,9 +1,9 @@
-"""Seal live decision policy re-resolution to canonical ledger authority.
+"""Seal live decision policy and reevaluation dispatch to canonical ledger authority.
 
-This is a composition guard over the existing live-decision and Decision Ledger
-implementations. It does not create a second ledger, policy engine, or decision
-resolver. Its only authority is to reject caller-polymorphic or shadowed read
-dispatch before the existing resolver can use it.
+This is a composition guard over the existing live-decision, reevaluation, and Decision
+Ledger implementations. It does not create a second ledger, policy engine, or decision
+resolver. Its only authority is to reject caller-polymorphic or shadowed ledger dispatch
+before the existing product-owned resolvers can use it.
 """
 
 from __future__ import annotations
@@ -12,21 +12,30 @@ from types import MethodType
 
 from . import decision_ledger as _ledger_module
 from . import live_decision_disposition as _target
+from . import live_decision_reevaluation as _reevaluation
 from .decision_ledger import DecisionRecord, EconomicDecisionAuthority, JsonlDecisionLedger
 from .portfolio_plan import PortfolioPlan
 
 
 _ORIGINAL_RESOLVER = _target._resolve_product_policy_binding
 _ORIGINAL_RESOLVER_CODE = _ORIGINAL_RESOLVER.__code__
+_ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE = _reevaluation._verified_records_or_pristine
+_ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE_CODE = (
+    _ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE.__code__
+)
 _CANONICAL_PROVENANCE_FOR = _target.provenance_for
 _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING = _ledger_module.verify_economic_goal_binding
 _CANONICAL_DECISION_RECORD_TO_DICT = DecisionRecord.to_dict
 _CANONICAL_PORTFOLIO_FROM_DICT = PortfolioPlan.from_dict.__func__
+_CANONICAL_DISPOSITION_FROM_JSON = _target.LiveDecisionDisposition.from_json.__func__
+_CANONICAL_REEVALUATION_POLICY_VERIFY = _reevaluation.verify_product_policy_authority
 
-# Every method in this chain is reached by the canonical economic-decision read.
-# An exact ledger instance still has a writable __dict__, so instance shadowing is
-# rejected separately from class-level rebinding.
+# Every method in this chain is reached by the canonical economic-decision or
+# reevaluation read/write. An exact ledger instance still has a writable __dict__, so
+# instance shadowing is rejected separately from class-level rebinding.
 _LEDGER_SURFACES = {
+    "append": JsonlDecisionLedger.append,
+    "_append_validated": JsonlDecisionLedger._append_validated,
     "verified_economic_decision": JsonlDecisionLedger.verified_economic_decision,
     "verified_records": JsonlDecisionLedger.verified_records,
     "verified_snapshot": JsonlDecisionLedger.verified_snapshot,
@@ -59,7 +68,11 @@ def _dispatch_is_canonical(ledger: JsonlDecisionLedger) -> bool:
         is _CANONICAL_VERIFY_ECONOMIC_GOAL_BINDING
         and DecisionRecord.to_dict is _CANONICAL_DECISION_RECORD_TO_DICT
         and PortfolioPlan.from_dict.__func__ is _CANONICAL_PORTFOLIO_FROM_DICT
+        and _target.LiveDecisionDisposition.from_json.__func__
+        is _CANONICAL_DISPOSITION_FROM_JSON
         and _target.provenance_for is _CANONICAL_PROVENANCE_FOR
+        and _reevaluation.verify_product_policy_authority
+        is _CANONICAL_REEVALUATION_POLICY_VERIFY
     )
 
 
@@ -67,7 +80,7 @@ def _guarded_resolver(*, ledger, authority, decision_id):
     if type(authority) is not EconomicDecisionAuthority:
         raise TypeError("authority must be exact EconomicDecisionAuthority")
     if not _dispatch_is_canonical(ledger):
-        raise TypeError("ledger must expose canonical JsonlDecisionLedger read authority")
+        raise TypeError("ledger must expose canonical JsonlDecisionLedger authority")
     if (
         _target._resolve_product_policy_binding is not _guarded_resolver
         or _ORIGINAL_RESOLVER.__code__ is not _ORIGINAL_RESOLVER_CODE
@@ -87,4 +100,25 @@ def _guarded_resolver(*, ledger, authority, decision_id):
     return result
 
 
+def _guarded_verified_records_or_pristine(ledger):
+    if not _dispatch_is_canonical(ledger):
+        raise TypeError("ledger must expose canonical JsonlDecisionLedger authority")
+    if (
+        _reevaluation._verified_records_or_pristine
+        is not _guarded_verified_records_or_pristine
+        or _ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE.__code__
+        is not _ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE_CODE
+    ):
+        raise _target.LiveDecisionDispositionError(
+            "reevaluation durable-read authority changed"
+        )
+    records = _ORIGINAL_VERIFIED_RECORDS_OR_PRISTINE(ledger)
+    if not _dispatch_is_canonical(ledger):
+        raise _target.LiveDecisionDispositionError(
+            "reevaluation ledger authority changed during durable read"
+        )
+    return records
+
+
 _target._resolve_product_policy_binding = _guarded_resolver
+_reevaluation._verified_records_or_pristine = _guarded_verified_records_or_pristine

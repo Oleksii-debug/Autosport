@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import uuid
 from decimal import (
     Context,
@@ -16,6 +17,7 @@ from decimal import (
     localcontext,
 )
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
@@ -29,6 +31,79 @@ _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+
+
+def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
+    """Return the immutable opening facts that authorized PAPER economics."""
+    return (
+        ticket.stake,
+        ticket.legs,
+        ticket.placed_at,
+        ticket.strategy_reason,
+        ticket.provider_source_ids,
+        ticket.provider_accounts,
+        ticket.bankroll_id,
+        ticket.currency,
+    )
+
+
+def _make_ticket_opening_authority_registry():
+    # Opening economics are product-issued facts. Keep the authoritative copy
+    # outside caller-visible PaperTicket fields so coherent field rewrites cannot
+    # become their own witness.
+    authorities = WeakKeyDictionary()
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            authorities[book] = {}
+
+    def record(book: object, ticket: PaperTicket) -> None:
+        commitment = _ticket_opening_commitment(ticket)
+        with guard:
+            current = authorities.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            existing = current.get(ticket.ticket_id)
+            if existing is not None and existing != commitment:
+                raise ValueError("PaperBook ticket opening authority cannot be rebound")
+            current[ticket.ticket_id] = commitment
+
+    def install_validated_snapshot(book: object) -> None:
+        commitments = {
+            ticket_id: _ticket_opening_commitment(ticket)
+            for ticket_id, ticket in book.tickets.items()
+        }
+        with guard:
+            if book not in authorities:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            authorities[book] = commitments
+
+    def require_current(book: object) -> None:
+        with guard:
+            current = authorities.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            expected = dict(current)
+        if set(expected) != set(book.tickets):
+            raise ValueError(
+                "PaperBook ticket set changed outside product-issued opening authority"
+            )
+        for ticket_id, ticket in book.tickets.items():
+            if expected[ticket_id] != _ticket_opening_commitment(ticket):
+                raise ValueError(
+                    "PaperBook ticket opening economic identity changed after admission"
+                )
+
+    return register_book, record, install_validated_snapshot, require_current
+
+
+(
+    _register_ticket_opening_authority_book,
+    _record_ticket_opening_authority,
+    _install_validated_ticket_opening_authority,
+    _require_ticket_opening_authority,
+) = _make_ticket_opening_authority_registry()
 
 
 def _paper_decimal_context() -> Context:
@@ -62,6 +137,7 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
+        _register_ticket_opening_authority_book(self)
         initial = Decimal(str(initial_bankroll))
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
@@ -80,6 +156,7 @@ class PaperBook:
 
     @property
     def committed_stake(self) -> Decimal:
+        _require_ticket_opening_authority(self)
         return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
 
     @classmethod
@@ -111,6 +188,8 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
+        _require_ticket_opening_authority(self)
+        self._validate_loaded_state(self)
         amount = Decimal(str(stake))
         new_balance = self._debit_balance(self.balance, amount)
 
@@ -148,6 +227,7 @@ class PaperBook:
             bankroll_id=bankroll_id,
             currency=currency,
         )
+        _record_ticket_opening_authority(self, ticket)
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
@@ -220,6 +300,8 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
+        _require_ticket_opening_authority(self)
+        self._validate_loaded_state(self)
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -275,6 +357,7 @@ class PaperBook:
         return payload
 
     def save(self, path: str | Path) -> None:
+        _require_ticket_opening_authority(self)
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
         # Revalidate the complete economic/identity state immediately before any
         # durable replacement so caller/agent mutation cannot persist a snapshot
@@ -1001,6 +1084,7 @@ class PaperBook:
             )
 
         cls._validate_loaded_state(book)
+        _install_validated_ticket_opening_authority(book)
         return book
 
     @classmethod

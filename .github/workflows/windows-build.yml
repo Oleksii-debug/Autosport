@@ -19,6 +19,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: write
 
 concurrency:
   group: windows-candidate-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
@@ -31,14 +32,14 @@ jobs:
     outputs:
       current_head: ${{ github.event_name != 'pull_request' && 'true' || steps.admission.outputs.current_head }}
     steps:
-      - name: Checkout exact PR head for read-only admission helper
+      - name: Checkout exact PR head for superseded-run admission helper
         if: github.event_name == 'pull_request'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Reject stale PR rerun before Windows runner allocation
+      - name: Reject stale PR rerun and cancel obsolete same-workflow runs
         if: github.event_name == 'pull_request'
         id: admission
         env:
@@ -49,7 +50,6 @@ jobs:
           --event-head-sha "${{ github.event.pull_request.head.sha }}"
           --workflow-name "${{ github.workflow }}"
           --current-run-id "${{ github.run_id }}"
-          --admission-only
 
   build:
     needs: superseded_run_admission

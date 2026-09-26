@@ -237,6 +237,43 @@ def test_reflected_predecessor_open_code_rebind_fails_before_execution() -> None
         original_open.__code__ = canonical_code
 
 
+def test_reflected_common_guard_code_rebind_fails_before_helper_dispatch() -> None:
+    state = _dispatch_state()
+    state_type = type(state)
+    common_guard = state_type._require_common_dispatch
+    canonical_guard_code = common_guard.__code__
+    original_derive = issuance._derive_policy_evaluation
+    called = False
+
+    def forged_common_guard(self):
+        del self
+        return None
+
+    def forged_derive(*args, **kwargs):
+        nonlocal called
+        del args, kwargs
+        called = True
+        raise AssertionError("forged derive must not run")
+
+    common_guard.__code__ = forged_common_guard.__code__
+    issuance._derive_policy_evaluation = forged_derive
+    try:
+        with pytest.raises(
+            issuance.ProductPolicyEvaluationIssuanceError,
+            match="dispatch state class executable",
+        ):
+            issuance.issue_product_policy_evaluation(
+                None,
+                None,
+                source_evaluation_bundle_id="caller-forged",
+            )
+    finally:
+        issuance._derive_policy_evaluation = original_derive
+        common_guard.__code__ = canonical_guard_code
+
+    assert called is False
+
+
 def test_reflected_original_issue_still_crosses_current_dispatch_choke_point() -> None:
     state = _dispatch_state()
     original_issue = object.__getattribute__(

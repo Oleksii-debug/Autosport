@@ -37,10 +37,6 @@ _STATUS_KIND = "autosport_continuous_local_observation"
 _STATUS_LIFECYCLE_STATES = frozenset(
     {"starting", "running", "attempting", "provider_unavailable", "failed", "stopped"}
 )
-# The durable status is a small control envelope, not a provider payload. Bound the
-# restart read before UTF-8/JSON decoding so a corrupted or replaced artifact cannot
-# turn startup classification into an unbounded memory allocation.
-_STATUS_MAX_BYTES = 1024 * 1024
 _MAX_CYCLES = 100_000
 _MAX_RUNTIME_SECONDS = 7 * 24 * 60 * 60
 _MAX_INTERVAL_SECONDS = 60 * 60
@@ -148,17 +144,8 @@ def _read_previous_status(path: Path) -> dict[str, object] | None:
     if not path.exists():
         return None
     try:
-        with path.open("rb") as handle:
-            payload = handle.read(_STATUS_MAX_BYTES + 1)
-        if len(payload) > _STATUS_MAX_BYTES:
-            raise ValueError("continuous observation status exceeds size limit")
-        text = payload.decode("utf-8")
-        raw = strict_json_loads(text)
-    except (OSError, UnicodeError) as exc:
-        raise ValueError("continuous observation status is unreadable or invalid JSON") from exc
-    except ValueError as exc:
-        if str(exc) == "continuous observation status exceeds size limit":
-            raise
+        raw = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError("continuous observation status is unreadable or invalid JSON") from exc
     if (
         type(raw) is not dict
@@ -371,67 +358,107 @@ def run_continuous_observation(
                     policy=policy,
                     clock=ingestion_clock,
                 )
-            except ProviderUnavailableError as exc:
                 full_refresh_seen = _drain_invalidation_projection(mirror_updates)
+            except ProviderUnavailableError as exc:
+                if _has_health_persistence_failure_note(exc):
+                    state.health_status = "unknown"
+                    state.last_error_kind = "local_health_failure_while_recording_provider_error"
+                    state.last_error = _redacted_error(exc, redact_values)
+                    terminal_reason = state.last_error_kind
+                    terminal_exit = 5
+                    publish("failed", stop_reason=terminal_reason)
+                    break
                 state.provider_unavailable_streak += 1
+                state.health_status = _safe_health_status(health_store, state.source_id, "failed")
                 state.last_error_kind = "provider_unavailable"
                 state.last_error = _redacted_error(exc, redact_values)
-                state.health_status = _safe_health_status(health_store, provider.source_id, "unknown")
-                publish("provider_unavailable", full_refresh=full_refresh_seen)
+                publish("provider_unavailable")
                 if state.attempted_cycles >= config.max_cycles:
                     terminal_reason = "max_cycles_after_provider_unavailable"
-                    terminal_exit = 4
+                    terminal_exit = 4 if state.successful_cycles == 0 else 0
                     break
-                delay = min(
+                remaining = config.max_runtime_seconds - (monotonic() - started_monotonic)
+                if remaining <= 0:
+                    terminal_reason = "max_runtime_after_provider_unavailable"
+                    terminal_exit = 4 if state.successful_cycles == 0 else 0
+                    break
+                exponent = min(state.provider_unavailable_streak - 1, 20)
+                backoff = min(
                     config.max_backoff_seconds,
-                    config.interval_seconds * (2 ** min(state.provider_unavailable_streak - 1, 20)),
+                    config.interval_seconds * (2**exponent),
+                    remaining,
                 )
-                if wait(delay):
+                if wait(backoff):
                     terminal_reason = "operator_stop"
                     break
-            except (OSError, sqlite3.Error, ValueError, CommittedIngestionHealthError) as exc:
-                full_refresh_seen = _drain_invalidation_projection(mirror_updates)
+                continue
+            except CommittedIngestionHealthError as exc:
+                state.health_status = "unknown"
+                state.last_error_kind = "local_health_publication_failure_after_market_commit"
+                state.last_error = _redacted_error(exc, redact_values)
+                terminal_reason = state.last_error_kind
+                terminal_exit = 5
+                publish("failed", stop_reason=terminal_reason)
+                break
+            except (sqlite3.Error, OSError) as exc:
+                state.health_status = _safe_health_status(health_store, state.source_id, "unknown")
                 state.last_error_kind = "local_durable_failure"
                 state.last_error = _redacted_error(exc, redact_values)
-                state.health_status = _safe_health_status(health_store, provider.source_id, "unknown")
-                terminal_reason = "local_durable_failure"
+                terminal_reason = state.last_error_kind
                 terminal_exit = 5
-                publish("failed", stop_reason=terminal_reason, full_refresh=full_refresh_seen)
+                publish("failed", stop_reason=terminal_reason)
                 break
-            else:
-                full_refresh_seen = _drain_invalidation_projection(mirror_updates)
-                state.provider_unavailable_streak = 0
-                state.successful_cycles += 1
-                state.total_received += stats.received
-                state.total_accepted += stats.accepted
-                state.total_rejected += stats.rejected
-                state.last_cursor = stats.cursor
-                state.health_status = stats.health_status
-                state.last_error_kind = None
-                state.last_error = None
+            except Exception as exc:
+                state.health_status = _safe_health_status(health_store, state.source_id, "failed")
+                state.last_error_kind = "fail_closed_provider_or_validation_error"
+                state.last_error = _redacted_error(exc, redact_values)
+                terminal_reason = state.last_error_kind
+                terminal_exit = 3
+                publish("failed", stop_reason=terminal_reason)
+                break
 
-                publish("running", full_refresh=full_refresh_seen)
-                if state.attempted_cycles >= config.max_cycles:
-                    terminal_reason = "max_cycles"
-                    break
-                if wait(config.interval_seconds):
-                    terminal_reason = "operator_stop"
-                    break
+            state.successful_cycles += 1
+            state.total_received += stats.received
+            state.total_accepted += stats.accepted
+            state.total_rejected += stats.rejected
+            state.last_cursor = stats.cursor
+            state.health_status = stats.health_status
+            state.provider_unavailable_streak = 0
+            state.last_error_kind = None
+            state.last_error = None
+            publish("running", full_refresh=full_refresh_seen)
+
+            if state.attempted_cycles >= config.max_cycles:
+                terminal_reason = "max_cycles"
+                break
+            remaining = config.max_runtime_seconds - (monotonic() - started_monotonic)
+            if remaining <= 0:
+                terminal_reason = "max_runtime"
+                break
+            if wait(min(config.interval_seconds, remaining)):
+                terminal_reason = "operator_stop"
+                break
+    except Exception as exc:
+        if state.last_error_kind is None:
+            state.last_error_kind = "local_startup_or_status_failure"
+            state.last_error = _redacted_error(exc, redact_values)
+        # If status publication itself is broken, a second write may fail too. Preserve
+        # the original exception and never proceed to provider I/O after that failure.
+        try:
+            publish("failed", stop_reason=state.last_error_kind)
+        except Exception:
+            pass
+        raise
     finally:
-        primary_failure = sys.exc_info()[1]
         if store is not None:
+            primary_failure_active = sys.exc_info()[0] is not None
             try:
                 store.close()
-            except BaseException as close_exc:
-                if primary_failure is not None:
-                    try:
-                        primary_failure.add_note(f"market store close also failed: {close_exc}")
-                    except Exception:
-                        pass
-                else:
+            except Exception:
+                if not primary_failure_active:
                     raise
 
-    publish("stopped", stop_reason=terminal_reason)
+    publish("stopped" if terminal_exit == 0 else "failed", stop_reason=terminal_reason)
     return ContinuousObservationResult(
         run_id=state.run_id,
         stop_reason=terminal_reason,
@@ -444,3 +471,119 @@ def run_continuous_observation(
         last_error=state.last_error,
         exit_code=terminal_exit,
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="autosport-observe-continuous",
+        description="Bounded local read-only Autosport market observation loop",
+    )
+    parser.add_argument("workspace", type=Path)
+    parser.add_argument(
+        "--provider",
+        choices=("parlay-table-tennis",),
+        default="parlay-table-tennis",
+    )
+    parser.add_argument(
+        "--enable-network-observation",
+        action="store_true",
+        help="required explicit opt-in before any provider network request",
+    )
+    parser.add_argument(
+        "--public-preview",
+        action="store_true",
+        help="use the provider's public preview instead of an authenticated API key",
+    )
+    parser.add_argument("--max-cycles", type=int, default=60)
+    parser.add_argument("--max-runtime-seconds", type=float, default=3600.0)
+    parser.add_argument("--interval-seconds", type=float, default=60.0)
+    parser.add_argument("--max-backoff-seconds", type=float, default=300.0)
+    parser.add_argument("--max-items", type=int, default=250)
+    parser.add_argument("--status-path", type=Path)
+    return parser
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    provider_factory: ProviderFactory = ParlayApiTableTennisProvider,
+) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        config = ContinuousObservationConfig(
+            workspace=args.workspace,
+            max_cycles=args.max_cycles,
+            max_runtime_seconds=args.max_runtime_seconds,
+            interval_seconds=args.interval_seconds,
+            max_backoff_seconds=args.max_backoff_seconds,
+            max_items=args.max_items,
+            status_path=args.status_path,
+        )
+    except ValueError as exc:
+        print(f"continuous_observation=CONFIG_ERROR error={exc}")
+        return 2
+
+    if not args.enable_network_observation:
+        print(
+            "continuous_observation=BLOCKED reason=network_observation_not_explicitly_enabled "
+            "real_money_execution=false"
+        )
+        return 2
+
+    api_key = None if args.public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
+    if not args.public_preview and not api_key:
+        print(
+            "continuous_observation=BLOCKED reason=AUTOSPORT_PARLAYAPI_KEY_not_set "
+            "real_money_execution=false"
+        )
+        return 2
+
+    try:
+        provider = provider_factory(api_key, public_preview=args.public_preview)
+    except (ProviderPayloadError, ValueError) as exc:
+        redacted_error = _redacted_error(exc, (api_key,) if api_key else ())
+        print(f"continuous_observation=CONFIG_ERROR error={redacted_error}")
+        return 2
+
+    stop_event = threading.Event()
+    old_handlers: dict[int, object] = {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stop_event.set()
+
+    for signum in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+        if signum is None:
+            continue
+        try:
+            old_handlers[signum] = signal.signal(signum, request_stop)
+        except (OSError, ValueError):
+            pass
+
+    try:
+        result = run_continuous_observation(
+            provider,
+            config,
+            stop_event=stop_event,
+            redact_values=(api_key,) if api_key else (),
+        )
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        print(f"continuous_observation=FAIL_CLOSED error={_redacted_error(exc, (api_key,) if api_key else ())}")
+        return 5
+    finally:
+        for signum, old_handler in old_handlers.items():
+            try:
+                signal.signal(signum, old_handler)
+            except (OSError, ValueError):
+                pass
+
+    print(
+        "continuous_observation=STOPPED "
+        f"reason={result.stop_reason} attempted={result.attempted_cycles} "
+        f"successful={result.successful_cycles} real_money_execution=false"
+    )
+    return result.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

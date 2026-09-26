@@ -168,9 +168,11 @@ def _canonical_effective_sample_size(
     value: object | None,
     sample_count: int,
 ) -> int | None:
+    if type(sample_count) is not int or sample_count < 0:
+        raise ValueError("sample_count must be a non-negative integer")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ValueError("effective_sample_size must be a positive integer")
     if value > sample_count:
         raise ValueError("effective_sample_size cannot exceed sample_count")
@@ -198,11 +200,11 @@ def _sample_insufficiency_reason(
         (baseline_count, "baseline_count"),
         (current_count, "current_count"),
     ):
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        if type(count) is not int or count < 0:
             raise ValueError(f"{name} must be a non-negative integer")
 
-    assert isinstance(baseline_count, int)
-    assert isinstance(current_count, int)
+    assert type(baseline_count) is int
+    assert type(current_count) is int
     baseline_effective = _canonical_effective_sample_size(
         baseline_effective_sample_size,
         baseline_count,
@@ -529,7 +531,7 @@ class DriftReference:
             raise ValueError("min_samples must be an integer")
         if self.min_samples <= 0:
             raise ValueError("min_samples must be positive")
-        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int):
+        if type(self.sample_count) is not int:
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative")
@@ -678,7 +680,7 @@ class DriftObservation:
             raise ValueError("observation window timestamps are inconsistent")
         _sha256(self.evidence_sha256, "evidence_sha256")
         _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
-        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int):
+        if type(self.sample_count) is not int:
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative")

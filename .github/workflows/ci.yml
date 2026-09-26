@@ -19,9 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  # Every attempt for the same PR/ref competes in one group. A newer exact-head
-  # run must cancel stale manual reruns as well as ordinary predecessor runs.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
   cancel-in-progress: true
 
 jobs:
@@ -54,7 +52,7 @@ jobs:
         if: failure() && runner.os == 'Windows'
         shell: pwsh
         run: |
-          python -c "from autosport.accessibility_audit import run_accessibility_audit; from autosport.windows_layout import install_compact_windows_layout; install_compact_windows_layout(); run_accessibility_audit('ci-accessibility-audit.json')"
+          python -c "from autosport.accessibility_audit import run_accessibility_audit; from autosport.windows_layout import install_compact_windows_layout; run_accessibility_audit('ci-accessibility-audit.json')"
       - name: Upload Windows accessibility failure evidence
         if: failure() && runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

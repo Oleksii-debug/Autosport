@@ -102,6 +102,8 @@ class _PartialStartRuntime:
 def _bare_controller(tmp_path: Path) -> AutosportWebController:
     controller = AutosportWebController.__new__(AutosportWebController)
     controller._lock = threading.RLock()
+    controller._request_replay_lock = threading.RLock()
+    controller._request_identities = {}
     controller._request_results = {}
     controller._closing = False
     controller.workspace = tmp_path

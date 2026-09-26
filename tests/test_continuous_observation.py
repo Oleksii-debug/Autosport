@@ -292,6 +292,45 @@ class ContinuousObservationTests(unittest.TestCase):
                 self._run(provider, self._config(workspace, max_cycles=1))
             self.assertEqual(provider.calls, 0)
 
+    def test_duplicate_key_previous_status_fails_before_any_provider_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "continuous_observation_status.json").write_text(
+                '{"schema_version":1,"run_id":"prior-run","state":"running","state":"stopped"}',
+                encoding="utf-8",
+            )
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+            with self.assertRaisesRegex(ValueError, "status is unreadable"):
+                self._run(provider, self._config(workspace, max_cycles=1))
+            self.assertEqual(provider.calls, 0)
+
+    def test_wrong_kind_previous_status_fails_before_any_provider_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "continuous_observation_status.json").write_text(
+                '{"schema_version":1,"kind":"different_status_document","run_id":"prior-run","state":"stopped"}',
+                encoding="utf-8",
+            )
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+            with self.assertRaisesRegex(ValueError, "unsupported kind"):
+                self._run(provider, self._config(workspace, max_cycles=1))
+            self.assertEqual(provider.calls, 0)
+
+    def test_unsupported_previous_lifecycle_state_fails_before_any_provider_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "continuous_observation_status.json").write_text(
+                '{"schema_version":1,"kind":"autosport_continuous_local_observation","run_id":"prior-run","state":"paused"}',
+                encoding="utf-8",
+            )
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+            with self.assertRaisesRegex(ValueError, "unsupported lifecycle state"):
+                self._run(provider, self._config(workspace, max_cycles=1))
+            self.assertEqual(provider.calls, 0)
+
     def test_provider_error_status_redacts_configured_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

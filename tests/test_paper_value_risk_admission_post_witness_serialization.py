@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from time import monotonic, sleep
 
 from autosport.agents import AgentContext
@@ -114,9 +114,42 @@ def _run_agent(
         done.set()
 
 
+class _PostWitnessBlockingDecisionLedger(JsonlDecisionLedger):
+    """Block one target read without rebinding canonical execution authority."""
+
+    def __init__(self, path, *, blocked: Event, release: Event) -> None:
+        super().__init__(path)
+        self.blocked = blocked
+        self.release = release
+        self.blocking_thread: Thread | None = None
+        self.target_decision_id: str | None = None
+        self._target_durable_reads = 0
+
+    def verified_records(self):
+        records = super().verified_records()
+        if (
+            self.blocking_thread is not None
+            and current_thread() is self.blocking_thread
+            and self.target_decision_id is not None
+            and any(
+                record.decision_id == self.target_decision_id
+                for record in records
+            )
+        ):
+            self._target_durable_reads += 1
+            # Target read 1 verifies the durable decision after append. Read 2
+            # is inside _issue_general_risk_admission while the execution lock
+            # is held and commits the risk witness. Read 3 occurs immediately
+            # after that witness returns, still under the same execution lock.
+            if self._target_durable_reads == 3:
+                self.blocked.set()
+                if not self.release.wait(timeout=5):
+                    raise AssertionError("target execution was not released")
+        return records
+
+
 def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     tmp_path,
-    monkeypatch,
 ) -> None:
     book = PaperBook("100.00")
     policy = PaperRiskPolicy(
@@ -133,7 +166,13 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     target_agent = _agent(target_event, policy)
     competitor_agent = _agent(competitor_event, policy)
 
-    decision_ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    target_post_witness = Event()
+    release_target = Event()
+    decision_ledger = _PostWitnessBlockingDecisionLedger(
+        tmp_path / "decisions.jsonl",
+        blocked=target_post_witness,
+        release=release_target,
+    )
     target_context = AgentContext(
         book,
         replay_run_id="replay-target",
@@ -157,44 +196,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         competitor_context,
         competitor_event,
     )
-    target_post_witness = Event()
-    release_target = Event()
-    original_execute_unlocked = PaperExecutionAdoptionRuntime._execute_unlocked
-
-    def block_after_target_witness(
-        self,
-        *,
-        prepared,
-        trigger_id: str,
-        started_at: str,
-        materialize_exposure: bool,
-        observations=None,
-        evidence_registry=None,
-        suspended_action_ids: frozenset[str] = frozenset(),
-    ):
-        # This boundary is reached only after GENERAL risk admission has committed
-        # and while the runtime-wide execution lock is held. Test synchronization
-        # therefore cannot replace the protected PaperValue authority entry point.
-        if trigger_id == target_decision_id:
-            target_post_witness.set()
-            if not release_target.wait(timeout=5):
-                raise AssertionError("target execution was not released")
-        return original_execute_unlocked(
-            self,
-            prepared=prepared,
-            trigger_id=trigger_id,
-            started_at=started_at,
-            materialize_exposure=materialize_exposure,
-            observations=observations,
-            evidence_registry=evidence_registry,
-            suspended_action_ids=suspended_action_ids,
-        )
-
-    monkeypatch.setattr(
-        PaperExecutionAdoptionRuntime,
-        "_execute_unlocked",
-        block_after_target_witness,
-    )
+    decision_ledger.target_decision_id = target_decision_id
 
     target_done = Event()
     competitor_done = Event()
@@ -212,6 +214,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         kwargs={"done": competitor_done, "errors": competitor_errors},
         daemon=True,
     )
+    decision_ledger.blocking_thread = target_thread
 
     target_thread.start()
     try:

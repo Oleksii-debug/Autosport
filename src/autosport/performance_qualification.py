@@ -34,6 +34,72 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]:
+    """Materialize one detached report state for validation and identity binding."""
+
+    if not isinstance(report, Mapping):
+        raise PerformanceQualificationError("endurance report must be an object")
+    try:
+        materialized = dict(report)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise PerformanceQualificationError(
+            "endurance report could not be snapshotted"
+        ) from exc
+
+    active_containers: set[int] = set()
+
+    def detach(value: object) -> object:
+        if value is None or type(value) in (str, int, float, bool):
+            return value
+
+        if type(value) is dict:
+            marker = id(value)
+            if marker in active_containers:
+                raise PerformanceQualificationError(
+                    "endurance report contains a circular object"
+                )
+            active_containers.add(marker)
+            try:
+                detached: dict[str, object] = {}
+                for key, item in value.items():
+                    if type(key) is not str:
+                        raise PerformanceQualificationError(
+                            "endurance report object keys must be strings"
+                        )
+                    try:
+                        key.encode("utf-8", errors="strict")
+                    except UnicodeEncodeError as exc:
+                        raise PerformanceQualificationError(
+                            "endurance report object keys must be valid UTF-8"
+                        ) from exc
+                    detached[key] = detach(item)
+                return detached
+            finally:
+                active_containers.remove(marker)
+
+        if type(value) is list:
+            marker = id(value)
+            if marker in active_containers:
+                raise PerformanceQualificationError(
+                    "endurance report contains a circular object"
+                )
+            active_containers.add(marker)
+            try:
+                return [detach(item) for item in value]
+            finally:
+                active_containers.remove(marker)
+
+        raise PerformanceQualificationError(
+            "endurance report contains an unsupported non-JSON value"
+        )
+
+    snapshot = detach(materialized)
+    if type(snapshot) is not dict:
+        raise PerformanceQualificationError("endurance report must snapshot to an object")
+    _canonical_json(snapshot)
+    return snapshot
+
+
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise PerformanceQualificationError(f"{name} must be canonical non-empty text")
@@ -437,8 +503,12 @@ def qualify_endurance_report(
         raise PerformanceQualificationError("budget must be PerformanceBudget")
     canonical_source_sha = _source_sha(source_sha)
     canonical_machine_profile = _text(machine_profile, "machine_profile")
-    observed = _validate_report(report, expected_source_sha=canonical_source_sha)
-    report_sha256 = _digest(dict(report))
+    report_snapshot = _detached_report_snapshot(report)
+    observed = _validate_report(
+        report_snapshot,
+        expected_source_sha=canonical_source_sha,
+    )
+    report_sha256 = _digest(report_snapshot)
 
     checks: list[MetricQualification] = []
 

@@ -25,6 +25,7 @@ class _CapturingProductWorker:
         *,
         workspace: str | Path,
         source_factory: str,
+        expected_source_id: str,
         initial_bankroll: str = "10000",
         poll_seconds: float = 30.0,
     ) -> bool:
@@ -32,6 +33,7 @@ class _CapturingProductWorker:
             {
                 "workspace": Path(workspace),
                 "source_factory": source_factory,
+                "expected_source_id": expected_source_id,
                 "initial_bankroll": initial_bankroll,
                 "poll_seconds": poll_seconds,
             }

@@ -22,30 +22,40 @@ def _job_body(text: str, job_name: str) -> str:
 
 
 @pytest.mark.parametrize(("workflow_path", "heavy_job"), _WORKFLOWS)
-def test_current_head_preflight_cancels_superseded_runs_before_heavy_runner(
+def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
     workflow_path: Path,
     heavy_job: str,
 ) -> None:
-    """Current head may evict stale work; stale reruns may never evict current head."""
+    """PR-controlled admission must never receive Actions write authority.
+
+    Fresh-vs-rerun exact-head concurrency preserves the bidirectional safety property;
+    the lightweight admission job then prevents a stale rerun from allocating the
+    expensive CI/Windows runner. Historical runs created from pre-admission workflow
+    versions require trusted operational cleanup rather than a write-capable PR token.
+    """
 
     text = workflow_path.read_text(encoding="utf-8")
 
-    # The helper reads the live PR head and cancels Actions runs through the REST API.
-    # Those permissions are explicit product/CI authority and must not be accidental.
     assert re.search(r"(?m)^  pull-requests:\s*read\s*$", text)
-    assert re.search(r"(?m)^  actions:\s*write\s*$", text)
+    assert not re.search(r"(?m)^  actions:\s*write\s*$", text)
 
     assert re.search(r"(?m)^  superseded_run_admission:\s*$", text)
     assert "scripts/cancel_superseded_pr_workflow_runs.py" in text
+    assert "--admission-only" in text
 
-    # Admission-only prevents stale work from starting but cannot free already-active
-    # obsolete runs. The current exact head must invoke the bounded asymmetric
-    # cancellation path; the helper itself rechecks the live head before cancellation.
-    assert "--admission-only" not in text
+    concurrency = re.search(
+        r"(?ms)^concurrency:\s*\n(?P<body>(?:^[ \t]+[^\n]*\n?)+)",
+        text,
+    )
+    assert concurrency is not None
+    group = concurrency.group("body")
+    assert "github.run_attempt" in group
+    assert "github.event.pull_request.head.sha" in group
+    assert "cancel-in-progress: true" in group
 
     heavy = _job_body(text, heavy_job)
     assert re.search(
         r"(?m)^    needs:\s*superseded_run_admission\s*$",
         heavy,
-    ), f"{heavy_job} must wait for current-head admission/cancellation"
+    ), f"{heavy_job} must wait for current-head admission"
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in heavy

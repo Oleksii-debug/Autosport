@@ -55,18 +55,23 @@ function Get-ExternalActionPattern {
     }
 
     # Chromium/WebView2 can expose an HTML button through the legacy-accessible
-    # bridge even when UIA InvokePattern is absent.  A non-empty default action
-    # is the externally observable activation contract; simply being focusable
-    # is not enough to pass this gate.
+    # bridge even when UIA InvokePattern is absent. UIA_LegacyIAccessiblePatternId
+    # is the stable UI Automation identifier (10018). Resolve the AutomationPattern
+    # by identifier instead of naming the concrete LegacyIAccessiblePattern CLR type:
+    # some PowerShell/.NET Windows runners expose the pattern object but cannot
+    # resolve that concrete type name. Dynamic member access still exercises the
+    # real external DefaultAction/DoDefaultAction contract.
+    $legacyPattern = [System.Windows.Automation.AutomationPattern]::LookupById(10018)
+    if ($null -eq $legacyPattern) { return $null }
+
     $legacyObject = $null
     if ($Element.TryGetCurrentPattern(
-        [System.Windows.Automation.LegacyIAccessiblePattern]::Pattern,
+        $legacyPattern,
         [ref]$legacyObject
     ) -and $null -ne $legacyObject) {
-        $legacy = [System.Windows.Automation.LegacyIAccessiblePattern]$legacyObject
-        $defaultAction = [string]$legacy.Current.DefaultAction
+        $defaultAction = [string]$legacyObject.Current.DefaultAction
         if (-not [string]::IsNullOrWhiteSpace($defaultAction)) {
-            return [pscustomobject]@{ Kind = 'LegacyIAccessible'; Pattern = $legacy }
+            return [pscustomobject]@{ Kind = 'LegacyIAccessible'; Pattern = $legacyObject }
         }
     }
     return $null
@@ -103,10 +108,34 @@ function Invoke-ExternalAction {
         return
     }
     if ($action.Kind -eq 'LegacyIAccessible') {
-        ([System.Windows.Automation.LegacyIAccessiblePattern]$action.Pattern).DoDefaultAction()
+        $action.Pattern.DoDefaultAction()
         return
     }
     throw "unsupported external action kind '$($action.Kind)'"
+}
+
+function Test-IsNamedStructuralHeaderRow {
+    param([System.Windows.Automation.AutomationElement]$Element)
+
+    # WebView2 exposes the semantic <thead><tr><th scope="col">… structure as an
+    # unnamed ControlType.Row containing a named ControlType.HeaderItem. That row
+    # is table structure, not ticket data, so it must not be counted as an unnamed
+    # data item. Actual body rows remain subject to the nonblank-name gate.
+    $descendants = $Element.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    foreach ($child in $descendants) {
+        try {
+            $childType = [string]$child.Current.ControlType.ProgrammaticName
+            if ($childType -ne 'ControlType.HeaderItem') { continue }
+            $childName = [string]$child.Current.Name
+            if (-not [string]::IsNullOrWhiteSpace($childName)) { return $true }
+        } catch {
+            # A disappearing fragment cannot prove structural-header semantics.
+        }
+    }
+    return $false
 }
 
 function Get-SemanticChildStats {
@@ -129,8 +158,15 @@ function Get-SemanticChildStats {
         try {
             $typeName = [string]$item.Current.ControlType.ProgrammaticName
             if (-not ($AllowedTypes -contains $typeName)) { continue }
-            $candidateCount += 1
             $itemName = [string]$item.Current.Name
+            if (
+                [string]::IsNullOrWhiteSpace($itemName) -and
+                $typeName -eq 'ControlType.Row' -and
+                (Test-IsNamedStructuralHeaderRow -Element $item)
+            ) {
+                continue
+            }
+            $candidateCount += 1
             if ([string]::IsNullOrWhiteSpace($itemName)) {
                 $unnamedCount += 1
             } else {

@@ -5,7 +5,10 @@ from typing import Any
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
-# This module is the retired Tk audit kept for historical/unit evidence only.\n# The canonical packaged WebView2 keyboard audit lives in windows_webview_audit.\n_STARTUP_FOCUS_CONTROL = "shell_navigation"\nfrom .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
+# This module is the retired Tk audit kept for historical/unit evidence only.
+# The canonical packaged WebView2 keyboard audit lives in windows_webview_audit.
+_STARTUP_FOCUS_CONTROL = "shell_navigation"
+from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 

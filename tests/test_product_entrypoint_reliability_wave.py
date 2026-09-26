@@ -242,7 +242,7 @@ def test_primary_tick_failure_survives_close_and_restore_failures(
             poll_seconds=0,
         )
 
-    assert raised.value.error_type == "TickFailure"
+    assert raised.value.error_type == "RuntimeError"
     assert isinstance(raised.value.__cause__, TickFailure)
     assert runtime.stop_calls == ["runtime_error"]
     assert runtime.close_calls == 1

@@ -303,49 +303,11 @@ class RunTransaction:
         if canonical_ledger.resolve() != (self.workspace / "decisions.jsonl").resolve():
             raise RunTransactionError("Decision Ledger staging path must be the canonical workspace path")
         ensure_durable_file(canonical_ledger)
-        expected_base_book_hash = self._hash_field(
-            manifest,
-            "base",
-            "paper_book_sha256",
-        )
-        base_book_snapshot = self._verified_canonical_paper_book_snapshot(
+        self._require_hash(
             self.workspace / "paper_book.json",
-            "base PaperBook",
+            self._hash_field(manifest, "base", "paper_book_sha256"),
+            "PaperBook",
         )
-        if base_book_snapshot.sha256 != expected_base_book_hash:
-            raise RunTransactionError(
-                "base PaperBook SHA-256 canonical hash is not the expected transaction state"
-            )
-
-        expected_retained_contract = {
-            "base_paper_book": "paper_book.base.json",
-            "terminal_paper_book": "paper_book.terminal.json",
-        }
-        retained_contract = manifest.get("retained")
-        if retained_contract is None:
-            # A genuine legacy transaction that is still in staging may acquire
-            # retained evidence because canonical PaperBook is still exactly BASE.
-            # Persist and verify BASE before advertising the new retained contract.
-            self._atomic_write_bytes(
-                self.base_book_snapshot_path,
-                base_book_snapshot.payload,
-            )
-        elif retained_contract != expected_retained_contract:
-            raise RunTransactionError(
-                "transaction retained-evidence paths are invalid"
-            )
-
-        retained_base = self._verified_canonical_paper_book_snapshot(
-            self.base_book_snapshot_path,
-            "retained base PaperBook",
-        )
-        if (
-            retained_base.sha256 != expected_base_book_hash
-            or retained_base.payload != base_book_snapshot.payload
-        ):
-            raise RunTransactionError(
-                "retained base PaperBook exact snapshot mismatch"
-            )
         canonical_snapshot = self._require_decision_ledger_snapshot(
             canonical_ledger,
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
@@ -401,11 +363,51 @@ class RunTransaction:
             raise RunTransactionError("transaction is not in staging phase")
         if not self.staged_book_path.is_file() or not self.staged_ledger_path.is_file():
             raise RunTransactionError("staged outputs are incomplete")
-        self._require_hash(
-            self.workspace / "paper_book.json",
-            self._hash_field(manifest, "base", "paper_book_sha256"),
-            "PaperBook",
+
+        expected_base_book_hash = self._hash_field(
+            manifest,
+            "base",
+            "paper_book_sha256",
         )
+        base_book_snapshot = self._verified_canonical_paper_book_snapshot(
+            self.workspace / "paper_book.json",
+            "base PaperBook",
+        )
+        if base_book_snapshot.sha256 != expected_base_book_hash:
+            raise RunTransactionError(
+                "base PaperBook SHA-256 canonical hash is not the expected transaction state"
+            )
+
+        expected_retained_contract = {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }
+        retained_contract = manifest.get("retained")
+        if retained_contract is None:
+            # A genuine legacy transaction is still before precommit. Canonical
+            # PaperBook is therefore required to be exact BASE, so retain those
+            # already-verified bytes before the new evidence contract is advertised.
+            self._atomic_write_bytes(
+                self.base_book_snapshot_path,
+                base_book_snapshot.payload,
+            )
+        elif retained_contract != expected_retained_contract:
+            raise RunTransactionError(
+                "transaction retained-evidence paths are invalid"
+            )
+
+        retained_base = self._verified_canonical_paper_book_snapshot(
+            self.base_book_snapshot_path,
+            "retained base PaperBook",
+        )
+        if (
+            retained_base.sha256 != expected_base_book_hash
+            or retained_base.payload != base_book_snapshot.payload
+        ):
+            raise RunTransactionError(
+                "retained base PaperBook exact snapshot mismatch"
+            )
+
         canonical_snapshot = self._require_decision_ledger_snapshot(
             self.workspace / "decisions.jsonl",
             self._hash_field(manifest, "base", "decision_ledger_sha256"),

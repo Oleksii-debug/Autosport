@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -678,8 +677,6 @@ def _install_verified_provider_evidence_authority() -> None:
         name: descriptor_code(value)
         for name, value in sealed_profile_descriptors.items()
     }
-    timeout_absence_assertion: object | None = None
-    timeout_absence_assertion_code: object | None = None
     missing = object()
 
     def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
@@ -777,50 +774,6 @@ def _install_verified_provider_evidence_authority() -> None:
                     f"provider capability profile authority method changed: {name}"
                 )
 
-    def register_timeout_absence_authority(assertion: object) -> None:
-        nonlocal timeout_absence_assertion, timeout_absence_assertion_code
-        if not callable(assertion):
-            raise sealed_error("timeout absence authority assertion must be callable")
-
-        # This registrar is exposed only to break the provider-evidence/timeout
-        # import cycle; exposure must not become caller-mintable authority.  A
-        # foreign callback registered before the timeout module is imported could
-        # otherwise become the permanently captured absence assertion and turn
-        # generic complete-empty readback into retry-authoritative absence.
-        timeout_module_name = f"{__package__}.betfair_timeout_reconciliation"
-        timeout_module = sys.modules.get(timeout_module_name)
-        assertion_globals = getattr(assertion, "__globals__", None)
-        assertion_qualname = getattr(assertion, "__qualname__", None)
-        if (
-            getattr(assertion, "__module__", None) != timeout_module_name
-            or timeout_module is None
-            or assertion_globals is not vars(timeout_module)
-            or assertion_qualname
-            != (
-                "_install_betfair_timeout_absence_authority.<locals>."
-                "assert_betfair_timeout_absence_authoritative"
-            )
-        ):
-            raise sealed_error(
-                "timeout absence authority assertion origin is not canonical"
-            )
-
-        assertion_code = getattr(assertion, "__code__", None)
-        if assertion_code is None:
-            raise sealed_error(
-                "timeout absence authority assertion executable code is unavailable"
-            )
-        if timeout_absence_assertion is None:
-            timeout_absence_assertion = assertion
-            timeout_absence_assertion_code = assertion_code
-            return
-        if timeout_absence_assertion is not assertion:
-            raise sealed_error("timeout absence authority assertion is already registered")
-        if timeout_absence_assertion_code is not assertion_code:
-            raise sealed_error(
-                "timeout absence authority assertion executable code changed"
-            )
-
     def authoritative_verify(
         action: ExecutionAction,
         profile: BookmakerCapabilityProfile,
@@ -852,7 +805,14 @@ def _install_verified_provider_evidence_authority() -> None:
     def assert_verified_provider_evidence_authoritative(
         evidence: VerifiedProviderState,
     ) -> None:
-        nonlocal timeout_absence_assertion
+        """Require exact evidence issued by the sealed canonical provider verifier.
+
+        Provider-evidence origin and Betfair timeout-horizon authority are separate
+        capabilities.  This boundary proves only the former; the final timeout
+        reconciliation boundary must additionally require the resolver-issued
+        timeout-horizon capability directly.
+        """
+
         assert_executable_authority_intact()
         if not isinstance(evidence, (sealed_effect_type, sealed_absence_type)):
             raise sealed_error("provider evidence type is not canonical")
@@ -865,44 +825,12 @@ def _install_verified_provider_evidence_authority() -> None:
             raise sealed_error(
                 "verified provider evidence changed after canonical verification"
             )
-        if isinstance(evidence, sealed_absence_type):
-            # Import only for registration side effect. Consumption uses the exact
-            # closure-captured assertion registered by the timeout authority, never a
-            # later mutable module attribute.
-            if timeout_absence_assertion is None:
-                try:
-                    from . import betfair_timeout_reconciliation as _timeout_authority
-                    del _timeout_authority
-                except ImportError as exc:
-                    raise sealed_error(
-                        "verified provider absence lacks durable timeout-horizon authority"
-                    ) from exc
-            assertion = timeout_absence_assertion
-            assertion_code = timeout_absence_assertion_code
-            if assertion is None or assertion_code is None:
-                raise sealed_error(
-                    "verified provider absence lacks durable timeout-horizon authority"
-                )
-            if getattr(assertion, "__code__", None) is not assertion_code:
-                raise sealed_error(
-                    "timeout absence authority assertion executable code changed"
-                )
-            try:
-                assertion(evidence)
-            except Exception as exc:
-                # Preserve one stable provider-evidence boundary for downstream
-                # reconciliation without trusting a mutable timeout exception symbol.
-                raise sealed_error(
-                    "verified provider absence lacks durable timeout-horizon authority"
-                ) from exc
 
     globals()["verify_betfair_provider_state"] = authoritative_verify
     globals()[
         "assert_verified_provider_evidence_authoritative"
     ] = assert_verified_provider_evidence_authoritative
-    globals()[
-        "_register_betfair_timeout_absence_authority_assertion"
-    ] = register_timeout_absence_authority
+
 
 
 _install_verified_provider_evidence_authority()

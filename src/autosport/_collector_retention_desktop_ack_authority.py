@@ -33,14 +33,19 @@ from pathlib import Path
 
 from . import causal_collector_legacy as _legacy
 from . import collector_retention as _retention
+from .collector_sqlite_active_store import CollectorDeltaStore as _CanonicalCollectorDeltaStore
 from .json_integrity import strict_json_loads
 
 
 DesktopDeltaCheckpointStore = _legacy.DesktopDeltaCheckpointStore
+CanonicalDesktopApplication = _legacy.CanonicalDesktopApplication
+_CanonicalDesktopApplicationStore = _legacy._CanonicalDesktopApplicationStore
 _AUTHORITY_METHODS = ("has_ack", "application_receipt")
 _PRISTINE_ANCHOR_NAME = "_collector_retention_pristine_desktop_ack_v1"
 _BUILD_PLAN_ANCHOR_NAME = "_collector_retention_original_build_plan_v1"
 _ACK_WRITE_ANCHOR_NAME = "_collector_desktop_ack_write_authority_v1"
+_COLLECTOR_WRITE_ANCHOR_NAME = "_collector_desktop_ack_collector_authority_v1"
+_APPLICATION_AUTHORITY_ANCHOR_NAME = "_collector_desktop_application_authority_v1"
 
 
 def _load_pristine_authority_methods():
@@ -97,10 +102,59 @@ def _load_ack_write_authority_methods():
     return existing[1], existing[2], existing[4]
 
 
+
+
+def _load_collector_write_authority_methods():
+    existing = getattr(_legacy, _COLLECTOR_WRITE_ANCHOR_NAME, None)
+    if existing is None:
+        existing = (
+            _CanonicalCollectorDeltaStore,
+            _CanonicalCollectorDeltaStore.get,
+            _CanonicalCollectorDeltaStore.deltas_after_commit,
+        )
+        setattr(_legacy, _COLLECTOR_WRITE_ANCHOR_NAME, existing)
+    if (
+        not isinstance(existing, tuple)
+        or len(existing) != 3
+        or existing[0] is not _CanonicalCollectorDeltaStore
+        or not callable(existing[1])
+        or not callable(existing[2])
+    ):
+        raise RuntimeError("desktop ACK collector authority anchor is invalid")
+    return existing[1], existing[2]
+
+
+def _load_application_authority_methods():
+    existing = getattr(_legacy, _APPLICATION_AUTHORITY_ANCHOR_NAME, None)
+    if existing is None:
+        existing = (
+            CanonicalDesktopApplication,
+            CanonicalDesktopApplication.lookup_receipt,
+            _CanonicalDesktopApplicationStore,
+            _CanonicalDesktopApplicationStore.receipt,
+        )
+        setattr(_legacy, _APPLICATION_AUTHORITY_ANCHOR_NAME, existing)
+    if (
+        not isinstance(existing, tuple)
+        or len(existing) != 4
+        or existing[0] is not CanonicalDesktopApplication
+        or existing[2] is not _CanonicalDesktopApplicationStore
+        or not callable(existing[1])
+        or not callable(existing[3])
+    ):
+        raise RuntimeError("desktop application authority anchor is invalid")
+    return existing[1], existing[3]
+
 _PRISTINE_HAS_ACK, _PRISTINE_APPLICATION_RECEIPT = _load_pristine_authority_methods()
 _ORIGINAL_BUILD_PLAN = _load_original_build_plan()
 _ORIGINAL_PUBLIC_ACK, _ORIGINAL_ACK_LOCKED, _ORIGINAL_CONSUMER_DRAIN = (
     _load_ack_write_authority_methods()
+)
+_CANONICAL_COLLECTOR_GET, _CANONICAL_COLLECTOR_DELTAS_AFTER_COMMIT = (
+    _load_collector_write_authority_methods()
+)
+_PRISTINE_APPLICATION_LOOKUP, _PRISTINE_APPLICATION_STATE_RECEIPT = (
+    _load_application_authority_methods()
 )
 
 
@@ -305,24 +359,133 @@ _retention.CollectorRetentionManager._build_plan = _build_plan
 
 # The token contains exact object identities, not caller-authored DTO content. It is
 # installed only around the already-established DesktopDeltaConsumer.drain handoff.
-_ACK_CONTEXT: ContextVar[tuple[DesktopDeltaCheckpointStore, object] | None] = ContextVar(
-    "autosport_desktop_ack_consumer_authority",
+_ACK_CONTEXT: ContextVar[
+    tuple[
+        DesktopDeltaCheckpointStore,
+        _CanonicalCollectorDeltaStore,
+        CanonicalDesktopApplication,
+    ]
+    | None
+] = ContextVar(
+    "autosport_desktop_ack_consumer_scope",
     default=None,
 )
 
 
-def _collector_call(collector: object, method_name: str, /, *args, **kwargs):
+def _collector_call(
+    collector: object,
+    method_name: str,
+    /,
+    *args,
+    **kwargs,
+):
+    if type(collector) is not _CanonicalCollectorDeltaStore:
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK requires the exact canonical CollectorDeltaStore"
+        )
     namespace = getattr(collector, "__dict__", None)
     if isinstance(namespace, dict) and method_name in namespace:
         raise _legacy.ApplicationReceiptError(
             f"collector {method_name} authority cannot be instance-shadowed"
         )
-    method = getattr(type(collector), method_name, None)
-    if not callable(method):
-        raise _legacy.ApplicationReceiptError(
-            f"collector lacks canonical {method_name} authority"
+    if method_name == "get":
+        current = getattr(_CanonicalCollectorDeltaStore, "get", None)
+        if current is not _CANONICAL_COLLECTOR_GET:
+            raise _legacy.ApplicationReceiptError(
+                "canonical collector get authority was rebound"
+            )
+        return _CANONICAL_COLLECTOR_GET(collector, *args, **kwargs)
+    if method_name == "deltas_after_commit":
+        current = getattr(_CanonicalCollectorDeltaStore, "deltas_after_commit", None)
+        if current is not _CANONICAL_COLLECTOR_DELTAS_AFTER_COMMIT:
+            raise _legacy.ApplicationReceiptError(
+                "canonical collector commit-order authority was rebound"
+            )
+        return _CANONICAL_COLLECTOR_DELTAS_AFTER_COMMIT(
+            collector, *args, **kwargs
         )
-    return method(collector, *args, **kwargs)
+    raise _legacy.ApplicationReceiptError(
+        f"collector lacks canonical {method_name} authority"
+    )
+
+
+def _canonical_application_for_consumer(
+    consumer: _legacy.DesktopDeltaConsumer,
+) -> CanonicalDesktopApplication:
+    if type(consumer) is not _legacy.DesktopDeltaConsumer:
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK requires the exact canonical DesktopDeltaConsumer"
+        )
+    if type(consumer.checkpoint) is not DesktopDeltaCheckpointStore:
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK requires the exact canonical checkpoint store"
+        )
+    if type(consumer.collector) is not _CanonicalCollectorDeltaStore:
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK requires the exact canonical CollectorDeltaStore"
+        )
+
+    lookup = consumer.lookup_application_receipt
+    application = getattr(lookup, "__self__", None)
+    if (
+        type(application) is not CanonicalDesktopApplication
+        or getattr(lookup, "__func__", None) is not _PRISTINE_APPLICATION_LOOKUP
+    ):
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK requires CanonicalDesktopApplication durable receipt authority"
+        )
+
+    state = getattr(application, "_state", None)
+    if type(state) is not _CanonicalDesktopApplicationStore:
+        raise _legacy.ApplicationReceiptError(
+            "desktop application durable state authority is invalid"
+        )
+
+    collector_path = Path(consumer.collector.path)
+    checkpoint_path = Path(consumer.checkpoint.path)
+    application_path = Path(state.path)
+    try:
+        if (
+            collector_path.is_symlink()
+            or checkpoint_path.is_symlink()
+            or application_path.is_symlink()
+            or collector_path.parent.resolve(strict=True)
+            != checkpoint_path.parent.resolve(strict=True)
+            or collector_path.parent.resolve(strict=True)
+            != application_path.parent.resolve(strict=True)
+        ):
+            raise _legacy.ApplicationReceiptError(
+                "desktop ACK authorities must share one canonical workspace"
+            )
+    except OSError as exc:
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK authority workspace cannot be verified"
+        ) from exc
+
+    return application
+
+
+def _canonical_application_receipt(
+    application: CanonicalDesktopApplication,
+    delta: _legacy.CollectorDelta,
+) -> _legacy.DesktopApplicationReceipt | None:
+    if type(application) is not CanonicalDesktopApplication:
+        raise _legacy.ApplicationReceiptError(
+            "desktop application authority is invalid"
+        )
+    state = getattr(application, "_state", None)
+    if type(state) is not _CanonicalDesktopApplicationStore:
+        raise _legacy.ApplicationReceiptError(
+            "desktop application durable state authority is invalid"
+        )
+    current_receipt_method = getattr(
+        _CanonicalDesktopApplicationStore, "receipt", None
+    )
+    if current_receipt_method is not _PRISTINE_APPLICATION_STATE_RECEIPT:
+        raise _legacy.ApplicationReceiptError(
+            "desktop application receipt authority was rebound"
+        )
+    return _PRISTINE_APPLICATION_STATE_RECEIPT(state, delta)
 
 
 def _canonical_commit_prefix(collector: object, delta: _legacy.CollectorDelta):
@@ -416,16 +579,29 @@ def _guarded_ack_locked(
             "desktop ACK write requires the canonical consumer handoff"
         )
     collector = authority[1]
+    application = authority[2]
     canonical_delta = _collector_call(collector, "get", delta.delta_id)
     if canonical_delta is None or canonical_delta != delta:
         raise _legacy.ApplicationReceiptError(
             "desktop ACK assertion does not match canonical collector evidence"
         )
+    durable_receipt = _canonical_application_receipt(
+        application, canonical_delta
+    )
+    if (
+        type(application_receipt) is not _legacy.DesktopApplicationReceipt
+        or durable_receipt is None
+        or type(durable_receipt) is not _legacy.DesktopApplicationReceipt
+        or durable_receipt != application_receipt
+    ):
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK requires the exact canonical durable application receipt"
+        )
     _require_contiguous_predecessors(self, collector, canonical_delta)
     return _ORIGINAL_ACK_LOCKED(
         self,
         canonical_delta,
-        application_receipt=application_receipt,
+        application_receipt=durable_receipt,
         acknowledged_at=acknowledged_at,
     )
 
@@ -436,7 +612,8 @@ def _guarded_consumer_drain(
     as_of: str,
     view: _legacy.CausalView = _legacy.CausalView.AS_KNOWN_AT_DECISION,
 ) -> tuple[str, ...]:
-    token = _ACK_CONTEXT.set((self.checkpoint, self.collector))
+    application = _canonical_application_for_consumer(self)
+    token = _ACK_CONTEXT.set((self.checkpoint, self.collector, application))
     try:
         return _ORIGINAL_CONSUMER_DRAIN(self, as_of=as_of, view=view)
     finally:

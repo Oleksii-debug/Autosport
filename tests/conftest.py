@@ -9,12 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 
-# Root-selection production now correctly treats post-composition replacement of the
-# OS account-location resolver as an authority violation. Tests that need a sandbox
-# must therefore install one stable process-local resolver *before* importing the
-# product package. The resolver identity never changes after composition; scoped
-# fixtures below vary only this test-process state. When no sandbox is active the
-# shim delegates to the real OS resolver, so unrelated tests retain normal behavior.
+# Root-selection production correctly treats post-composition replacement of the
+# OS account-location resolver as an authority violation. Install one stable
+# process-local resolver *before* importing the product package and vary only its
+# backing test path. This keeps callable identity fixed while preventing independent
+# tmp_path workspaces from accumulating selector receipts in one account-wide test
+# store. The dedicated product-store contract still exercises the real OS resolver.
 _ROOT_SELECTION_TEST_HOME: Path | None = None
 
 if os.name == "nt":
@@ -63,26 +63,27 @@ from autosport.paper_execution_reality import (
 
 
 _ROOT_SELECTION_PRODUCT_STORE_TEST = "test_monotonic_root_selection_product_store.py"
-_ROOT_SELECTION_SANDBOX_TESTS = frozenset(
-    {
-        "test_monotonic_root_selector_concurrent_instance_fork.py",
-        "test_monotonic_workspace_authority_bootstrap.py",
-        "test_monotonic_workspace_authority_p0_regressions.py",
-    }
-)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_monotonic_root_selection_store(request, tmp_path):
-    """Keep root-selection tests hermetic without post-import resolver rebinding."""
+    """Isolate selector state per test without rebinding the resolver callable.
+
+    Production intentionally keeps selector receipts in one OS-account store so a
+    moved/copied workspace can be detected across paths. Pytest, however, creates
+    thousands of unrelated temporary workspaces in one process. Letting those tests
+    share the account store makes each split-identity cross-check rescan unrelated
+    prior receipts and turns the suite into cumulative filesystem work.
+
+    Keep the one resolver installed before Autosport import and vary only its backing
+    path per test. The dedicated product-store test deliberately retains the real OS
+    account location and therefore bypasses this isolation.
+    """
 
     global _ROOT_SELECTION_TEST_HOME
 
     test_file = Path(str(request.node.fspath)).name
     if test_file == _ROOT_SELECTION_PRODUCT_STORE_TEST:
-        yield
-        return
-    if test_file not in _ROOT_SELECTION_SANDBOX_TESTS:
         yield
         return
 

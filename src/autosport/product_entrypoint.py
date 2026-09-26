@@ -14,6 +14,7 @@ from typing import Callable, Mapping, Sequence
 
 from .collector_service import _load_source_factory
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .secret_redaction import _safe_exception_type_label
 
 
 _OUTPUT_FORMATS = frozenset({"json", "text"})
@@ -36,9 +37,11 @@ class ProductEntrypointError(RuntimeError):
 class ProductRuntimeError(ProductEntrypointError):
     """The product failed only after the canonical runtime had started."""
 
-    def __init__(self, error_type: str) -> None:
+    def __init__(self, exc: BaseException) -> None:
+        if not isinstance(exc, BaseException):
+            raise TypeError("ProductRuntimeError requires a caught exception")
         super().__init__("product runtime failed after start")
-        self.error_type = error_type
+        self.error_type = _safe_exception_type_label(exc)
 
 
 class _SecretSafeArgumentParser(argparse.ArgumentParser):
@@ -412,7 +415,7 @@ def run_product(
         if started:
             if isinstance(exc, ProductRuntimeError):
                 raise
-            raise ProductRuntimeError(type(exc).__name__) from exc
+            raise ProductRuntimeError(exc) from exc
         raise
     finally:
         primary_failure = sys.exc_info()[1]
@@ -432,7 +435,7 @@ def run_product(
                 try:
                     primary_failure.add_note(
                         "runtime STOP also failed during exceptional cleanup: "
-                        f"{type(stop_error).__name__}"
+                        f"{_safe_exception_type_label(stop_error)}"
                     )
                 except BaseException:
                     pass
@@ -446,7 +449,7 @@ def run_product(
                 try:
                     primary_failure.add_note(
                         "runtime close also failed during cleanup: "
-                        f"{type(exc).__name__}"
+                        f"{_safe_exception_type_label(exc)}"
                     )
                 except BaseException:
                     pass
@@ -468,9 +471,7 @@ def run_product(
 
         if cleanup_failure is not None:
             if started:
-                raise ProductRuntimeError(
-                    type(cleanup_failure).__name__
-                ) from cleanup_failure
+                raise ProductRuntimeError(cleanup_failure) from cleanup_failure
             raise cleanup_failure
 
 
@@ -508,7 +509,7 @@ def run_product_command(
         _print_failure(
             kind="product_start_failure",
             error_code="product_start_failed",
-            error_type=type(exc).__name__,
+            error_type=_safe_exception_type_label(exc),
             output_format=output_format,
         )
         return 3

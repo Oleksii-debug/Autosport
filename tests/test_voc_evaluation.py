@@ -1358,6 +1358,36 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             ):
                 VOCEvaluationStore(path)
 
+    def test_store_restart_rejects_duplicate_json_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "voc.json"
+            VOCEvaluationStore(path)
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            encoded = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            marker = '"version":3'
+            self.assertIn(marker, encoded)
+            path.write_text(
+                encoded.replace(
+                    marker,
+                    '"version":999,"version":3',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                VOCEvaluationError,
+                "VOC evaluation store is unreadable",
+            ):
+                VOCEvaluationStore(path)
+
     def test_future_outcome_evaluation_is_not_causally_usable(self):
         paired = evaluation(
             outcome_revealed_at=T3,

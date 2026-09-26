@@ -28,6 +28,12 @@ class WorkflowRun:
     status: str
 
 
+@dataclass(frozen=True)
+class CancellationResult:
+    current_head: bool
+    cancelled_run_ids: tuple[int, ...]
+
+
 def _require_sha(value: object, *, field: str) -> str:
     if not isinstance(value, str) or len(value) != 40:
         raise CancellationError(f"invalid {field}")
@@ -161,14 +167,14 @@ def cancel_superseded(
     event_head_sha: str,
     workflow_name: str,
     current_run_id: int,
-) -> tuple[int, ...]:
+) -> CancellationResult:
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     live_head_sha = api.live_pr_head(pr_number)
     if event_head_sha != live_head_sha:
-        return ()
+        return CancellationResult(current_head=False, cancelled_run_ids=())
     active_runs = api.active_runs()
     if api.live_pr_head(pr_number) != live_head_sha:
-        return ()
+        return CancellationResult(current_head=False, cancelled_run_ids=())
     selected = select_superseded_runs(
         active_runs,
         pr_number=pr_number,
@@ -178,7 +184,19 @@ def cancel_superseded(
     )
     for run_id in selected:
         api.cancel(run_id)
-    return selected
+    return CancellationResult(current_head=True, cancelled_run_ids=selected)
+
+
+def _write_github_output(result: CancellationResult) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+    try:
+        with open(output_path, "a", encoding="utf-8") as output:
+            value = "true" if result.current_head else "false"
+            output.write(f"current_head={value}\n")
+    except OSError as exc:
+        raise CancellationError("unable to write GITHUB_OUTPUT") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -193,17 +211,19 @@ def main(argv: list[str] | None = None) -> int:
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
         )
-        cancelled = cancel_superseded(
+        result = cancel_superseded(
             api=api,
             pr_number=args.pr_number,
             event_head_sha=args.event_head_sha,
             workflow_name=args.workflow_name,
             current_run_id=args.current_run_id,
         )
+        _write_github_output(result)
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
         return 2
-    print("cancelled superseded workflow runs: " + ",".join(str(item) for item in cancelled))
+    cancelled = ",".join(str(item) for item in result.cancelled_run_ids)
+    print("cancelled superseded workflow runs: " + cancelled)
     return 0
 
 

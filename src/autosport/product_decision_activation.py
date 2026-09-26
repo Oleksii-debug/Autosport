@@ -35,7 +35,8 @@ DECISION_CYCLE_CONTRACT: Final = "autosport.product-paper-decision-cycle.v1"
 PAPER_EXECUTION_MODE: Final = "PAPER"
 _ACTIVATION_AUTHORITY_DOMAIN: Final = "autosport.product-decision-activation.v1"
 _PRODUCT_AUTHORITY_ROOT_NAME: Final = "product-decision-activation-authority-v1"
-_MAX_DURABLE_JSON_BYTES: Final = 1024 * 1024
+_MAX_ACTIVATION_STATE_BYTES: Final = 1024 * 1024
+_MAX_SMALL_AUTHORITY_BYTES: Final = 64 * 1024
 
 # Freeze the exact product-import-time fingerprint authority. Exact instance type alone
 # is insufficient because Python permits replacing a class property at runtime. START
@@ -312,15 +313,22 @@ def _optional_text(value: object, name: str) -> str | None:
     return None if value is None else _text(value, name)
 
 
-def _read_regular_file(path: Path, label: str) -> bytes:
+def _read_regular_file(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int | None = None,
+) -> bytes:
     try:
         if path.is_symlink() or not path.is_file():
             raise ProductDecisionActivationError(f"{label} must be a regular file")
+        if max_bytes is None:
+            return path.read_bytes()
         with path.open("rb") as handle:
-            raw = handle.read(_MAX_DURABLE_JSON_BYTES + 1)
+            raw = handle.read(max_bytes + 1)
     except OSError as exc:
         raise ProductDecisionActivationError(f"cannot read {label}") from exc
-    if len(raw) > _MAX_DURABLE_JSON_BYTES:
+    if len(raw) > max_bytes:
         raise ProductDecisionActivationError(
             f"{label} exceeds bounded durable-state size"
         )
@@ -344,8 +352,13 @@ def _require_workspace_path(
     return expected
 
 
-def _strict_json_file(path: Path, label: str) -> tuple[bytes, object]:
-    raw = _read_regular_file(path, label)
+def _strict_json_file(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[bytes, object]:
+    raw = _read_regular_file(path, label, max_bytes=max_bytes)
     try:
         return raw, strict_json_loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, TypeError, ValueError) as exc:
@@ -361,7 +374,11 @@ def _product_composition(workspace: Path) -> tuple[str, str, str]:
         "product_composition.json",
         "product composition",
     )
-    raw, payload = _strict_json_file(path, "product composition")
+    raw, payload = _strict_json_file(
+        path,
+        "product composition",
+        max_bytes=_MAX_SMALL_AUTHORITY_BYTES,
+    )
     if type(payload) is not dict:
         raise ProductDecisionActivationError("product composition must be an object")
     if payload.get("schema") != "autosport.autonomous_product_composition":
@@ -507,7 +524,11 @@ def _risk_policy_file_digest(
         "paper_risk_policy.json",
         "paper risk policy",
     )
-    raw, payload = _strict_json_file(path, "paper risk policy")
+    raw, payload = _strict_json_file(
+        path,
+        "paper risk policy",
+        max_bytes=_MAX_SMALL_AUTHORITY_BYTES,
+    )
     if type(payload) is not dict:
         raise ProductDecisionActivationError("paper risk policy must be an object")
     if (
@@ -1014,7 +1035,11 @@ class ProductDecisionActivationStore:
             )
         if not self.path.exists():
             return None
-        raw = _read_regular_file(self.path, "product decision activation")
+        raw = _read_regular_file(
+            self.path,
+            "product decision activation",
+            max_bytes=_MAX_ACTIVATION_STATE_BYTES,
+        )
         return hashlib.sha256(raw).hexdigest()
 
     def _recover_authority(self) -> str | None:
@@ -1115,6 +1140,7 @@ class ProductDecisionActivationStore:
         durable_goal_bytes = _read_regular_file(
             durable_goal_store.path,
             "durable owner EconomicGoalContract",
+            max_bytes=_MAX_SMALL_AUTHORITY_BYTES,
         )
         if durable_goal_bytes != expected_goal_bytes:
             raise ProductDecisionActivationError(
@@ -1343,7 +1369,9 @@ class ProductDecisionActivationStore:
 
     def _load_local(self) -> ProductDecisionActivationBinding:
         _, root = _strict_json_file(
-            self.path, "product decision activation"
+            self.path,
+            "product decision activation",
+            max_bytes=_MAX_ACTIVATION_STATE_BYTES,
         )
         if type(root) is not dict or frozenset(root) != _ROOT_FIELDS:
             raise ProductDecisionActivationError(

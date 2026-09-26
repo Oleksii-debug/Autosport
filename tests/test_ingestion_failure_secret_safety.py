@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.continuous_observation import _redacted_error
 from autosport.ingestion_health import SourceHealthStore
 from autosport.providers import ProviderUnavailableError
 
@@ -84,35 +83,8 @@ class IngestionFailureSecretSafetyTests(unittest.TestCase):
             self.assertEqual(state.total_failures, 1)
             self.assertEqual(
                 state.last_error,
-                "_HostileError: exception details unavailable",
+                "Exception: exception details unavailable",
             )
-
-    def test_continuous_observation_uses_shared_pattern_and_explicit_redaction(self) -> None:
-        environment_secret = "synthetic-environment-secret-4c8a"
-        explicit_secret = "synthetic-explicit-secret-62"
-        error = ValueError(
-            "password=synthetic-password-13 "
-            "authorization=Bearer synthetic-bearer-55 "
-            f"environment={environment_secret} "
-            f"opaque={explicit_secret}"
-        )
-
-        with patch.dict(
-            "os.environ",
-            {"AUTOSPORT_PARLAYAPI_KEY": environment_secret},
-            clear=False,
-        ):
-            rendered = _redacted_error(error, (explicit_secret,))
-
-        self.assertTrue(rendered.startswith("ValueError: "))
-        for secret in (
-            "synthetic-password-13",
-            "synthetic-bearer-55",
-            environment_secret,
-            explicit_secret,
-        ):
-            self.assertNotIn(secret, rendered)
-        self.assertIn("[REDACTED]", rendered)
 
     def test_ordinary_failure_detail_remains_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

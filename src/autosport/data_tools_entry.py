@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import sys
 
-from autosport.secret_redaction import safe_exception_text
+from autosport.secret_redaction import safe_exception_detail
 
 
 # Expected failures are an operator-presentation boundary, not an extensible exception
-# registry. Capture the concrete interpreter-owned classes and canonical formatter once
+# registry. Capture the concrete interpreter-owned classes and canonical redactor once
 # so later module-global rebinding cannot mint presentation authority.
 _CANONICAL_VALUE_ERROR = ValueError
 _CANONICAL_OS_ERROR = OSError
-_CANONICAL_SAFE_EXCEPTION_TEXT = safe_exception_text
+_CANONICAL_SAFE_EXCEPTION_DETAIL = safe_exception_detail
 _EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
 
 
@@ -128,15 +128,19 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    if safe_exception_text is not _CANONICAL_SAFE_EXCEPTION_TEXT:
-        rendered = "ExpectedFailure: exception details unavailable"
+    # The exception category is deliberately product-owned. Exception classes and the
+    # builtins namespace are mutable runtime presentation inputs, so neither may choose
+    # the operator-visible type label. Only the canonical redactor owns detail text.
+    if safe_exception_detail is not _CANONICAL_SAFE_EXCEPTION_DETAIL:
+        detail = "exception details unavailable"
     else:
-        rendered = _CANONICAL_SAFE_EXCEPTION_TEXT(
+        detail = _CANONICAL_SAFE_EXCEPTION_DETAIL(
             exc,
             unavailable_detail="exception details unavailable",
         )
-    rendered = " ".join(rendered.splitlines()).strip()
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={rendered}"
+    detail = " ".join(detail.splitlines()).strip()
+    suffix = "" if not detail else f": {detail}"
+    return f"Autosport-Data: {command}=FAIL_CLOSED error=ExpectedFailure{suffix}"
 
 
 def main(argv: list[str] | None = None) -> int:

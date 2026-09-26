@@ -185,23 +185,43 @@ _expected_failure_message = _install_expected_failure_message()
 del _install_expected_failure_message
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in {"-h", "--help"}:
-        print(_USAGE)
-        return 0
+def _install_main():
+    """Bind final expected-failure presentation to the canonical sealed renderer."""
 
-    command, forwarded = args[0], args[1:]
-    try:
-        return _dispatch(command, forwarded)
-    except _EXPECTED_FAILURE_TYPES as exc:
-        # This executable is a packaged user-facing boundary. Expected malformed
-        # local input and filesystem failures must be recoverable without a Python
-        # traceback. Deliberately do not catch RuntimeError, SystemExit or
-        # BaseException so programming failures and argparse exit semantics remain
-        # visible to qualification instead of being mislabeled as user-input errors.
-        print(_expected_failure_message(command, exc), file=sys.stderr)
-        return 3
+    canonical_failure_renderer = _expected_failure_message
+    canonical_failure_renderer_code = canonical_failure_renderer.__code__
+
+    def main(argv: list[str] | None = None) -> int:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if not args or args[0] in {"-h", "--help"}:
+            print(_USAGE)
+            return 0
+
+        command, forwarded = args[0], args[1:]
+        try:
+            return _dispatch(command, forwarded)
+        except _EXPECTED_FAILURE_TYPES as exc:
+            # The renderer is itself a security boundary. Do not let module-global
+            # rebinding or an in-place executable swap bypass its redaction fences.
+            if (
+                _expected_failure_message is canonical_failure_renderer
+                and getattr(canonical_failure_renderer, "__code__", None)
+                is canonical_failure_renderer_code
+            ):
+                message = canonical_failure_renderer(command, exc)
+            else:
+                message = (
+                    f"Autosport-Data: {command}=FAIL_CLOSED "
+                    "error=ExpectedFailure: exception details unavailable"
+                )
+            print(message, file=sys.stderr)
+            return 3
+
+    return main
+
+
+main = _install_main()
+del _install_main
 
 
 if __name__ == "__main__":

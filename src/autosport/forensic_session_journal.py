@@ -507,11 +507,7 @@ def _parse_line(line: str, *, expected_seq: int, expected_prev: str) -> JournalR
     )
 
 
-def _read_verified_records_only(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
-    journal_path = Path(path)
-    if not journal_path.exists():
-        return ()
-    raw = journal_path.read_bytes()
+def _parse_verified_record_bytes(raw: bytes) -> tuple[JournalRecord, ...]:
     if not raw:
         return ()
     if not raw.endswith(b"\n"):
@@ -530,6 +526,76 @@ def _read_verified_records_only(path: str | os.PathLike[str]) -> tuple[JournalRe
         records.append(record)
         expected_prev = record.sha256
     return tuple(records)
+
+
+def _read_verified_records_only(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
+    journal_path = Path(path)
+    if not journal_path.exists():
+        return ()
+    return _parse_verified_record_bytes(journal_path.read_bytes())
+
+
+def _assert_bound_journal_path(
+    path: Path,
+    identity: tuple[int, int],
+    size: int,
+) -> None:
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise JournalIntegrityError(
+            "journal path disappeared during verification"
+        ) from exc
+    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+        raise JournalIntegrityError(
+            "journal path identity is not a single-link regular file"
+        )
+    if (current.st_dev, current.st_ino) != identity:
+        raise JournalIntegrityError("journal path identity changed during verification")
+    if current.st_size != size:
+        raise JournalIntegrityError("journal file size changed during verification")
+
+
+def _read_verified_records_bound(
+    path: Path,
+) -> tuple[tuple[JournalRecord, ...], tuple[int, int] | None, int]:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return (), None, 0
+    except OSError as exc:
+        raise JournalIntegrityError("journal path is not safely openable") from exc
+
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise JournalIntegrityError(
+                "journal verification requires a single-link regular file"
+            )
+        identity = (before.st_dev, before.st_ino)
+
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino) != identity or after.st_nlink != 1:
+            raise JournalIntegrityError("journal inode changed during verification")
+        if before.st_size != after.st_size or len(raw) != after.st_size:
+            raise JournalIntegrityError("journal file size changed during verification")
+        if before.st_mtime_ns != after.st_mtime_ns:
+            raise JournalIntegrityError("journal content changed during verification")
+
+        records = _parse_verified_record_bytes(raw)
+        _assert_bound_journal_path(path, identity, after.st_size)
+        return records, identity, after.st_size
+    finally:
+        os.close(fd)
 
 
 def read_verified_records(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
@@ -585,7 +651,10 @@ class ForensicSessionJournal:
         self._expected_file_size = 0
         self._acquire_writer_lock()
         try:
-            self._records = list(_read_verified_records_only(self._path))
+            records, verified_identity, verified_size = _read_verified_records_bound(
+                self._path
+            )
+            self._records = list(records)
             if self._writer_lock_created and self._records:
                 self._discard_fresh_writer_lock_path()
                 raise JournalIntegrityError(
@@ -594,11 +663,16 @@ class ForensicSessionJournal:
                 )
             if self._writer_lock_created:
                 self._bind_fresh_writer_lock()
+
+            # Adopt only the inode whose bytes were actually verified. A later
+            # pathname stat must never be allowed to bless a replacement file.
+            self._expected_file_identity = verified_identity
+            self._expected_file_size = verified_size
             _reconcile_checkpoint(self._path, self._records, recover=True)
-            if self._path.exists():
-                st = self._path.stat()
-                self._expected_file_identity = (st.st_dev, st.st_ino)
-                self._expected_file_size = st.st_size
+            if verified_identity is not None:
+                _assert_bound_journal_path(
+                    self._path, verified_identity, verified_size
+                )
             self._seq = len(self._records)
             self._last_sha256 = self._records[-1].sha256 if self._records else GENESIS_SHA256
 

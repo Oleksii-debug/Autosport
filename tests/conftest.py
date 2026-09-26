@@ -66,7 +66,7 @@ _ROOT_SELECTION_PRODUCT_STORE_TEST = "test_monotonic_root_selection_product_stor
 
 
 @pytest.fixture(autouse=True)
-def _isolate_monotonic_root_selection_store(request, tmp_path):
+def _isolate_monotonic_root_selection_store(request, tmp_path_factory):
     """Isolate selector state per test without rebinding the resolver callable.
 
     Production intentionally keeps selector receipts in one OS-account store so a
@@ -87,7 +87,11 @@ def _isolate_monotonic_root_selection_store(request, tmp_path):
         yield
         return
 
-    sandbox = tmp_path / "root-selection-product-state"
+    # Keep selector state outside the per-test protected workspace tree.  Using a
+    # separately numbered directory under pytest's base temp gives every test a
+    # sibling store rather than a descendant of its tmp_path, preserving the
+    # production disjoint-tree invariant while avoiding cross-test accumulation.
+    sandbox = tmp_path_factory.mktemp("root-selection-product-state")
     previous = _ROOT_SELECTION_TEST_HOME
     _ROOT_SELECTION_TEST_HOME = sandbox
     try:

@@ -214,24 +214,33 @@ class _DispatchState:
         factory_module = self._factory_module
         candidate_init = self._store_type.__init__
         candidate_code = getattr(candidate_init, "__code__", None)
+        error_prefix = (
+            "product PolicyEvaluation issuance authority was rebound: "
+            "FactoryArtifactStore constructor/clock dispatch"
+        )
         if (
             factory_module.FactoryArtifactStore is not self._store_type
             or issuance_module.FactoryArtifactStore is not self._store_type
-            or candidate_init is not self._store_init
-            or self._store_type.__setattr__ is not self._store_setattr
-            or getattr(candidate_init, "__globals__", None)
+        ):
+            raise self._error_type(f"{error_prefix}: store type")
+        if candidate_init is not self._store_init:
+            raise self._error_type(f"{error_prefix}: constructor")
+        if self._store_type.__setattr__ is not self._store_setattr:
+            raise self._error_type(f"{error_prefix}: __setattr__")
+        if (
+            getattr(candidate_init, "__globals__", None)
             is not self._store_init_globals
             or candidate_code is None
             or self._marshal_dumps(candidate_code) != self._store_init_code
-            or factory_module.datetime is not self._factory_datetime
+        ):
+            raise self._error_type(f"{error_prefix}: constructor executable")
+        if (
+            factory_module.datetime is not self._factory_datetime
             or factory_module.timezone is not self._factory_timezone
             or self._store_init_globals.get("datetime") is not self._factory_datetime
             or self._store_init_globals.get("timezone") is not self._factory_timezone
         ):
-            raise self._error_type(
-                "product PolicyEvaluation issuance authority was rebound: "
-                "FactoryArtifactStore constructor/clock dispatch"
-            )
+            raise self._error_type(f"{error_prefix}: clock globals")
 
     def trusted_clock(self):
         return self._trusted_datetime.now(self._trusted_utc)

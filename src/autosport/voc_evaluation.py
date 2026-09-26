@@ -993,7 +993,7 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is missing"
             )
-        if not isinstance(score, OutcomeDerivedVOCScore):
+        if type(score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is invalid"
             )
@@ -1043,7 +1043,7 @@ class CanonicalVOCAuthorityResolver:
             if callable(episode_resolver)
             else score
         )
-        if not isinstance(episode_score, OutcomeDerivedVOCScore):
+        if type(episode_score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC episode score is missing"
             )

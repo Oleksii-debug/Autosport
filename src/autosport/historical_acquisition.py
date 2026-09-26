@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 from .historical_matches import capture_historical_matches, historical_match_request_url
 from .historical_snapshot import capture_historical_snapshot
-from .integrity import atomic_write_json, sha256_file
+from .integrity import atomic_write_json, durable_path_lock, sha256_file
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -22,6 +22,12 @@ from .parlayapi_provider import (
 
 
 _BUNDLE_KIND = "parlayapi_historical_acquisition_bundle"
+
+
+def _bundle_publication_lock_path(destination: Path) -> Path:
+    canonical = os.path.normcase(str(destination.resolve(strict=False))).encode("utf-8")
+    identity = hashlib.sha256(canonical).hexdigest()
+    return Path(tempfile.gettempdir()) / "autosport-historical-acquisition-locks" / identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,7 +776,12 @@ def capture_historical_acquisition_bundle(
         }
         bundle_path = staging / "bundle.json"
         atomic_write_json(bundle_path, bundle)
-        staging.rename(output)
+        with durable_path_lock(_bundle_publication_lock_path(output)):
+            if output.exists() or output.is_symlink():
+                raise ValueError(
+                    "output_dir appeared during acquisition; historical acquisition bundles never overwrite"
+                )
+            staging.rename(output)
         final_bundle = output / "bundle.json"
         return HistoricalAcquisitionBundle(
             root=str(output),

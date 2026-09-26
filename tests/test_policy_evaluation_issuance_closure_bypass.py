@@ -214,6 +214,29 @@ def test_object_setattr_predecessor_rebind_fails_before_forged_dispatch() -> Non
     assert called is False
 
 
+def test_reflected_predecessor_open_code_rebind_fails_before_execution() -> None:
+    state = _dispatch_state()
+    original_open = object.__getattribute__(
+        state,
+        "_DispatchState__original_open",
+    )
+    canonical_code = original_open.__code__
+
+    def forged_open(authority):
+        del authority
+        raise AssertionError("forged predecessor open code must not execute")
+
+    original_open.__code__ = forged_open.__code__
+    try:
+        with pytest.raises(
+            issuance.ProductPolicyEvaluationIssuanceError,
+            match=r"direct helper executable \(predecessor open\)",
+        ):
+            issuance._open_canonical_authorities(None)
+    finally:
+        original_open.__code__ = canonical_code
+
+
 def test_reflected_original_issue_still_crosses_current_dispatch_choke_point() -> None:
     state = _dispatch_state()
     original_issue = object.__getattribute__(

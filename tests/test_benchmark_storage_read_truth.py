@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from autosport.storage import SQLiteMarketStore
 from benchmarks.benchmark_storage_read import (
     StorageReadBenchmarkResult,
     _build_events,
@@ -55,6 +56,28 @@ def test_storage_read_result_rejects_invalid_timing_evidence(
 
     with pytest.raises(ValueError, match="finite and positive"):
         replace(valid, **{field: invalid})
+
+
+def test_storage_read_benchmark_rejects_stale_current_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = SQLiteMarketStore.current_by_source
+
+    def stale_projection(store: SQLiteMarketStore):
+        current = original(store)
+        for historical in store.events():
+            key = (historical.source_id, historical.quote_key)
+            latest = current.get(key)
+            if latest is not None and latest.dedupe_key != historical.dedupe_key:
+                stale = dict(current)
+                stale[key] = historical
+                return stale
+        raise AssertionError("fixture did not contain an overwritten projection key")
+
+    monkeypatch.setattr(SQLiteMarketStore, "current_by_source", stale_projection)
+
+    with pytest.raises(RuntimeError, match="latest durable identity per key"):
+        run_benchmark(count=102)
 
 
 def test_small_storage_read_benchmark_reports_exact_workload_truth() -> None:

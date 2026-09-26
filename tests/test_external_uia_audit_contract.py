@@ -41,6 +41,20 @@ def test_external_uia_audit_preserves_keyboard_fallback_without_legacy_pattern()
     assert helper.index("if ($null -ne $legacyPattern) {") < helper.index("Kind = 'KeyboardButton'")
 
 
+def test_manual_result_uia_name_matches_shipped_webview_label() -> None:
+    audit = _audit()
+    html = (_ROOT / "src" / "autosport" / "windows_web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    expected = "Результат і докази ручного розрахунку"
+
+    result_line = next(
+        line for line in audit.splitlines() if "automation_id = '334'" in line
+    )
+    assert f"name = '{expected}'" in result_line
+    assert f'aria-label="{expected}"' in html
+
+
 def test_external_uia_audit_requires_semantic_control_type_for_critical_controls() -> None:
     audit = _audit()
     expected_types = {

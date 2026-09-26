@@ -135,13 +135,17 @@ class DurableRealizedExposureScopeTests(unittest.TestCase):
         plan: ExecutionPlan,
         bindings: tuple[PaperExposureBinding, ...],
     ) -> PreparedPaperExecution:
-        return runtime._mint_prepared(
+        prepared = runtime._mint_prepared(
             PreparedPaperExecution(
                 execution_plan=plan,
                 exposure_bindings=bindings,
                 intent_evidence_json='{"schema":"scope-test-intent"}',
             )
         )
+        # White-box fixture: model an already-authorized lower-layer execution.
+        runtime._exposure_scope_authorities[id(prepared)] = prepared
+        return prepared
+
 
     def _accepted_then_unknown(self, root: Path):
         config = _config()

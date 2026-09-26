@@ -176,3 +176,8 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Provider-sport exact bytes are structural evidence only. Admit positive mappings
+# through an explicit product-owned curation table while reusing the canonical
+# registry for parsing, chronology, locking, persistence and overlap semantics.
+from . import _provider_sport_mapping_curation_guard as _provider_sport_mapping_curation_guard  # noqa: F401,E402

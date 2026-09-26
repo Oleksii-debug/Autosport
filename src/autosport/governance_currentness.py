@@ -283,6 +283,20 @@ def _product_time_ns() -> int:
     return now_ns
 
 
+def _global_witnesses(function: object) -> tuple[tuple[dict[str, object], str, object], ...]:
+    """Capture global bindings actually referenced by one canonical Python function."""
+
+    code = getattr(function, "__code__", None)
+    namespace = getattr(function, "__globals__", None)
+    if code is None or type(namespace) is not dict:
+        return ()
+    return tuple(
+        (namespace, name, namespace[name])
+        for name in code.co_names
+        if name in namespace
+    )
+
+
 # These are read/clock dispatch witnesses, not alternate authorities or stores. The
 # current resolver checks their public dispatch points before invoking the captured
 # canonical callables, so class/module rebinding cannot redirect positive currentness
@@ -302,6 +316,55 @@ _CANONICAL_REGISTRY_READ_SURFACES = (
 _CANONICAL_REGISTRY_READ_CODES = tuple(
     (name, function, getattr(function, "__code__", None))
     for name, function in _CANONICAL_REGISTRY_READ_SURFACES
+)
+_CANONICAL_REGISTRY_DATA_SURFACES = (
+    (
+        _registry_module.BookmakerCapabilityFact,
+        "__post_init__",
+        _registry_module.BookmakerCapabilityFact.__post_init__,
+    ),
+    (
+        _registry_module.BookmakerCapabilityProfile,
+        "__post_init__",
+        _registry_module.BookmakerCapabilityProfile.__post_init__,
+    ),
+    (
+        _registry_module.BookmakerCapabilityProfile,
+        "profile_id",
+        _registry_module.BookmakerCapabilityProfile.profile_id,
+    ),
+    (
+        _registry_module.BookmakerCapabilityProfile,
+        "to_canonical_dict",
+        _registry_module.BookmakerCapabilityProfile.to_canonical_dict,
+    ),
+    (
+        BookmakerGovernanceEvidence,
+        "__post_init__",
+        BookmakerGovernanceEvidence.__post_init__,
+    ),
+    (
+        BookmakerGovernanceEvidence,
+        "evidence_id",
+        BookmakerGovernanceEvidence.evidence_id,
+    ),
+    (
+        BookmakerGovernanceEvidence,
+        "to_canonical_dict",
+        BookmakerGovernanceEvidence.to_canonical_dict,
+    ),
+)
+_CANONICAL_REGISTRY_DEPENDENCY_GLOBALS = tuple(
+    witness
+    for _name, function in _CANONICAL_REGISTRY_READ_SURFACES
+    for witness in _global_witnesses(function)
+) + tuple(
+    witness
+    for _owner, _name, surface in _CANONICAL_REGISTRY_DATA_SURFACES
+    for target in (
+        surface.fget if isinstance(surface, property) else surface,
+    )
+    for witness in _global_witnesses(target)
 )
 _CANONICAL_REGISTRY_MODULE = _registry_module
 _CANONICAL_REGISTRY_SCHEMA_VERSION = BookmakerCapabilityRegistry.SCHEMA_VERSION
@@ -326,6 +389,16 @@ def _require_registry_read_dispatch(registry: BookmakerCapabilityRegistry) -> No
         if live is not function or getattr(function, "__code__", None) is not expected_code:
             raise GovernanceCurrentnessError(
                 "governance registry reader dispatch authority changed"
+            )
+    for owner, name, expected in _CANONICAL_REGISTRY_DATA_SURFACES:
+        if getattr(owner, name, None) is not expected:
+            raise GovernanceCurrentnessError(
+                "governance registry data dependency authority changed"
+            )
+    for namespace, name, expected in _CANONICAL_REGISTRY_DEPENDENCY_GLOBALS:
+        if namespace.get(name) is not expected:
+            raise GovernanceCurrentnessError(
+                "governance registry global dependency authority changed"
             )
     if (
         _registry_module is not _CANONICAL_REGISTRY_MODULE

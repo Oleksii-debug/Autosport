@@ -16,6 +16,11 @@ def test_caller_authored_exact_bytes_cannot_mint_positive_mapping_resolution(tmp
     A caller can serialize a perfectly valid evidence-shaped JSON object and compute all
     public deterministic hashes. That must never be sufficient to make an arbitrary
     provider sport identity resolve as canonical product truth.
+
+    Structural persistence is deliberately not the authority under test. An
+    implementation may reject the uncurated blob before durable mutation, or it may
+    retain non-authoritative structural evidence; either way positive resolution must
+    remain impossible.
     """
 
     registry = ProviderSportMappingRegistry.initialize_pristine(
@@ -36,8 +41,16 @@ def test_caller_authored_exact_bytes_cannot_mint_positive_mapping_resolution(tmp
         separators=(",", ":"),
     ).encode("utf-8")
 
-    registry.register_evidence(caller_authored_bytes)
+    try:
+        registry.register_evidence(caller_authored_bytes)
+    except ProviderSportMappingError:
+        # Stronger fail-closed implementation: uncurated caller bytes never enter the
+        # durable registry at all. The authority property is already satisfied.
+        assert registry.bindings == ()
+        return
 
+    # If structural evidence is retained, it still must not become positive product
+    # curation/origin authority at the resolution boundary.
     with pytest.raises(ProviderSportMappingError):
         registry.resolve(
             provider_namespace="caller-forged-provider",

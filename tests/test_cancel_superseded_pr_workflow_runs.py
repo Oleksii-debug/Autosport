@@ -60,6 +60,20 @@ def test_current_run_is_never_selected_even_if_payload_is_inconsistent() -> None
     ) == ()
 
 
+def test_later_run_is_never_selected_even_if_live_head_read_is_stale() -> None:
+    assert select_superseded_runs(
+        (
+            _run(30, HEAD_A),
+            _run(31, HEAD_B),
+            _run(32, HEAD_C),
+        ),
+        pr_number=2008,
+        live_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=31,
+    ) == (30,)
+
+
 class FakeApi:
     def __init__(self, heads: list[str], runs: tuple[WorkflowRun, ...]) -> None:
         self._heads = list(heads)
@@ -118,7 +132,7 @@ def test_current_head_cancels_only_older_same_workflow_runs() -> None:
         (
             _run(40, HEAD_A),
             _run(41, HEAD_B),
-            _run(42, HEAD_C, workflow_name="Windows candidate"),
+            _run(42, HEAD_C),
         ),
     )
     result = cancel_superseded(

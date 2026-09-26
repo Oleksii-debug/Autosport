@@ -1,0 +1,613 @@
+"""Seal product PolicyEvaluation issuance dispatch and materialization time.
+
+The #762 issuer is intentionally a composition layer over the canonical scientific
+registry and factory artifact store. Positive issuance must therefore depend on
+exact product-owned helper dispatch and on a product-owned UTC materialization
+clock, not on caller-rebound module globals or a same-class constructor mutation.
+
+This module adds no registry, artifact store, evaluator, or promotion authority.
+It only fail-closes the existing issuer's direct dispatch graph and replaces the
+newly-opened canonical store's default clock with a state-owned trusted UTC clock.
+"""
+from __future__ import annotations
+
+import marshal
+from datetime import datetime as _datetime_type
+from datetime import timezone as _timezone_type
+
+from . import external_validity_policy_issuance as _issuance
+from . import strategy_model_factory as _factory_module
+
+
+class _DispatchState:
+    """Keep predecessor entrypoints behind guard-enforcing methods.
+
+    Public wrapper closure cells intentionally capture only this sealed state
+    object and guard-enforcing bound methods, never an unguarded predecessor
+    FunctionType. The bound methods and their internal guard callables are pinned
+    before publication so later class-method rebinding cannot redirect dispatch.
+    """
+
+    __slots__ = (
+        "_issuance_module",
+        "_factory_module",
+        "_marshal_dumps",
+        "_error_type",
+        "__original_open",
+        "__original_issue",
+        "__original_resolve",
+        "__original_verify",
+        "_store_type",
+        "_store_init",
+        "_store_setattr",
+        "_store_init_globals",
+        "_store_init_code",
+        "_factory_datetime",
+        "_factory_timezone",
+        "_target",
+        "_issuance_id",
+        "_require_source",
+        "_derive",
+        "_registry_get",
+        "_store_read",
+        "_store_materialize",
+        "_store_receipt",
+        "_registry_append",
+        "_canonical_bundle_sha256",
+        "_workspace_type",
+        "_ref_type",
+        "_policy_evaluation_type",
+        "_protocol_type",
+        "_baseline_kind_type",
+        "_bundle_type",
+        "_result_artifact_kind",
+        "_bundle_id_prefix",
+        "_issuer_source_sha256",
+        "_trusted_datetime",
+        "_trusted_utc",
+        "_public_open",
+        "_public_issue",
+        "_public_resolve",
+        "_public_verify",
+        "_constructor_guard",
+        "_common_guard",
+        "_trusted_clock_callable",
+        "_code_witnesses",
+        "_transitive_helper_witnesses",
+        "_transitive_global_witnesses",
+        "_hashlib_sha256",
+        "_json_dumps",
+        "_sealed",
+    )
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_sealed", False)
+        issuance_module = _issuance
+        factory_module = _factory_module
+        marshal_dumps = marshal.dumps
+        object.__setattr__(self, "_issuance_module", issuance_module)
+        object.__setattr__(self, "_factory_module", factory_module)
+        object.__setattr__(self, "_marshal_dumps", marshal_dumps)
+        object.__setattr__(
+            self,
+            "_error_type",
+            issuance_module.ProductPolicyEvaluationIssuanceError,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_open",
+            issuance_module._open_canonical_authorities,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_issue",
+            issuance_module.issue_product_policy_evaluation,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_resolve",
+            issuance_module.resolve_product_policy_evaluation,
+        )
+        object.__setattr__(
+            self,
+            "_DispatchState__original_verify",
+            issuance_module.verify_product_policy_evaluation,
+        )
+
+        store_type = issuance_module._STORE_TYPE
+        store_init = store_type.__init__
+        object.__setattr__(self, "_store_type", store_type)
+        object.__setattr__(self, "_store_init", store_init)
+        object.__setattr__(self, "_store_setattr", store_type.__setattr__)
+        object.__setattr__(self, "_store_init_globals", store_init.__globals__)
+        # ``FunctionType.__code__`` replacement swaps the code object; code objects are
+        # immutable to ordinary Python callers. Pin exact code-object identity rather than
+        # a marshalled image, which is serialization evidence rather than runtime dispatch
+        # identity and can create interpreter-dependent false positives.
+        object.__setattr__(self, "_store_init_code", store_init.__code__)
+        object.__setattr__(self, "_factory_datetime", factory_module.datetime)
+        object.__setattr__(self, "_factory_timezone", factory_module.timezone)
+
+        object.__setattr__(self, "_target", issuance_module._target)
+        object.__setattr__(self, "_issuance_id", issuance_module._issuance_id)
+        object.__setattr__(
+            self,
+            "_require_source",
+            issuance_module._require_source_factory_evaluation,
+        )
+        object.__setattr__(self, "_derive", issuance_module._derive_policy_evaluation)
+        object.__setattr__(self, "_registry_get", issuance_module._registry_get)
+        object.__setattr__(self, "_store_read", issuance_module._store_read)
+        object.__setattr__(self, "_store_materialize", issuance_module._STORE_MATERIALIZE)
+        object.__setattr__(self, "_store_receipt", issuance_module._STORE_RECEIPT)
+        object.__setattr__(self, "_registry_append", issuance_module._REGISTRY_APPEND)
+        object.__setattr__(
+            self,
+            "_canonical_bundle_sha256",
+            issuance_module.canonical_product_policy_evaluation_bundle_sha256,
+        )
+
+        object.__setattr__(
+            self,
+            "_workspace_type",
+            issuance_module.ProductPolicyEvaluationWorkspace,
+        )
+        object.__setattr__(self, "_ref_type", issuance_module.IssuedPolicyEvaluationRef)
+        object.__setattr__(self, "_policy_evaluation_type", issuance_module.PolicyEvaluation)
+        object.__setattr__(self, "_protocol_type", issuance_module.FrozenBaselineProtocol)
+        object.__setattr__(self, "_baseline_kind_type", issuance_module.BaselineKind)
+        object.__setattr__(self, "_bundle_type", issuance_module.EvaluationBundleRef)
+
+        object.__setattr__(self, "_result_artifact_kind", issuance_module._RESULT_ARTIFACT_KIND)
+        object.__setattr__(self, "_bundle_id_prefix", issuance_module._BUNDLE_ID_PREFIX)
+        object.__setattr__(self, "_issuer_source_sha256", issuance_module._ISSUER_SOURCE_SHA256)
+
+        trusted_datetime = _datetime_type
+        trusted_utc = _timezone_type.utc
+        object.__setattr__(self, "_trusted_datetime", trusted_datetime)
+        object.__setattr__(self, "_trusted_utc", trusted_utc)
+
+        # Materialization can occur after the public pre-dispatch state witness has
+        # completed.  The callable installed on the canonical store must therefore
+        # not late-read mutable DispatchState slots while issuance is in flight.
+        # Capture the concrete datetime type and UTC singleton in closure-local
+        # cells now; state slots remain witnessed for pre-call tamper detection.
+        def trusted_clock_callable():
+            return trusted_datetime.now(trusted_utc)
+
+        object.__setattr__(self, "_public_open", None)
+        object.__setattr__(self, "_public_issue", None)
+        object.__setattr__(self, "_public_resolve", None)
+        object.__setattr__(self, "_public_verify", None)
+
+        # Pin bound guard methods before the state becomes reachable through any
+        # published wrapper. Later monkeypatching of _DispatchState methods must
+        # not redirect a positive authority entrypoint or its internal checks.
+        object.__setattr__(
+            self,
+            "_constructor_guard",
+            object.__getattribute__(self, "_require_store_constructor_authority"),
+        )
+        object.__setattr__(
+            self,
+            "_common_guard",
+            object.__getattribute__(self, "_require_common_dispatch"),
+        )
+        object.__setattr__(
+            self,
+            "_trusted_clock_callable",
+            trusted_clock_callable,
+        )
+
+        # Function-object identity is not enough for executable authority in Python:
+        # callers can replace FunctionType.__code__ in place while preserving the
+        # exact function object. Pin every predecessor/direct helper executable that
+        # the guarded issuer invokes so an in-place code swap fails before dispatch.
+        code_witness_functions = (
+            ("predecessor open", issuance_module._open_canonical_authorities),
+            ("predecessor issue", issuance_module.issue_product_policy_evaluation),
+            ("predecessor resolve", issuance_module.resolve_product_policy_evaluation),
+            ("predecessor verify", issuance_module.verify_product_policy_evaluation),
+            ("target", self._target),
+            ("issuance id", self._issuance_id),
+            ("source evaluation", self._require_source),
+            ("derive policy evaluation", self._derive),
+            ("registry get", self._registry_get),
+            ("store read", self._store_read),
+            ("canonical bundle digest", self._canonical_bundle_sha256),
+        )
+        object.__setattr__(
+            self,
+            "_code_witnesses",
+            tuple(
+                (label, function, function.__code__)
+                for label, function in code_witness_functions
+            ),
+        )
+
+        # The exact public/direct helper FunctionTypes above still execute through
+        # external_validity_policy_issuance.__globals__. Seal the transitive
+        # canonicalization and uncertainty helpers that those exact code objects
+        # resolve at runtime; otherwise replacing (for example) _bootstrap_interval
+        # can alter an issued PolicyEvaluation while _derive_policy_evaluation itself
+        # retains the exact witnessed FunctionType and CodeType.
+        transitive_helper_functions = (
+            ("text", "_text", issuance_module._text),
+            ("sha256", "_sha256", issuance_module._sha256),
+            ("instant", "_instant", issuance_module._instant),
+            ("decimal", "_decimal", issuance_module._decimal),
+            ("decimal text", "_decimal_text", issuance_module._decimal_text),
+            ("digest", "_digest", issuance_module._digest),
+            ("bootstrap interval", "_bootstrap_interval", issuance_module._bootstrap_interval),
+        )
+        object.__setattr__(
+            self,
+            "_transitive_helper_witnesses",
+            tuple(
+                (label, name, function, function.__code__)
+                for label, name, function in transitive_helper_functions
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_transitive_global_witnesses",
+            (
+                ("hashlib", issuance_module.hashlib),
+                ("json", issuance_module.json),
+                ("Decimal", issuance_module.Decimal),
+                ("InvalidOperation", issuance_module.InvalidOperation),
+                ("localcontext", issuance_module.localcontext),
+                ("datetime", issuance_module.datetime),
+                ("timezone", issuance_module.timezone),
+                ("EvaluationContractFamily", issuance_module.EvaluationContractFamily),
+                ("_Target", issuance_module._Target),
+                ("_SourceEvaluation", issuance_module._SourceEvaluation),
+                ("_BOOTSTRAP_REPLICATES", issuance_module._BOOTSTRAP_REPLICATES),
+            ),
+        )
+        object.__setattr__(self, "_hashlib_sha256", issuance_module.hashlib.sha256)
+        object.__setattr__(self, "_json_dumps", issuance_module.json.dumps)
+
+    def __getattribute__(self, name: str):
+        if name.startswith("_DispatchState__original_"):
+            raise AttributeError("unguarded predecessor entrypoints are not exposed")
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if object.__getattribute__(self, "_sealed"):
+            raise AttributeError("policy issuance dispatch state is sealed")
+        object.__setattr__(self, name, value)
+
+    def bind_public(self, open_fn, issue_fn, resolve_fn, verify_fn) -> None:
+        if object.__getattribute__(self, "_sealed"):
+            raise RuntimeError("policy issuance dispatch state is already sealed")
+        object.__setattr__(self, "_public_open", open_fn)
+        object.__setattr__(self, "_public_issue", issue_fn)
+        object.__setattr__(self, "_public_resolve", resolve_fn)
+        object.__setattr__(self, "_public_verify", verify_fn)
+        object.__setattr__(self, "_sealed", True)
+
+    def _require_store_constructor_authority(self) -> None:
+        issuance_module = self._issuance_module
+        factory_module = self._factory_module
+        candidate_init = self._store_type.__init__
+        candidate_code = getattr(candidate_init, "__code__", None)
+        error_prefix = (
+            "product PolicyEvaluation issuance authority was rebound: "
+            "FactoryArtifactStore constructor/clock dispatch"
+        )
+        if (
+            factory_module.FactoryArtifactStore is not self._store_type
+            or issuance_module.FactoryArtifactStore is not self._store_type
+        ):
+            raise self._error_type(f"{error_prefix}: store type")
+        if candidate_init is not self._store_init:
+            raise self._error_type(f"{error_prefix}: constructor")
+        if self._store_type.__setattr__ is not self._store_setattr:
+            raise self._error_type(f"{error_prefix}: __setattr__")
+        if (
+            getattr(candidate_init, "__globals__", None)
+            is not self._store_init_globals
+            or candidate_code is None
+            or candidate_code is not self._store_init_code
+        ):
+            raise self._error_type(f"{error_prefix}: constructor executable")
+        if (
+            factory_module.datetime is not self._factory_datetime
+            or factory_module.timezone is not self._factory_timezone
+            or self._store_init_globals.get("datetime") is not self._factory_datetime
+            or self._store_init_globals.get("timezone") is not self._factory_timezone
+        ):
+            raise self._error_type(f"{error_prefix}: clock globals")
+
+    def trusted_clock(self):
+        return self._trusted_datetime.now(self._trusted_utc)
+
+    def open(self, authority):
+        # Full graph validation at the canonical-open choke point also protects
+        # reflected predecessor issue/resolve callables: those originals resolve
+        # _open_canonical_authorities dynamically and therefore cannot skip the
+        # current product dispatch graph merely by being recovered reflectively.
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
+        original_open = object.__getattribute__(self, "_DispatchState__original_open")
+        registry, store = original_open(authority)
+        common_guard()
+        if type(store) is not self._store_type:
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "canonical artifact store type"
+            )
+        # The owning constructor publicly supports an injected test clock. The
+        # product issuer never accepts one: replace its default source before any
+        # result materialization can occur.
+        store._clock = object.__getattribute__(self, "_trusted_clock_callable")
+        return registry, store
+
+    def _require_common_dispatch(self) -> None:
+        issuance_module = self._issuance_module
+        for label, function, expected_code in self._code_witnesses:
+            if getattr(function, "__code__", None) is not expected_code:
+                raise self._error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    f"direct helper executable ({label})"
+                )
+        for label, name, function, expected_code in self._transitive_helper_witnesses:
+            if (
+                getattr(issuance_module, name, None) is not function
+                or getattr(function, "__code__", None) is not expected_code
+            ):
+                raise self._error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    f"transitive helper ({label})"
+                )
+        for name, expected in self._transitive_global_witnesses:
+            if getattr(issuance_module, name, None) is not expected:
+                raise self._error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    f"transitive helper global ({name})"
+                )
+        if (
+            issuance_module.hashlib.sha256 is not self._hashlib_sha256
+            or issuance_module.json.dumps is not self._json_dumps
+        ):
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "transitive helper module dependency"
+            )
+        if (
+            issuance_module._open_canonical_authorities is not self._public_open
+            or issuance_module.issue_product_policy_evaluation is not self._public_issue
+            or issuance_module.resolve_product_policy_evaluation is not self._public_resolve
+            or issuance_module.verify_product_policy_evaluation is not self._public_verify
+            or issuance_module._target is not self._target
+            or issuance_module._issuance_id is not self._issuance_id
+            or issuance_module._require_source_factory_evaluation is not self._require_source
+            or issuance_module._derive_policy_evaluation is not self._derive
+            or issuance_module._registry_get is not self._registry_get
+            or issuance_module._store_read is not self._store_read
+            or issuance_module._STORE_MATERIALIZE is not self._store_materialize
+            or issuance_module._STORE_RECEIPT is not self._store_receipt
+            or issuance_module._REGISTRY_APPEND is not self._registry_append
+            or issuance_module.canonical_product_policy_evaluation_bundle_sha256
+            is not self._canonical_bundle_sha256
+            or issuance_module.ProductPolicyEvaluationWorkspace is not self._workspace_type
+            or issuance_module.IssuedPolicyEvaluationRef is not self._ref_type
+            or issuance_module.PolicyEvaluation is not self._policy_evaluation_type
+            or issuance_module.FrozenBaselineProtocol is not self._protocol_type
+            or issuance_module.BaselineKind is not self._baseline_kind_type
+            or issuance_module.EvaluationBundleRef is not self._bundle_type
+            or issuance_module._RESULT_ARTIFACT_KIND != self._result_artifact_kind
+            or issuance_module._BUNDLE_ID_PREFIX != self._bundle_id_prefix
+            or issuance_module._ISSUER_SOURCE_SHA256 != self._issuer_source_sha256
+        ):
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "direct helper graph"
+            )
+        object.__getattribute__(self, "_constructor_guard")()
+
+    def issue(
+        self,
+        authority,
+        protocol,
+        *,
+        source_evaluation_bundle_id: str,
+        baseline_kind=None,
+    ):
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
+        original_issue = object.__getattribute__(self, "_DispatchState__original_issue")
+        result = original_issue(
+            authority,
+            protocol,
+            source_evaluation_bundle_id=source_evaluation_bundle_id,
+            baseline_kind=baseline_kind,
+        )
+        common_guard()
+        return result
+
+    def resolve(self, authority, protocol, reference):
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
+        original_resolve = object.__getattribute__(self, "_DispatchState__original_resolve")
+        result = original_resolve(authority, protocol, reference)
+        common_guard()
+        return result
+
+    def verify(self, authority, protocol, reference, claimed):
+        common_guard = object.__getattribute__(self, "_common_guard")
+        common_guard()
+        original_verify = object.__getattribute__(self, "_DispatchState__original_verify")
+        result = original_verify(authority, protocol, reference, claimed)
+        common_guard()
+        return result
+
+
+def _build_dispatch_guards():
+    state = _DispatchState()
+    state_type = type(state)
+    error_type = object.__getattribute__(state, "_error_type")
+    state_getattribute = state_type.__getattribute__
+    state_setattr = state_type.__setattr__
+    state_bind_public = state_type.bind_public
+    state_constructor_guard = state_type._require_store_constructor_authority
+    state_common_guard = state_type._require_common_dispatch
+    state_trusted_clock = state_type.trusted_clock
+    state_open = state_type.open
+    state_issue = state_type.issue
+    state_resolve = state_type.resolve
+    state_verify = state_type.verify
+    state_method_code_witnesses = (
+        ("__getattribute__", state_getattribute, state_getattribute.__code__),
+        ("__setattr__", state_setattr, state_setattr.__code__),
+        ("bind_public", state_bind_public, state_bind_public.__code__),
+        (
+            "_require_store_constructor_authority",
+            state_constructor_guard,
+            state_constructor_guard.__code__,
+        ),
+        (
+            "_require_common_dispatch",
+            state_common_guard,
+            state_common_guard.__code__,
+        ),
+        ("trusted_clock", state_trusted_clock, state_trusted_clock.__code__),
+        ("open", state_open, state_open.__code__),
+        ("issue", state_issue, state_issue.__code__),
+        ("resolve", state_resolve, state_resolve.__code__),
+        ("verify", state_verify, state_verify.__code__),
+    )
+
+    open_dispatch = state.open
+    issue_dispatch = state.issue
+    resolve_dispatch = state.resolve
+    verify_dispatch = state.verify
+
+    # This snapshot lives outside the reflectable _DispatchState object.  It is
+    # populated only after bind_public() has installed the final public wrappers.
+    # object.__setattr__(state, ...) can bypass the class' syntactic write guard,
+    # but it cannot update this independently held exact-identity witness.
+    state_instance_snapshot = None
+
+    def require_state_instance_authority() -> None:
+        snapshot = state_instance_snapshot
+        if snapshot is None:
+            raise error_type("policy issuance dispatch state witness is unavailable")
+        for name, expected in snapshot:
+            try:
+                current = object.__getattribute__(state, name)
+            except AttributeError as exc:
+                raise error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    "dispatch state instance"
+                ) from exc
+            if current is not expected:
+                raise error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    "dispatch state instance"
+                )
+
+    def require_state_class_authority() -> None:
+        for _name, method, expected_code in state_method_code_witnesses:
+            if getattr(method, "__code__", None) is not expected_code:
+                raise error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    "dispatch state class executable"
+                )
+        if (
+            type(state) is not state_type
+            or state_type.__getattribute__ is not state_getattribute
+            or state_type.__setattr__ is not state_setattr
+            or state_type.bind_public is not state_bind_public
+            or state_type._require_store_constructor_authority
+            is not state_constructor_guard
+            or state_type._require_common_dispatch is not state_common_guard
+            or state_type.trusted_clock is not state_trusted_clock
+            or state_type.open is not state_open
+            or state_type.issue is not state_issue
+            or state_type.resolve is not state_resolve
+            or state_type.verify is not state_verify
+        ):
+            raise error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "dispatch state class"
+            )
+
+    def guarded_open(authority: ProductPolicyEvaluationWorkspace):
+        require_state_class_authority()
+        require_state_instance_authority()
+        result = open_dispatch(authority)
+        require_state_instance_authority()
+        return result
+
+    def guarded_issue(
+        authority: ProductPolicyEvaluationWorkspace,
+        protocol: FrozenBaselineProtocol,
+        *,
+        source_evaluation_bundle_id: str,
+        baseline_kind: BaselineKind | None = None,
+    ) -> IssuedPolicyEvaluationRef:
+        require_state_class_authority()
+        require_state_instance_authority()
+        result = issue_dispatch(
+            authority,
+            protocol,
+            source_evaluation_bundle_id=source_evaluation_bundle_id,
+            baseline_kind=baseline_kind,
+        )
+        require_state_instance_authority()
+        return result
+
+    def guarded_resolve(
+        authority: ProductPolicyEvaluationWorkspace,
+        protocol: FrozenBaselineProtocol,
+        reference: IssuedPolicyEvaluationRef,
+    ) -> PolicyEvaluation:
+        require_state_class_authority()
+        require_state_instance_authority()
+        result = resolve_dispatch(authority, protocol, reference)
+        require_state_instance_authority()
+        return result
+
+    def guarded_verify(
+        authority: ProductPolicyEvaluationWorkspace,
+        protocol: FrozenBaselineProtocol,
+        reference: IssuedPolicyEvaluationRef,
+        claimed: PolicyEvaluation,
+    ) -> PolicyEvaluation:
+        require_state_class_authority()
+        require_state_instance_authority()
+        result = verify_dispatch(authority, protocol, reference, claimed)
+        require_state_instance_authority()
+        return result
+
+    state.bind_public(guarded_open, guarded_issue, guarded_resolve, guarded_verify)
+    # __slots__ retains the source spelling of private names (for example
+    # "__original_open"), while CPython stores those slots under the normal
+    # class-mangled name ("_DispatchState__original_open").  Witness the real
+    # storage names: otherwise import-time witness construction itself fails and
+    # the private predecessor capabilities are never covered by the seal.
+    state_slot_names = tuple(
+        (
+            f"_{state_type.__name__.lstrip('_')}{name}"
+            if name.startswith("__") and not name.endswith("__")
+            else name
+        )
+        for name in state_type.__slots__
+    )
+    state_instance_snapshot = tuple(
+        (name, object.__getattribute__(state, name))
+        for name in state_slot_names
+    )
+    return guarded_open, guarded_issue, guarded_resolve, guarded_verify
+
+
+(
+    _issuance._open_canonical_authorities,
+    _issuance.issue_product_policy_evaluation,
+    _issuance.resolve_product_policy_evaluation,
+    _issuance.verify_product_policy_evaluation,
+) = _build_dispatch_guards()
+
+del _build_dispatch_guards

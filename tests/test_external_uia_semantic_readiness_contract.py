@@ -51,7 +51,14 @@ def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> No
     semantic_block = script[semantic_state_index:semantic_timeout_index]
 
     assert "while ([DateTime]::UtcNow -lt $deadline)" in semantic_block
-    assert "Get-ProcessFamilyIds -RootProcessId $process.Id" in semantic_block
+    direct_probe = "$semanticReady = $uiaRoot.FindFirst("
+    family_probe = "Get-ProcessFamilyIds -RootProcessId $process.Id"
+    assert direct_probe in semantic_block
+    assert family_probe in semantic_block
+    assert semantic_block.index(direct_probe) < semantic_block.index(family_probe)
+    assert "$nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)" in semantic_block
+    assert "if ($now -ge $nextFamilyRefresh)" in semantic_block
+    assert "$nextFamilyRefresh = $now.AddMilliseconds(1000)" in semantic_block
     assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in semantic_block
     assert "$uiaRoot = $semanticSurface.Root" in semantic_block
     assert "$semanticReady = $semanticSurface.Element" in semantic_block

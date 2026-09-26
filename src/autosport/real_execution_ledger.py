@@ -262,8 +262,8 @@ class ExecutionPlan:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
         actions = tuple(self.actions)
-        if not actions or not all(isinstance(item, ExecutionAction) for item in actions):
-            raise ValueError("execution plan requires ExecutionAction items")
+        if not actions or not all(type(item) is ExecutionAction for item in actions):
+            raise ValueError("execution plan requires exact ExecutionAction items")
         if len({action.action_id for action in actions}) != len(actions):
             raise ValueError("execution plan needs unique action_id values")
         object.__setattr__(self, "actions", actions)
@@ -1834,6 +1834,9 @@ class RealExecutionLedger:
         return dict(matches[0])
 
     def reserve_plan(self, plan: ExecutionPlan) -> str:
+        if type(plan) is not ExecutionPlan:
+            raise ValueError("plan must be exact ExecutionPlan")
+
         def operation() -> str:
             events = self._events()
             prior = self._plan_event(events, plan.plan_id)
@@ -2083,6 +2086,10 @@ class RealExecutionLedger:
     def acknowledge(
         self, acknowledgement: ExternalAcknowledgement
     ) -> None:
+        if type(acknowledgement) is not ExternalAcknowledgement:
+            raise ValueError(
+                "acknowledgement must be exact ExternalAcknowledgement"
+            )
         payload = acknowledgement.to_dict()
 
         def operation() -> None:
@@ -2210,6 +2217,10 @@ class RealExecutionLedger:
     def reconcile_found(
         self, reconciliation: ExternalEffectReconciliation
     ) -> None:
+        if type(reconciliation) is not ExternalEffectReconciliation:
+            raise ValueError(
+                "reconciliation must be exact ExternalEffectReconciliation"
+            )
         payload = reconciliation.to_dict()
 
         def operation() -> None:
@@ -2298,6 +2309,8 @@ class RealExecutionLedger:
     def reconcile_not_found(
         self, snapshot: ReconciliationSnapshot
     ) -> None:
+        if type(snapshot) is not ReconciliationSnapshot:
+            raise ValueError("snapshot must be exact ReconciliationSnapshot")
         if snapshot.external_effect_found:
             raise ValueError(
                 "found external effect must be reconciled as acknowledgement"

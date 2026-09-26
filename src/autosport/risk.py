@@ -694,6 +694,8 @@ class PaperRiskPolicy:
                                 "market_id": leg.market_id,
                                 "selection_id": leg.selection_id,
                                 "locked_odds": str(leg.locked_odds),
+                                "sport": leg.sport,
+                                "exchange_side": leg.exchange_side,
                             }
                             for leg in ticket.legs
                         ],
@@ -719,7 +721,7 @@ class PaperRiskPolicy:
                 )
             return _sha256_payload(
                 {
-                    "schema": "autosport.paper-risk-state.v3",
+                    "schema": "autosport.paper-risk-state.v4",
                     "initial_bankroll": str(book.initial_bankroll),
                     "balance": str(book.balance),
                     "tickets": tickets,
@@ -748,12 +750,14 @@ class PaperRiskPolicy:
                     "market_id": leg.market_id,
                     "selection_id": leg.selection_id,
                     "locked_odds": str(leg.locked_odds),
+                    "sport": leg.sport,
+                    "exchange_side": leg.exchange_side,
                 }
                 for leg in sorted(context.legs, key=lambda item: item.quote_key)
             ]
             return _sha256_payload(
                 {
-                    "schema": "autosport.risk-candidate.v2",
+                    "schema": "autosport.risk-candidate.v3",
                     "legs": legs,
                     "quotes": quotes,
                     "provider_accounts": [

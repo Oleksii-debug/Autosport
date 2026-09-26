@@ -1,4 +1,4 @@
-АВТОСПОРТ — V1 WINDOWS PAPER / MARKET LAB
+АВТОСПОРТ — WINDOWS: ПАПЕРОВЕ МОДЕЛЮВАННЯ ТА РИНКОВА ЛАБОРАТОРІЯ
 
 1. Запустіть Autosport.exe.
 2. Для historical replay кнопка «Вибрати dataset» відкриває папку replay dataset, що містить manifest.json, market.jsonl і окремий sealed results.json. У packaged demo це папка examples\tt_demo.
@@ -12,7 +12,7 @@
 10. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes; F8 — Evaluation і portfolio evidence. Strategy combobox і кнопка research plan входять у Tab traversal та мають UIA names/descriptions.
 11. Віртуальний банк, рішення, market history, source health та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску. Economic history різних strategy/plan identities ізольована у strategy-specific workspaces.
 
-PORTABLE DATA / RESEARCH TOOLS
+ПОРТАТИВНІ ІНСТРУМЕНТИ ДАНИХ ТА ДОСЛІДЖЕННЯ
 
 12. У цій самій папці ZIP є Autosport-Data.exe — console tool, доступний з Windows Terminal / PowerShell і придатний для клавіатурної роботи та читання stdout screen reader-ом. Команда довідки: .\Autosport-Data.exe --help
 13. Перевірити dataset без replay: .\Autosport-Data.exe verify-dataset .\examples\tt_demo
@@ -21,21 +21,21 @@ PORTABLE DATA / RESEARCH TOOLS
 16. Для bundle, створеного командою acquire, використовуйте canonical adapter: .\Autosport-Data.exe build-corpus-from-bundle --help. Adapter перевіряє bundle identity і bound evidence перед передачею у той самий corpus assembler; opaque provider result rows не перетворюються автоматично на sealed outcomes.
 17. Autosport-Data.exe не виконує реальні ставки і не містить bookmaker execution/funding/withdrawal path.
 
-WALK-FORWARD EVALUATION
+ПОКРОКОВЕ ПРИЧИННЕ ОЦІНЮВАННЯ
 
 18. Для strict causal walk-forward evaluation відкрийте PowerShell у папці програми та виконайте: .\Autosport-Data.exe walk-forward-evaluate <evaluation-bundle.json> --output walk-forward-report.json. Команда використовує canonical evaluator і fail-closed temporal/cohort checks. Наявність report не є доказом profitability або predictive superiority; реальний OOS proof вимагає lawful governed historical corpus та чесного holdout/walk-forward protocol.
 
-STRATEGY COMPARISON
+ПОРІВНЯННЯ СТРАТЕГІЙ
 
 19. Для fail-closed порівняння двох або більше completed strategy run summaries на тому самому sealed dataset відкрийте PowerShell у папці програми та виконайте: .\Autosport-Data.exe compare-strategies <run-summary-1.json> <run-summary-2.json> --baseline-strategy baseline-v1 --output strategy-comparison.json. Команда приймає лише сумісні canonical run summaries і записує machine-readable report; observed paper ordering не є доказом profitability, predictive superiority або out-of-sample переваги.
 
-CRASH / ECONOMIC WORKSPACE RECOVERY
+ВІДНОВЛЕННЯ ПІСЛЯ ЗБОЮ ТА ЕКОНОМІЧНОЇ РОБОЧОЇ ОБЛАСТІ
 
 20. Якщо Autosport після аварійного завершення повідомляє про unresolved economic transaction, не видаляйте paper_book.json, decisions.jsonl, run_registry.json або transaction files вручну. Закрийте Autosport.exe, відкрийте PowerShell у папці програми та запустіть canonical fail-closed recovery для відповідного workspace: .\Autosport-Data.exe repair-workspace --workspace "<повний шлях до workspace>".
 21. Для baseline-v1 типовий workspace показується безпосередньо в рядку «Віртуальний банк» GUI. Для інших strategy/plan identities використовуйте саме strategy-specific workspace, який GUI також показує під час replay. Команда recovery не запускається паралельно з active economic writer.
 22. repair-workspace не «позначає run успішним» за припущенням. Вона завершує або відхиляє лише той стан, який може бути доведений canonical transaction/base hashes; неоднозначний стан залишається unresolved і повертає ненульовий exit code. Після успішного repair перезапустіть Autosport.exe і повторно відкрийте той самий strategy/plan context.
 
-PHYSICAL WINDOWS 11 + NVDA ACCEPTANCE — HUMAN-ONLY RELEASE GATE
+ФІЗИЧНА ПЕРЕВІРКА WINDOWS 11 + NVDA — ЛИШЕ ЛЮДИНОЮ
 
 23. Цей розділ виконується людиною на фізичному Windows 11 з реально запущеним NVDA. Machine UIA/keyboard audit не замінює цей gate. ДО відкриття або тестування локального ZIP отримайте з незалежного GitHub Actions/control record для exact candidate два trust anchors: canonical source SHA та опублікований SHA-256 release ZIP. Не використовуйте BUILD_INFO або сам локальний ZIP як джерело «expected» значень. Окремо обчисліть SHA-256 локального ZIP і переконайтеся, що він точно дорівнює опублікованому digest; після fresh extraction також звірте BUILD_INFO `source_sha` з незалежно отриманим canonical source SHA та зафіксуйте `autosport_exe_sha256`. Будь-яка невідповідність = STOP/FAIL, цей build не тестуйте. Не змішуйте файли з іншого build.
 24. Запустіть NVDA, після цього `Autosport.exe` лише клавіатурою. PASS вимагає, щоб NVDA озвучив зрозумілу назву головного вікна та початковий фокус; не можна використовувати мишу для обходу недоступного control.

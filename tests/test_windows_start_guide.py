@@ -12,10 +12,37 @@ class WindowsStartGuideTests(unittest.TestCase):
         self.assertIn("F7 — live quotes", guide)
         self.assertIn("F8 — Evaluation і portfolio evidence", guide)
 
+    def test_uses_stage_neutral_ukrainian_operator_headings(self) -> None:
+        guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")
+
+        self.assertTrue(
+            guide.startswith(
+                "АВТОСПОРТ — WINDOWS: ПАПЕРОВЕ МОДЕЛЮВАННЯ ТА РИНКОВА ЛАБОРАТОРІЯ"
+            )
+        )
+        for heading in (
+            "ПОРТАТИВНІ ІНСТРУМЕНТИ ДАНИХ ТА ДОСЛІДЖЕННЯ",
+            "ПОКРОКОВЕ ПРИЧИННЕ ОЦІНЮВАННЯ",
+            "ПОРІВНЯННЯ СТРАТЕГІЙ",
+            "ВІДНОВЛЕННЯ ПІСЛЯ ЗБОЮ ТА ЕКОНОМІЧНОЇ РОБОЧОЇ ОБЛАСТІ",
+            "ФІЗИЧНА ПЕРЕВІРКА WINDOWS 11 + NVDA — ЛИШЕ ЛЮДИНОЮ",
+        ):
+            self.assertIn(heading, guide)
+
+        for obsolete in (
+            "V1 WINDOWS PAPER / MARKET LAB",
+            "PORTABLE DATA / RESEARCH TOOLS",
+            "WALK-FORWARD EVALUATION",
+            "STRATEGY COMPARISON",
+            "CRASH / ECONOMIC WORKSPACE RECOVERY",
+            "HUMAN-ONLY RELEASE GATE",
+        ):
+            self.assertNotIn(obsolete, guide)
+
     def test_binds_physical_nvda_gate_to_exact_packaged_candidate(self) -> None:
         guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")
 
-        self.assertIn("PHYSICAL WINDOWS 11 + NVDA ACCEPTANCE — HUMAN-ONLY RELEASE GATE", guide)
+        self.assertIn("ФІЗИЧНА ПЕРЕВІРКА WINDOWS 11 + NVDA — ЛИШЕ ЛЮДИНОЮ", guide)
         self.assertIn("незалежного GitHub Actions/control record", guide)
         self.assertIn("опублікований SHA-256 release ZIP", guide)
         self.assertIn("`source_sha`", guide)

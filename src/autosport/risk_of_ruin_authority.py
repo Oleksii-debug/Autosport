@@ -221,10 +221,16 @@ def _bind_product_evaluator_resolver(
     evaluator_init,
     evaluator_resolve,
 ):
+    resolver_code = None
+
     def _resolve_product_evaluator_result(
         workspace: Path,
         result_id: str,
     ) -> IssuedRiskOfRuinResult:
+        if _resolve_product_evaluator_result.__code__ is not resolver_code:
+            raise RiskOfRuinIssuanceError(
+                "risk-of-ruin product evaluator resolver executable changed"
+            )
         return resolver_impl(
             workspace,
             result_id,
@@ -233,6 +239,7 @@ def _bind_product_evaluator_resolver(
             evaluator_resolve=evaluator_resolve,
         )
 
+    resolver_code = _resolve_product_evaluator_result.__code__
     return _resolve_product_evaluator_result
 
 
@@ -242,8 +249,6 @@ _resolve_product_evaluator_result = _bind_product_evaluator_resolver(
     ProductRiskOfRuinEvaluator.__init__,
     ProductRiskOfRuinEvaluator.resolve,
 )
-_PRODUCT_EVALUATOR_RESOLVER = _resolve_product_evaluator_result
-_PRODUCT_EVALUATOR_RESOLVER_CODE = _resolve_product_evaluator_result.__code__
 del _bind_product_evaluator_resolver
 
 
@@ -308,6 +313,7 @@ def verify_risk_of_ruin_authority(
     *,
     kind: str,
     available_by: str,
+    _product_evaluator_resolver=_resolve_product_evaluator_result,
 ) -> tuple[bool, str]:
     """Re-resolve one risk result from durable product-owned scientific history."""
 
@@ -414,15 +420,7 @@ def verify_risk_of_ruin_authority(
     # observation/dataset/IID inputs gain product-owned authority, so this bridge
     # cannot accidentally open the positive path early.
     try:
-        if (
-            _resolve_product_evaluator_result is not _PRODUCT_EVALUATOR_RESOLVER
-            or getattr(_PRODUCT_EVALUATOR_RESOLVER, "__code__", None)
-            is not _PRODUCT_EVALUATOR_RESOLVER_CODE
-        ):
-            raise RiskOfRuinIssuanceError(
-                "risk-of-ruin product evaluator resolver authority was rebound"
-            )
-        product_result = _PRODUCT_EVALUATOR_RESOLVER(
+        product_result = _product_evaluator_resolver(
             resolved_registry_path.parent,
             getattr(evidence, "evidence_id"),
         )

@@ -93,6 +93,8 @@ _REQUIRED_EMERGENCY_STOP_KEYBOARD_MARKERS = (
     "button.addEventListener(\"click\", activateEmergencyStop);",
     "const dispatch = globalThis.autosportDispatch;",
     '"emergency_stop.activate",',
+    "globalAnnouncement: false",
+    "resultFocus: false",
     "postRefresh: false",
 )
 _FORBIDDEN_SHORTCUT_MARKERS = (

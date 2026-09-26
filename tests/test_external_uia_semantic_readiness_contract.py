@@ -121,6 +121,9 @@ def test_external_uia_button_activation_is_real_and_not_focus_only() -> None:
     assert "[System.Windows.Automation.LegacyIAccessiblePattern]" not in helper
     assert "$legacyObject.Current.DefaultAction" in helper
     assert "$action.Pattern.DoDefaultAction()" in helper
+    assert "Kind = 'KeyboardButton'" in helper
+    assert "$Element.SetFocus()" in helper
+    assert "[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')" in helper
     assert "required_pattern = 'Action'" in script
     assert "return $null -ne (Get-ExternalActionPattern -Element $Element)" in helper
 

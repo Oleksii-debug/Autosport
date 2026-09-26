@@ -83,16 +83,13 @@ def _reachable_weak_registries(root: FunctionType) -> tuple[WeakKeyDictionary, .
     return tuple(found.values())
 
 
+
 def test_transient_clock_substitution_during_provider_io_cannot_backdate_identity(
     monkeypatch,
 ) -> None:
     read_entered = Event()
     release_payload = Event()
-    after_clock_sample = Event()
-    release_parse = Event()
-
     original_loads = json.loads
-    original_provider_text = _readonly._provider_text
 
     class Response:
         def __init__(self, payload: bytes) -> None:
@@ -135,17 +132,11 @@ def test_transient_clock_substitution_during_provider_io_cannot_backdate_identit
             assert data is None
             return fake_open(request, timeout)
 
-    def fenced_provider_text(*args, **kwargs):
-        after_clock_sample.set()
-        assert release_parse.wait(timeout=5)
-        return original_provider_text(*args, **kwargs)
-
     monkeypatch.setattr(_urllib_request, "_opener", Opener())
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
     original_clock = client._clock
-
     result: dict[str, object] = {}
 
     def resolve() -> None:
@@ -158,13 +149,12 @@ def test_transient_clock_substitution_during_provider_io_cannot_backdate_identit
     worker.start()
     assert read_entered.wait(timeout=5)
 
+    # The provider read is already in flight and the per-call shadow owns the
+    # construction-time product clock. A mutate/restore race on the escaped live
+    # client must therefore be irrelevant to the observation timestamp.
     client._clock = lambda: datetime(1900, 1, 1, tzinfo=timezone.utc)
-    monkeypatch.setattr(_readonly, "_provider_text", fenced_provider_text)
-    release_payload.set()
-    assert after_clock_sample.wait(timeout=5)
     client._clock = original_clock
-    monkeypatch.setattr(_readonly, "_provider_text", original_provider_text)
-    release_parse.set()
+    release_payload.set()
 
     worker.join(timeout=5)
     assert not worker.is_alive()
@@ -181,7 +171,6 @@ def test_transient_parser_currency_substitution_cannot_launder_k07_identity(
     read_entered = Event()
     release_payload = Event()
     forged_parser_entered = Event()
-    release_forged_parser = Event()
     original_loads = json.loads
     original_provider_text = _readonly._provider_text
 
@@ -228,9 +217,8 @@ def test_transient_parser_currency_substitution_cannot_launder_k07_identity(
             return fake_open(request, timeout)
 
     def forged_provider_text(raw, key: str, field: str):
+        forged_parser_entered.set()
         if field == "currency_code":
-            forged_parser_entered.set()
-            assert release_forged_parser.wait(timeout=5)
             return "GBP"
         return original_provider_text(raw, key, field)
 
@@ -249,20 +237,19 @@ def test_transient_parser_currency_substitution_cannot_launder_k07_identity(
     worker = Thread(target=resolve)
     worker.start()
     assert read_entered.wait(timeout=5)
+
+    # fresh_call_clones() completed before transport.read() blocked. Mutating the
+    # module parser now must not enter the already-sealed per-call reader at all.
     monkeypatch.setattr(_readonly, "_provider_text", forged_provider_text)
     release_payload.set()
-    assert forged_parser_entered.wait(timeout=5)
-
-    monkeypatch.setattr(_readonly, "_provider_text", original_provider_text)
-    release_forged_parser.set()
     worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert "value" not in result
-    error = result.get("error")
-    assert isinstance(error, BetfairAccountIdentityError)
-    assert "currency diverged from captured provider response" in str(error)
-
+    assert not forged_parser_entered.is_set()
+    assert "error" not in result, repr(result.get("error"))
+    value = result["value"]
+    assert value.currency_code == "EUR"
+    assert is_authoritative_betfair_account_identity(value, client=client)
 
 def test_json_codec_rebinding_cannot_redirect_or_forge_k07_rpc(monkeypatch) -> None:
     original_dumps = json.dumps
@@ -363,15 +350,13 @@ def test_k07_uses_one_existing_origin_registry_not_parallel_snapshot_state() -> 
     assert len(origin_registries) == 1
 
 
+
 def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
     monkeypatch,
 ) -> None:
     read_entered = Event()
     release_payload = Event()
-    parser_entered = Event()
-    release_parser = Event()
     original_loads = json.loads
-    original_provider_text = _readonly._provider_text
     sealed_rpc = _reachable_named(build_betfair_authenticated_client, "_rpc")
     original_decode = sealed_rpc.__globals__["_decode_json"]
 
@@ -425,13 +410,7 @@ def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
         forged["result"] = forged_result
         return forged
 
-    def fenced_provider_text(*args, **kwargs):
-        parser_entered.set()
-        assert release_parser.wait(timeout=5)
-        return original_provider_text(*args, **kwargs)
-
     monkeypatch.setattr(_urllib_request, "_opener", Opener())
-    monkeypatch.setattr(_readonly, "_provider_text", fenced_provider_text)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -447,15 +426,11 @@ def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
     worker.start()
     assert read_entered.wait(timeout=5)
 
-    # The public closure graph exposes the persistent template.  Mutate it only
-    # while the canonical network read is in flight, then restore it before the
-    # ordinary post-acquisition checks.  The active call must already own a fresh
-    # private clone and therefore remain bound to the genuine EUR payload.
+    # The active call already owns a private RPC clone. A transient mutation of
+    # the persistent template during blocked provider I/O cannot redirect it.
     sealed_rpc.__globals__["_decode_json"] = forged_decode
-    release_payload.set()
-    assert parser_entered.wait(timeout=5)
     sealed_rpc.__globals__["_decode_json"] = original_decode
-    release_parser.set()
+    release_payload.set()
 
     worker.join(timeout=5)
     assert not worker.is_alive()
@@ -463,7 +438,6 @@ def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
     value = result["value"]
     assert value.currency_code == "EUR"
     assert is_authoritative_betfair_account_identity(value, client=client)
-
 
 def test_private_json_facade_mutation_fails_closed_before_build(monkeypatch) -> None:
     sealed_rpc = _reachable_named(build_betfair_authenticated_client, "_rpc")

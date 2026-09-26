@@ -2000,15 +2000,14 @@ class RealExecutionLedger:
                     and event["event_type"]
                     == EventType.ATTEMPT_RESERVED.value
                 ):
-                    if (
-                        self._state(
-                            self._attempt_events(events, event["attempt_id"])
-                        )
-                        != AttemptState.RECONCILED_NOT_FOUND
-                    ):
-                        raise ExecutionStateError(
-                            "action already has unresolved/final attempt"
-                        )
+                    # RECONCILED_NOT_FOUND is durable diagnostic truth only.
+                    # No currently integrated product issuer proves that this
+                    # legacy/generic fact authorizes repeating an irreversible
+                    # provider effect.
+                    raise ExecutionStateError(
+                        "action already has prior attempt; retry requires "
+                        "product-issued no-effect authority"
+                    )
             if _timestamp(reserved_at, "reserved_at") >= _timestamp(
                 action["expires_at"], "expires_at"
             ):
@@ -2748,13 +2747,11 @@ class RealExecutionLedger:
             and event["event_type"]
             == EventType.ATTEMPT_RESERVED.value
         ]
-        return (
-            not attempts
-            or self._state(
-                self._attempt_events(events, attempts[-1])
-            )
-            == AttemptState.RECONCILED_NOT_FOUND
-        )
+        # A durable NOT_FOUND fact is not, by itself, proof that a provider
+        # effect cannot appear later.  Until a product-issued no-effect
+        # authority is integrated and re-resolved, any prior attempt keeps
+        # retry fail-closed.
+        return not attempts
 
     def saga(self, plan_id: str) -> ExecutionSaga:
         events = self._events()

@@ -416,6 +416,21 @@ class VerifiedExecutionLedgerSnapshot:
     event_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedAcceptedExecution:
+    """Read-only accepted execution facts re-resolved from a verified ledger snapshot."""
+
+    bookmaker_id: str
+    account_id: str
+    action_id: str
+    attempt_id: str
+    external_receipt_id: str
+    side: str
+    accepted_odds: str
+    accepted_stake: str
+    ledger_sha256: str
+
+
 class RealExecutionLedger:
     """Durable execution facts only; deliberately contains no provider write capability."""
 
@@ -2359,6 +2374,83 @@ class RealExecutionLedger:
             )
 
         self._mutate(operation)
+
+    def accepted_execution_by_receipt(
+        self,
+        *,
+        bookmaker_id: str,
+        account_id: str,
+        external_receipt_id: str,
+    ) -> VerifiedAcceptedExecution:
+        """Resolve accepted economics from canonical durable ledger truth.
+
+        Caller-supplied economics are deliberately absent from this API. The receipt
+        identity only selects an already-durable acknowledgement; stake, odds and
+        side are re-derived from the integrity-checked ledger snapshot.
+        """
+
+        target = ExternalReceiptIdentity(
+            bookmaker_id=_text(bookmaker_id, "bookmaker_id"),
+            account_id=_text(account_id, "account_id"),
+            external_receipt_id=_text(
+                external_receipt_id, "external_receipt_id"
+            ),
+        )
+        snapshot = self.verified_snapshot()
+        events = self._parse(snapshot.payload)
+        matches: list[VerifiedAcceptedExecution] = []
+        for event in events:
+            if (
+                event["event_type"]
+                != EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ):
+                continue
+            if self._receipt_identity(events, event) != target:
+                continue
+            acknowledgement = self._acknowledgement_from_dict(
+                event["payload"]
+            )
+            if acknowledgement.status not in {
+                AcknowledgementStatus.ACCEPTED,
+                AcknowledgementStatus.PARTIAL,
+            }:
+                raise ExecutionLedgerIntegrityError(
+                    "receipt does not prove accepted execution economics"
+                )
+            raw_odds = event["payload"].get("accepted_odds")
+            raw_stake = event["payload"].get("accepted_stake")
+            if not isinstance(raw_odds, str) or not isinstance(raw_stake, str):
+                raise ExecutionLedgerIntegrityError(
+                    "accepted acknowledgement lacks canonical economics"
+                )
+            _, action = self._action_payload(
+                events, event["plan_id"], event["action_id"]
+            )
+            side = action.get("side")
+            if side not in {"BACK", "LAY"}:
+                raise ExecutionLedgerIntegrityError(
+                    "stored execution action has invalid side"
+                )
+            matches.append(
+                VerifiedAcceptedExecution(
+                    bookmaker_id=target.bookmaker_id,
+                    account_id=target.account_id,
+                    action_id=event["action_id"],
+                    attempt_id=event["attempt_id"],
+                    external_receipt_id=target.external_receipt_id,
+                    side=side,
+                    accepted_odds=raw_odds,
+                    accepted_stake=raw_stake,
+                    ledger_sha256=snapshot.sha256,
+                )
+            )
+        if not matches:
+            raise KeyError(target)
+        if len(matches) != 1:
+            raise ExecutionLedgerIntegrityError(
+                "receipt resolves to multiple accepted acknowledgements"
+            )
+        return matches[0]
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
         raw = self.path.read_bytes() if self.path.exists() else b""

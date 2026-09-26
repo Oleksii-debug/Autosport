@@ -25,11 +25,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  superseded-run-admission:
+  superseded_run_admission:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      current-head: ${{ github.event_name != 'pull_request' && 'true' || steps.admission.outputs.current_head }}
+      current_head: ${{ github.event_name != 'pull_request' && 'true' || steps.admission.outputs.current_head }}
     steps:
       - name: Checkout exact PR head for read-only admission helper
         if: github.event_name == 'pull_request'
@@ -52,12 +52,12 @@ jobs:
           --admission-only
 
   build:
-    needs: superseded-run-admission
+    needs: superseded_run_admission
     # Build the expensive Windows candidate only for an integration-capable current-head PR.
     # ready_for_review starts the full gate; converted_to_draft/closed lets concurrency
     # displace obsolete work; closed itself never qualifies the candidate.
     if: >-
-      needs.superseded-run-admission.outputs.current-head == 'true' &&
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
       (github.event_name != 'pull_request' ||
       (github.event.action != 'closed' && github.event.pull_request.draft == false))
     runs-on: windows-latest

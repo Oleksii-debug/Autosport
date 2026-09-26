@@ -19,6 +19,11 @@ def _install() -> None:
     canonical_json = _json_integrity.json
     canonical_json_loads = canonical_json.loads
     canonical_json_loads_code = getattr(canonical_json_loads, "__code__", None)
+    canonical_json_decoder = canonical_json.JSONDecoder
+    decoder_method_witnesses = tuple(
+        (name, getattr(canonical_json_decoder, name), getattr(canonical_json_decoder, name).__code__)
+        for name in ("__init__", "decode", "raw_decode")
+    )
     canonical_math = _json_integrity.math
     canonical_isfinite = canonical_math.isfinite
 
@@ -44,11 +49,16 @@ def _install() -> None:
             or _json_integrity.json is not canonical_json
             or canonical_json.loads is not canonical_json_loads
             or getattr(canonical_json_loads, "__code__", None) is not canonical_json_loads_code
+            or canonical_json.JSONDecoder is not canonical_json_decoder
             or _json_integrity.math is not canonical_math
             or canonical_math.isfinite is not canonical_isfinite
             or _json_integrity._JSON_INTEGER_MAX_DIGITS != canonical_integer_limit
         ):
             return False
+        for name, expected, expected_code in decoder_method_witnesses:
+            current = getattr(canonical_json_decoder, name, None)
+            if current is not expected or getattr(expected, "__code__", None) is not expected_code:
+                return False
         for name, expected, expected_code in helper_witnesses:
             current = getattr(_json_integrity, name, None)
             if current is not expected or getattr(expected, "__code__", None) is not expected_code:

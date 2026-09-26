@@ -15,8 +15,15 @@ def test_same_head_dedup_has_bounded_actions_read_authority_only_in_ci() -> None
     assert "  actions: write\n" not in ci
     assert "--dedupe-same-head" in ci
 
-    # Windows admission only checks live-head currentness. It therefore does not need
-    # repository Actions enumeration authority and keeps the narrower token surface.
+    # Every PR run gets a scheduler-unique key so GitHub cannot cancel an older useful
+    # exact-head run before the lightweight admission job applies oldest-active-wins.
+    assert "github.run_id" in ci
+    assert "format('pr-{0}-run-{1}'" in ci
+    assert "github.run_attempt == 1 && 'fresh'" not in ci
+
+    # Windows admission currently only checks live-head currentness. It therefore does
+    # not need repository Actions enumeration authority; this carrier changes no
+    # Windows token surface while fixing the observed full-CI cancellation path.
     assert "  actions: read\n" not in windows
     assert "  actions: write\n" not in windows
     assert "--dedupe-same-head" not in windows

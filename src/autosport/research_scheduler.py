@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,7 @@ from typing import Any, Callable, Iterable, Protocol
 
 from apscheduler.triggers.interval import IntervalTrigger
 
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .research_curriculum import (
     CurriculumDispatchReceipt,
     CurriculumPurpose,
@@ -39,6 +40,42 @@ from .workspace_lock import WorkspaceEconomicLock
 SCHEMA = "autosport.research_scheduler"
 SCHEMA_VERSION = 3
 _HEX = frozenset("0123456789abcdef")
+_COLD_HISTORY_SCHEMA = "autosport.research_scheduler.cold_history"
+_COLD_HISTORY_SCHEMA_VERSION = 2
+_COLD_HISTORY_ZERO_SHA256 = "0" * 64
+_COLD_HISTORY_DELETE_TRIGGER_NAME = "cold_history_reject_delete"
+_COLD_HISTORY_UPDATE_TRIGGER_NAME = "cold_history_reject_update"
+_COLD_HISTORY_INSERT_TRIGGER_NAME = "cold_history_require_contiguous_insert"
+_COLD_HISTORY_DELETE_TRIGGER_SQL = """
+CREATE TRIGGER cold_history_reject_delete
+BEFORE DELETE ON cold_history
+BEGIN
+    SELECT RAISE(ABORT, 'cold history is append-only');
+END
+""".strip()
+_COLD_HISTORY_UPDATE_TRIGGER_SQL = """
+CREATE TRIGGER cold_history_reject_update
+BEFORE UPDATE ON cold_history
+BEGIN
+    SELECT RAISE(ABORT, 'cold history is append-only');
+END
+""".strip()
+_COLD_HISTORY_INSERT_TRIGGER_SQL = """
+CREATE TRIGGER cold_history_require_contiguous_insert
+BEFORE INSERT ON cold_history
+WHEN NEW.sequence != COALESCE((SELECT MAX(sequence) + 1 FROM cold_history), 1)
+BEGIN
+    SELECT RAISE(ABORT, 'cold history sequence must append contiguously');
+END
+""".strip()
+_COLD_HISTORY_FIELDS = frozenset(
+    {"cold_history_count", "cold_history_tail_sha256"}
+)
+_COLD_HISTORY_OCCURRENCE = "OCCURRENCE"
+_COLD_HISTORY_CURRICULUM_WAKE = "CURRICULUM_WAKE"
+_COLD_HISTORY_KINDS = frozenset(
+    {_COLD_HISTORY_OCCURRENCE, _COLD_HISTORY_CURRICULUM_WAKE}
+)
 
 
 class ResearchSchedulerError(RuntimeError):
@@ -448,7 +485,11 @@ class ResearchScheduler:
         self.trigger_sink = trigger_sink
         self.source_registry = source_registry
         try:
-            self._validate(self._read())
+            with WorkspaceEconomicLock(self.path.parent):
+                state = self._read()
+                self._validate(state, check_history_tail=False)
+                state = self._prepare_cold_history_locked(state)
+                self._validate(state)
         except FileNotFoundError as exc:
             raise ResearchSchedulerError("research scheduler state is missing") from exc
 
@@ -473,6 +514,8 @@ class ResearchScheduler:
                     "schedules": {},
                     "occurrences": {},
                     "curriculum_wakes": {},
+                    "cold_history_count": 0,
+                    "cold_history_tail_sha256": _COLD_HISTORY_ZERO_SHA256,
                 }
                 atomic_write_json(target, {**body, "state_sha256": _digest(body)})
         return cls(target, trigger_sink, source_registry=source_registry)
@@ -492,6 +535,633 @@ class ResearchScheduler:
     def _write(self, state: dict[str, Any]) -> None:
         body = {key: value for key, value in state.items() if key != "state_sha256"}
         atomic_write_json(self.path, {**body, "state_sha256": _digest(body)})
+
+    @property
+    def _cold_history_path(self) -> Path:
+        return self.path.with_name(f".{self.path.name}.cold-history.sqlite3")
+
+    @staticmethod
+    def _cold_history_anchor(
+        state: dict[str, Any],
+    ) -> tuple[int, str] | None:
+        has_count = "cold_history_count" in state
+        has_tail = "cold_history_tail_sha256" in state
+        if has_count != has_tail:
+            raise ResearchSchedulerError("cold history anchor is incomplete")
+        if not has_count:
+            return None
+        count = _nonnegative_int(
+            state["cold_history_count"],
+            "cold_history_count",
+        )
+        tail = _sha(
+            state["cold_history_tail_sha256"],
+            "cold_history_tail_sha256",
+        )
+        if count == 0 and tail != _COLD_HISTORY_ZERO_SHA256:
+            raise ResearchSchedulerError("empty cold history has non-empty tail")
+        if count > 0 and tail == _COLD_HISTORY_ZERO_SHA256:
+            raise ResearchSchedulerError("non-empty cold history has empty tail")
+        return count, tail
+
+    def _validate_cold_history_schema(self, connection: sqlite3.Connection) -> None:
+        meta_columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(cold_history_meta)"
+            ).fetchall()
+        ]
+        history_columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(cold_history)"
+            ).fetchall()
+        ]
+        if meta_columns != ["key", "value"]:
+            raise ResearchSchedulerError("cold history metadata schema mismatch")
+        if history_columns != [
+            "sequence",
+            "record_kind",
+            "record_id",
+            "previous_entry_sha256",
+            "record_json",
+            "entry_sha256",
+        ]:
+            raise ResearchSchedulerError("cold history table schema mismatch")
+        meta = dict(
+            connection.execute(
+                "SELECT key, value FROM cold_history_meta ORDER BY key"
+            ).fetchall()
+        )
+        if meta != {
+            "schema": _COLD_HISTORY_SCHEMA,
+            "schema_version": str(_COLD_HISTORY_SCHEMA_VERSION),
+        }:
+            raise ResearchSchedulerError("cold history metadata mismatch")
+
+        expected_triggers = {
+            _COLD_HISTORY_DELETE_TRIGGER_NAME: (
+                "cold_history",
+                " ".join(_COLD_HISTORY_DELETE_TRIGGER_SQL.split()),
+            ),
+            _COLD_HISTORY_UPDATE_TRIGGER_NAME: (
+                "cold_history",
+                " ".join(_COLD_HISTORY_UPDATE_TRIGGER_SQL.split()),
+            ),
+            _COLD_HISTORY_INSERT_TRIGGER_NAME: (
+                "cold_history",
+                " ".join(_COLD_HISTORY_INSERT_TRIGGER_SQL.split()),
+            ),
+        }
+        triggers = {
+            name: (table_name, " ".join((sql or "").split()))
+            for name, table_name, sql in connection.execute(
+                """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'trigger' AND tbl_name = 'cold_history'
+                ORDER BY name
+                """
+            ).fetchall()
+        }
+        if triggers != expected_triggers:
+            raise ResearchSchedulerError("cold history append-only trigger schema mismatch")
+
+    def _open_cold_history(
+        self,
+        *,
+        create: bool,
+    ) -> sqlite3.Connection | None:
+        path = self._cold_history_path
+        if not path.exists() and not create:
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_database = not path.exists()
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(path, timeout=30.0)
+            connection.execute("PRAGMA synchronous = FULL")
+            if create and new_database:
+                connection.execute("BEGIN IMMEDIATE")
+                existing_object = connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type IN ('table', 'trigger', 'index', 'view')
+                      AND name NOT LIKE 'sqlite_%'
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if existing_object is not None:
+                    raise ResearchSchedulerError(
+                        "new cold history database was not pristine"
+                    )
+                connection.execute(
+                    """
+                    CREATE TABLE cold_history_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE cold_history (
+                        sequence INTEGER PRIMARY KEY,
+                        record_kind TEXT NOT NULL,
+                        record_id TEXT NOT NULL,
+                        previous_entry_sha256 TEXT NOT NULL,
+                        record_json TEXT NOT NULL,
+                        entry_sha256 TEXT NOT NULL,
+                        UNIQUE(record_kind, record_id)
+                    )
+                    """
+                )
+                connection.execute(_COLD_HISTORY_DELETE_TRIGGER_SQL)
+                connection.execute(_COLD_HISTORY_UPDATE_TRIGGER_SQL)
+                connection.execute(_COLD_HISTORY_INSERT_TRIGGER_SQL)
+                connection.executemany(
+                    "INSERT INTO cold_history_meta(key, value) VALUES (?, ?)",
+                    (
+                        ("schema", _COLD_HISTORY_SCHEMA),
+                        ("schema_version", str(_COLD_HISTORY_SCHEMA_VERSION)),
+                    ),
+                )
+                connection.commit()
+            self._validate_cold_history_schema(connection)
+            return connection
+        except ResearchSchedulerError:
+            if connection is not None:
+                connection.close()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None:
+                connection.close()
+            raise ResearchSchedulerError("cold history database is unreadable") from exc
+
+    @staticmethod
+    def _cold_history_entry_sha256(
+        *,
+        sequence: int,
+        previous_entry_sha256: str,
+        record_kind: str,
+        record_id: str,
+        record: dict[str, Any],
+    ) -> str:
+        body = {
+            "sequence": _positive_int(sequence, "cold history sequence"),
+            "previous_entry_sha256": _sha(
+                previous_entry_sha256,
+                "cold history previous_entry_sha256",
+            ),
+            "record_kind": record_kind,
+            "record_id": _sha(record_id, "cold history record_id"),
+            "record": record,
+        }
+        if record_kind not in _COLD_HISTORY_KINDS:
+            raise ResearchSchedulerError("cold history record kind is invalid")
+        return _digest(body)
+
+    def _validate_cold_history_record(
+        self,
+        *,
+        record_kind: str,
+        record_id: str,
+        record: object,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        if type(record) is not dict:
+            raise ResearchSchedulerError("cold history record must be an object")
+        if record_kind == _COLD_HISTORY_OCCURRENCE:
+            self._validate_occurrence(
+                record_id,
+                record,
+                state["schedules"],
+            )
+            if record["status"] not in {"ACCEPTED", "SKIPPED"}:
+                raise ResearchSchedulerError(
+                    "cold occurrence history requires completed status"
+                )
+        elif record_kind == _COLD_HISTORY_CURRICULUM_WAKE:
+            self._validate_curriculum_wake(record_id, record)
+            if record["status"] != "ACCEPTED":
+                raise ResearchSchedulerError(
+                    "cold curriculum history requires ACCEPTED status"
+                )
+        else:
+            raise ResearchSchedulerError("cold history record kind is invalid")
+        return record
+
+    def _validate_cold_history_row(
+        self,
+        row: object,
+        *,
+        state: dict[str, Any],
+        expected_sequence: int | None = None,
+        expected_previous: str | None = None,
+    ) -> tuple[str, str, dict[str, Any], str]:
+        if type(row) not in {tuple, list} or len(row) != 6:
+            raise ResearchSchedulerError("cold history row is invalid")
+        sequence, record_kind, record_id, previous, record_json, entry_sha256 = row
+        sequence = _positive_int(sequence, "cold history sequence")
+        if expected_sequence is not None and sequence != expected_sequence:
+            raise ResearchSchedulerError("cold history sequence mismatch")
+        if type(record_kind) is not str or record_kind not in _COLD_HISTORY_KINDS:
+            raise ResearchSchedulerError("cold history record kind is invalid")
+        record_id = _sha(record_id, "cold history record_id")
+        previous = _sha(previous, "cold history previous_entry_sha256")
+        if expected_previous is not None and previous != expected_previous:
+            raise ResearchSchedulerError("cold history chain mismatch")
+        if type(record_json) is not str:
+            raise ResearchSchedulerError("cold history record_json is invalid")
+        try:
+            record = json.loads(record_json)
+        except json.JSONDecodeError as exc:
+            raise ResearchSchedulerError("cold history record_json is invalid") from exc
+        if _canonical_json(record) != record_json:
+            raise ResearchSchedulerError("cold history record_json is not canonical")
+        record = self._validate_cold_history_record(
+            record_kind=record_kind,
+            record_id=record_id,
+            record=record,
+            state=state,
+        )
+        expected_entry_sha256 = self._cold_history_entry_sha256(
+            sequence=sequence,
+            previous_entry_sha256=previous,
+            record_kind=record_kind,
+            record_id=record_id,
+            record=record,
+        )
+        entry_sha256 = _sha(entry_sha256, "cold history entry_sha256")
+        if entry_sha256 != expected_entry_sha256:
+            raise ResearchSchedulerError("cold history entry digest mismatch")
+        return record_kind, record_id, record, entry_sha256
+
+    def _read_cold_history_records(
+        self,
+        state: dict[str, Any],
+        *,
+        limit: int | None = None,
+    ) -> list[tuple[str, str, dict[str, Any], str]]:
+        if limit is not None:
+            _nonnegative_int(limit, "cold history read limit")
+            if limit == 0:
+                return []
+        connection = self._open_cold_history(create=False)
+        if connection is None:
+            return []
+        try:
+            if limit is None:
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                if integrity is None or integrity[0] != "ok":
+                    raise ResearchSchedulerError("cold history database integrity check failed")
+                rows = connection.execute(
+                    """
+                    SELECT sequence, record_kind, record_id,
+                           previous_entry_sha256, record_json, entry_sha256
+                    FROM cold_history
+                    ORDER BY sequence
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT sequence, record_kind, record_id,
+                           previous_entry_sha256, record_json, entry_sha256
+                    FROM cold_history
+                    WHERE sequence <= ?
+                    ORDER BY sequence
+                    """,
+                    (limit,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise ResearchSchedulerError("cold history database read failed") from exc
+        finally:
+            connection.close()
+
+        records: list[tuple[str, str, dict[str, Any], str]] = []
+        previous = _COLD_HISTORY_ZERO_SHA256
+        seen: set[tuple[str, str]] = set()
+        for index, row in enumerate(rows, start=1):
+            record_kind, record_id, record, entry_sha256 = (
+                self._validate_cold_history_row(
+                    row,
+                    state=state,
+                    expected_sequence=index,
+                    expected_previous=previous,
+                )
+            )
+            identity = (record_kind, record_id)
+            if identity in seen:
+                raise ResearchSchedulerError("duplicate cold history identity")
+            seen.add(identity)
+            records.append((record_kind, record_id, record, entry_sha256))
+            previous = entry_sha256
+        return records
+
+    def _validate_cold_history_tail(self, state: dict[str, Any]) -> None:
+        anchor = self._cold_history_anchor(state)
+        if anchor is None:
+            return
+        count, tail = anchor
+        connection = self._open_cold_history(create=False)
+        if connection is None:
+            if count == 0:
+                return
+            raise ResearchSchedulerError("cold history database is missing")
+        try:
+            maximum = connection.execute(
+                "SELECT MAX(sequence) FROM cold_history"
+            ).fetchone()[0]
+            if count == 0:
+                if maximum is not None:
+                    raise ResearchSchedulerError(
+                        "cold history exists beyond empty state anchor"
+                    )
+                return
+            if maximum != count:
+                raise ResearchSchedulerError(
+                    "cold history cardinality mismatches state anchor"
+                )
+            row = connection.execute(
+                """
+                SELECT sequence, record_kind, record_id,
+                       previous_entry_sha256, record_json, entry_sha256
+                FROM cold_history
+                WHERE sequence = ?
+                """,
+                (count,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ResearchSchedulerError("cold history tail read failed") from exc
+        finally:
+            connection.close()
+        if row is None:
+            raise ResearchSchedulerError("cold history tail row is missing")
+        _, _, _, entry_sha256 = self._validate_cold_history_row(
+            row,
+            state=state,
+            expected_sequence=count,
+        )
+        if entry_sha256 != tail:
+            raise ResearchSchedulerError("cold history tail digest mismatch")
+
+    def _ensure_cold_history_anchor_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._cold_history_anchor(state) is not None:
+            return state
+        connection = self._open_cold_history(create=False)
+        if connection is not None:
+            try:
+                prior = connection.execute(
+                    "SELECT COUNT(*) FROM cold_history"
+                ).fetchone()[0]
+            except sqlite3.Error as exc:
+                raise ResearchSchedulerError(
+                    "legacy scheduler cold history cannot be inspected"
+                ) from exc
+            finally:
+                connection.close()
+            if prior:
+                raise ResearchSchedulerError(
+                    "legacy scheduler state has detached cold history"
+                )
+        state["cold_history_count"] = 0
+        state["cold_history_tail_sha256"] = _COLD_HISTORY_ZERO_SHA256
+        state["state_version"] += 1
+        self._write(state)
+        migrated = self._read()
+        self._validate(migrated, check_history_tail=False)
+        return migrated
+
+    @staticmethod
+    def _cold_history_collection(
+        state: dict[str, Any],
+        record_kind: str,
+    ) -> dict[str, Any]:
+        if record_kind == _COLD_HISTORY_OCCURRENCE:
+            return state["occurrences"]
+        if record_kind == _COLD_HISTORY_CURRICULUM_WAKE:
+            return state["curriculum_wakes"]
+        raise ResearchSchedulerError("cold history record kind is invalid")
+
+    def _recover_cold_history_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        anchor = self._cold_history_anchor(state)
+        if anchor is None:
+            raise ResearchSchedulerError("cold history anchor is missing")
+        count, tail = anchor
+        records = self._read_cold_history_records(state)
+        if len(records) < count:
+            raise ResearchSchedulerError("cold history was truncated")
+        if count == 0:
+            if tail != _COLD_HISTORY_ZERO_SHA256:
+                raise ResearchSchedulerError("empty cold history tail mismatch")
+        elif records[count - 1][3] != tail:
+            raise ResearchSchedulerError(
+                "cold history does not match durable state anchor"
+            )
+
+        changed = False
+        for record_kind, record_id, record, _ in records[:count]:
+            collection = self._cold_history_collection(state, record_kind)
+            hot = collection.get(record_id)
+            if hot is not None:
+                if hot != record:
+                    raise ResearchSchedulerError(
+                        "hot scheduler record conflicts with cold history"
+                    )
+                del collection[record_id]
+                changed = True
+
+        if len(records) > count:
+            for record_kind, record_id, record, _ in records[count:]:
+                collection = self._cold_history_collection(state, record_kind)
+                hot = collection.get(record_id)
+                if hot != record:
+                    raise ResearchSchedulerError(
+                        "unanchored cold history cannot be recovered"
+                    )
+                del collection[record_id]
+            state["cold_history_count"] = len(records)
+            state["cold_history_tail_sha256"] = records[-1][3]
+            changed = True
+
+        if changed:
+            state["state_version"] += 1
+            self._write(state)
+            recovered = self._read()
+            self._validate(recovered)
+            return recovered
+        self._validate_cold_history_tail(state)
+        return state
+
+    def _append_cold_history_locked(
+        self,
+        state: dict[str, Any],
+        completed: list[tuple[str, str, dict[str, Any]]],
+    ) -> None:
+        if not completed:
+            return
+        anchor = self._cold_history_anchor(state)
+        if anchor is None:
+            raise ResearchSchedulerError("cold history anchor is missing")
+        count, tail = anchor
+        connection = self._open_cold_history(create=True)
+        assert connection is not None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for record_kind, record_id, record in completed:
+                sequence = count + 1
+                record_json = _canonical_json(record)
+                entry_sha256 = self._cold_history_entry_sha256(
+                    sequence=sequence,
+                    previous_entry_sha256=tail,
+                    record_kind=record_kind,
+                    record_id=record_id,
+                    record=record,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO cold_history(
+                        sequence, record_kind, record_id,
+                        previous_entry_sha256, record_json, entry_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sequence,
+                        record_kind,
+                        record_id,
+                        tail,
+                        record_json,
+                        entry_sha256,
+                    ),
+                )
+                count = sequence
+                tail = entry_sha256
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise ResearchSchedulerError("cold history identity conflict") from exc
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise ResearchSchedulerError("cold history append failed") from exc
+        finally:
+            connection.close()
+        state["cold_history_count"] = count
+        state["cold_history_tail_sha256"] = tail
+
+    def _archive_completed_cold_history_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        ordered: list[tuple[str, str, str, dict[str, Any]]] = []
+        for record_id, raw in state["occurrences"].items():
+            if raw["status"] in {"ACCEPTED", "SKIPPED"}:
+                ordered.append(
+                    (
+                        _timestamp(raw["scheduled_for"], "occurrence.scheduled_for"),
+                        _COLD_HISTORY_OCCURRENCE,
+                        record_id,
+                        raw,
+                    )
+                )
+        for record_id, raw in state["curriculum_wakes"].items():
+            if raw["status"] == "ACCEPTED":
+                ordered.append(
+                    (
+                        _timestamp(raw["as_of"], "curriculum as_of"),
+                        _COLD_HISTORY_CURRICULUM_WAKE,
+                        record_id,
+                        raw,
+                    )
+                )
+        ordered.sort(key=lambda item: (item[0], item[1], item[2]))
+        if not ordered:
+            return state
+
+        completed = [
+            (record_kind, record_id, record)
+            for _, record_kind, record_id, record in ordered
+        ]
+        for record_kind, record_id, record in completed:
+            self._validate_cold_history_record(
+                record_kind=record_kind,
+                record_id=record_id,
+                record=record,
+                state=state,
+            )
+        self._append_cold_history_locked(state, completed)
+        for record_kind, record_id, _ in completed:
+            del self._cold_history_collection(state, record_kind)[record_id]
+        state["state_version"] += 1
+        self._write(state)
+        archived = self._read()
+        self._validate(archived)
+        return archived
+
+    def _prepare_cold_history_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = self._ensure_cold_history_anchor_locked(state)
+        state = self._recover_cold_history_locked(state)
+        state = self._archive_completed_cold_history_locked(state)
+        records = self._read_cold_history_records(state)
+        anchor = self._cold_history_anchor(state)
+        assert anchor is not None
+        count, tail = anchor
+        if len(records) != count:
+            raise ResearchSchedulerError(
+                "cold history cardinality mismatch after recovery"
+            )
+        if count and records[-1][3] != tail:
+            raise ResearchSchedulerError("cold history tail mismatch after recovery")
+        return state
+
+    def _lookup_cold_history_record(
+        self,
+        state: dict[str, Any],
+        *,
+        record_kind: str,
+        record_id: str,
+    ) -> dict[str, Any] | None:
+        anchor = self._cold_history_anchor(state)
+        if anchor is None:
+            return None
+        count, _ = anchor
+        if count == 0:
+            return None
+        connection = self._open_cold_history(create=False)
+        if connection is None:
+            raise ResearchSchedulerError("cold history database is missing")
+        try:
+            row = connection.execute(
+                """
+                SELECT sequence, record_kind, record_id,
+                       previous_entry_sha256, record_json, entry_sha256
+                FROM cold_history
+                WHERE record_kind = ? AND record_id = ? AND sequence <= ?
+                """,
+                (record_kind, record_id, count),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ResearchSchedulerError("cold history lookup failed") from exc
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        _, _, record, _ = self._validate_cold_history_row(
+            row,
+            state=state,
+            expected_sequence=row[0],
+        )
+        return record
 
     @staticmethod
     def _event_from_payload(raw: object) -> ExternalResearchTrigger:
@@ -543,7 +1213,12 @@ class ResearchScheduler:
             }
         )
 
-    def _validate(self, state: object) -> None:
+    def _validate(
+        self,
+        state: object,
+        *,
+        check_history_tail: bool = True,
+    ) -> None:
         if type(state) is not dict:
             raise ResearchSchedulerError("research scheduler state must be an object")
         required = {
@@ -557,8 +1232,10 @@ class ResearchScheduler:
             "curriculum_wakes",
             "state_sha256",
         }
-        if set(state) != required:
+        fields = set(state)
+        if fields != required and fields != required | _COLD_HISTORY_FIELDS:
             raise ResearchSchedulerError("research scheduler state fields mismatch")
+        self._cold_history_anchor(state)
         if state["schema"] != SCHEMA or state["schema_version"] != SCHEMA_VERSION:
             raise ResearchSchedulerError("research scheduler schema mismatch")
         try:
@@ -612,6 +1289,8 @@ class ResearchScheduler:
             self._validate_occurrence(occurrence_id, raw, state["schedules"])
         for wake_id, raw in state["curriculum_wakes"].items():
             self._validate_curriculum_wake(wake_id, raw)
+        if check_history_tail:
+            self._validate_cold_history_tail(state)
 
     def _validate_schedule_authority(self, schedule: ResearchSchedule) -> None:
         if schedule.wake_source is WakeSource.SCHEDULED_QUESTION:
@@ -950,6 +1629,13 @@ class ResearchScheduler:
             self._validate(state)
             if SchedulerStatus(state["status"]) is SchedulerStatus.STOPPED:
                 raise ResearchSchedulerError("stopped scheduler cannot queue curriculum wake")
+            archived = self._lookup_cold_history_record(
+                state,
+                record_kind=_COLD_HISTORY_CURRICULUM_WAKE,
+                record_id=wake_id,
+            )
+            if archived is not None:
+                raise ResearchSchedulerError("curriculum wake identity conflict")
             prior = state["curriculum_wakes"].get(wake_id)
             if prior is not None:
                 if prior != entry:
@@ -1053,8 +1739,11 @@ class ResearchScheduler:
                 prior["receipt_sha256"] = receipt.trigger_receipt.receipt_sha256
                 state["state_version"] += 1
                 self._write(state)
+                state = self._read()
+                self._validate(state)
             else:
                 raise ResearchSchedulerError("curriculum wake status changed unexpectedly")
+            self._archive_completed_cold_history_locked(state)
         return TickResult(
             TickAction.DELIVERED,
             curriculum_wake_id=wake_id,
@@ -1089,9 +1778,10 @@ class ResearchScheduler:
 
     @property
     def status(self) -> SchedulerStatus:
-        state = self._read()
-        self._validate(state)
-        return SchedulerStatus(state["status"])
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            return SchedulerStatus(state["status"])
 
     def pause(self) -> None:
         self._set_status(SchedulerStatus.PAUSED)
@@ -1124,9 +1814,57 @@ class ResearchScheduler:
             self._write(state)
 
     def snapshot(self) -> dict[str, Any]:
-        state = self._read()
-        self._validate(state)
-        return json.loads(_canonical_json(state))
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate(state)
+            frozen = json.loads(_canonical_json(state))
+        anchor = self._cold_history_anchor(frozen)
+        assert anchor is not None
+        count, tail = anchor
+        records = self._read_cold_history_records(
+            frozen,
+            limit=count,
+        )
+        if len(records) < count:
+            raise ResearchSchedulerError("cold history was truncated")
+        if count and records[count - 1][3] != tail:
+            raise ResearchSchedulerError(
+                "cold history does not match snapshot anchor"
+            )
+        archived_occurrences: dict[str, Any] = {}
+        archived_wakes: dict[str, Any] = {}
+        for record_kind, record_id, record, _ in records:
+            if record_kind == _COLD_HISTORY_OCCURRENCE:
+                archived_occurrences[record_id] = record
+            elif record_kind == _COLD_HISTORY_CURRICULUM_WAKE:
+                archived_wakes[record_id] = record
+            else:
+                raise ResearchSchedulerError("cold history record kind is invalid")
+
+        for record_id, record in frozen["occurrences"].items():
+            prior = archived_occurrences.get(record_id)
+            if prior is not None and prior != record:
+                raise ResearchSchedulerError(
+                    "hot occurrence conflicts with snapshot history"
+                )
+            archived_occurrences[record_id] = record
+        for record_id, record in frozen["curriculum_wakes"].items():
+            prior = archived_wakes.get(record_id)
+            if prior is not None and prior != record:
+                raise ResearchSchedulerError(
+                    "hot curriculum wake conflicts with snapshot history"
+                )
+            archived_wakes[record_id] = record
+
+        frozen["occurrences"] = dict(sorted(archived_occurrences.items()))
+        frozen["curriculum_wakes"] = dict(sorted(archived_wakes.items()))
+        body = {
+            key: value
+            for key, value in frozen.items()
+            if key != "state_sha256"
+        }
+        frozen["state_sha256"] = _digest(body)
+        return frozen
 
     @staticmethod
     def _oldest_pending(
@@ -1231,6 +1969,9 @@ class ResearchScheduler:
                 }
                 state["state_version"] += 1
                 self._write(state)
+                state = self._read()
+                self._validate(state)
+                self._archive_completed_cold_history_locked(state)
                 return TickResult(
                     TickAction.SKIPPED,
                     schedule_id=schedule_id,
@@ -1275,6 +2016,7 @@ class ResearchScheduler:
             raw = state["occurrences"].get(occurrence_id)
             if raw is None:
                 raise ResearchSchedulerError("pending occurrence disappeared")
+            schedule_id = raw["schedule_id"]
             expected_event = self._event_from_payload(raw["event"])
             if expected_event.source_event_sha256 != event.source_event_sha256:
                 raise ResearchSchedulerError("pending occurrence changed during delivery")
@@ -1286,11 +2028,14 @@ class ResearchScheduler:
                 raw["receipt"] = accepted_receipt
                 state["state_version"] += 1
                 self._write(state)
+                state = self._read()
+                self._validate(state)
             else:
                 raise ResearchSchedulerError("pending occurrence status changed")
+            self._archive_completed_cold_history_locked(state)
             return TickResult(
                 TickAction.DELIVERED,
-                schedule_id=raw["schedule_id"],
+                schedule_id=schedule_id,
                 occurrence_id=occurrence_id,
                 receipt=receipt,
             )
@@ -1301,18 +2046,31 @@ class ResearchScheduler:
         Existing PENDING reservations recover before PAUSED/STOPPED state is
         consulted. Thus STOP blocks new reservations but cannot orphan a wakeup
         durably reserved before the status transition.
+
+        The scheduler-state workspace lock intentionally is not held across the
+        external trigger sink: pause/STOP must remain able to commit while a
+        delivery is in flight.  A separate crash-releasing durable path lock
+        serializes reserve -> sink -> receipt publication across cooperating
+        scheduler processes, so the same PENDING occurrence cannot be delivered
+        concurrently by duplicate scheduler instances.  Crash-after-acceptance
+        recovery still replays the identical immutable event and therefore
+        relies on the trigger sink's existing idempotent event identity.
         """
 
-        reserved = self._reserve_due(_timestamp(now, "now"))
-        if isinstance(reserved, TickResult):
-            return reserved
-        occurrence_id, event = reserved
-        receipt = self.trigger_sink.accept(event)
-        if not isinstance(receipt, ResearchTriggerReceipt):
-            raise ResearchSchedulerError(
-                "trigger sink must return ResearchTriggerReceipt"
-            )
-        return self._record_accepted(occurrence_id, event, receipt)
+        dispatch_lock_target = self.path.with_name(
+            f"{self.path.name}.occurrence-dispatch"
+        )
+        with durable_path_lock(dispatch_lock_target):
+            reserved = self._reserve_due(_timestamp(now, "now"))
+            if isinstance(reserved, TickResult):
+                return reserved
+            occurrence_id, event = reserved
+            receipt = self.trigger_sink.accept(event)
+            if not isinstance(receipt, ResearchTriggerReceipt):
+                raise ResearchSchedulerError(
+                    "trigger sink must return ResearchTriggerReceipt"
+                )
+            return self._record_accepted(occurrence_id, event, receipt)
 
     def run(
         self,

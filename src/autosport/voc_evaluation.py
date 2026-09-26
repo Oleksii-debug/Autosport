@@ -108,7 +108,7 @@ def _time(name: str, value: object) -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise VOCEvaluationError(f"{name} must be a finite Decimal")
     return value
 
@@ -327,9 +327,9 @@ class PairedVOCEvaluation:
             self.latency_opportunity_cost_penalty,
         )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
-        if isinstance(self.paired_sample_count, bool) or not isinstance(self.paired_sample_count, int) or self.paired_sample_count < 1:
+        if type(self.paired_sample_count) is not int or self.paired_sample_count < 1:
             raise VOCEvaluationError("paired_sample_count must be a positive integer")
-        if isinstance(self.effective_sample_size, bool) or not isinstance(self.effective_sample_size, int) or self.effective_sample_size < 1:
+        if type(self.effective_sample_size) is not int or self.effective_sample_size < 1:
             raise VOCEvaluationError("effective_sample_size must be a positive integer")
         if self.effective_sample_size > self.paired_sample_count:
             raise VOCEvaluationError("effective_sample_size cannot exceed paired_sample_count")
@@ -455,7 +455,7 @@ class PairedVOCEvaluation:
         as_of: str,
         minimum_effective_sample_size: int,
     ) -> str | None:
-        if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size < 1:
+        if type(minimum_effective_sample_size) is not int or minimum_effective_sample_size < 1:
             raise VOCEvaluationError("minimum_effective_sample_size must be positive")
         now = _instant("as_of", as_of)
         if self.provenance is not VOCEvaluationProvenance.MEASURED_SHADOW:
@@ -587,14 +587,12 @@ class OutcomeDerivedVOCScore:
         )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         if (
-            isinstance(self.paired_sample_count, bool)
-            or not isinstance(self.paired_sample_count, int)
+            type(self.paired_sample_count) is not int
             or self.paired_sample_count < 1
         ):
             raise VOCEvaluationError("paired_sample_count must be positive")
         if (
-            isinstance(self.effective_sample_size, bool)
-            or not isinstance(self.effective_sample_size, int)
+            type(self.effective_sample_size) is not int
             or self.effective_sample_size < 1
             or self.effective_sample_size > self.paired_sample_count
         ):

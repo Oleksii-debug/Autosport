@@ -191,6 +191,45 @@ def test_paperbook_rejects_opening_rewrite_before_save_and_after_round_trip(tmp_
     assert path.read_bytes() == durable_before
 
 
+def test_load_bytes_is_structural_only_and_cannot_mint_opening_authority(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    source = PaperBook("100")
+    source.open_ticket([_leg("back")], "10", placed_at=_TS)
+    source.save(path)
+
+    parsed = PaperBook.load_bytes(path.read_bytes())
+    assert parsed.balance == Decimal("90")
+    parsed_ticket = next(iter(parsed.tickets.values()))
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks product-issued opening authority",
+    ):
+        _ = parsed.committed_stake
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks product-issued opening authority",
+    ):
+        parsed.settle(
+            parsed_ticket.ticket_id,
+            {parsed_ticket.legs[0].quote_key},
+            settled_at=_TS,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks product-issued opening authority",
+    ):
+        parsed.open_ticket([_leg("back")], "1", placed_at=_TS)
+
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks product-issued opening authority",
+    ):
+        parsed.save(tmp_path / "forged.json")
+
+
 def test_paperbook_save_and_load_fail_closed_on_lay_materialization(tmp_path) -> None:
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")

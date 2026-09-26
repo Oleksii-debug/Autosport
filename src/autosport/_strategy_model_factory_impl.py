@@ -159,6 +159,40 @@ class TrainingPoint:
         return self.target_available_at
 
 
+@dataclass(frozen=True, slots=True)
+class CausalPredictionInput:
+    """Decision-time model input that deliberately excludes supervised labels."""
+
+    observed_at: str
+    feature: float
+    evidence_sha256s: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _instant(self.observed_at, "observed_at")
+        _finite(self.feature, "feature")
+        if not isinstance(self.evidence_sha256s, tuple):
+            raise ValueError("evidence_sha256s must be a tuple")
+        evidence = tuple(
+            _sha256(value, "prediction input evidence_sha256")
+            for value in self.evidence_sha256s
+        )
+        if len(evidence) != len(set(evidence)):
+            raise ValueError(
+                "prediction input evidence_sha256s must not contain duplicates"
+            )
+        object.__setattr__(self, "evidence_sha256s", evidence)
+
+    @classmethod
+    def from_training_point(cls, point: TrainingPoint) -> "CausalPredictionInput":
+        if not isinstance(point, TrainingPoint):
+            raise ValueError("prediction input source must be a TrainingPoint")
+        return cls(
+            observed_at=point.observed_at,
+            feature=point.feature,
+            evidence_sha256s=point.evidence_sha256s,
+        )
+
+
 def _ordered_training_points(points: Sequence[TrainingPoint]) -> tuple[TrainingPoint, ...]:
     for point in points:
         if not isinstance(point, TrainingPoint):
@@ -303,7 +337,7 @@ class BaselineModel(Protocol):
     @property
     def identity_sha256(self) -> str: ...
 
-    def predict(self, point: TrainingPoint, *, decision_at: str) -> float: ...
+    def predict(self, point: CausalPredictionInput, *, decision_at: str) -> float: ...
 
     def to_payload(self) -> dict[str, object]: ...
 
@@ -352,7 +386,7 @@ class MeanBaselineModel:
         mean = sum(_finite(point.target, "target") for point in eligible) / len(eligible)
         return cls(model_id, training_cutoff, mean, len(eligible))
 
-    def predict(self, point: TrainingPoint, *, decision_at: str) -> float:
+    def predict(self, point: CausalPredictionInput, *, decision_at: str) -> float:
         decision = _instant(decision_at, "decision_at")
         if _instant(point.observed_at, "observed_at") > decision:
             raise ValueError("prediction input is not available at decision time")
@@ -501,7 +535,11 @@ class WalkForwardRunner:
                 causal_train,
                 training_cutoff=cutoff,
             )
-            prediction = model.predict(evaluation, decision_at=evaluation.observed_at)
+            prediction_input = CausalPredictionInput.from_training_point(evaluation)
+            prediction = model.predict(
+                prediction_input,
+                decision_at=evaluation.observed_at,
+            )
             target = _finite(evaluation.target, "target")
             squared_error = (prediction - target) ** 2
             folds.append(

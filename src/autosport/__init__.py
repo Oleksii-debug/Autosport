@@ -126,6 +126,11 @@ from . import _campaign_provider_scope_stable_projection as _campaign_provider_s
 # mutable exact instance cannot shadow methods and mint deletion authority.
 from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
 
+# The headless collector state is one durable read/modify/replace authority. Serialize
+# independent instances/processes on the same workspace so counters and terminal STOP
+# cannot be lost to a stale predecessor publication.
+from . import _collector_service_state_serialization as _collector_service_state_serialization  # noqa: F401,E402
+
 # ScientificRegistry successors are protected by an independent machine authority;
 # every read must consume the exact authority-current image before causal witnesses
 # can be minted from it.

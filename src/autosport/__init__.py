@@ -10,6 +10,11 @@ from . import _paper_execution_append_recovery as _paper_execution_append_recove
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
 
+# Reserve PAPER exposure-scope mint/publication before decision-origin seals snapshot
+# the ledger/runtime graph. The final execute binding is completed by the existing
+# decision-origin callsite authority later in this import sequence.
+from . import _paper_exposure_scope_provenance_guard as _paper_exposure_scope_provenance_guard  # noqa: F401,E402
+
 # Product PAPER execution must preserve which exact, already-durable DecisionLedger
 # record existed before #623 RUN_RESERVED/attempt publication. This guard wraps the
 # fully-composed execution runtime after the existing recovery/authority layers.
@@ -159,6 +164,3 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.
 from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402
 
-# PAPER economic scope is a reserved canonical ledger event, not a generic caller
-# append capability. Install this after the existing PAPER authority composition.
-from . import _paper_exposure_scope_provenance_guard as _paper_exposure_scope_provenance_guard  # noqa: F401,E402

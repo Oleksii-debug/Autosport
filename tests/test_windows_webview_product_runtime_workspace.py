@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 import autosport.windows_webview_shell as shell
+from autosport.operator_source_store import OperatorSourceConfigStore
 from autosport.windows_webview_shell import AutosportWebController
 
 
@@ -61,6 +62,12 @@ def _controller(
     return controller, worker
 
 
+def _configure_canonical_source(controller: AutosportWebController) -> None:
+    OperatorSourceConfigStore(
+        controller.workspace / "operator-source.json"
+    ).write_source_id("parlayapi-table-tennis")
+
+
 def _bind_strategy_workspace(
     controller: AutosportWebController,
     monkeypatch,
@@ -94,10 +101,7 @@ def test_product_runtime_start_uses_selected_strategy_workspace(
     strategy_workspace = tmp_path / "workspace-research"
     controller, worker = _controller(base_workspace)
     _bind_strategy_workspace(controller, monkeypatch, strategy_workspace)
-    monkeypatch.setenv(
-        "AUTOSPORT_PRODUCT_SOURCE_FACTORY",
-        "provider.module:factory",
-    )
+    _configure_canonical_source(controller)
 
     result = controller._action_product_runtime_start({})
 
@@ -105,7 +109,8 @@ def test_product_runtime_start_uses_selected_strategy_workspace(
     assert worker.start_calls == [
         {
             "workspace": strategy_workspace,
-            "source_factory": "provider.module:factory",
+            "source_factory": "autosport.product_source:create_parlay_product_source",
+            "expected_source_id": "parlayapi:table_tennis",
             "initial_bankroll": "10000",
             "poll_seconds": 30.0,
         }
@@ -142,6 +147,7 @@ def test_product_runtime_actionability_uses_selected_strategy_workspace(
     strategy_workspace = tmp_path / "workspace-research"
     controller, _worker = _controller(base_workspace)
     _bind_strategy_workspace(controller, monkeypatch, strategy_workspace)
+    _configure_canonical_source(controller)
 
     assert controller._product_runtime_can_start() is True
 
@@ -171,7 +177,8 @@ def test_product_runtime_actionability_fails_closed_for_invalid_strategy_configu
 def test_product_runtime_state_projects_canonical_start_actionability() -> None:
     source = inspect.getsource(AutosportWebController.state)
 
-    assert '"can_start": self._product_runtime_can_start()' in source
+    assert '"can_start": self._product_runtime_can_start(' in source
+    assert "source_ready=source_entry is not None" in source
 
 
 def test_product_runtime_terminal_error_quarantines_active_workspace() -> None:

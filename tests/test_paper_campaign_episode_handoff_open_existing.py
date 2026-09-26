@@ -12,6 +12,7 @@ from autosport.paper_campaign_episode_handoff import (
     PaperCampaignEpisodeHandoff,
     PaperCampaignEpisodeHandoffError,
 )
+from autosport.paper_campaign_runtime import PaperCampaignRuntime
 
 
 _BASE_PATH = Path(__file__).with_name("test_paper_campaign_episode_handoff.py")
@@ -26,6 +27,26 @@ _SPEC.loader.exec_module(_base)
 
 
 class PaperCampaignEpisodeHandoffOpenExistingTests(unittest.TestCase):
+    def test_campaign_subclass_is_rejected_before_attribute_dispatch(self) -> None:
+        class HostileCampaign(PaperCampaignRuntime):
+            hook_reads = 0
+
+            def __getattribute__(self, name):
+                if name in {"state_path", "agent_loop", "environment"}:
+                    type(self).hook_reads += 1
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileCampaign)
+        HostileCampaign.hook_reads = 0
+
+        with self.assertRaisesRegex(TypeError, "exact PaperCampaignRuntime"):
+            PaperCampaignEpisodeHandoff(hostile)
+        self.assertEqual(HostileCampaign.hook_reads, 0)
+
+        with self.assertRaisesRegex(TypeError, "exact PaperCampaignRuntime"):
+            PaperCampaignEpisodeHandoff.open_existing(hostile)
+        self.assertEqual(HostileCampaign.hook_reads, 0)
+
     @staticmethod
     def _committed_handoff(root: Path):
         environment, runtime, _finalization = (

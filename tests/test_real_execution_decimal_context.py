@@ -29,6 +29,14 @@ _ACCEPTED_ODDS = "1.2345678901234567890123456789012345"
 _ACCEPTED_STAKE = "9876543210.1234567890123456789012345"
 
 
+def _format_bounded_decimal_only(value: Decimal, format_spec: str) -> str:
+    """Allow bounded sibling fields while proving extreme values never reach format()."""
+    exponent = value.as_tuple().exponent
+    if isinstance(exponent, int) and abs(exponent) >= 1_000_000:
+        raise AssertionError("formatter must not run for extreme exponent")
+    return value.__format__(format_spec)
+
+
 def _plan() -> ExecutionPlan:
     action = ExecutionAction(
         action_id="action-decimal-context",
@@ -221,7 +229,7 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
                 with patch.object(
                     real_execution_ledger,
                     "format",
-                    side_effect=AssertionError("formatter must not run"),
+                    side_effect=_format_bounded_decimal_only,
                     create=True,
                 ):
                     with self.assertRaisesRegex(
@@ -243,7 +251,7 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
         with patch.object(
             real_execution_ledger,
             "format",
-            side_effect=AssertionError("formatter must not run"),
+            side_effect=_format_bounded_decimal_only,
             create=True,
         ):
             with self.assertRaisesRegex(

@@ -63,3 +63,29 @@ def test_restart_status_reader_rejects_in_place_json_loads_code_swap(
             observation._read_previous_status(status_path)
     finally:
         canonical.__code__ = original_code
+
+
+def test_restart_status_reader_rejects_rebound_stdlib_json_decoder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """json.loads must not late-resolve a caller-selected decoder authority."""
+
+    status_path = _status_path(tmp_path)
+
+    class ForgedDecoder:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def decode(self, _text: str):
+            return {
+                "schema_version": 1,
+                "kind": "autosport_continuous_local_observation",
+                "run_id": "prior-run",
+                "state": "stopped",
+            }
+
+    monkeypatch.setattr(json_integrity.json, "JSONDecoder", ForgedDecoder)
+
+    with pytest.raises(ValueError, match="authority|parser|JSON|json"):
+        observation._read_previous_status(status_path)

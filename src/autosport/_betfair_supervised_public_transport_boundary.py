@@ -26,8 +26,8 @@ from . import trusted_runtime_code_profile as _runtime_profile
 
 _CLIENT_TYPE = _impl.BetfairSupervisedPlaceOrdersClient
 _CANONICAL_TRANSPORT_TYPE = _impl.UrllibBetfairHttpTransport
-_PRIVATE_PLACE_ACTION = _CLIENT_TYPE.__dict__.get("place_action")
-_PRIVATE_PLACE_ACTION_CODE = getattr(_PRIVATE_PLACE_ACTION, "__code__", None)
+_RAW_PLACE_ACTION = _CLIENT_TYPE.__dict__.get("place_action")
+_RAW_PLACE_ACTION_CODE = getattr(_RAW_PLACE_ACTION, "__code__", None)
 _CANONICAL_EXECUTE = _impl.execute_betfair_supervised_action
 _CANONICAL_EXECUTE_CODE = getattr(_CANONICAL_EXECUTE, "__code__", None)
 _PROVIDER_HTTP_POST = _impl._CANONICAL_PROVIDER_HTTP_POST
@@ -51,10 +51,10 @@ _REQUIRE_TRUSTED_PROFILE = (
 _REQUIRE_TRUSTED_PROFILE_CODE = getattr(_REQUIRE_TRUSTED_PROFILE, "__code__", None)
 
 if (
-    not callable(_PRIVATE_PLACE_ACTION)
-    or _PRIVATE_PLACE_ACTION_CODE is None
-    or _impl._CANONICAL_BETFAIR_PLACE_ACTION is not _PRIVATE_PLACE_ACTION
-    or _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE is not _PRIVATE_PLACE_ACTION_CODE
+    not callable(_RAW_PLACE_ACTION)
+    or _RAW_PLACE_ACTION_CODE is None
+    or _impl._CANONICAL_BETFAIR_PLACE_ACTION is not _RAW_PLACE_ACTION
+    or _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE is not _RAW_PLACE_ACTION_CODE
     or not callable(_CANONICAL_EXECUTE)
     or _CANONICAL_EXECUTE_CODE is None
     or not callable(_PROVIDER_HTTP_POST)
@@ -131,64 +131,77 @@ def _require_current_workspace_profile_locked(workspace: str):
     return profile
 
 
-def _trusted_private_place_action(
-    self: _impl.BetfairSupervisedPlaceOrdersClient,
-    action: _impl.ExecutionAction,
-    *,
-    profile: _impl.BookmakerCapabilityProfile,
-    bound: _impl.BoundSupervisedExecutionPlan,
-    provider_order_ref: str,
-    execution_workspace: Path,
-    _before_transport=None,
-    _transport_post=None,
-    _response_parser=None,
-    _observation_clock=None,
+def _build_trusted_private_place_action(
+    private_place_action,
+    private_place_action_code,
 ):
-    """Compose current trusted-runtime authority with the exact private write seam."""
+    """Capture the raw effectful primitive without exporting module authority."""
 
-    try:
-        caller_code = sys._getframe(1).f_code
-    except (AttributeError, ValueError):
-        caller_code = None
-    if caller_code is not _CANONICAL_EXECUTE_CODE:
-        raise _impl.BetfairSupervisedExecutionError(
-            "private Betfair provider write requires canonical execution caller"
-        )
-    if (
-        _transport_post is not _PROVIDER_HTTP_POST
-        or _response_parser is not _RESPONSE_PARSER
-        or _observation_clock is not _OBSERVATION_CLOCK
-        or not callable(_before_transport)
+    def _trusted_private_place_action(
+        self: _impl.BetfairSupervisedPlaceOrdersClient,
+        action: _impl.ExecutionAction,
+        *,
+        profile: _impl.BookmakerCapabilityProfile,
+        bound: _impl.BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        _before_transport=None,
+        _transport_post=None,
+        _response_parser=None,
+        _observation_clock=None,
     ):
-        raise _impl.BetfairSupervisedExecutionError(
-            "canonical Betfair internal provider-write dependencies changed"
-        )
-    workspace = _canonical_workspace_text(execution_workspace)
-
-    # This is deliberately the existing #1891 RLock, not a new admission lock.
-    # Holding it through the private call prevents STOP/runtime cleanup from
-    # revoking the profile between positive re-resolution and irreversible POST.
-    with _TRUSTED_PROFILE_LOCK:
-        _require_current_workspace_profile_locked(workspace)
-        if not _canonical_internal_dispatch_unchanged():
+        """Compose current trusted-runtime authority with the exact private write seam."""
+    
+        try:
+            caller_code = sys._getframe(1).f_code
+        except (AttributeError, ValueError):
+            caller_code = None
+        if caller_code is not _CANONICAL_EXECUTE_CODE:
             raise _impl.BetfairSupervisedExecutionError(
-                "canonical Betfair internal provider-write authority changed"
+                "private Betfair provider write requires canonical execution caller"
             )
-        return _PRIVATE_PLACE_ACTION(
-            self,
-            action,
-            profile=profile,
-            bound=bound,
-            provider_order_ref=provider_order_ref,
-            execution_workspace=execution_workspace,
-            _before_transport=_before_transport,
-            _transport_post=_PROVIDER_HTTP_POST,
-            _response_parser=_RESPONSE_PARSER,
-            _observation_clock=_OBSERVATION_CLOCK,
-        )
+        if (
+            getattr(private_place_action, "__code__", None)
+            is not private_place_action_code
+            or _transport_post is not _PROVIDER_HTTP_POST
+            or _response_parser is not _RESPONSE_PARSER
+            or _observation_clock is not _OBSERVATION_CLOCK
+            or not callable(_before_transport)
+        ):
+            raise _impl.BetfairSupervisedExecutionError(
+                "canonical Betfair internal provider-write dependencies changed"
+            )
+        workspace = _canonical_workspace_text(execution_workspace)
+    
+        # This is deliberately the existing #1891 RLock, not a new admission lock.
+        # Holding it through the private call prevents STOP/runtime cleanup from
+        # revoking the profile between positive re-resolution and irreversible POST.
+        with _TRUSTED_PROFILE_LOCK:
+            _require_current_workspace_profile_locked(workspace)
+            if not _canonical_internal_dispatch_unchanged():
+                raise _impl.BetfairSupervisedExecutionError(
+                    "canonical Betfair internal provider-write authority changed"
+                )
+            return private_place_action(
+                self,
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_order_ref,
+                execution_workspace=execution_workspace,
+                _before_transport=_before_transport,
+                _transport_post=_PROVIDER_HTTP_POST,
+                _response_parser=_RESPONSE_PARSER,
+                _observation_clock=_OBSERVATION_CLOCK,
+            )
+    return _trusted_private_place_action
 
 
-_TRUSTED_PRIVATE_PLACE_ACTION = _trusted_private_place_action
+_TRUSTED_PRIVATE_PLACE_ACTION = _build_trusted_private_place_action(
+    _RAW_PLACE_ACTION,
+    _RAW_PLACE_ACTION_CODE,
+)
+del _RAW_PLACE_ACTION, _RAW_PLACE_ACTION_CODE
 _TRUSTED_PRIVATE_PLACE_ACTION_CODE = _TRUSTED_PRIVATE_PLACE_ACTION.__code__
 
 # The implementation's high-level executor calls this captured module global. Point
@@ -208,8 +221,9 @@ def _canonical_internal_dispatch_unchanged() -> bool:
         is _TRUSTED_PRIVATE_PLACE_ACTION_CODE
         and getattr(_TRUSTED_PRIVATE_PLACE_ACTION, "__code__", None)
         is _TRUSTED_PRIVATE_PLACE_ACTION_CODE
-        and getattr(_PRIVATE_PLACE_ACTION, "__code__", None)
-        is _PRIVATE_PLACE_ACTION_CODE
+        and "_RAW_PLACE_ACTION" not in globals()
+        and "_RAW_PLACE_ACTION_CODE" not in globals()
+        and "_PRIVATE_PLACE_ACTION" not in globals()
         and _impl.execute_betfair_supervised_action is _CANONICAL_EXECUTE
         and getattr(_CANONICAL_EXECUTE, "__code__", None)
         is _CANONICAL_EXECUTE_CODE

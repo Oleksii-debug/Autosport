@@ -8,6 +8,7 @@ import autosport.product_entrypoint as entrypoint
 
 
 _SECRET = "provider-secret-7f3a"
+_TYPE_CANARY = "ProviderCredentialCanary_1943"
 
 
 class _BaseExceptionRuntime:
@@ -120,3 +121,62 @@ def test_started_cleanup_system_exit_is_wrapped_without_secret_text(
     assert _SECRET not in output
     assert '"error_type":"SystemExit"' in output
     assert '"error_code":"product_runtime_failed"' in output
+
+
+def test_pre_start_custom_exception_name_cannot_mint_public_error_type(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    unsafe_type = type(_TYPE_CANARY, (RuntimeError,), {})
+
+    def fail_source(*_args: object, **_kwargs: object) -> object:
+        raise unsafe_type("api_key=" + _SECRET)
+
+    monkeypatch.setattr(entrypoint, "_validated_source", fail_source)
+
+    exit_code = entrypoint.run_product_command(
+        workspace=entrypoint.Path("unused"),
+        source_factory="unused:factory",
+        initial_bankroll="10000",
+        max_cycles=1,
+        poll_seconds=0,
+    )
+
+    assert exit_code == 3
+    output = capsys.readouterr().out
+    assert _TYPE_CANARY not in output
+    assert _SECRET not in output
+    assert '"error_type":"RuntimeError"' in output
+
+
+def test_post_start_custom_exception_name_cannot_mint_public_error_type(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    unsafe_type = type(_TYPE_CANARY, (RuntimeError,), {})
+    runtime = _BaseExceptionRuntime()
+    _install_runtime(monkeypatch, runtime)
+
+    def fail_tick() -> object:
+        raise unsafe_type("api_key=" + _SECRET)
+
+    monkeypatch.setattr(runtime, "tick", fail_tick)
+
+    exit_code = entrypoint.run_product_command(
+        workspace=entrypoint.Path("unused"),
+        source_factory="unused:factory",
+        initial_bankroll="10000",
+        max_cycles=1,
+        poll_seconds=0,
+    )
+
+    assert exit_code == 4
+    output = capsys.readouterr().out
+    assert _TYPE_CANARY not in output
+    assert _SECRET not in output
+    assert '"error_type":"RuntimeError"' in output
+
+
+def test_product_runtime_error_rejects_caller_supplied_type_label() -> None:
+    with pytest.raises(TypeError):
+        entrypoint.ProductRuntimeError(_TYPE_CANARY)  # type: ignore[arg-type]

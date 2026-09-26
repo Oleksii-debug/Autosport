@@ -1,11 +1,12 @@
-"""Seal the fixed-origin Parlay catalog acquirer against in-place code mutation.
+"""Seal the fixed-origin Parlay catalog acquirer against caller dispatch drift.
 
 The owning acquisition module already captures its positive transport/clock objects in
 closure/default cells and removes the direct origin issuer from module dispatch. Python
 function identity alone is not sufficient, however: caller code can mutate a reachable
-function object's ``__code__`` without rebinding that object. This package guard pins
-the executable identities used by positive product-origin acquisition and fails closed
-before or after acquisition if any of them drift.
+function object's ``__code__`` without rebinding that object. Likewise, a caller-owned
+subclass of the public acquisition DTO must not cross the conditional-acquisition seam
+and virtual-dispatch authority-bearing prior fields before the canonical validator runs.
+This package guard pins both boundaries and fails closed before or after acquisition.
 
 No second provider client, store, scheduler, or origin authority is introduced.
 """
@@ -18,6 +19,7 @@ from . import parlay_sport_catalog_acquisition as _catalog
 def _install_guard() -> None:
     public_acquirer = _catalog.acquire_parlay_sport_catalog
     public_acquirer_code = public_acquirer.__code__
+    acquisition_type = _catalog.ParlaySportCatalogAcquisition
     error_type = _catalog.ParlaySportCatalogEvidenceError
 
     function_names = (
@@ -49,6 +51,7 @@ def _install_guard() -> None:
         if (
             _catalog.acquire_parlay_sport_catalog is not guarded_acquirer
             or getattr(public_acquirer, "__code__", None) is not public_acquirer_code
+            or _catalog.ParlaySportCatalogAcquisition is not acquisition_type
             or _catalog._default_transport is not product_transport
             or getattr(product_transport, "__code__", None) is not product_transport_code
         ):
@@ -74,9 +77,14 @@ def _install_guard() -> None:
 
     def guarded_acquirer(*args, **kwargs):
         require_canonical_execution()
+        prior = kwargs.get("prior")
+        if prior is not None and type(prior) is not acquisition_type:
+            raise error_type(
+                "conditional acquisition prior must be exact ParlaySportCatalogAcquisition"
+            )
         result = public_acquirer(*args, **kwargs)
         require_canonical_execution()
-        if type(result) is not _catalog.ParlaySportCatalogAcquisition:
+        if type(result) is not acquisition_type:
             raise error_type("Parlay sport-catalog acquirer returned non-canonical evidence")
         return result
 

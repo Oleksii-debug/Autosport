@@ -30,6 +30,17 @@ def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> N
     assert "keyboard-actionable Button semantics" in audit
 
 
+def test_external_uia_audit_preserves_keyboard_fallback_without_legacy_pattern() -> None:
+    audit = _audit()
+    helper_start = audit.index("function Get-ExternalActionPattern")
+    helper_end = audit.index("function Test-Pattern")
+    helper = audit[helper_start:helper_end]
+
+    assert "if ($null -eq $legacyPattern) { return $null }" not in helper
+    assert "if ($null -ne $legacyPattern) {" in helper
+    assert helper.index("if ($null -ne $legacyPattern) {") < helper.index("Kind = 'KeyboardButton'")
+
+
 def test_external_uia_audit_requires_semantic_control_type_for_critical_controls() -> None:
     audit = _audit()
     expected_types = {

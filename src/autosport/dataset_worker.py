@@ -9,16 +9,14 @@ from .dataset import ReplayDataset
 
 
 DatasetValidationTask = Callable[[], ReplayDataset]
+_TERMINAL_VALIDATION_ERROR = "DatasetValidationError: dataset validation failed"
 
 
 def _safe_worker_error(exc: BaseException) -> str:
-    """Render a constant terminal failure without inspecting caller-controlled metadata."""
+    """Compatibility renderer for a constant terminal validation failure."""
 
-    # Exception detail, class names, MROs and the mutable ``builtins`` namespace are
-    # deliberately not consulted here. This is an operator presentation boundary,
-    # not an exception-classification authority.
     del exc
-    return "DatasetValidationError: dataset validation failed"
+    return _TERMINAL_VALIDATION_ERROR
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +111,12 @@ class OneShotDatasetValidationWorker:
     def _run(self, task: DatasetValidationTask) -> None:
         try:
             message = DatasetValidationMessage(result=task())
-        except BaseException as exc:
-            message = DatasetValidationMessage(error=_safe_worker_error(exc))
+        except BaseException:
+            # This is a packaged operator boundary. Do not dispatch through a mutable
+            # module renderer or inspect caller-controlled exception metadata at all.
+            message = DatasetValidationMessage(
+                error="DatasetValidationError: dataset validation failed"
+            )
         self._messages.put(message)
 
     def poll(self) -> DatasetValidationMessage | None:

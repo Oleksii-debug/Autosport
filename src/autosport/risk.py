@@ -47,6 +47,7 @@ def _build_product_risk_authority_dispatch(verifier):
     """Pin the exact lazy authority helper executable used by the policy gate."""
 
     verifier_code = verifier.__code__
+    dispatch_code = None
 
     def dispatch(
         registry_path: str | Path | None,
@@ -56,7 +57,8 @@ def _build_product_risk_authority_dispatch(verifier):
         available_by: str,
     ) -> tuple[bool, str]:
         if (
-            _verify_product_risk_of_ruin_authority is not verifier
+            dispatch.__code__ is not dispatch_code
+            or _verify_product_risk_of_ruin_authority is not verifier
             or getattr(verifier, "__code__", None) is not verifier_code
         ):
             prefix = "portfolio" if kind == "single" else "portfolio vector"
@@ -68,6 +70,7 @@ def _build_product_risk_authority_dispatch(verifier):
             available_by=available_by,
         )
 
+    dispatch_code = dispatch.__code__
     return dispatch
 
 
@@ -1987,6 +1990,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         amount: Decimal,
         goal: EconomicGoalContract,
         context: ProposedTicketRiskContext,
+        _authority_dispatch=_PRODUCT_RISK_AUTHORITY_DISPATCH,
     ) -> RiskDecision | None:
         base_decision = _PaperRiskPolicyCore._risk_of_ruin_evidence_decision(
             book,
@@ -1999,7 +2003,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         evidence = context.risk_of_ruin_evidence
         assert evidence is not None
         assert context.proposal_ts is not None
-        verified, reason = _PRODUCT_RISK_AUTHORITY_DISPATCH(
+        verified, reason = _authority_dispatch(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="single",
@@ -2014,6 +2018,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         contexts: tuple[ProposedTicketRiskContext, ...],
         stakes: tuple[Decimal, ...],
         evidence: RiskOfRuinVectorEvidence | None,
+        _authority_dispatch=_PRODUCT_RISK_AUTHORITY_DISPATCH,
     ) -> RiskDecision | None:
         base_decision = _PaperRiskPolicyCore._risk_of_ruin_vector_evidence_decision(
             book,
@@ -2036,7 +2041,7 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
                 "portfolio vector risk-of-ruin evidence lacks canonical proposal time",
             )
         available_by = min(proposal_times).astimezone(timezone.utc).isoformat()
-        verified, reason = _PRODUCT_RISK_AUTHORITY_DISPATCH(
+        verified, reason = _authority_dispatch(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="vector",
@@ -2044,3 +2049,8 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         )
         return None if verified else RiskDecision(False, reason)
 
+
+# The policy methods retain the exact guarded dispatcher in their immutable
+# function defaults.  Do not leave a module-global callable that can be rebound
+# into positive financial authority.
+del _PRODUCT_RISK_AUTHORITY_DISPATCH

@@ -100,7 +100,9 @@ class PaperPreActionWitnessCorruptionTests(unittest.TestCase):
 
             self.assertIsNotNone(observed)
             assert observed is not None
-            self.assertEqual(observed.to_dict(), expected.to_dict())
+            roundtrip = root / "roundtrip_pre_action_book.json"
+            observed.save(roundtrip)
+            self.assertEqual(roundtrip.read_bytes(), path.read_bytes())
 
     def test_live_loader_returns_none_only_when_witness_is_absent(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -122,7 +122,7 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
         return verify_main(forwarded)
 
-    print(f"Autosport-Data: unknown command {command!r}\n")
+    print("Autosport-Data: unknown command\n")
     print(_USAGE)
     return 2
 

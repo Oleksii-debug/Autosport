@@ -7,6 +7,8 @@ existing continuous-observation status reader only while that graph remains cano
 
 from __future__ import annotations
 
+import builtins as _builtins
+
 from . import continuous_observation as _observation
 from . import json_integrity as _json_integrity
 
@@ -39,6 +41,45 @@ def _install() -> None:
     )
     canonical_integer_limit = _json_integrity._JSON_INTEGER_MAX_DIGITS
 
+    # The helper code above still resolves ordinary builtin names through the module
+    # globals / module ``__builtins__`` mapping.  Pin that executable dependency too:
+    # e.g. rebinding ``ord`` can otherwise make raw JSON digit text decode to another
+    # integer while every helper function object and ``__code__`` remains unchanged.
+    builtin_names = (
+        "bool",
+        "dict",
+        "float",
+        "int",
+        "isinstance",
+        "len",
+        "list",
+        "ord",
+        "str",
+        "type",
+    )
+    canonical_builtin_bindings = tuple(
+        (name, getattr(_builtins, name)) for name in builtin_names
+    )
+    canonical_module_builtins = _json_integrity.__dict__.get("__builtins__")
+    if canonical_module_builtins is None:
+        raise RuntimeError("json_integrity builtin dispatch is unavailable")
+    module_builtins_is_dict = type(canonical_module_builtins) is dict
+
+    def builtin_dispatch_is_canonical() -> bool:
+        if _json_integrity.__dict__.get("__builtins__") is not canonical_module_builtins:
+            return False
+        for name, expected in canonical_builtin_bindings:
+            # An injected module global shadows builtin fallback even when the module's
+            # ``__builtins__`` object itself did not move.
+            if _json_integrity.__dict__.get(name, expected) is not expected:
+                return False
+            if module_builtins_is_dict:
+                if canonical_module_builtins.get(name) is not expected:
+                    return False
+            elif getattr(canonical_module_builtins, name, None) is not expected:
+                return False
+        return True
+
     def parser_dispatch_is_canonical() -> bool:
         if (
             _observation.strict_json_loads is not canonical_loader
@@ -53,6 +94,7 @@ def _install() -> None:
             or _json_integrity.math is not canonical_math
             or canonical_math.isfinite is not canonical_isfinite
             or _json_integrity._JSON_INTEGER_MAX_DIGITS != canonical_integer_limit
+            or not builtin_dispatch_is_canonical()
         ):
             return False
         for name, expected, expected_code in decoder_method_witnesses:

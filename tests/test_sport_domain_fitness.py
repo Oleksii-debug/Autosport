@@ -282,5 +282,44 @@ class SportDomainFitnessTests(unittest.TestCase):
         self.assertNotIn("2.0", encoded)
 
 
+    def test_restart_rejects_duplicate_json_keys_before_provenance_can_be_relabelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fitness.json"
+            store = SportDomainFitnessStore(path)
+            store.add(make_observation(observation_id="dup-provenance"))
+
+            raw = path.read_text(encoding="utf-8")
+            self.assertIn('"provenance": "OBSERVED"', raw)
+            raw = raw.replace(
+                '"provenance": "OBSERVED"',
+                '"provenance": "SIMULATED",\n      "provenance": "OBSERVED"',
+                1,
+            )
+            path.write_text(raw, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                SportDomainFitnessError, "cannot load fitness evidence store"
+            ):
+                SportDomainFitnessStore(path)
+
+    def test_restart_rejects_nonstandard_json_constants_even_in_unused_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fitness.json"
+            store = SportDomainFitnessStore(path)
+            store.add(make_observation(observation_id="nonfinite"))
+
+            raw = path.read_text(encoding="utf-8")
+            raw = raw.replace(
+                "{\n",
+                '{\n  "ignored_nonfinite": NaN,\n',
+                1,
+            )
+            path.write_text(raw, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                SportDomainFitnessError, "cannot load fitness evidence store"
+            ):
+                SportDomainFitnessStore(path)
+
 if __name__ == "__main__":
     unittest.main()

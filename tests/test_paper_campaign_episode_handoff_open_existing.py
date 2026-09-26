@@ -122,6 +122,50 @@ class PaperCampaignEpisodeHandoffOpenExistingTests(unittest.TestCase):
             ):
                 reopened.committed_children()
 
+    def test_valid_virgin_snapshot_cannot_omit_independently_committed_child(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = (
+                _base.PaperCampaignEpisodeHandoffTests._terminal_parent(root)
+            )
+            parent_snapshot = runtime.agent_loop.snapshot()
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+            virgin = handoff.state_path.read_bytes()
+            policy = _base.PaperCampaignEpisodeHandoffTests._child_policy(environment)
+
+            with patch(
+                "autosport.champion_agent_episode.load_champion_policy",
+                return_value=policy,
+            ):
+                result = _base.PaperCampaignEpisodeHandoffTests._call(
+                    handoff,
+                    root,
+                    environment,
+                    parent_snapshot,
+                )
+
+            committed = handoff.state_path.read_bytes()
+            self.assertNotEqual(committed, virgin)
+            self.assertEqual(
+                json.loads(committed)["handoffs"][
+                    result.receipt.parent_checkpoint_id
+                ]["status"],
+                "COMMITTED",
+            )
+
+            # Restore the exact byte-valid state that existed before the handoff.
+            # Its local digest is honest, but it omits the child whose independent
+            # consumption authority is already durably COMMIT.
+            handoff.state_path.write_bytes(virgin)
+            reopened = PaperCampaignEpisodeHandoff.open_existing(runtime)
+            with self.assertRaisesRegex(
+                PaperCampaignEpisodeHandoffError,
+                "local handoff state omits independently committed child",
+            ):
+                reopened.committed_children()
+
+            self.assertEqual(handoff.state_path.read_bytes(), virgin)
+
     def test_wrong_valid_state_path_after_commit_is_rejected_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

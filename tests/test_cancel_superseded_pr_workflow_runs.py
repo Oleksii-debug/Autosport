@@ -93,7 +93,7 @@ def test_stale_rerun_has_zero_cancellation_authority() -> None:
 
 def test_current_head_cancels_only_older_same_workflow_runs() -> None:
     api = FakeApi(
-        [HEAD_B],
+        [HEAD_B, HEAD_B],
         (
             _run(40, HEAD_A),
             _run(41, HEAD_B),
@@ -108,6 +108,25 @@ def test_current_head_cancels_only_older_same_workflow_runs() -> None:
         current_run_id=41,
     ) == (40,)
     assert api.cancelled == [40]
+
+
+def test_head_change_after_run_listing_revokes_cancellation_authority() -> None:
+    api = FakeApi(
+        [HEAD_B, HEAD_C],
+        (
+            _run(50, HEAD_A),
+            _run(51, HEAD_C),
+        ),
+    )
+    assert cancel_superseded(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=49,
+    ) == ()
+    assert api.active_calls == 1
+    assert api.cancelled == []
 
 
 def test_invalid_sha_fails_closed() -> None:

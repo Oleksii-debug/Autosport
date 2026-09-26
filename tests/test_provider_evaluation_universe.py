@@ -446,7 +446,7 @@ def test_provider_save_without_consumer_commit_does_not_create_restart_denominat
         tmp_path / "workspace",
         authority_id="provider-intake-1",
         source_id="parlayapi:table_tennis",
-        authority_root=tmp_path / "consumer-authority",
+        authority_root=tmp_path / "provider-authority",
     )
     assert consumer_store.load() is None
 

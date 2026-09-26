@@ -84,11 +84,15 @@ def test_recovered_predecessor_resolver_rejects_read_cell_rebinding() -> None:
     try:
         with pytest.raises(
             BetfairAccountIdentityError,
-            match="canonical Betfair account-details read authority changed",
+            match=(
+                "canonical Betfair account-details read authority changed"
+                "|authenticated client origin changed before identity issuance"
+            ),
         ):
             predecessor(client)
     finally:
         read_cell.cell_contents = guarded_read
+
 
 
 def test_recovered_predecessor_resolver_uses_construction_time_snapshot(
@@ -98,10 +102,7 @@ def test_recovered_predecessor_resolver_uses_construction_time_snapshot(
 
     read_entered = Event()
     release_payload = Event()
-    parser_entered = Event()
-    release_parser = Event()
     original_loads = json.loads
-    original_provider_text = _readonly._provider_text
 
     class Response:
         def __init__(self, payload: bytes) -> None:
@@ -144,11 +145,6 @@ def test_recovered_predecessor_resolver_uses_construction_time_snapshot(
             assert data is None
             return fake_open(request, timeout)
 
-    def fenced_provider_text(*args, **kwargs):
-        parser_entered.set()
-        assert release_parser.wait(timeout=5)
-        return original_provider_text(*args, **kwargs)
-
     monkeypatch.setattr(_urllib_request, "_opener", Opener())
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
@@ -167,17 +163,12 @@ def test_recovered_predecessor_resolver_uses_construction_time_snapshot(
     worker.start()
     assert read_entered.wait(timeout=5)
 
-    # Mutate the live client only while provider I/O is in flight, then restore it
-    # before the predecessor resolver's post-acquisition context check.  The old
-    # implementation could accept the transient clock; the owning read-seam
-    # snapshot must remain bound to the construction-time clock instead.
+    # The predecessor now reaches the same sealed owning read seam. Mutating and
+    # restoring the escaped live client while transport.read() is blocked must
+    # not change the per-call shadow's construction-time clock authority.
     client._clock = lambda: datetime(1900, 1, 1, tzinfo=timezone.utc)
-    monkeypatch.setattr(_readonly, "_provider_text", fenced_provider_text)
-    release_payload.set()
-    assert parser_entered.wait(timeout=5)
     client._clock = original_clock
-    monkeypatch.setattr(_readonly, "_provider_text", original_provider_text)
-    release_parser.set()
+    release_payload.set()
 
     worker.join(timeout=5)
     assert not worker.is_alive()

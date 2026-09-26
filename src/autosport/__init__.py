@@ -1,5 +1,16 @@
 """Autosport paper/replay laboratory."""
 
+import sys as _bootstrap_sys
+
+_betfair_timeout_bootstrap_name = (
+    f"{__name__}.betfair_timeout_reconciliation"
+)
+if _betfair_timeout_bootstrap_name in _bootstrap_sys.modules:
+    raise ImportError(
+        "Autosport refuses a preloaded Betfair timeout authority module"
+    )
+del _betfair_timeout_bootstrap_name, _bootstrap_sys
+
 __version__ = "0.1.0"
 
 # Install the PAPER execution durability/freshness guards before the public

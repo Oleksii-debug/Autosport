@@ -262,6 +262,10 @@ def _install_guard() -> None:
         sealed_transport_post,
         "Betfair HTTP transport",
     )
+    read_account_details_snapshot = snapshot_function(
+        original_read_account_details,
+        "Betfair account-details reader",
+    )
 
     def require_static_snapshot() -> None:
         if sealed_json.dumps is not canonical_json_dumps:
@@ -286,6 +290,11 @@ def _install_guard() -> None:
             sealed_transport_post,
             transport_snapshot,
             "K07 Betfair HTTP transport",
+        )
+        require_snapshot(
+            original_read_account_details,
+            read_account_details_snapshot,
+            "K07 Betfair account-details reader",
         )
 
     def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
@@ -369,7 +378,13 @@ def _install_guard() -> None:
         product_clock._autosport_k07_clock_sealed = True
         return product_clock
 
-    def fresh_call_clones() -> tuple[FunctionType, FunctionType, FunctionType, FunctionType]:
+    def fresh_call_clones() -> tuple[
+        FunctionType,
+        FunctionType,
+        FunctionType,
+        FunctionType,
+        FunctionType,
+    ]:
         """Copy verified templates before I/O so later metadata mutation is irrelevant."""
 
         require_static_snapshot()
@@ -408,6 +423,11 @@ def _install_guard() -> None:
             label="per-call Betfair HTTP transport",
             metadata=transport_snapshot[0],
         )
+        local_read_account_details = clone_function(
+            original_read_account_details,
+            label="per-call K07 Betfair account-details reader",
+            metadata=read_account_details_snapshot[0],
+        )
 
         # Validate what was copied, not only the persistent templates. Transient
         # global rebinding is caught in the local copy, while executable metadata
@@ -439,12 +459,18 @@ def _install_guard() -> None:
             transport_snapshot,
             "per-call K07 Betfair HTTP transport",
         )
+        require_snapshot(
+            local_read_account_details,
+            read_account_details_snapshot,
+            "per-call K07 Betfair account-details reader",
+        )
         require_static_snapshot()
         return (
             local_rpc,
             local_next_request_id,
             local_observed_at,
             local_transport_post,
+            local_read_account_details,
         )
 
     def guarded_client_init(self, *args, **kwargs) -> None:
@@ -507,6 +533,7 @@ def _install_guard() -> None:
             local_next_request_id,
             local_observed_at,
             local_transport_post,
+            local_read_account_details,
         ) = fresh_call_clones()
         try:
             # Reserve from the real canonical client's monotonic sequence before
@@ -561,7 +588,7 @@ def _install_guard() -> None:
             return result
 
         shadow._rpc = snapshot_rpc
-        details = original_read_account_details(shadow)
+        details = local_read_account_details(shadow)
         require_static_snapshot()
         if type(details) is not details_type or len(captured) != 1:
             raise identity_error(

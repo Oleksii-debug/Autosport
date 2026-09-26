@@ -127,36 +127,36 @@ def test_source_snapshot_must_mechanically_contain_claimed_mapping_contract():
 def test_provider_namespace_is_nfkc_normalized_but_opaque_id_is_not():
     with TemporaryDirectory() as tmp:
         reg = registry(tmp)
-        add(reg, provider_namespace="ｂｅｔｆａｉｒ", provider_sport_id="ＴＥＮＮＩＳ")
-        result = reg.resolve(
-            provider_namespace="betfair", provider_sport_id="ＴＥＮＮＩＳ", as_of=FUTURE
-        )
+        add(reg, provider_namespace="ｂｅｔｆａｉｒ")
+        result = reg.resolve(provider_namespace="betfair", provider_sport_id="1", as_of=FUTURE)
         assert result.provider_namespace == "betfair"
+        with pytest.raises(ProviderSportMappingError, match="curation authority"):
+            add(reg, provider_sport_id="１")
         with pytest.raises(ProviderSportMappingError, match="no causal canonical mapping"):
-            reg.resolve(provider_namespace="betfair", provider_sport_id="TENNIS", as_of=FUTURE)
+            reg.resolve(provider_namespace="betfair", provider_sport_id="１", as_of=FUTURE)
 
 
-def test_cross_provider_same_opaque_id_stays_distinct():
+def test_uncurated_provider_cannot_reuse_a_curated_opaque_id():
     with TemporaryDirectory() as tmp:
         reg = registry(tmp)
         add(reg, provider_namespace="betfair", canonical_sport="football")
-        add(reg, provider_namespace="matchbook", canonical_sport="tennis")
+        with pytest.raises(ProviderSportMappingError, match="curation authority"):
+            add(reg, provider_namespace="matchbook", canonical_sport="tennis")
         assert reg.resolve(
             provider_namespace="betfair", provider_sport_id="1", as_of=FUTURE
         ).canonical_sport == "football"
-        assert reg.resolve(
-            provider_namespace="matchbook", provider_sport_id="1", as_of=FUTURE
-        ).canonical_sport == "tennis"
+        with pytest.raises(ProviderSportMappingError, match="no causal canonical mapping"):
+            reg.resolve(provider_namespace="matchbook", provider_sport_id="1", as_of=FUTURE)
 
 
 def test_half_open_validity_boundary_and_successor_mapping():
     with TemporaryDirectory() as tmp:
         reg = registry(tmp)
         add(reg, valid_until=T2)
-        add(reg, canonical_sport="soccer", valid_from=T2, evidence_available_at=T2)
+        add(reg, valid_from=T2, evidence_available_at=T2)
         assert reg.resolve(
             provider_namespace="betfair", provider_sport_id="1", as_of=FUTURE
-        ).canonical_sport == "soccer"
+        ).canonical_sport == "football"
         first = reg.bindings[0]
         with pytest.raises(ProviderSportMappingError, match="no causal canonical mapping"):
             reg.resolve(
@@ -171,7 +171,7 @@ def test_overlapping_mapping_is_rejected_even_with_different_exact_source_bytes(
         reg = registry(tmp)
         add(reg, valid_until=FUTURE)
         with pytest.raises(ProviderSportMappingError, match="overlapping"):
-            add(reg, canonical_sport="tennis", valid_from=T2, evidence_available_at=T2)
+            add(reg, valid_from=T2, evidence_available_at=T2)
 
 
 def test_exact_registration_retry_is_idempotent_and_preserves_original_record_time():

@@ -527,12 +527,21 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 transport_frame_sha256=frame_sha,
                 evaluated_at_ms=evaluated_at_ms,
             )
+            # The policy argument is caller-owned. A frozen dataclass prevents
+            # ordinary attribute assignment but does not make that exact object an
+            # authority-safe lifetime boundary (object.__setattr__ can still mutate it).
+            # Snapshot the already validated exact scalar policy into a product-owned
+            # canonical instance before retaining it for future currentness checks.
+            policy_snapshot = BetfairStreamFreshnessPolicy(
+                max_age_ms=policy.max_age_ms,
+                max_future_skew_ms=policy.max_future_skew_ms,
+            )
             with _AUTHORITY_LOCK:
                 _ISSUED_DECISIONS[decision] = _DecisionAuthority(
                     _decision_fingerprint(decision),
                     ref(self),
                     identity,
-                    policy,
+                    policy_snapshot,
                 )
             return decision
 

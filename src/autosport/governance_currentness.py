@@ -302,6 +302,7 @@ def _global_witnesses(function: object) -> tuple[tuple[dict[str, object], str, o
 # canonical callables, so class/module rebinding cannot redirect positive currentness
 # issuance after validation.
 _CANONICAL_PRODUCT_TIME_NS = _product_time_ns
+_CANONICAL_REGISTRY_CLASS = BookmakerCapabilityRegistry
 _CANONICAL_GOVERNANCE_HISTORY = BookmakerCapabilityRegistry.governance_history
 _CANONICAL_REGISTRY_READ_SURFACES = (
     ("governance_history", BookmakerCapabilityRegistry.governance_history),
@@ -402,6 +403,8 @@ def _require_registry_read_dispatch(registry: BookmakerCapabilityRegistry) -> No
             )
     if (
         _registry_module is not _CANONICAL_REGISTRY_MODULE
+        or BookmakerCapabilityRegistry is not _CANONICAL_REGISTRY_CLASS
+        or _registry_module.BookmakerCapabilityRegistry is not _CANONICAL_REGISTRY_CLASS
         or BookmakerCapabilityRegistry.SCHEMA_VERSION != _CANONICAL_REGISTRY_SCHEMA_VERSION
         or _registry_module.strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
         or getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)

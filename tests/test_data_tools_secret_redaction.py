@@ -22,7 +22,7 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
         self.assertEqual(result, 3)
         output = stderr.getvalue()
         self.assertIn(
-            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ExpectedFailure",
+            "Autosport-Data: verify-dataset=FAIL_CLOSED error=ValueError",
             output,
         )
         self.assertNotIn("Traceback", output)
@@ -74,7 +74,7 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
                 exc,
             )
 
-        self.assertIn("error=ExpectedFailure", output)
+        self.assertIn("error=ValueError", output)
         self.assertIn("ordinary failure", output)
         self.assertNotIn(secret_type_name, output)
 

@@ -101,7 +101,7 @@ def _sha256_text(name: str, value: object) -> str:
 def _economic_goal_sha256(goal: EconomicGoalContract | None) -> str | None:
     if goal is None:
         return None
-    if not isinstance(goal, EconomicGoalContract):
+    if type(goal) is not EconomicGoalContract:
         raise PaperRiskPolicyStoreError(
             "economic_goal must be a canonical EconomicGoalContract or None"
         )

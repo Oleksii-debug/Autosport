@@ -41,9 +41,14 @@ def _resolve(registry: BookmakerCapabilityRegistry):
     )
 
 
+@pytest.mark.parametrize(
+    "surface",
+    ("_profiles_from_document", "_decode_profile", "_profile_key"),
+)
 def test_profile_reader_class_rebinding_fails_before_hostile_dispatch(
     monkeypatch,
     tmp_path: Path,
+    surface: str,
 ) -> None:
     registry = _registry(tmp_path)
     hostile_called = False
@@ -51,9 +56,9 @@ def test_profile_reader_class_rebinding_fails_before_hostile_dispatch(
     def hostile(*args, **kwargs):
         nonlocal hostile_called
         hostile_called = True
-        raise AssertionError("hostile profile reader executed")
+        raise AssertionError(f"hostile profile reader executed: {surface}")
 
-    monkeypatch.setattr(BookmakerCapabilityRegistry, "_profiles_from_document", hostile)
+    monkeypatch.setattr(BookmakerCapabilityRegistry, surface, hostile)
 
     with pytest.raises(
         currentness.GovernanceCurrentnessError,

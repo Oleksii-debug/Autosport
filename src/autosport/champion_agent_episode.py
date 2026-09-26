@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .agent_loop import AgentLoopPhase, AgentLoopRuntime
+from .champion_eligibility import ChampionEligibilityDecision
 from .champion_policy import load_champion_policy
 from .deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from .learning_environment import (
@@ -190,6 +191,7 @@ class ChampionAgentEpisode:
         semantic_inputs: CrossSessionSemanticInputs | None = None,
         market_store: SQLiteMarketStore | None = None,
         runtime_authority_store: DeploymentRuntimeAuthorityStore | None = None,
+        eligibility_decision: ChampionEligibilityDecision | None = None,
     ) -> "ChampionAgentEpisode":
         """Start a new paper/shadow episode from canonical champion authority.
 
@@ -212,6 +214,7 @@ class ChampionAgentEpisode:
             semantic_inputs,
             market_store,
             runtime_authority_store,
+            eligibility_decision,
         )
         if activation_binding is None:
             if any(value is not None for value in cross_session_values):
@@ -234,6 +237,10 @@ class ChampionAgentEpisode:
                     runtime_authority_store=runtime_authority_store,
                 )
             )
+            if not isinstance(eligibility_decision, ChampionEligibilityDecision):
+                raise ChampionAgentEpisodeError(
+                    "cross-session activation requires current champion eligibility evidence"
+                )
             if _instant(activation_binding.activation_at, "activation_at") != _instant(
                 at, "at"
             ):
@@ -256,6 +263,8 @@ class ChampionAgentEpisode:
             protocol_id=authority_identity.protocol_id,
             config_sha256=config_sha256,
             admissible_actions=admissible_actions,
+            eligibility_decision=eligibility_decision,
+            eligibility_as_of=at if activation_binding is not None else None,
         )
 
         if activation_binding is not None:
@@ -345,6 +354,7 @@ class ChampionAgentEpisode:
         semantic_inputs: CrossSessionSemanticInputs | None = None,
         market_store: SQLiteMarketStore | None = None,
         runtime_authority_store: DeploymentRuntimeAuthorityStore | None = None,
+        eligibility_decision: ChampionEligibilityDecision | None = None,
     ) -> "ChampionAgentEpisode":
         """Rebuild one exact champion episode from its durable checkpoint."""
 
@@ -367,9 +377,13 @@ class ChampionAgentEpisode:
             )
 
         if snapshot.activation_binding_id is None:
-            if caller_supplied_authority or any(
-                value is not None
-                for value in (semantic_inputs, market_store, runtime_authority_store)
+            if (
+                caller_supplied_authority
+                or eligibility_decision is not None
+                or any(
+                    value is not None
+                    for value in (semantic_inputs, market_store, runtime_authority_store)
+                )
             ):
                 raise ChampionAgentEpisodeError(
                     "legacy AgentLoop cannot accept deployment authority on resume"
@@ -385,6 +399,10 @@ class ChampionAgentEpisode:
                     runtime_authority_store=runtime_authority_store,
                 )
             )
+            if not isinstance(eligibility_decision, ChampionEligibilityDecision):
+                raise ChampionAgentEpisodeError(
+                    "cross-session resume requires current champion eligibility evidence"
+                )
             durable_authority = load_deployment_authority(
                 path,
                 expected_binding_id=snapshot.activation_binding_id,
@@ -425,6 +443,8 @@ class ChampionAgentEpisode:
             protocol_id=authority_identity.protocol_id,
             config_sha256=config_sha256,
             admissible_actions=admissible_actions,
+            eligibility_decision=eligibility_decision,
+            eligibility_as_of=as_of if activation_binding is not None else None,
         )
 
         if activation_binding is not None:

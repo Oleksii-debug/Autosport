@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+from threading import Lock
 from typing import Final
 import weakref
 
@@ -150,6 +151,7 @@ def _install_lease_authority():
     issue_token = object()
     # identity -> (weak object reference, raw HANDLE, release-attempted)
     issued: dict[int, tuple[weakref.ReferenceType[object], int, bool]] = {}
+    state_lock = Lock()
 
     @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
     class WindowsLaunchLease:
@@ -176,12 +178,13 @@ def _install_lease_authority():
             object.__setattr__(self, "user_scope", user_scope)
 
         def _state(self) -> tuple[int, bool]:
-            current = issued.get(id(self))
-            if current is None or current[0]() is not self:
-                raise WindowsLaunchLeaseError(
-                    "Windows launch lease issuance authority is unavailable"
-                )
-            return current[1], current[2]
+            with state_lock:
+                current = issued.get(id(self))
+                if current is None or current[0]() is not self:
+                    raise WindowsLaunchLeaseError(
+                        "Windows launch lease issuance authority is unavailable"
+                    )
+                return current[1], current[2]
 
         @property
         def released(self) -> bool:
@@ -189,14 +192,20 @@ def _install_lease_authority():
             return released
 
         def release(self) -> None:
-            handle, released = self._state()
-            if released:
-                return
-            # Preserve the existing at-most-once CloseHandle rule. If CloseHandle
-            # reports failure, ownership disposition is uncertain and retrying the same
-            # numeric handle could close an unrelated object after HANDLE reuse.
-            reference = issued[id(self)][0]
-            issued[id(self)] = (reference, handle, True)
+            with state_lock:
+                current = issued.get(id(self))
+                if current is None or current[0]() is not self:
+                    raise WindowsLaunchLeaseError(
+                        "Windows launch lease issuance authority is unavailable"
+                    )
+                reference, handle, released = current
+                if released:
+                    return
+                # Commit release-attempted before calling the kernel so two concurrent
+                # release callers can never issue CloseHandle twice for one numeric
+                # HANDLE. A failed close remains fail-closed and non-retriable because
+                # HANDLE reuse makes a later retry unsafe.
+                issued[id(self)] = (reference, handle, True)
             _close_windows_handle(handle)
 
         def __enter__(self) -> "WindowsLaunchLease":
@@ -245,12 +254,14 @@ def _install_lease_authority():
         identity = id(lease)
 
         def remove(reference, *, identity=identity) -> None:
-            current = issued.get(identity)
-            if current is not None and current[0] is reference:
-                issued.pop(identity, None)
+            with state_lock:
+                current = issued.get(identity)
+                if current is not None and current[0] is reference:
+                    issued.pop(identity, None)
 
         reference = weakref.ref(lease, remove)
-        issued[identity] = (reference, handle, False)
+        with state_lock:
+            issued[identity] = (reference, handle, False)
         return lease
 
     return WindowsLaunchLease, acquire_windows_launch_lease

@@ -154,6 +154,10 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
+# Product-owned risk randomization must expose only the closure-sealed public issuer,
+# never its implementation hook that accepts caller-supplied entropy.
+from . import _risk_randomization_precommit_internal_guard as _risk_randomization_precommit_internal_guard  # noqa: F401,E402
+
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.

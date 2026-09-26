@@ -151,8 +151,18 @@ class _DispatchState:
         object.__setattr__(self, "_bundle_id_prefix", issuance_module._BUNDLE_ID_PREFIX)
         object.__setattr__(self, "_issuer_source_sha256", issuance_module._ISSUER_SOURCE_SHA256)
 
-        object.__setattr__(self, "_trusted_datetime", _datetime_type)
-        object.__setattr__(self, "_trusted_utc", _timezone_type.utc)
+        trusted_datetime = _datetime_type
+        trusted_utc = _timezone_type.utc
+        object.__setattr__(self, "_trusted_datetime", trusted_datetime)
+        object.__setattr__(self, "_trusted_utc", trusted_utc)
+
+        # Materialization can occur after the public pre-dispatch state witness has
+        # completed.  The callable installed on the canonical store must therefore
+        # not late-read mutable DispatchState slots while issuance is in flight.
+        # Capture the concrete datetime type and UTC singleton in closure-local
+        # cells now; state slots remain witnessed for pre-call tamper detection.
+        def trusted_clock_callable():
+            return trusted_datetime.now(trusted_utc)
 
         object.__setattr__(self, "_public_open", None)
         object.__setattr__(self, "_public_issue", None)
@@ -175,7 +185,7 @@ class _DispatchState:
         object.__setattr__(
             self,
             "_trusted_clock_callable",
-            object.__getattribute__(self, "trusted_clock"),
+            trusted_clock_callable,
         )
 
     def __getattribute__(self, name: str):

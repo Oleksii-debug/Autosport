@@ -107,6 +107,15 @@ class _HostileInt(int):
         return True
 
 
+class _HostilePairedVOCEvaluation(PairedVOCEvaluation):
+    __slots__ = ()
+    payload_hook_calls = 0
+
+    def payload(self):
+        type(self).payload_hook_calls += 1
+        raise AssertionError("hostile PairedVOCEvaluation payload dispatch executed")
+
+
 def evaluation(**overrides):
     values = dict(
         evaluation_id="voc-eval-1",
@@ -465,6 +474,33 @@ def outcome_score(value):
 
 
 class PairedVOCEvaluationTests(unittest.TestCase):
+    @staticmethod
+    def _hostile_evaluation(value=None):
+        source = evaluation() if value is None else value
+        return _HostilePairedVOCEvaluation(
+            **{
+                name: getattr(source, name)
+                for name in PairedVOCEvaluation.__dataclass_fields__
+            }
+        )
+
+    def test_store_rejects_evaluation_subclass_before_payload_dispatch(self):
+        _HostilePairedVOCEvaluation.payload_hook_calls = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            store = VOCEvaluationStore(Path(tmp) / "voc.json")
+            hostile = self._hostile_evaluation()
+            with self.assertRaisesRegex(TypeError, "evaluation must be PairedVOCEvaluation"):
+                store.record(hostile)
+        self.assertEqual(_HostilePairedVOCEvaluation.payload_hook_calls, 0)
+
+    def test_production_resolver_rejects_evaluation_subclass_before_payload_dispatch(self):
+        resolver, paired = self._production_resolver_fixture()
+        hostile = self._hostile_evaluation(paired)
+        _HostilePairedVOCEvaluation.payload_hook_calls = 0
+        with self.assertRaisesRegex(TypeError, "evaluation must be PairedVOCEvaluation"):
+            resolver.resolve(hostile, as_of=T2)
+        self.assertEqual(_HostilePairedVOCEvaluation.payload_hook_calls, 0)
+
     def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
         _HostileDecimal.hook_calls = 0
         with self.assertRaisesRegex(VOCEvaluationError, "finite Decimal"):

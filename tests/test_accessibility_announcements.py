@@ -2,6 +2,8 @@ import inspect
 
 import pytest
 
+import autosport.accessibility_announcements as announcements
+
 from autosport.accessibility_announcements import (
     AnnouncementDecision,
     AnnouncementEvent,
@@ -481,3 +483,155 @@ def test_suppressed_decision_cannot_carry_activity_identity():
             reason="DUPLICATE_STATE_TRANSITION",
             activity_id=_valid_activity_id(AnnouncementPriority.POLITE),
         )
+
+
+class _HostileHistoryInt(int):
+    def __le__(self, other):
+        raise AssertionError("hostile int comparison must not run")
+
+
+class _HostileString(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile string strip must not run")
+
+    def encode(self, *args, **kwargs):
+        raise AssertionError("hostile string encode must not run")
+
+
+class _HostileEventSubclass(AnnouncementEvent):
+    def __getattribute__(self, name):
+        if name in {"kind", "text", "state_token", "episode_id"}:
+            raise AssertionError("subclass event fields must not be read")
+        return super().__getattribute__(name)
+
+
+def test_history_bound_requires_exact_builtin_int_before_comparison():
+    with pytest.raises(ValueError, match="max_history must be a positive integer"):
+        AnnouncementGate(max_history=_HostileHistoryInt(-1))
+
+
+@pytest.mark.parametrize("field", ["text", "state_token"])
+def test_event_strings_require_exact_builtin_str_before_dispatch(field):
+    kwargs = {
+        "kind": AnnouncementKind.OPERATION_STARTED,
+        "text": "Операцію розпочато",
+        "state_token": "transition-1",
+    }
+    kwargs[field] = _HostileString(kwargs[field])
+    with pytest.raises(ValueError, match=field):
+        AnnouncementEvent(**kwargs)
+
+
+def test_assertive_episode_requires_exact_builtin_str_before_dispatch():
+    with pytest.raises(ValueError, match="episode_id"):
+        AnnouncementEvent(
+            kind=AnnouncementKind.CRITICAL_ERROR,
+            text="Критична помилка",
+            state_token="projection-1",
+            episode_id=_HostileString("episode-1"),
+        )
+
+
+def test_decide_rejects_event_subclass_before_reading_polymorphic_fields():
+    hostile = object.__new__(_HostileEventSubclass)
+    with pytest.raises(TypeError, match="event must be AnnouncementEvent"):
+        AnnouncementGate().decide(hostile)
+
+
+def test_gate_revalidates_exact_event_fields_after_construction():
+    event = _event(AnnouncementKind.OPERATION_STARTED, token="transition-1")
+    object.__setattr__(event, "state_token", _HostileString("transition-1"))
+    with pytest.raises(ValueError, match="event.state_token"):
+        AnnouncementGate().decide(event)
+
+
+def test_generic_decision_mint_helper_is_not_exposed_through_module_or_decide_metadata():
+    assert not hasattr(announcements, "_issue_announcement_decision")
+    assert AnnouncementGate.decide.__closure__ is None
+    assert AnnouncementGate.decide.__defaults__ is None
+
+
+def test_exact_gate_issued_decision_is_one_shot_emitter_authority():
+    gate = AnnouncementGate()
+    decision = gate.decide(
+        _event(
+            AnnouncementKind.CRITICAL_ERROR,
+            token="projection-1",
+            episode="episode-1",
+            text="Критична помилка",
+        )
+    )
+
+    assert gate.consume_for_emission(decision) is decision
+    with pytest.raises(ValueError, match="not issued for emission"):
+        gate.consume_for_emission(decision)
+
+
+def test_same_shaped_forged_decision_is_not_emitter_eligible():
+    gate = AnnouncementGate()
+    issued = gate.decide(
+        _event(
+            AnnouncementKind.STOP_COMPLETED,
+            token="stop-1",
+            text="Зупинено",
+        )
+    )
+    forged = _decision_for_invariant_test(
+        emit=issued.emit,
+        priority=issued.priority,
+        text=issued.text,
+        reason=issued.reason,
+        activity_id=issued.activity_id,
+        move_focus=issued.move_focus,
+    )
+
+    assert type(forged) is AnnouncementDecision
+    assert forged == issued
+    assert forged is not issued
+    with pytest.raises(ValueError, match="not issued for emission"):
+        gate.consume_for_emission(forged)
+    assert gate.consume_for_emission(issued) is issued
+
+
+def test_decision_from_another_gate_is_not_emitter_eligible():
+    first_gate = AnnouncementGate()
+    second_gate = AnnouncementGate()
+    decision = first_gate.decide(
+        _event(
+            AnnouncementKind.STOP_COMPLETED,
+            token="stop-1",
+            text="Зупинено",
+        )
+    )
+
+    with pytest.raises(ValueError, match="not issued for emission"):
+        second_gate.consume_for_emission(decision)
+    assert first_gate.consume_for_emission(decision) is decision
+
+
+def test_suppressed_decision_never_receives_emission_authority():
+    gate = AnnouncementGate()
+    decision = gate.decide(_event(AnnouncementKind.PRICE_TICK, token="tick-1"))
+    assert decision.emit is False
+    with pytest.raises(ValueError, match="not issued for emission"):
+        gate.consume_for_emission(decision)
+
+
+def test_emission_authority_registry_is_bounded_by_history_limit():
+    gate = AnnouncementGate(max_history=2)
+    first = gate.decide(_event(AnnouncementKind.STOP_COMPLETED, token="stop-1"))
+    second = gate.decide(_event(AnnouncementKind.STOP_COMPLETED, token="stop-2"))
+    third = gate.decide(_event(AnnouncementKind.STOP_COMPLETED, token="stop-3"))
+
+    with pytest.raises(ValueError, match="not issued for emission"):
+        gate.consume_for_emission(first)
+    assert gate.consume_for_emission(second) is second
+    assert gate.consume_for_emission(third) is third
+
+
+def test_gate_internal_state_rejects_ordinary_rebinding():
+    gate = AnnouncementGate()
+    with pytest.raises(AttributeError, match="product-owned and immutable"):
+        gate._max_history = 999  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError, match="product-owned and immutable"):
+        gate._history = ()  # type: ignore[attr-defined]

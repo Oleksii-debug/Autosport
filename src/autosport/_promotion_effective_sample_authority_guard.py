@@ -1,13 +1,13 @@
 """Fail closed on promotion-shaped effective-sample assertions without authority.
 
-ScientificRegistry/EvaluationBundleRef are general reproducibility surfaces.  A
+ScientificRegistry/EvaluationBundleRef are general reproducibility surfaces. A
 caller-provided effective_sample_size can therefore remain useful descriptive
 metadata, but it must not become promotion-grade evidence merely because the same
 bundle also carries an effect interval and practical improvement.
 
 #367 requires product-owned raw/effective sample evidence, cluster membership and
-the assumptions used to derive effective N.  No canonical product-owned derivation
-authority for that contract exists yet.  Until it does, promotion-shaped bundles
+the assumptions used to derive effective N. No canonical product-owned derivation
+authority for that contract exists yet. Until it does, promotion-shaped bundles
 fail closed at durable publication while ordinary evaluation bundles retain their
 existing compatibility.
 
@@ -40,7 +40,7 @@ def _append_with_promotion_effective_sample_authority(
     allow_repeat_experiment: bool = False,
 ) -> str:
     if _is_promotion_shaped_bundle(record):
-        raise _registry.PromotionEvidenceError(
+        raise ValueError(
             "promotion-shaped EvaluationBundle effective sample lacks canonical "
             "raw-sample/dependence/cluster derivation authority"
         )

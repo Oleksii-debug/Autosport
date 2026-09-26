@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
 
 # This gate describes the semantic HTML/WebView2 surface that ships in the
 # package.  It intentionally validates externally observable UIA semantics, not
@@ -74,6 +75,23 @@ function Get-ExternalActionPattern {
             return [pscustomobject]@{ Kind = 'LegacyIAccessible'; Pattern = $legacyObject }
         }
     }
+
+    # Chromium/WebView2 can expose a semantic HTML button as a focusable
+    # ControlType.Button while omitting both InvokePattern and the legacy action
+    # pattern from this .NET UIA client. That is still externally keyboard
+    # actionable. Keep the fallback narrow: exact Button semantics, enabled,
+    # keyboard-focusable, and activation through a real key event.
+    try {
+        if (
+            [string]$Element.Current.ControlType.ProgrammaticName -eq 'ControlType.Button' -and
+            $Element.Current.IsKeyboardFocusable -eq $true -and
+            $Element.Current.IsEnabled -eq $true
+        ) {
+            return [pscustomobject]@{ Kind = 'KeyboardButton'; Pattern = $null }
+        }
+    } catch {
+        # A disappearing fragment cannot prove keyboard actionability.
+    }
     return $null
 }
 
@@ -101,7 +119,7 @@ function Invoke-ExternalAction {
 
     $action = Get-ExternalActionPattern -Element $Element
     if ($null -eq $action) {
-        throw "control exposes neither InvokePattern nor LegacyIAccessible default action"
+        throw "control exposes neither InvokePattern, LegacyIAccessible default action, nor keyboard-actionable Button semantics"
     }
     if ($action.Kind -eq 'Invoke') {
         ([System.Windows.Automation.InvokePattern]$action.Pattern).Invoke()
@@ -109,6 +127,12 @@ function Invoke-ExternalAction {
     }
     if ($action.Kind -eq 'LegacyIAccessible') {
         $action.Pattern.DoDefaultAction()
+        return
+    }
+    if ($action.Kind -eq 'KeyboardButton') {
+        $Element.SetFocus()
+        Start-Sleep -Milliseconds 50
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
         return
     }
     throw "unsupported external action kind '$($action.Kind)'"

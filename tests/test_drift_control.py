@@ -204,6 +204,32 @@ def _reference(monitor, **overrides):
     return monitor.create_reference(**values)
 
 
+def test_min_samples_requires_exact_builtin_int_before_comparison(tmp_path):
+    class HostileMinSamples(int):
+        def __le__(self, other):
+            raise AssertionError("hostile min_samples comparison must not run")
+
+    hostile = HostileMinSamples(-1)
+    monitor = DriftMonitor(_registry(tmp_path))
+
+    with pytest.raises(ValueError, match="min_samples must be an integer"):
+        _reference(monitor, min_samples=hostile)
+
+    with pytest.raises(ValueError, match="min_samples must be an integer"):
+        drift_control._sample_insufficiency_reason(
+            algorithm_version=drift_control.DRIFT_ALGORITHM_VERSION,
+            min_samples=hostile,
+            baseline_count=2,
+            baseline_effective_sample_size=None,
+            current_count=2,
+            current_effective_sample_size=None,
+        )
+
+    reference = _reference(monitor, min_samples=3)
+    assert type(reference.min_samples) is int
+    assert reference.min_samples == 3
+
+
 def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     baseline = _baseline_window(effective_sample_size=1)
     current = _current_window(effective_sample_size=1)

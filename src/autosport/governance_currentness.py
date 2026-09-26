@@ -300,6 +300,8 @@ _CANONICAL_REGISTRY_READ_CODES = tuple(
     (name, function, getattr(function, "__code__", None))
     for name, function in _CANONICAL_REGISTRY_READ_SURFACES
 )
+_CANONICAL_REGISTRY_MODULE = _registry_module
+_CANONICAL_REGISTRY_SCHEMA_VERSION = BookmakerCapabilityRegistry.SCHEMA_VERSION
 _CANONICAL_STRICT_JSON_LOADS = _registry_module.strict_json_loads
 _CANONICAL_STRICT_JSON_LOADS_CODE = getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)
 
@@ -323,7 +325,9 @@ def _require_registry_read_dispatch(registry: BookmakerCapabilityRegistry) -> No
                 "governance registry reader dispatch authority changed"
             )
     if (
-        _registry_module.strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
+        _registry_module is not _CANONICAL_REGISTRY_MODULE
+        or BookmakerCapabilityRegistry.SCHEMA_VERSION != _CANONICAL_REGISTRY_SCHEMA_VERSION
+        or _registry_module.strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
         or getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)
         is not _CANONICAL_STRICT_JSON_LOADS_CODE
         or _registry_module.BookmakerGovernanceEvidence is not BookmakerGovernanceEvidence

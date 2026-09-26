@@ -3,10 +3,61 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import timedelta
 from itertools import count
+import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+# Root-selection production now correctly treats post-composition replacement of the
+# OS account-location resolver as an authority violation. Tests that need a sandbox
+# must therefore install one stable process-local resolver *before* importing the
+# product package. The resolver identity never changes after composition; scoped
+# fixtures below vary only this test-process state. When no sandbox is active the
+# shim delegates to the real OS resolver, so unrelated tests retain normal behavior.
+_ROOT_SELECTION_TEST_HOME: Path | None = None
+
+if os.name == "nt":
+    import ctypes as _root_selection_ctypes
+
+    _real_root_selection_shell32 = _root_selection_ctypes.windll.shell32  # type: ignore[attr-defined]
+    _real_root_selection_get_folder_path = _real_root_selection_shell32.SHGetFolderPathW
+
+    def _pytest_root_selection_get_folder_path(_hwnd, _csidl, _token, _flags, buffer):
+        caller_module = sys._getframe(1).f_globals.get("__name__")
+        if (
+            _ROOT_SELECTION_TEST_HOME is None
+            or caller_module != "autosport._monotonic_root_selection_os_resolver_guard"
+        ):
+            return _real_root_selection_get_folder_path(
+                _hwnd,
+                _csidl,
+                _token,
+                _flags,
+                buffer,
+            )
+        buffer.value = str(_ROOT_SELECTION_TEST_HOME)
+        return 0
+
+    _real_root_selection_shell32.SHGetFolderPathW = _pytest_root_selection_get_folder_path
+else:
+    import pwd as _root_selection_pwd
+
+    _real_root_selection_getpwuid = _root_selection_pwd.getpwuid
+
+    def _pytest_root_selection_getpwuid(uid):
+        caller_module = sys._getframe(1).f_globals.get("__name__")
+        if (
+            _ROOT_SELECTION_TEST_HOME is None
+            or caller_module != "autosport._monotonic_root_selection_os_resolver_guard"
+        ):
+            return _real_root_selection_getpwuid(uid)
+        return SimpleNamespace(pw_dir=str(_ROOT_SELECTION_TEST_HOME))
+
+    _root_selection_pwd.getpwuid = _pytest_root_selection_getpwuid
+
+from autosport import monotonic_authority_root_binding as _root_selection
 from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,
 )
@@ -18,6 +69,57 @@ from autosport.paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
+
+
+_ROOT_SELECTION_PRODUCT_STORE_TEST = "test_monotonic_root_selection_product_store.py"
+_LEGACY_MONOTONIC_ROOT_COMPOSITION_TESTS = frozenset(
+    {
+        "test_dataset_snapshot_lineage.py",
+        "test_point_in_time_evidence.py",
+        "test_point_in_time_holdout_concurrency.py",
+        "test_trial_family_accounting.py",
+        "test_trial_family_accounting_registry_order.py",
+        "test_trial_family_cross_ledger_witness.py",
+        "test_trial_family_witness_mint_guard.py",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _align_legacy_monotonic_root_composition(request, tmp_path, monkeypatch):
+    """Align default and explicit roots in legacy same-workspace fixtures only."""
+
+    test_file = Path(str(request.node.fspath)).name
+    if test_file not in _LEGACY_MONOTONIC_ROOT_COMPOSITION_TESTS:
+        return
+    authority_root = (
+        tmp_path.parent / f"{tmp_path.name}-machine-authority"
+    ).resolve(strict=False)
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_monotonic_root_selection_store(request, tmp_path_factory):
+    """Isolate selector receipts per test without resolver rebinding.
+
+    The fake account home is visible only to the root-selection resolver guard.
+    Other product account-root resolvers retain the actual OS location.
+    """
+
+    global _ROOT_SELECTION_TEST_HOME
+
+    test_file = Path(str(request.node.fspath)).name
+    if test_file == _ROOT_SELECTION_PRODUCT_STORE_TEST:
+        yield
+        return
+
+    sandbox = tmp_path_factory.mktemp("root-selection-product-state")
+    previous = _ROOT_SELECTION_TEST_HOME
+    _ROOT_SELECTION_TEST_HOME = sandbox
+    try:
+        yield
+    finally:
+        _ROOT_SELECTION_TEST_HOME = previous
 
 
 # These four legacy suites predate #623 execution-reality adoption. Their product

@@ -829,7 +829,7 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("lacks product cloud permission", decision.reason)
 
-    def test_cloud_requires_positive_fresh_measured_paired_voc(self):
+    def test_positive_voc_still_needs_product_issued_cloud_permission(self):
         decision = self.route_compute(
             request(),
             self.candidates,
@@ -838,11 +838,15 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=self.qualified_voc(),
             domain_observation=slow_observation(),
         )
-        self.assertEqual(decision.tier, ComputeTier.CLOUD)
-        self.assertEqual(decision.backend_id, "permitted-cloud")
-        self.assertEqual(decision.model_id, "challenger-v2")
-        self.assertEqual(decision.config_sha256, SHA_B)
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertEqual(decision.backend_id, "local-cpu")
+        self.assertEqual(decision.model_id, "baseline-v1")
+        self.assertEqual(decision.config_sha256, SHA_A)
         self.assertEqual(decision.domain_observation_id, "fitness-1")
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            decision.reason,
+        )
 
         no_voc = self.route_compute(
             replace(request(), request_id="req-no-voc"),
@@ -916,7 +920,11 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=evidence,
             domain_observation=slow_observation(),
         )
-        self.assertEqual(current.tier, ComputeTier.CLOUD)
+        self.assertEqual(current.tier, ComputeTier.LOCAL)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            current.reason,
+        )
 
         source_decision = self.route_compute(
             request(
@@ -1050,10 +1058,14 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=self.qualified_voc(evidence_id="voc-exact-compute-identity"),
             domain_observation=slow_observation(),
         )
-        self.assertEqual(exact.tier, ComputeTier.CLOUD)
-        self.assertEqual(exact.backend_id, "permitted-cloud")
-        self.assertEqual(exact.model_id, "challenger-v2")
-        self.assertEqual(exact.config_sha256, SHA_B)
+        self.assertEqual(exact.tier, ComputeTier.LOCAL)
+        self.assertEqual(exact.backend_id, "local-cpu")
+        self.assertEqual(exact.model_id, "baseline-v1")
+        self.assertEqual(exact.config_sha256, SHA_A)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            exact.reason,
+        )
 
     def test_voc_exact_compute_identity_survives_restart_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1069,7 +1081,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=evidence,
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(first.tier, ComputeTier.CLOUD)
+            self.assertEqual(first.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                first.reason,
+            )
 
             reopened = self.router_store(path)
             readback = self.store_route(reopened, 
@@ -1288,7 +1304,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-route-cloud"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(cloud_decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                cloud_decision.reason,
+            )
 
             local_request = request(
                 request_id="req-route-local",
@@ -1382,7 +1402,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-cloud-authority"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                decision.reason,
+            )
             original = path.read_text(encoding="utf-8")
 
             def assert_semantic_forgery_rejected(mutate):
@@ -1397,7 +1421,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 rewrite_route_with_valid_hashes(path, raw, route)
                 with self.assertRaisesRegex(
                     ModelComputeRouterError,
-                    "persisted CLOUD decision is not authorized "
+                    "persisted LOCAL decision is not authorized "
                     "by persisted route inputs|"
                     "VOC evaluation utility/cost values do not match evidence",
                 ):

@@ -978,7 +978,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("missing canonical VOC authority resolver", decision.reason)
 
-    def test_qualified_paired_evaluation_can_authorize_cloud(self):
+    def test_qualified_paired_evaluation_cannot_bypass_cloud_permission(self):
         resolver, paired = self._production_resolver_fixture()
         production_store = VOCEvaluationStore(
             Path(self._router_tmp.name) / "production-voc.json",
@@ -1036,7 +1036,11 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             voc_evaluation_store=production_store,
             domain_observation=slow_observation(),
         )
-        self.assertEqual(decision.tier, ComputeTier.CLOUD)
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            decision.reason,
+        )
 
     def test_historical_voc_cannot_authorize_its_source_decision(self):
         paired = evaluation()

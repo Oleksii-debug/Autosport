@@ -89,7 +89,7 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.tearDown()
 
-    def test_restarted_production_score_authorizes_only_the_next_matching_cloud_route(self):
+    def test_restarted_production_score_cannot_bypass_cloud_permission(self):
         paired = self.fixture._evaluation(register_cohort=False)
         second = self.fixture._evaluation(
             evaluation_id="voc-derived-2",
@@ -279,8 +279,12 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
             voc_evaluation_store=restarted_store,
             domain_observation=observation,
         )
-        self.assertEqual(decision.tier, ComputeTier.CLOUD)
-        self.assertEqual(decision.candidate_id, "challenger")
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertEqual(decision.candidate_id, "baseline")
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            decision.reason,
+        )
 
 
 if __name__ == "__main__":

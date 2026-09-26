@@ -237,10 +237,11 @@ del _install_expected_failure_message
 
 
 def _install_main():
-    """Bind final expected-failure presentation to the canonical sealed renderer."""
+    """Bind final expected-failure presentation to canonical sealed authorities."""
 
     canonical_failure_renderer = _expected_failure_message
     canonical_failure_renderer_code = canonical_failure_renderer.__code__
+    canonical_expected_failure_types = _EXPECTED_FAILURE_TYPES
 
     def main(argv: list[str] | None = None) -> int:
         args = list(sys.argv[1:] if argv is None else argv)
@@ -251,9 +252,10 @@ def _install_main():
         command, forwarded = args[0], args[1:]
         try:
             return _dispatch(command, forwarded)
-        except _EXPECTED_FAILURE_TYPES as exc:
-            # The renderer is itself a security boundary. Do not let module-global
-            # rebinding or an in-place executable swap bypass its redaction fences.
+        except canonical_expected_failure_types as exc:
+            # Both catch types and renderer are closure-owned security authority.
+            # Module-global rebinding must not expand expected failures to programming
+            # errors or bypass the redaction fences.
             if (
                 _expected_failure_message is canonical_failure_renderer
                 and getattr(canonical_failure_renderer, "__code__", None)

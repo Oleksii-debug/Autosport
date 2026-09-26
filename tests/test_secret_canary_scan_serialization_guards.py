@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -150,3 +151,120 @@ def test_reparse_ancestor_of_root_fails_closed_before_scan(
     assert report.scanned_files == 0
     assert report.findings == ()
     assert report.errors[0].error_type == "RootReparsePointAncestor"
+
+
+def test_file_replacement_immediately_before_open_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    victim = tmp_path / "artifact.bin"
+    victim.write_bytes(b"safe")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_text(canary, encoding="utf-8")
+    original_open = secret_canary_scan._open_readonly_no_follow
+    swapped = False
+
+    def swap_then_open(path: Path) -> int:
+        nonlocal swapped
+        if path == victim and not swapped:
+            os.replace(replacement, victim)
+            swapped = True
+        return original_open(path)
+
+    monkeypatch.setattr(
+        secret_canary_scan,
+        "_open_readonly_no_follow",
+        swap_then_open,
+    )
+
+    report = secret_canary_scan.scan_secret_canary(tmp_path, canary)
+
+    assert swapped is True
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert any(error.error_type == "FileIdentityChanged" for error in report.errors)
+
+
+def test_fixture_replacement_after_validation_is_not_silently_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    fixture = tmp_path / "fixture.txt"
+    fixture.write_text(canary, encoding="utf-8")
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text(canary, encoding="utf-8")
+    original_scan_directory = secret_canary_scan._scan_directory
+    swapped = False
+
+    def swap_then_scan(
+        path: Path,
+        expected_identity: secret_canary_scan._PathIdentity,
+    ):
+        nonlocal swapped
+        if path == tmp_path and not swapped:
+            os.replace(replacement, fixture)
+            swapped = True
+        return original_scan_directory(path, expected_identity)
+
+    monkeypatch.setattr(secret_canary_scan, "_scan_directory", swap_then_scan)
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        fixture_input=fixture,
+    )
+
+    assert swapped is True
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert report.excluded_files == 0
+    assert report.scanned_files >= 1
+    assert any(
+        error.error_type == "FixtureIdentityChanged"
+        for error in report.errors
+    )
+
+
+def test_directory_replacement_before_descent_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text(canary, encoding="utf-8")
+    original_scan_directory = secret_canary_scan._scan_directory
+    swapped = False
+
+    def swap_child_then_scan(
+        path: Path,
+        expected_identity: secret_canary_scan._PathIdentity,
+    ):
+        nonlocal swapped
+        if path == child and not swapped:
+            backup = tmp_path / "child-original"
+            child.rename(backup)
+            try:
+                child.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                backup.rename(child)
+                pytest.skip("directory symlinks unavailable in this test environment")
+            swapped = True
+        return original_scan_directory(path, expected_identity)
+
+    monkeypatch.setattr(secret_canary_scan, "_scan_directory", swap_child_then_scan)
+
+    report = secret_canary_scan.scan_secret_canary(tmp_path, canary)
+
+    assert swapped is True
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert any(
+        error.error_type == "DirectoryIdentityChanged"
+        for error in report.errors
+    )

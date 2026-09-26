@@ -399,17 +399,17 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 )
             self.assertEqual(ledger.events(), ())
 
-    def test_direct_unlocked_execution_cannot_publish_reserved_scope(self) -> None:
+    def test_direct_unlocked_descriptor_fails_closed_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
-            prepared = _prepared(runtime)
+            descriptor = _prepared(runtime)
 
             with self.assertRaisesRegex(
-                PaperExecutionAdoptionError,
-                "reserved for canonical execute authority",
+                TypeError,
+                "prepared must be PreparedPaperExecution",
             ):
                 runtime._execute_unlocked(
-                    prepared=prepared,
+                    prepared=descriptor,
                     trigger_id="direct-unlocked-trigger",
                     started_at=QUOTE_AT,
                     materialize_exposure=False,
@@ -424,8 +424,8 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             hidden_execute = PaperExecutionAdoptionRuntime.execute.__wrapped__
 
             with self.assertRaisesRegex(
-                PaperExecutionAdoptionError,
-                "reserved for canonical execute authority",
+                PaperExecutionIntegrityError,
+                "reserved for canonical execution authority",
             ):
                 hidden_execute(
                     runtime,

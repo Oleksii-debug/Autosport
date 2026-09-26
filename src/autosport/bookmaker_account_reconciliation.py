@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import tempfile
 from threading import RLock
+from weakref import ReferenceType, ref
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -40,6 +41,162 @@ from .monotonic_workspace_authority import (
 _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
 _RECONCILIATION_TRANSITION_SCHEMA = (
     "autosport.account-reconciliation-transition-v1"
+)
+
+_CANONICAL_AUTHORITY_CLASS = MonotonicWorkspaceAuthority
+_CANONICAL_AUTHORITY_METHOD_NAMES = ("read_history", "prepare", "recover")
+_CANONICAL_AUTHORITY_METHODS = {
+    name: getattr(_CANONICAL_AUTHORITY_CLASS, name)
+    for name in _CANONICAL_AUTHORITY_METHOD_NAMES
+}
+_CANONICAL_AUTHORITY_METHOD_CODES = {
+    name: getattr(method, "__code__", None)
+    for name, method in _CANONICAL_AUTHORITY_METHODS.items()
+}
+_MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
+_WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE = (
+    Path("Autosport") / "application-state" / "monotonic-authority-v1"
+)
+_POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
+
+
+def _product_account_reconciliation_authority_root() -> Path:
+    """Resolve the supported product machine-state root without env overrides.
+
+    The generic MonotonicWorkspaceAuthority deliberately supports a caller/process
+    override.  The supported account-reconciliation path must not use that override
+    as its default authority selector: otherwise a restart can point at a fresh root
+    after deleting local state and make a previously non-pristine workspace appear
+    PRISTINE.  Resolve the OS-owned user state location directly instead.
+    """
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            # CSIDL_LOCAL_APPDATA.  Query the shell rather than trusting the
+            # caller-editable LOCALAPPDATA environment variable.
+            result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+                None,
+                0x001C,
+                None,
+                0,
+                buffer,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned Windows account authority root"
+            ) from exc
+        if result != 0 or not buffer.value:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned Windows account authority root"
+            )
+        base = Path(buffer.value)
+        relative = _WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE
+    else:
+        try:
+            import pwd
+
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned POSIX account authority root"
+            ) from exc
+        base = Path(home) / ".local" / "state"
+        relative = _POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE
+
+    if not base.is_absolute():
+        raise AccountReconciliationIntegrityError(
+            "product-owned account authority root must be absolute"
+        )
+    return base / relative
+
+
+def _build_authority_binding_registry():
+    """Keep constructor-issued authority trust outside caller-mutable store fields."""
+
+    records: dict[
+        int,
+        tuple[
+            ReferenceType[object],
+            MonotonicWorkspaceAuthority,
+            tuple[object, ...],
+            Path,
+            Path,
+        ],
+    ] = {}
+    lock = RLock()
+
+    def authority_binding(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[object, ...]:
+        return (
+            authority.authority_root,
+            authority.workspace,
+            authority.workspace_instance_id,
+            authority.domain,
+            authority.key,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.namespace_marker_path,
+            authority.workspace_binding_path,
+        )
+
+    def register(
+        store: object,
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        workspace: Path,
+        path: Path,
+    ) -> None:
+        key = id(store)
+
+        def release(
+            dead_ref: ReferenceType[object],
+            *,
+            issued_key: int = key,
+        ) -> None:
+            with lock:
+                record = records.get(issued_key)
+                if record is not None and record[0] is dead_ref:
+                    records.pop(issued_key, None)
+
+        store_ref = ref(store, release)
+        record = (
+            store_ref,
+            authority,
+            authority_binding(authority),
+            workspace,
+            path,
+        )
+        with lock:
+            existing = records.get(key)
+            if existing is not None and existing[0]() is store:
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation monotonic authority issuance is already registered"
+                )
+            records[key] = record
+
+    def lookup(
+        store: object,
+    ) -> tuple[
+        MonotonicWorkspaceAuthority,
+        tuple[object, ...],
+        Path,
+        Path,
+    ] | None:
+        with lock:
+            record = records.get(id(store))
+            if record is None or record[0]() is not store:
+                return None
+            return record[1], record[2], record[3], record[4]
+
+    return register, lookup
+
+
+_register_authority_binding, _lookup_authority_binding = (
+    _build_authority_binding_registry()
 )
 
 
@@ -174,6 +331,23 @@ def _decimal_text(value: Decimal) -> str:
         digits.pop()
         exponent += 1
 
+    coefficient_length = len(digits)
+    if exponent >= 0:
+        fixed_length = coefficient_length + exponent
+    else:
+        point = coefficient_length + exponent
+        fixed_length = (
+            coefficient_length + 1
+            if point > 0
+            else 2 + (-point) + coefficient_length
+        )
+    if sign:
+        fixed_length += 1
+    if fixed_length > _MAX_CANONICAL_DECIMAL_TEXT_LENGTH:
+        raise AccountReconciliationIntegrityError(
+            "money canonical Decimal text exceeds bounded length"
+        )
+
     coefficient = "".join(str(digit) for digit in digits)
     if exponent >= 0:
         text = coefficient + ("0" * exponent)
@@ -207,6 +381,8 @@ def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
         coefficient = 0
         for digit in digits:
             coefficient = (coefficient * 10) + digit
+        if coefficient == 0:
+            return 0, 0
         return (-coefficient if sign else coefficient), exponent
 
     left_coefficient, left_exponent = signed_coefficient(left)
@@ -556,12 +732,93 @@ class BookmakerAccountReconciliationStore:
     ) -> None:
         self.path = Path(path)
         self._workspace = self.path.parent.resolve(strict=False)
-        self._authority = MonotonicWorkspaceAuthority(
+        if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority class identity changed"
+            )
+        selected_authority_root = (
+            _product_account_reconciliation_authority_root()
+            if authority_root is None
+            else authority_root
+        )
+        authority = _CANONICAL_AUTHORITY_CLASS(
             workspace=self._workspace,
             domain=_RECONCILIATION_AUTHORITY_DOMAIN,
             key=f"account-reconciliation:{self.path.name}",
-            authority_root=authority_root,
+            authority_root=selected_authority_root,
         )
+        self._authority = authority
+        _register_authority_binding(
+            self,
+            authority,
+            workspace=self._workspace,
+            path=self.path,
+        )
+
+    def _require_canonical_authority(
+        self,
+        _registry_lookup=_lookup_authority_binding,
+    ) -> MonotonicWorkspaceAuthority:
+        if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority class identity changed"
+            )
+        authority = self._authority
+        registered = _registry_lookup(self)
+        if registered is None:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority issuance is missing"
+            )
+        (
+            expected_authority,
+            expected_binding,
+            expected_workspace,
+            expected_path,
+        ) = registered
+        current_binding = (
+            getattr(authority, "authority_root", None),
+            getattr(authority, "workspace", None),
+            getattr(authority, "workspace_instance_id", None),
+            getattr(authority, "domain", None),
+            getattr(authority, "key", None),
+            getattr(authority, "namespace_sha256", None),
+            getattr(authority, "journal_dir", None),
+            getattr(authority, "namespace_marker_path", None),
+            getattr(authority, "workspace_binding_path", None),
+        )
+        if (
+            type(authority) is not _CANONICAL_AUTHORITY_CLASS
+            or authority is not expected_authority
+            or current_binding != expected_binding
+            or self._workspace != expected_workspace
+            or self.path != expected_path
+            or authority.workspace != expected_workspace
+            or authority.domain != _RECONCILIATION_AUTHORITY_DOMAIN
+            or authority.key != f"account-reconciliation:{expected_path.name}"
+        ):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority identity or binding changed"
+            )
+
+        for method_name in _CANONICAL_AUTHORITY_METHOD_NAMES:
+            expected_method = _CANONICAL_AUTHORITY_METHODS[method_name]
+            current_class_method = getattr(
+                _CANONICAL_AUTHORITY_CLASS,
+                method_name,
+                None,
+            )
+            bound_method = getattr(authority, method_name, None)
+            if (
+                current_class_method is not expected_method
+                or getattr(current_class_method, "__code__", None)
+                is not _CANONICAL_AUTHORITY_METHOD_CODES[method_name]
+                or getattr(bound_method, "__self__", None) is not authority
+                or getattr(bound_method, "__func__", None) is not expected_method
+            ):
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation monotonic authority dispatch changed"
+                )
+        return authority
 
     def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
         if not isinstance(snapshot, BookmakerAccountSnapshot):
@@ -802,9 +1059,14 @@ class BookmakerAccountReconciliationStore:
         observed_state_sha256: str | None,
         *,
         history: list[BookmakerAccountSnapshot] | None = None,
+        _authority_guard=_require_canonical_authority,
     ) -> None:
+        # Capture the product-owned validator at class-definition time.  Resolving
+        # self._require_canonical_authority here would let an exact store instance
+        # shadow the guard after construction and route durability to another root.
+        authority = _authority_guard(self)
         try:
-            records = self._authority.read_history()
+            records = authority.read_history()
             pending = (
                 records[-1]
                 if records and records[-1].phase is AuthorityPhase.PREPARE
@@ -838,13 +1100,13 @@ class BookmakerAccountReconciliationStore:
                     raise AccountReconciliationIntegrityError(
                         "account reconciliation authority semantic binding mismatch"
                     )
-                self._authority.recover(
+                authority.recover(
                     observed_state_sha256=observed_state_sha256,
                     tx_id=pending.tx_id,
                     semantic_binding_sha256=expected_binding,
                 )
             else:
-                self._authority.recover(
+                authority.recover(
                     observed_state_sha256=observed_state_sha256,
                 )
         except MonotonicWorkspaceAuthorityError as exc:
@@ -852,10 +1114,16 @@ class BookmakerAccountReconciliationStore:
                 "account reconciliation failed independent monotonic authority validation"
             ) from exc
 
-    def _next_authority_tx_id(self, snapshot_id: str) -> str:
+    def _next_authority_tx_id(
+        self,
+        snapshot_id: str,
+        *,
+        _authority_guard=_require_canonical_authority,
+    ) -> str:
         prefix = _authority_tx_prefix(snapshot_id)
+        authority = _authority_guard(self)
         try:
-            records = self._authority.read_history()
+            records = authority.read_history()
         except MonotonicWorkspaceAuthorityError as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation monotonic authority history is unreadable"
@@ -977,8 +1245,12 @@ class BookmakerAccountReconciliationStore:
                     pass
 
     def _write_history(
-        self, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
+        self,
+        history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot],
+        *,
+        _authority_guard=_require_canonical_authority,
     ) -> None:
+        authority = _authority_guard(self)
         encoded = self._encode_history(history)
         intended_state_sha256 = sha256(encoded).hexdigest()
         previous_state_sha256: str | None = None
@@ -998,7 +1270,7 @@ class BookmakerAccountReconciliationStore:
             tx_id=tx_id,
         )
         try:
-            self._authority.prepare(
+            authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=previous_state_sha256,
                 intended_state_sha256=intended_state_sha256,
@@ -1021,4 +1293,3 @@ class BookmakerAccountReconciliationStore:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation publication did not preserve intended history"
             )
-

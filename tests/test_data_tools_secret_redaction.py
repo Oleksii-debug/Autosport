@@ -4,7 +4,7 @@ import builtins
 import io
 import os
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from autosport import data_tools_entry
@@ -146,6 +146,19 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
 
         self.assertIn("error=ExpectedFailure", output)
         self.assertIn("exception details unavailable", output)
+        self.assertNotIn(secret, output)
+
+    def test_unknown_command_never_echoes_caller_controlled_text(self) -> None:
+        secret = "AS-DATATOOLS-UNKNOWN-COMMAND-SECRET-58a1"
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            result = data_tools_entry.main([secret])
+
+        self.assertEqual(result, 2)
+        output = stdout.getvalue()
+        self.assertIn("Autosport-Data: unknown command", output)
+        self.assertIn("Usage:", output)
         self.assertNotIn(secret, output)
 
 

@@ -160,6 +160,15 @@ class GitHubApi:
             raise CancellationError("unexpected cancel response body")
 
 
+def admit_current_head(*, api: GitHubApi, pr_number: int, event_head_sha: str) -> CancellationResult:
+    event_head_sha = _require_sha(event_head_sha, field="event head sha")
+    live_head_sha = api.live_pr_head(pr_number)
+    return CancellationResult(
+        current_head=event_head_sha == live_head_sha,
+        cancelled_run_ids=(),
+    )
+
+
 def cancel_superseded(
     *,
     api: GitHubApi,
@@ -205,19 +214,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--event-head-sha", required=True)
     parser.add_argument("--workflow-name", required=True)
     parser.add_argument("--current-run-id", type=int, required=True)
+    parser.add_argument("--admission-only", action="store_true")
     args = parser.parse_args(argv)
     try:
         api = GitHubApi(
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
         )
-        result = cancel_superseded(
-            api=api,
-            pr_number=args.pr_number,
-            event_head_sha=args.event_head_sha,
-            workflow_name=args.workflow_name,
-            current_run_id=args.current_run_id,
-        )
+        if args.admission_only:
+            result = admit_current_head(
+                api=api,
+                pr_number=args.pr_number,
+                event_head_sha=args.event_head_sha,
+            )
+        else:
+            result = cancel_superseded(
+                api=api,
+                pr_number=args.pr_number,
+                event_head_sha=args.event_head_sha,
+                workflow_name=args.workflow_name,
+                current_run_id=args.current_run_id,
+            )
         _write_github_output(result)
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)

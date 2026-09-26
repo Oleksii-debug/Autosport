@@ -145,6 +145,32 @@ def _install_expected_failure_message():
     canonical_re = redaction_module.re
     canonical_re_sub = canonical_re.sub
     canonical_unquote_plus = redaction_module.unquote_plus
+    canonical_builtins = redaction_module.builtins
+    canonical_module_builtins = redaction_module.__dict__.get("__builtins__")
+    if canonical_module_builtins is None:
+        raise RuntimeError("secret redaction builtin dispatch is unavailable")
+    module_builtins_is_dict = type(canonical_module_builtins) is dict
+    builtin_names = (
+        "BaseException",
+        "TypeError",
+        "ValueError",
+        "any",
+        "chr",
+        "dict",
+        "int",
+        "isinstance",
+        "len",
+        "list",
+        "range",
+        "set",
+        "sorted",
+        "str",
+        "tuple",
+        "type",
+    )
+    builtin_witnesses = tuple(
+        (name, getattr(canonical_builtins, name)) for name in builtin_names
+    )
     callable_names = (
         "redact_operator_text",
         "_secret_values",
@@ -184,6 +210,24 @@ def _install_expected_failure_message():
     simple_escape_items = tuple(sorted(redaction_module._KEY_SIMPLE_ESCAPES.items()))
     canonical_redactor_code = canonical_redactor.__code__
 
+    def builtin_dispatch_is_canonical() -> bool:
+        if (
+            redaction_module.builtins is not canonical_builtins
+            or redaction_module.__dict__.get("__builtins__") is not canonical_module_builtins
+        ):
+            return False
+        for name, expected in builtin_witnesses:
+            # A module global shadows Python's builtin fallback without changing any
+            # helper object/code witness. Reject that before rendering secrets.
+            if redaction_module.__dict__.get(name, expected) is not expected:
+                return False
+            if module_builtins_is_dict:
+                if canonical_module_builtins.get(name) is not expected:
+                    return False
+            elif getattr(canonical_module_builtins, name, None) is not expected:
+                return False
+        return True
+
     def redaction_dispatch_is_canonical() -> bool:
         if (
             _secret_redaction is not redaction_module
@@ -194,6 +238,7 @@ def _install_expected_failure_message():
             or redaction_module.re is not canonical_re
             or canonical_re.sub is not canonical_re_sub
             or redaction_module.unquote_plus is not canonical_unquote_plus
+            or not builtin_dispatch_is_canonical()
         ):
             return False
         for name, expected, expected_code in callable_witnesses:

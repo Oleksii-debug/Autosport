@@ -93,19 +93,22 @@ def select_superseded_runs(
     live_head_sha: str,
     workflow_name: str,
     current_run_id: int,
+    cancel_same_head: bool = False,
 ) -> tuple[int, ...]:
     pr_number = _require_positive_int(pr_number, field="pull request number")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
     live_head_sha = _require_sha(live_head_sha, field="live head sha")
     if not workflow_name:
         raise CancellationError("workflow name is required")
+    if type(cancel_same_head) is not bool:
+        raise CancellationError("cancel_same_head must be boolean")
     selected = {
         run.run_id
         for run in runs
         if run.run_id < current_run_id
         and run.workflow_name == workflow_name
         and pr_number in run.pr_numbers
-        and run.head_sha != live_head_sha
+        and (cancel_same_head or run.head_sha != live_head_sha)
     }
     return tuple(sorted(selected))
 
@@ -157,14 +160,27 @@ class GitHubApi:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CancellationError("GitHub API returned invalid JSON") from exc
 
-    def live_pr_head(self, pr_number: int) -> str:
+    def _pull_request(self, pr_number: int) -> dict[str, object]:
+        pr_number = _require_positive_int(pr_number, field="pull request number")
         payload = self._request(f"/pulls/{pr_number}")
         if not isinstance(payload, dict):
             raise CancellationError("invalid pull request response")
+        return payload
+
+    def live_pr_head(self, pr_number: int) -> str:
+        payload = self._pull_request(pr_number)
         head = payload.get("head")
         if not isinstance(head, dict):
             raise CancellationError("invalid pull request head")
         return _require_sha(head.get("sha"), field="live pull request head")
+
+    def pr_is_integration_capable(self, pr_number: int) -> bool:
+        payload = self._pull_request(pr_number)
+        state = payload.get("state")
+        draft = payload.get("draft")
+        if state not in ("open", "closed") or type(draft) is not bool:
+            raise CancellationError("invalid pull request qualification state")
+        return state == "open" and draft is False
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:
@@ -258,8 +274,11 @@ def cancel_superseded(
     event_head_sha: str,
     workflow_name: str,
     current_run_id: int,
+    cancel_same_head: bool = False,
 ) -> CancellationResult:
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
+    if type(cancel_same_head) is not bool:
+        raise CancellationError("cancel_same_head must be boolean")
     live_head_sha = api.live_pr_head(pr_number)
     if event_head_sha != live_head_sha:
         return CancellationResult(current_head=False, cancelled_run_ids=())
@@ -272,6 +291,7 @@ def cancel_superseded(
         live_head_sha=live_head_sha,
         workflow_name=workflow_name,
         current_run_id=current_run_id,
+        cancel_same_head=cancel_same_head,
     )
     cancelled: list[int] = []
     for run_id in selected:
@@ -325,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
                 event_head_sha=args.event_head_sha,
                 workflow_name=args.workflow_name,
                 current_run_id=args.current_run_id,
+                cancel_same_head=not api.pr_is_integration_capable(args.pr_number),
             )
         _write_github_output(result)
     except CancellationError as exc:

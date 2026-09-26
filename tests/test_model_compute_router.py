@@ -704,6 +704,77 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.assertEqual(StatefulCandidate.hook_reads, 0)
         self.assertEqual(StatefulCandidate.tier_reads, 0)
 
+    def test_decimal_subclass_is_rejected_before_numeric_hooks_execute(self):
+        class HostileDecimal(Decimal):
+            hook_calls = 0
+
+            def is_finite(self):
+                type(self).hook_calls += 1
+                return True
+
+            def __lt__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+            def __le__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+            def __gt__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+            def __ge__(self, other):
+                type(self).hook_calls += 1
+                return True
+
+            def __str__(self):
+                type(self).hook_calls += 1
+                return "0"
+
+        hostile = HostileDecimal("-1")
+        HostileDecimal.hook_calls = 0
+
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "finite exact Decimal",
+        ):
+            ComputeCandidate(
+                candidate_id="hostile-decimal",
+                tier=ComputeTier.LOCAL,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                capabilities=("forecast",),
+                estimated_cost=hostile,
+                estimated_latency_seconds=Decimal("2"),
+            )
+
+        self.assertEqual(HostileDecimal.hook_calls, 0)
+
+    def test_voc_sample_threshold_int_subclass_is_rejected_before_hooks_execute(self):
+        class HostileInt(int):
+            hook_calls = 0
+
+            def __lt__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+        hostile = HostileInt(-1)
+        HostileInt.hook_calls = 0
+
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "voc_min_effective_sample_size must be a positive integer",
+        ):
+            ComputeRoutingPolicy(
+                policy_id="hostile-threshold",
+                policy_version=1,
+                voc_min_effective_sample_size=hostile,
+            )
+
+        self.assertEqual(HostileInt.hook_calls, 0)
+
     def test_cloud_requires_product_owned_matching_data_classification(self):
         observation = slow_observation()
         evidence = self.qualified_voc(evidence_id="voc-data-classification")

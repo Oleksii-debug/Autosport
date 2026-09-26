@@ -37,6 +37,30 @@ def capture(
     return new_capture_retention_evidence(**values)  # type: ignore[arg-type]
 
 
+def test_datetime_subclasses_cannot_move_retention_or_deletion_boundaries() -> None:
+    class HostileDatetime(datetime):
+        def utcoffset(self):
+            return timedelta(0)
+
+        def __add__(self, _other):
+            return datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+        def __lt__(self, _other):
+            return False
+
+        def __ge__(self, _other):
+            return False
+
+    hostile_capture = HostileDatetime(2026, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(ParlayApiRetentionError, match="exact timezone-aware datetime"):
+        capture(captured_at=hostile_capture, available_at=hostile_capture)
+
+    evidence = capture()
+    hostile_as_of = HostileDatetime(2026, 4, 1, tzinfo=timezone.utc)
+    with pytest.raises(ParlayApiRetentionError, match="exact timezone-aware datetime"):
+        evidence.evaluate(as_of=hostile_as_of)
+
+
 def test_line_level_pricing_has_hard_90_day_cap_without_consent_authority() -> None:
     evidence = capture(
         internal_retention_until=T0 + timedelta(days=365),

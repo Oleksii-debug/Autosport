@@ -67,6 +67,21 @@ def _canonical_digest(payload: object) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _json_object_without_duplicate_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    """Reject semantically ambiguous durable JSON objects."""
+
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise SportMemoryCheckpointError(
+                f"sport-memory authority checkpoint contains duplicate JSON key {key!r}"
+            )
+        payload[key] = value
+    return payload
+
+
 def _file_root(name: str, path: Path) -> str:
     try:
         if not path.is_file():
@@ -319,7 +334,10 @@ def _checkpoint_from_raw(raw: object) -> SportMemoryAuthorityCheckpoint:
 
 def _read_checkpoint(path: Path) -> SportMemoryAuthorityCheckpoint:
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        raw: Any = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_json_object_without_duplicate_keys,
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise SportMemoryCheckpointError(
             "cannot load sport-memory authority checkpoint"

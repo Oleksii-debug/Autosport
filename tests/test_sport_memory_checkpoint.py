@@ -497,3 +497,44 @@ def test_existing_runtime_without_checkpoint_cannot_self_attest_generation(tmp_p
             identity,
             opponent,
         )
+
+
+def test_checkpoint_parser_rejects_duplicate_json_keys(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    original = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    valid_root = original["identity_root_sha256"]
+    canonical = json.dumps(
+        original,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    invalid_root = "0" * 64
+    unique_field = f'"identity_root_sha256":"{valid_root}"'
+    assert canonical.count(unique_field) == 1
+    tampered = canonical.replace(
+        unique_field,
+        (
+            f'"identity_root_sha256":"{invalid_root}",'
+            f'"identity_root_sha256":"{valid_root}"'
+        ),
+        1,
+    )
+    checkpoint_path.write_text(tampered + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="duplicate JSON key 'identity_root_sha256'",
+    ):
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+

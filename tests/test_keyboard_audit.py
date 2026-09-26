@@ -6,11 +6,7 @@ from unittest.mock import patch
 
 import autosport.keyboard_audit as keyboard_audit
 from autosport.keyboard_audit import summarize_keyboard_contract
-from autosport.windows_entry import (
-    _STARTUP_FOCUS_CONTROL,
-    _install_deterministic_startup_focus,
-    _schedule_startup_focus,
-)
+_STARTUP_FOCUS_CONTROL = keyboard_audit._STARTUP_FOCUS_CONTROL
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
@@ -125,49 +121,6 @@ class KeyboardAuditTests(unittest.TestCase):
         missing = self._summarize(*self._passing(), startup_focus_control=None)
         self.assertEqual(missing["status"], "FAIL")
         self.assertEqual(missing["startup_focus"]["observed_control"], None)
-
-    def test_startup_focus_is_scheduled_after_idle_without_forcing_focus(self):
-        class _Target:
-            def __init__(self):
-                self.focus_calls = 0
-
-            def focus_set(self):
-                self.focus_calls += 1
-
-        class _App:
-            def __init__(self):
-                self.shell_navigation = _Target()
-                self.idle_callbacks = []
-
-            def after_idle(self, callback):
-                self.idle_callbacks.append(callback)
-
-        app = _App()
-        _schedule_startup_focus(app)
-        self.assertEqual(app.shell_navigation.focus_calls, 0)
-        self.assertEqual(len(app.idle_callbacks), 1)
-        app.idle_callbacks[0]()
-        self.assertEqual(app.shell_navigation.focus_calls, 1)
-
-    def test_startup_focus_installer_is_idempotent(self):
-        class _Target:
-            def focus_set(self):
-                return None
-
-        class _App:
-            def __init__(self):
-                self.shell_navigation = _Target()
-                self.idle_callbacks = []
-
-            def after_idle(self, callback):
-                self.idle_callbacks.append(callback)
-
-        _install_deterministic_startup_focus(_App)
-        wrapped_init = _App.__init__
-        _install_deterministic_startup_focus(_App)
-        self.assertIs(_App.__init__, wrapped_init)
-        app = _App()
-        self.assertEqual(len(app.idle_callbacks), 1)
 
     def test_missing_action_binding_fails_closed(self):
         bindings, focus, reachable, reverse_reachable = self._passing()

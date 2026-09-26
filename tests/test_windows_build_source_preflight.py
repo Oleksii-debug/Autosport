@@ -416,7 +416,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         )
         first_build = (
             "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+            "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork "
             "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
         )
         second_build = (
@@ -460,7 +460,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
         first_build = (
             "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-            "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+            "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork "
             "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
         )
         first_bind = (

@@ -36,40 +36,58 @@ def test_real_relative_workspace_override_is_rejected_before_gui_import() -> Non
     assert "absolute path" in show_error.call_args.args[0]
 
 
-def test_valid_workspace_configuration_delegates_to_gui(tmp_path: Path) -> None:
+def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    gui_main = MagicMock(return_value=7)
-    fake_gui_module = types.ModuleType("autosport.windows_gui")
-    fake_gui_module.main = gui_main
+    runtime_preflight = MagicMock(
+        return_value=types.SimpleNamespace(available=True)
+    )
+    controller = object()
+    bridge = object()
+    build_controller = MagicMock(return_value=controller)
+    build_bridge = MagicMock(return_value=bridge)
+    launch_shell = MagicMock(return_value=7)
+
+    runtime_module = types.ModuleType("autosport.webview2_runtime_deployment")
+    runtime_module.ensure_webview2_runtime = runtime_preflight
+    stop_module = types.ModuleType("autosport.windows_webview_emergency_stop")
+    stop_module.EmergencyStopWebController = build_controller
+    shell_module = types.ModuleType("autosport.windows_webview_shell")
+    shell_module.AutosportWebBridge = build_bridge
+    shell_module.WindowsWebViewUnavailable = RuntimeError
+    shell_module.launch_windows_shell = launch_shell
 
     with (
         patch("autosport.paths.default_workspace", return_value=workspace) as validate_workspace,
+        patch.object(windows_entry, "_probe_workspace_writable") as probe_workspace,
         patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
-        patch.dict(sys.modules, {"autosport.windows_gui": fake_gui_module}),
+        patch.dict(
+            sys.modules,
+            {
+                "autosport.webview2_runtime_deployment": runtime_module,
+                "autosport.windows_webview_emergency_stop": stop_module,
+                "autosport.windows_webview_shell": shell_module,
+            },
+        ),
     ):
         exit_code = windows_entry._run_interactive_gui()
 
     assert exit_code == 7
     validate_workspace.assert_called_once_with()
     show_error.assert_not_called()
-    gui_main.assert_called_once_with()
-
-
+    runtime_preflight.assert_called_once_with()
+    probe_workspace.assert_called_once_with(workspace)
+    build_controller.assert_called_once_with(workspace)
+    build_bridge.assert_called_once_with(controller)
+    launch_shell.assert_called_once_with(bridge)
 def test_machine_mode_does_not_validate_interactive_workspace() -> None:
-    install_layout = MagicMock()
     run_diagnostic = MagicMock(return_value=0)
-    fake_layout_module = types.ModuleType("autosport.windows_layout")
-    fake_layout_module.install_compact_windows_layout = install_layout
     fake_diagnostic_module = types.ModuleType("autosport.diagnostic")
     fake_diagnostic_module.run_machine_diagnostic = run_diagnostic
 
     with (
         patch.dict(
             sys.modules,
-            {
-                "autosport.windows_layout": fake_layout_module,
-                "autosport.diagnostic": fake_diagnostic_module,
-            },
+            {"autosport.diagnostic": fake_diagnostic_module},
         ),
         patch(
             "autosport.paths.default_workspace",
@@ -80,12 +98,9 @@ def test_machine_mode_does_not_validate_interactive_workspace() -> None:
         exit_code = windows_entry.main(["--diagnostic-output", "diagnostic.json"])
 
     assert exit_code == 0
-    install_layout.assert_called_once_with()
     run_diagnostic.assert_called_once_with("diagnostic.json")
     validate_workspace.assert_not_called()
     show_error.assert_not_called()
-
-
 def test_native_workspace_error_dialog_is_actionable_and_accessible_boundary() -> None:
     user32 = MagicMock()
     fake_windll = types.SimpleNamespace(user32=user32)

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="uk-UA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Автоспорт</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Перейти до основного вмісту</a>
+
+  <header class="app-header">
+    <h1>Автоспорт</h1>
+    <p id="app-status" role="status" aria-live="polite" aria-atomic="true">Запуск інтерфейсу…</p>
+    <p id="error-status" role="alert" aria-live="assertive" aria-atomic="true" hidden></p>
+  </header>
+
+  <nav aria-label="Навігація продукту">
+    <label for="301">Екран</label>
+    <select id="301" aria-label="Навігація екранами Автоспорт"></select>
+    <button id="303" type="button">Перейти до робочої поверхні</button>
+    <label for="302">Стан вибраної поверхні</label>
+    <input id="302" type="text" readonly aria-label="Стан вибраної поверхні">
+    <ul id="304" class="readback-list" tabindex="0" aria-label="Контракт вибраного екрана"></ul>
+  </nav>
+
+  <main id="main-content" tabindex="-1">
+    <section id="overview" aria-labelledby="overview-heading">
+      <h2 id="overview-heading">Огляд і паперовий банк</h2>
+      <label for="205">Віртуальний банк</label>
+      <input id="205" type="text" readonly aria-label="Віртуальний банк">
+      <p><strong>Робоча область:</strong> <span id="workspace-value">—</span></p>
+      <p><strong>Активна економічна область:</strong> <span id="active-workspace-value">—</span></p>
+      <p id="truth-boundary">Реальні грошові ставки вимкнено. Людську перевірку та перевірку NVDA ще не підтверджено.</p>
+    </section>
+
+    <section id="replay-controls" aria-labelledby="replay-heading">
+      <h2 id="replay-heading">Дані, стратегія та симуляційний повтор</h2>
+
+      <label for="dataset-path">Шлях до папки набору даних</label>
+      <input id="dataset-path" type="text" autocomplete="off" aria-describedby="dataset-summary">
+      <button id="101" type="button">Вибрати та перевірити набір даних</button>
+      <p id="dataset-summary">Набір даних не вибрано.</p>
+
+      <label for="106">Стратегія повтору</label>
+      <select id="106" aria-label="Стратегія повтору"></select>
+
+      <label for="research-plan-path">Шлях до JSON-плану дослідження</label>
+      <input id="research-plan-path" type="text" autocomplete="off" aria-describedby="research-plan-summary">
+      <button id="107" type="button">Вибрати план дослідження</button>
+      <p id="research-plan-summary">План дослідження не вибрано.</p>
+
+      <label for="103">Швидкість повтору</label>
+      <select id="103" aria-label="Швидкість повтору">
+        <option value="0">За подіями без штучної затримки</option>
+        <option value="1">Реальний час</option>
+        <option value="10">10×</option>
+        <option value="100">100×</option>
+        <option value="1000">1000×</option>
+      </select>
+
+      <div class="button-row">
+        <button id="102" type="button">Запустити симуляційний повтор</button>
+        <button id="108" type="button">Відновити робочу область</button>
+      </div>
+
+      <label for="evidence-path">Файл експорту доказів поза активною робочою областю</label>
+      <input id="evidence-path" type="text" autocomplete="off">
+      <button id="109" type="button">Експортувати докази</button>
+    </section>
+
+    <section id="paper-runtime" aria-labelledby="paper-runtime-heading">
+      <h2 id="paper-runtime-heading">Тривала симуляційна робота</h2>
+      <p>Ця оболонка лише керує канонічним середовищем виконання застосунку. Реальні грошові ставки не виконуються.</p>
+      <label for="product-source-select">Джерело даних для тривалої симуляційної роботи</label>
+      <select id="product-source-select" aria-describedby="product-source-status"></select>
+      <button id="product-source-save" type="button" aria-describedby="product-source-status">Зберегти джерело даних</button>
+      <label for="product-source-status">Стан налаштування джерела даних</label>
+      <input id="product-source-status" type="text" readonly aria-label="Стан налаштування джерела даних">
+      <div class="button-row">
+        <button id="product-runtime-start" type="button">Запустити симуляційну роботу</button>
+        <button id="product-runtime-stop" type="button" disabled>Зупинити симуляційну роботу</button>
+      </div>
+      <label for="product-runtime-status">Стан тривалої симуляційної роботи</label>
+      <input id="product-runtime-status" type="text" readonly aria-label="Стан тривалої симуляційної роботи">
+    </section>
+
+    <section id="emergency-stop-panel" aria-labelledby="emergency-stop-heading">
+      <h2 id="emergency-stop-heading">Аварійний STOP виконання</h2>
+      <p id="emergency-stop-boundary">Цей STOP блокує допуск нових виконань через канонічний стійкий журнал заборони. Він не доводить завершення вже запущеного процесу або потоку даних.</p>
+      <button id="emergency-stop-action" type="button" aria-describedby="emergency-stop-boundary emergency-stop-status">Активувати аварійний STOP</button>
+      <p id="emergency-stop-status" role="status" aria-live="assertive" aria-atomic="true" tabindex="-1">Аварійний STOP доступний. Активація блокує допуск нових виконань.</p>
+    </section>
+
+    <section id="live-market" aria-labelledby="live-heading">
+      <h2 id="live-heading">Живі ринкові дані</h2>
+      <label for="104">Режим живих даних</label>
+      <select id="104" aria-label="Режим живих даних">
+        <option value="public_preview">Публічний попередній перегляд без ключа</option>
+        <option value="api_key">ParlayAPI з ключем середовища</option>
+      </select>
+      <button id="105" type="button">Оновити поточні котирування</button>
+      <p id="live-status">Живе оновлення ще не запускалося.</p>
+      <h3>Поточні котирування</h3>
+      <ul id="203" class="readback-list" tabindex="0" aria-label="Поточні котирування"></ul>
+    </section>
+
+    <section id="paper-results" aria-labelledby="paper-heading">
+      <h2 id="paper-heading">Паперові квитки та оцінювання</h2>
+      <h3>Паперові квитки і результати</h3>
+      <table id="201" tabindex="0" aria-label="Паперові квитки і результати">
+        <caption>Паперові квитки і результати</caption>
+        <thead>
+          <tr aria-label="Заголовок таблиці паперових квитків"><th scope="col">Квиток або результат</th></tr>
+        </thead>
+        <tbody id="tickets-table-body"></tbody>
+      </table>
+      <h3>Оцінювання та докази портфеля</h3>
+      <ul id="204" class="readback-list" tabindex="0" aria-label="Оцінювання та докази портфеля"></ul>
+      <label for="202">Журнал виконання</label>
+      <textarea id="202" rows="10" readonly aria-label="Журнал виконання"></textarea>
+    </section>
+
+    <section id="owner-authority" aria-labelledby="owner-heading">
+      <h2 id="owner-heading">Економічні межі власника</h2>
+      <button id="305" type="button" aria-controls="owner-panel" aria-expanded="false">Економічні межі власника</button>
+      <div id="owner-panel" hidden>
+        <label for="306">Стан економічних меж власника</label>
+        <input id="306" type="text" readonly aria-label="Стан економічних меж власника">
+        <h3>Точні економічні межі власника</h3>
+        <ul id="307" class="readback-list" tabindex="0" aria-label="Точні економічні межі власника"></ul>
+
+        <fieldset id="owner-form">
+          <legend>Початковий контракт економічних меж</legend>
+
+          <label for="309">Ідентифікатор цілі</label>
+          <input id="309" data-owner-field="goal_id" type="text">
+          <label for="310">Ідентифікатор банку</label>
+          <input id="310" data-owner-field="bankroll_id" type="text">
+          <label for="311">Валюта</label>
+          <input id="311" data-owner-field="currency" type="text">
+          <label for="312">Максимальна частка ставки</label>
+          <input id="312" data-owner-field="max_stake_fraction" type="text">
+          <label for="313">Максимальна сума ставки</label>
+          <input id="313" data-owner-field="max_stake_amount" type="text">
+          <label for="314">Максимальна втрата за сесію</label>
+          <input id="314" data-owner-field="max_session_loss_fraction" type="text">
+          <label for="315">Максимальна денна втрата</label>
+          <input id="315" data-owner-field="max_day_loss_fraction" type="text">
+          <label for="316">Максимальна просадка</label>
+          <input id="316" data-owner-field="max_drawdown_fraction" type="text">
+          <label for="317">Максимальна частка капіталу під ризиком</label>
+          <input id="317" data-owner-field="max_capital_at_risk_fraction" type="text">
+          <label for="318">Максимальний ризик розорення</label>
+          <input id="318" data-owner-field="max_risk_of_ruin" type="text">
+          <label for="319">Максимальний вік котирування, секунд</label>
+          <input id="319" data-owner-field="max_quote_age_seconds" type="text">
+          <label for="320">Мінімальна якість даних</label>
+          <input id="320" data-owner-field="minimum_data_quality" type="text">
+          <label for="321">Максимум одночасних позицій</label>
+          <input id="321" data-owner-field="max_concurrent_positions" type="text">
+          <label for="322">Максимум ніг парлею</label>
+          <input id="322" data-owner-field="max_parlay_legs" type="text">
+          <label for="323">Рівень автоматизації</label>
+          <input id="323" data-owner-field="automation_level" type="text">
+          <label for="324">Заблоковані види спорту, через кому</label>
+          <input id="324" data-owner-field="blocked_sports" type="text">
+          <label for="325">Заблоковані провайдери, через кому</label>
+          <input id="325" data-owner-field="blocked_providers" type="text">
+          <label for="326">Заблоковані ринки, через кому</label>
+          <input id="326" data-owner-field="blocked_markets" type="text">
+          <label class="checkbox-label" for="327">
+            <input id="327" type="checkbox"> Аварійна зупинка
+          </label>
+
+          <button id="328" type="button">Переглянути точні межі перед створенням</button>
+          <div id="owner-review" tabindex="-1" aria-labelledby="owner-review-heading">
+            <h3 id="owner-review-heading">Перевірка перед створенням</h3>
+            <ul id="owner-review-list" class="readback-list"></ul>
+          </div>
+          <label class="checkbox-label" for="owner-confirm-checkbox">
+            <input id="owner-confirm-checkbox" type="checkbox"> Я підтверджую саме показаний контракт
+          </label>
+          <button id="owner-confirm" type="button">Створити підтверджений початковий контракт</button>
+          <button id="329" type="button">Закрити економічні межі</button>
+        </fieldset>
+      </div>
+    </section>
+
+    <section id="manual-calculation" aria-labelledby="manual-heading">
+      <h2 id="manual-heading">Ручні розрахунки</h2>
+      <button id="330" type="button" aria-controls="manual-panel" aria-expanded="false">Відкрити робочу поверхню ручних розрахунків</button>
+      <div id="manual-panel" hidden>
+        <label for="331">Операція ручного розрахунку</label>
+        <select id="331" aria-label="Операція ручного розрахунку"></select>
+
+        <label for="332">Вхідні значення ручного розрахунку</label>
+        <textarea id="332" rows="8" aria-label="Вхідні значення ручного розрахунку"></textarea>
+
+        <div class="button-row">
+          <button id="333" type="button">Обчислити ручний результат</button>
+          <button id="335" type="button">Очистити ручні значення</button>
+          <button id="336" type="button">Закрити ручні розрахунки</button>
+        </div>
+
+        <p id="manual-status" role="status" aria-live="polite">Готово до розрахунку.</p>
+        <label for="334">Результат і докази ручного розрахунку</label>
+        <textarea id="334" rows="16" readonly aria-label="Результат і докази ручного розрахунку"></textarea>
+      </div>
+    </section>
+
+    <section id="help-about" aria-labelledby="help-heading">
+      <h2 id="help-heading" tabindex="-1">Клавіатура і межа доказів</h2>
+      <p>F2 — навігація екранами; F8 — оцінювання. Шляхи набору даних і доказів, оновлення котирувань, симуляційний повтор, відновлення та аварійний STOP доступні через звичайні семантичні елементи керування Tab + Enter/Space.</p>
+      <p>Ctrl+O/Ctrl+E/Ctrl+L, браузерні комбінації оновлення та F6/F7/F9/F10 залишаються браузеру/WebView2 і допоміжним технологіям; Автоспорт не перехоплює ці комбінації на рівні DOM.</p>
+      <p>Машинні семантичні перевірки UIA не є фізичною перевіркою NVDA. NVDA_VERIFIED залишається false до людського тесту точного артефакту випуску.</p>
+    </section>
+  </main>
+
+  <noscript>Для керування Автоспортом у цій оболонці потрібен JavaScript WebView2.</noscript>
+  <script src="app.js"></script>
+  <script src="emergency_stop.js"></script>
+</body>
+</html>

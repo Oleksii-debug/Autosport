@@ -213,43 +213,31 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 )
             self.assertEqual(ledger.events(), ())
 
-    def test_frame_provider_closure_rebind_fails_before_fake_frame_lookup(self) -> None:
+    def test_publisher_has_no_positive_frame_or_code_authority_cells(self) -> None:
+        publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+        freevars = set(publisher.__code__.co_freevars)
+        for forbidden in {
+            "getframe",
+            "sys_module",
+            "canonical_execute_code",
+            "baseline_execute",
+            "unlocked_execute",
+            "paper_value_execute",
+        }:
+            self.assertNotIn(forbidden, freevars)
+
+    def test_direct_mint_does_not_enter_scope_authority_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _caller_prepared(runtime)
             runtime._mint_prepared(prepared)
-
-            publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
-            cells = dict(
-                zip(
-                    publisher.__code__.co_freevars,
-                    publisher.__closure__ or (),
-                    strict=True,
-                )
-            )
-            self.assertIn("getframe", cells)
-            getframe_cell = cells["getframe"]
-            original_getframe = getframe_cell.cell_contents
-            forged_calls: list[int] = []
-
-            def forged_getframe(depth: int):
-                forged_calls.append(depth)
-                raise AssertionError("forged frame provider executed")
-
-            getframe_cell.cell_contents = forged_getframe
-            try:
-                with self.assertRaisesRegex(
-                    PaperExecutionIntegrityError,
-                    "frame-authority dispatch was rebound",
-                ):
-                    runtime._publish_exposure_scope(
-                        prepared=prepared,
-                        run_id="caller-selected-run",
-                    )
-            finally:
-                getframe_cell.cell_contents = original_getframe
-
-            self.assertEqual(forged_calls, [])
+            self.assertIs(runtime._prepared_authorities[id(prepared)], prepared)
+            self.assertNotIn(id(prepared), runtime._exposure_scope_authorities)
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "lacks canonical PAPER exposure-scope authority",
+            ):
+                runtime._require_exposure_scope_authority(prepared)
             self.assertEqual(ledger.events(), ())
 
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:

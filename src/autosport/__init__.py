@@ -176,3 +176,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Durable continuous-observation restart truth must keep using the existing strict
+# JSON-integrity graph even if ordinary module globals are rebound after package load.
+from . import _continuous_observation_status_parser_guard as _continuous_observation_status_parser_guard  # noqa: F401,E402

@@ -115,19 +115,21 @@ class CollectorServiceStateStopSerializationTests(unittest.TestCase):
             self.assertEqual(observer.snapshot(), stopped)
 
             state.resume(at="2026-09-25T17:00:12+00:00")
+            state.record_attempt(at="2026-09-25T17:00:13+00:00")
             state.record_success(
-                at="2026-09-25T17:00:13+00:00",
+                at="2026-09-25T17:00:14+00:00",
                 committed=1,
                 duplicates=0,
             )
             resumed = observer.snapshot()
             self.assertIsNone(resumed["stopped_at"])
             self.assertIsNone(resumed["stop_reason"])
+            self.assertEqual(resumed["cycles_attempted"], 1)
             self.assertEqual(resumed["cycles_succeeded"], 1)
             self.assertEqual(resumed["deltas_committed"], 1)
             self.assertEqual(
                 resumed["last_success_at"],
-                "2026-09-25T17:00:13+00:00",
+                "2026-09-25T17:00:14+00:00",
             )
 
 

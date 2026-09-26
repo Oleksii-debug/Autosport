@@ -138,12 +138,10 @@ def test_cycle_rejects_in_place_registry_constructor_code_swap(tmp_path: Path) -
     cycle = _build(tmp_path, _Registry(original_path))
     canonical_init = _Registry.__init__
     original_code = canonical_init.__code__
-    caller_constructor_executed = False
 
     def forged_init(self, path: Path) -> None:
-        nonlocal caller_constructor_executed
-        caller_constructor_executed = True
-        self.path = Path(path)
+        del self, path
+        raise AssertionError("forged ScientificRegistry constructor executed")
 
     try:
         canonical_init.__code__ = forged_init.__code__
@@ -155,5 +153,3 @@ def test_cycle_rejects_in_place_registry_constructor_code_swap(tmp_path: Path) -
                 cycle._load_current_scientific_registry()
     finally:
         canonical_init.__code__ = original_code
-
-    assert caller_constructor_executed is False

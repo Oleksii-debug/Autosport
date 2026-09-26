@@ -122,8 +122,6 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
         return verify_main(forwarded)
 
-    # Unknown command text is caller-controlled presentation input. Do not reflect it
-    # because it may itself contain a credential/token pasted into the wrong position.
     print("Autosport-Data: unknown command\n")
     print(_USAGE)
     return 2
@@ -135,7 +133,7 @@ def _install_expected_failure_message():
     Function-object identity alone is insufficient in Python because ordinary caller
     code can replace a function object's ``__code__`` in place. The canonical exception
     renderer also dispatches through the secret-redaction module, so capture that direct
-    dependency as part of this boundary and fail closed if either hop changes.
+    dependency chain and fail closed if any hop changes.
     """
 
     canonical_value_error = ValueError
@@ -145,6 +143,8 @@ def _install_expected_failure_message():
     canonical_redactor_code = canonical_redactor.__code__
     canonical_text_redactor = redaction_module.redact_operator_text
     canonical_text_redactor_code = canonical_text_redactor.__code__
+    canonical_secret_values = redaction_module._secret_values
+    canonical_secret_values_code = canonical_secret_values.__code__
 
     def redaction_dispatch_is_canonical() -> bool:
         return (
@@ -154,6 +154,9 @@ def _install_expected_failure_message():
             and redaction_module.redact_operator_text is canonical_text_redactor
             and getattr(canonical_text_redactor, "__code__", None)
             is canonical_text_redactor_code
+            and redaction_module._secret_values is canonical_secret_values
+            and getattr(canonical_secret_values, "__code__", None)
+            is canonical_secret_values_code
         )
 
     def expected_failure_message(command: str, exc: OSError | ValueError) -> str:
@@ -187,23 +190,41 @@ _expected_failure_message = _install_expected_failure_message()
 del _install_expected_failure_message
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in {"-h", "--help"}:
-        print(_USAGE)
-        return 0
+def _install_main():
+    """Bind final expected-failure presentation to the canonical sealed renderer."""
 
-    command, forwarded = args[0], args[1:]
-    try:
-        return _dispatch(command, forwarded)
-    except _EXPECTED_FAILURE_TYPES as exc:
-        # This executable is a packaged user-facing boundary. Expected malformed
-        # local input and filesystem failures must be recoverable without a Python
-        # traceback. Deliberately do not catch RuntimeError, SystemExit or
-        # BaseException so programming failures and argparse exit semantics remain
-        # visible to qualification instead of being mislabeled as user-input errors.
-        print(_expected_failure_message(command, exc), file=sys.stderr)
-        return 3
+    canonical_failure_renderer = _expected_failure_message
+    canonical_failure_renderer_code = canonical_failure_renderer.__code__
+
+    def main(argv: list[str] | None = None) -> int:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if not args or args[0] in {"-h", "--help"}:
+            print(_USAGE)
+            return 0
+
+        command, forwarded = args[0], args[1:]
+        try:
+            return _dispatch(command, forwarded)
+        except _EXPECTED_FAILURE_TYPES as exc:
+            if (
+                _expected_failure_message is canonical_failure_renderer
+                and getattr(canonical_failure_renderer, "__code__", None)
+                is canonical_failure_renderer_code
+            ):
+                message = canonical_failure_renderer(command, exc)
+            else:
+                message = (
+                    f"Autosport-Data: {command}=FAIL_CLOSED "
+                    "error=ExpectedFailure: exception details unavailable"
+                )
+            print(message, file=sys.stderr)
+            return 3
+
+    return main
+
+
+main = _install_main()
+del _install_main
 
 
 if __name__ == "__main__":

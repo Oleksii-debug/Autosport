@@ -86,6 +86,51 @@ class HistoricalAcquisitionCoverageScopeBindingTests(unittest.TestCase):
         self.assertEqual(len(transport.urls), 1)
         self.assertTrue(urlparse(transport.urls[0]).path.endswith("/coverage"))
 
+    def test_noncanonical_initial_sport_scope_fails_before_coverage_network(self) -> None:
+        transport = _CoverageOnlyTransport()
+        provider = self._provider(transport)
+        provider.sport_key = "football"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "canonical table-tennis sport scope",
+            ):
+                capture_historical_acquisition_bundle(
+                    provider,
+                    requested_at=("2026-09-12T10:03:00Z",),
+                    results_date="2026-09-10",
+                    output_dir=root,
+                )
+            self.assertFalse(root.exists())
+
+        self.assertEqual(transport.urls, [])
+
+    def test_mutable_provider_class_sport_cannot_redefine_coverage_scope(self) -> None:
+        transport = _CoverageOnlyTransport()
+        with patch.object(
+            ParlayApiTableTennisProvider,
+            "sport_key",
+            "football",
+        ):
+            provider = self._provider(transport)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "acquisition"
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "canonical table-tennis sport scope",
+                ):
+                    capture_historical_acquisition_bundle(
+                        provider,
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+                self.assertFalse(root.exists())
+
+        self.assertEqual(transport.urls, [])
+
     def test_returned_coverage_report_cannot_change_requested_scope(self) -> None:
         for changes in (
             {"sport_key": "football"},

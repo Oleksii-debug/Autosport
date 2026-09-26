@@ -438,9 +438,22 @@ def _build_dispatch_guards():
         return result
 
     state.bind_public(guarded_open, guarded_issue, guarded_resolve, guarded_verify)
+    # __slots__ retains the source spelling of private names (for example
+    # "__original_open"), while CPython stores those slots under the normal
+    # class-mangled name ("_DispatchState__original_open").  Witness the real
+    # storage names: otherwise import-time witness construction itself fails and
+    # the private predecessor capabilities are never covered by the seal.
+    state_slot_names = tuple(
+        (
+            f"_{state_type.__name__.lstrip('_')}{name}"
+            if name.startswith("__") and not name.endswith("__")
+            else name
+        )
+        for name in state_type.__slots__
+    )
     state_instance_snapshot = tuple(
         (name, object.__getattribute__(state, name))
-        for name in state_type.__slots__
+        for name in state_slot_names
     )
     return guarded_open, guarded_issue, guarded_resolve, guarded_verify
 

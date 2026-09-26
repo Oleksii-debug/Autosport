@@ -124,8 +124,12 @@ def _authority_now() -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise ModelComputeRouterError(f"{name} must be a finite Decimal")
+    # Routing/economic ingress must not dispatch through caller-defined Decimal
+    # subclasses before durable validation has accepted the value.
+    if type(value) is not Decimal:
+        raise ModelComputeRouterError(f"{name} must be a finite exact Decimal")
+    if not value.is_finite():
+        raise ModelComputeRouterError(f"{name} must be a finite exact Decimal")
     return value
 
 
@@ -382,8 +386,7 @@ class ComputeRoutingPolicy:
         _nonnegative("max_cloud_cost", self.max_cloud_cost)
         _nonnegative("voc_max_age_seconds", self.voc_max_age_seconds)
         if (
-            isinstance(self.voc_min_effective_sample_size, bool)
-            or not isinstance(self.voc_min_effective_sample_size, int)
+            type(self.voc_min_effective_sample_size) is not int
             or self.voc_min_effective_sample_size < 1
         ):
             raise ModelComputeRouterError(

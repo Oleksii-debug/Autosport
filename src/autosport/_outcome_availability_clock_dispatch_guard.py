@@ -9,8 +9,11 @@ metadata contains no authority-bearing predecessor ``FunctionType``.
 
 The checked objects validate the exact import-time public clock identity, the exact
 installed sampler/begin identities and every directly-read global binding of the
-private clones before delegating.  No second registry or availability authority is
-introduced.
+private clones before delegating. This proves fail-closed behavior for the supported
+public dispatch/function-metadata threat model. It does not claim capability security
+against arbitrary same-process reflection that reaches private object slots and then
+mutates or directly invokes raw FunctionType instances; that stronger property remains
+explicitly unproven. No second registry or availability authority is introduced.
 """
 from __future__ import annotations
 
@@ -202,6 +205,10 @@ def _install_guard() -> None:
     guarded_begin._autosport_product_clock_sealed = True
     guarded_begin._autosport_clock_metadata_sealed = True
     guarded_begin._autosport_predecessor_unreachable = True
+    # Machine-readable truth boundary: the supported public dispatch/metadata seals
+    # above do not prove capability security against arbitrary same-process private
+    # object reflection or raw FunctionType mutation/direct invocation.
+    guarded_begin._autosport_same_process_reflection_tamper_resistance_proven = False
 
     _availability._sealed_product_utc_now = checked_clock
     registry_type.begin = guarded_begin

@@ -1353,6 +1353,31 @@ def test_not_found_consumer_rejects_rebound_authority_dispatch(
 
         with monkeypatch.context() as local:
             local.setattr(
+                "autosport.supervised_execution."
+                "assert_betfair_timeout_absence_authoritative",
+                lambda evidence: None,
+            )
+            with pytest.raises(
+                SupervisedExecutionError,
+                match=(
+                    "provider not-found executable authority changed: "
+                    "assert_betfair_timeout_absence_authoritative"
+                ),
+            ):
+                reconcile_provider_not_found(
+                    ledger,
+                    bound,
+                    attempt_id="attempt-consumer-dispatch",
+                    readback=foreign_absence,
+                )
+
+        assert (
+            ledger.attempt_state("attempt-consumer-dispatch")
+            is AttemptState.UNKNOWN
+        )
+
+        with monkeypatch.context() as local:
+            local.setattr(
                 RealExecutionLedger,
                 "provider_order_reference",
                 lambda self, *, attempt_id, provider_id: foreign_ref,

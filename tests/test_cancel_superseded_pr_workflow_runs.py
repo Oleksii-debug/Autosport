@@ -4,7 +4,9 @@ import pytest
 
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
+    CancellationResult,
     WorkflowRun,
+    _write_github_output,
     cancel_superseded,
     select_superseded_runs,
 )
@@ -80,13 +82,14 @@ class FakeApi:
 
 def test_stale_rerun_has_zero_cancellation_authority() -> None:
     api = FakeApi([HEAD_B], (_run(30, HEAD_B),))
-    assert cancel_superseded(
+    result = cancel_superseded(
         api=api,
         pr_number=2008,
         event_head_sha=HEAD_A,
         workflow_name="CI",
         current_run_id=29,
-    ) == ()
+    )
+    assert result == CancellationResult(current_head=False, cancelled_run_ids=())
     assert api.active_calls == 0
     assert api.cancelled == []
 
@@ -100,13 +103,14 @@ def test_current_head_cancels_only_older_same_workflow_runs() -> None:
             _run(42, HEAD_C, workflow_name="Windows candidate"),
         ),
     )
-    assert cancel_superseded(
+    result = cancel_superseded(
         api=api,
         pr_number=2008,
         event_head_sha=HEAD_B,
         workflow_name="CI",
         current_run_id=41,
-    ) == (40,)
+    )
+    assert result == CancellationResult(current_head=True, cancelled_run_ids=(40,))
     assert api.cancelled == [40]
 
 
@@ -118,15 +122,23 @@ def test_head_change_after_run_listing_revokes_cancellation_authority() -> None:
             _run(51, HEAD_C),
         ),
     )
-    assert cancel_superseded(
+    result = cancel_superseded(
         api=api,
         pr_number=2008,
         event_head_sha=HEAD_B,
         workflow_name="CI",
         current_run_id=49,
-    ) == ()
+    )
+    assert result == CancellationResult(current_head=False, cancelled_run_ids=())
     assert api.active_calls == 1
     assert api.cancelled == []
+
+
+def test_github_output_exposes_only_boolean_current_head(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "github-output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+    _write_github_output(CancellationResult(current_head=True, cancelled_run_ids=(7, 9)))
+    assert output_path.read_text(encoding="utf-8") == "current_head=true\n"
 
 
 def test_invalid_sha_fails_closed() -> None:

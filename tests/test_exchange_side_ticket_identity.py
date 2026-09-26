@@ -98,6 +98,99 @@ def test_paperbook_rejects_lay_mutation_before_settlement() -> None:
     assert book._lifecycle == [("open", ticket.ticket_id, (), ())]
 
 
+def test_paperbook_rejects_coherent_stake_rewrite_before_settlement() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg("back")], "10", placed_at=_TS)
+
+    # Keep lifecycle replay arithmetically coherent with the forged stake so the
+    # private opening authority, not a balance mismatch, is the decisive fence.
+    ticket.stake = Decimal("20")
+    book.balance = Decimal("80")
+    balance_before = book.balance
+    lifecycle_before = tuple(book._lifecycle)
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.settle(
+            ticket.ticket_id,
+            {ticket.legs[0].quote_key},
+            settled_at=_TS,
+        )
+
+    assert book.balance == balance_before
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert ticket.status.value == "open"
+    assert ticket.payout == Decimal("0")
+
+
+def test_paperbook_rejects_same_quote_inflated_odds_before_settlement() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg("back")], "10", placed_at=_TS)
+    original_quote_key = ticket.legs[0].quote_key
+    inflated = TicketLeg(
+        "event-1",
+        "market-1",
+        "selection-1",
+        Decimal("100"),
+        sport="soccer",
+        exchange_side="back",
+    )
+    assert inflated.quote_key == original_quote_key
+    ticket.legs = (inflated,)
+
+    balance_before = book.balance
+    lifecycle_before = tuple(book._lifecycle)
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.settle(ticket.ticket_id, {original_quote_key}, settled_at=_TS)
+
+    assert book.balance == balance_before
+    assert tuple(book._lifecycle) == lifecycle_before
+    assert ticket.status.value == "open"
+    assert ticket.payout == Decimal("0")
+
+
+def test_paperbook_rejects_opening_rewrite_before_save_and_after_round_trip(tmp_path) -> None:
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg("back")], "10", placed_at=_TS)
+    book.save(path)
+    durable_before = path.read_bytes()
+
+    ticket.stake = Decimal("20")
+    book.balance = Decimal("80")
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.save(path)
+    assert path.read_bytes() == durable_before
+
+    restored = PaperBook.load(path)
+    restored_ticket = next(iter(restored.tickets.values()))
+    inflated = TicketLeg(
+        restored_ticket.legs[0].event_id,
+        restored_ticket.legs[0].market_id,
+        restored_ticket.legs[0].selection_id,
+        Decimal("100"),
+        sport=restored_ticket.legs[0].sport,
+        exchange_side=restored_ticket.legs[0].exchange_side,
+    )
+    assert inflated.quote_key == restored_ticket.legs[0].quote_key
+    restored_ticket.legs = (inflated,)
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        restored.save(path)
+    assert path.read_bytes() == durable_before
+
+
 def test_paperbook_save_and_load_fail_closed_on_lay_materialization(tmp_path) -> None:
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")

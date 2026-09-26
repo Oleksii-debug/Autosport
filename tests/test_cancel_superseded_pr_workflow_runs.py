@@ -7,6 +7,7 @@ from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationResult,
     WorkflowRun,
     _write_github_output,
+    admit_current_head,
     cancel_superseded,
     select_superseded_runs,
 )
@@ -78,6 +79,23 @@ class FakeApi:
 
     def cancel(self, run_id: int) -> None:
         self.cancelled.append(run_id)
+
+
+def test_read_only_admission_distinguishes_current_and_stale_heads() -> None:
+    current_api = FakeApi([HEAD_B], ())
+    assert admit_current_head(
+        api=current_api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+    ) == CancellationResult(current_head=True, cancelled_run_ids=())
+
+    stale_api = FakeApi([HEAD_B], ())
+    assert admit_current_head(
+        api=stale_api,
+        pr_number=2008,
+        event_head_sha=HEAD_A,
+    ) == CancellationResult(current_head=False, cancelled_run_ids=())
+    assert current_api.active_calls == stale_api.active_calls == 0
 
 
 def test_stale_rerun_has_zero_cancellation_authority() -> None:

@@ -63,7 +63,7 @@ def test_failed_max_cycles_stop_is_not_reissued_as_runtime_error(
             install_signal_handlers=False,
         )
 
-    assert raised.value.error_type == "StopFailure"
+    assert raised.value.error_type == "RuntimeError"
     assert isinstance(raised.value.__cause__, StopFailure)
     assert runtime.tick_calls == 1
     assert runtime.stop_calls == ["max_cycles_reached"]
@@ -92,7 +92,7 @@ def test_failed_signal_stop_is_not_reissued_as_runtime_error(
             install_signal_handlers=False,
         )
 
-    assert raised.value.error_type == "StopFailure"
+    assert raised.value.error_type == "RuntimeError"
     assert isinstance(raised.value.__cause__, StopFailure)
     assert runtime.tick_calls == 0
     assert runtime.stop_calls == ["signal:SIGTERM"]

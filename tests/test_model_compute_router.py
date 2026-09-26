@@ -2390,6 +2390,88 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
 
 
+    def test_durable_router_json_rejects_duplicate_object_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            self.router_store(path)
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            encoded = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            marker = '"version":6'
+            self.assertIn(marker, encoded)
+            path.write_text(
+                encoded.replace(
+                    marker,
+                    '"version":999,"version":6',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "routing store is unreadable",
+            ):
+                self.router_store(path)
+
+    def test_authority_journals_reject_duplicate_object_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = self.router_store(path)
+            req = request(
+                request_id="req-authority-duplicate-key",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+            )
+            self.store_route(store, req, self.candidates, policy(), as_of=T1)
+            store.record_execution(
+                execution_id="exec-authority-duplicate-key",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+
+            execution_authority_path = path.with_name(
+                f"{path.name}.execution-authority.jsonl"
+            )
+            line = execution_authority_path.read_text(
+                encoding="utf-8"
+            ).splitlines()[0]
+            execution_authority_path.write_text(
+                '{"authority_sequence":999,' + line[1:] + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution authority journal contains invalid JSON",
+            ):
+                self.router_store(path)
+
+            execution_authority_path.unlink()
+            shadow_path = store._voc_shadow_authority_path
+            shadow_path.write_text(
+                '{"authority_sequence":1,"authority_sequence":1}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "VOC shadow execution authority journal contains invalid JSON",
+            ):
+                store._read_voc_shadow_authority_records()
+
     def test_authority_partial_tail_and_state_ahead_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"

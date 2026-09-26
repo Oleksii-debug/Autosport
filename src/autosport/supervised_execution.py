@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
+from .betfair_timeout_reconciliation import (
+    BetfairTimeoutResolutionError,
+    assert_betfair_timeout_absence_authoritative,
+)
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
     BookmakerCapability,
@@ -1053,7 +1057,8 @@ def reconcile_provider_not_found(
         )
     try:
         assert_verified_provider_evidence_authoritative(readback)
-    except ProviderEvidenceError as exc:
+        assert_betfair_timeout_absence_authoritative(readback)
+    except (ProviderEvidenceError, BetfairTimeoutResolutionError) as exc:
         raise SupervisedExecutionError(
             "verified complete provider absence evidence is not authoritative"
         ) from exc

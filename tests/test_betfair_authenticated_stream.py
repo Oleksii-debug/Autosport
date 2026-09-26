@@ -229,6 +229,44 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert not subscription.real_money_authorized
 
 
+def test_caller_policy_mutation_cannot_extend_issued_freshness_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    identity = _identity()
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(pt=publish_time_ms),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    caller_policy = BetfairStreamFreshnessPolicy(max_age_ms=10_000)
+    decision = runtime.evaluate(identity, policy=caller_policy)
+    assert decision.decision_eligible
+
+    authority = auth._ISSUED_DECISIONS[decision]
+    assert authority.policy is not caller_policy
+    assert authority.policy.max_age_ms == 10_000
+
+    # frozen=True is not an ownership boundary: a caller retaining the original
+    # object can still mutate it directly. Twenty seconds later that forged wider
+    # window would keep the old implementation current because it retained the
+    # exact caller object by reference.
+    object.__setattr__(caller_policy, "max_age_ms", 60_000)
+    assert caller_policy.max_age_ms == 60_000
+    assert authority.policy.max_age_ms == 10_000
+    assert not runtime._decision_is_current(
+        decision,
+        identity,
+        authority.policy,
+        decision.evaluated_at_ms + 20_000,
+    )
+
+
 def test_public_clock_rebinding_revokes_already_issued_positive_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

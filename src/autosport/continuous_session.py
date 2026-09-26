@@ -359,7 +359,7 @@ def _canonical_settlement_handoff_snapshot(
 
     detached: list[SettlementResolution] = []
     for resolution in resolutions:
-        if not isinstance(resolution, SettlementResolution):
+        if type(resolution) is not SettlementResolution:
             raise TypeError(
                 "resolutions must contain SettlementResolution values"
             )
@@ -1056,7 +1056,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
                     "outcome authority must return SettlementResolution or None"
                 )

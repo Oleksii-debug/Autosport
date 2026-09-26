@@ -206,6 +206,8 @@ def _install_main():
         try:
             return _dispatch(command, forwarded)
         except _EXPECTED_FAILURE_TYPES as exc:
+            # The renderer is itself a security boundary. Do not let module-global
+            # rebinding or an in-place executable swap bypass its redaction fences.
             if (
                 _expected_failure_message is canonical_failure_renderer
                 and getattr(canonical_failure_renderer, "__code__", None)

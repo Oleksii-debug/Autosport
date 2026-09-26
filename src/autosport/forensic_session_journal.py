@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .secret_redaction import REDACTED, is_sensitive_key
+
 SCHEMA_VERSION = 1
 GENESIS_SHA256 = "0" * 64
-REDACTED = "[REDACTED]"
 _LOCK_MAGIC = b"AUTOSPORT_FORENSIC_SESSION_LOCK_V1\n"
 _LOCK_NEW_MAGIC = b"AUTOSPORT_FORENSIC_SESSION_LOCK_NEW_V1\n"
 _CHECKPOINT_KEYS = frozenset(
@@ -25,16 +26,6 @@ _CHECKPOINT_MAX_BYTES = 4096
 _EVENT_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
-_SENSITIVE_KEY_PARTS = {
-    "authorization",
-    "cookie",
-    "credential",
-    "password",
-    "passwd",
-    "secret",
-    "token",
-}
-
 _LIFECYCLE_STARTUP = "lifecycle.startup"
 _LIFECYCLE_HEARTBEAT = "lifecycle.heartbeat"
 _LIFECYCLE_SHUTDOWN = "lifecycle.shutdown"
@@ -152,22 +143,8 @@ def _validate_event_type(value: Any) -> str:
     return value
 
 
-def _is_sensitive_key(key: str) -> bool:
-    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key.strip())
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
-    normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
-    if normalized in _SENSITIVE_KEY_PARTS | {"api_key", "apikey", "session_key"}:
-        return True
-    parts = [part for part in normalized.split("_") if part]
-    if parts and parts[-1] in _SENSITIVE_KEY_PARTS:
-        return True
-    if len(parts) >= 2 and parts[-2:] in (["api", "key"], ["session", "key"]):
-        return True
-    return False
-
-
 def _redact(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and _is_sensitive_key(key):
+    if key is not None and is_sensitive_key(key):
         return REDACTED
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -194,7 +171,7 @@ def redact_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
 def _assert_redaction_invariant(value: Any) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if _is_sensitive_key(key) and child != REDACTED:
+            if is_sensitive_key(key) and child != REDACTED:
                 raise JournalIntegrityError("journal contains unredacted sensitive payload data")
             _assert_redaction_invariant(child)
     elif isinstance(value, list):

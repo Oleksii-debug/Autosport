@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import io
+import os
 import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
@@ -62,6 +63,34 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
 
         self.assertNotIn(api_key, output)
         self.assertNotIn(session_token, output)
+
+    def test_configured_bare_secret_value_is_not_emitted(self) -> None:
+        secret = "AS-DATATOOLS-CONFIGURED-SECRET-48c2"
+        with patch.dict(
+            os.environ,
+            {"AUTOSPORT_TEST_API_KEY": secret},
+            clear=False,
+        ):
+            output = self._run_expected_failure(
+                f"provider rejected credential value {secret}"
+            )
+
+        self.assertIn("provider rejected credential value", output)
+        self.assertIn("[REDACTED]", output)
+        self.assertNotIn(secret, output)
+
+    def test_multiline_secret_diagnostic_is_flattened_after_redaction(self) -> None:
+        first = "AS-DATATOOLS-MULTILINE-KEY-1"
+        second = "AS-DATATOOLS-MULTILINE-TOKEN-2"
+        output = self._run_expected_failure(
+            f"first line api_key={first}\nsecond line token={second}"
+        )
+
+        self.assertNotIn(first, output)
+        self.assertNotIn(second, output)
+        self.assertNotIn("\n", output.rstrip("\n"))
+        self.assertIn("first line api_key=[REDACTED]", output)
+        self.assertIn("second line token=[REDACTED]", output)
 
     def test_exception_type_metadata_cannot_become_operator_output(self) -> None:
         secret_type_name = "AS_DATATOOLS_SECRET_TYPE_SENTINEL_81f2"

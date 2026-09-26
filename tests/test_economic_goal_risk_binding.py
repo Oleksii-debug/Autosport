@@ -121,7 +121,7 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             "selection-risk-identity",
             Decimal("2"),
             sport="football",
-            exchange_side="BACK",
+            exchange_side="back",
         )
         ticket = book.open_ticket(
             [leg],
@@ -132,12 +132,12 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         baseline = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
         self.assertIsNotNone(baseline)
 
-        object.__setattr__(stored_leg, "exchange_side", "LAY")
+        object.__setattr__(stored_leg, "exchange_side", "lay")
         changed_side = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
         self.assertIsNotNone(changed_side)
         self.assertNotEqual(changed_side, baseline)
 
-        object.__setattr__(stored_leg, "exchange_side", "BACK")
+        object.__setattr__(stored_leg, "exchange_side", "back")
         object.__setattr__(stored_leg, "sport", "tennis")
         changed_sport = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
         self.assertIsNotNone(changed_sport)
@@ -162,13 +162,13 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             )
 
         baseline = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
-            context(sport="football", exchange_side="BACK")
+            context(sport="football", exchange_side="back")
         )
         changed_side = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
-            context(sport="football", exchange_side="LAY")
+            context(sport="football", exchange_side="lay")
         )
         changed_sport = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
-            context(sport="tennis", exchange_side="BACK")
+            context(sport="tennis", exchange_side="back")
         )
 
         self.assertIsNotNone(baseline)

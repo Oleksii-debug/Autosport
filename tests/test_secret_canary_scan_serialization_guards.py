@@ -55,14 +55,20 @@ def test_reparse_subtree_fails_closed_without_descent(
     junction = tmp_path / "junction"
     junction.mkdir()
     (junction / "hidden.txt").write_text(canary, encoding="utf-8")
-    original = secret_canary_scan._path_is_reparse_point
+    junction_identity = secret_canary_scan._identity_from_stat(junction.lstat())
+    original = secret_canary_scan._metadata_is_reparse_point
 
-    def fake_reparse(path: Path) -> bool:
-        if path == junction:
+    def fake_reparse(metadata: os.stat_result) -> bool:
+        identity = secret_canary_scan._identity_from_stat(metadata)
+        if secret_canary_scan._same_object_identity(identity, junction_identity):
             return True
-        return original(path)
+        return original(metadata)
 
-    monkeypatch.setattr(secret_canary_scan, "_path_is_reparse_point", fake_reparse)
+    monkeypatch.setattr(
+        secret_canary_scan,
+        "_metadata_is_reparse_point",
+        fake_reparse,
+    )
 
     report = secret_canary_scan.scan_secret_canary(tmp_path, canary)
 
@@ -277,7 +283,7 @@ def test_symlink_swap_immediately_before_open_fails_closed(
     canary = "planted-secret"
     victim = tmp_path / "artifact.bin"
     victim.write_bytes(b"safe")
-    target = tmp_path / "target.bin"
+    target = tmp_path.parent / f"{tmp_path.name}-outside-target.bin"
     target.write_text(canary, encoding="utf-8")
     original_open = secret_canary_scan._open_readonly_no_follow
     swapped = False

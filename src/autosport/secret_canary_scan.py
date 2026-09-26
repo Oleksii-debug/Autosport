@@ -382,6 +382,8 @@ def _validate_fixture_input(
             return None, "FixtureReparsePoint"
         if not stat.S_ISREG(metadata.st_mode):
             return None, "FixtureNotRegularFile"
+    except FileNotFoundError:
+        return None, "FixtureNotRegularFile"
     except OSError as exc:
         return None, type(exc).__name__
     return _ValidatedFixture(candidate, _identity_from_stat(metadata)), None

@@ -46,7 +46,7 @@ def test_bound_stop_state_cannot_readopt_after_machine_history_loss(
     assert decision.allowed is False
     assert decision.mode is ExecutionAuthorityMode.STOPPED
     assert decision.revision is None
-    assert "missing after prior binding" in decision.reason
+    assert "activated monotonic authority history is missing under selected root" in decision.reason
 
     with pytest.raises(
         ExecutionStopIntegrityError,

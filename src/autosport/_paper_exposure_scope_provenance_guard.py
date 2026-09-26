@@ -344,6 +344,9 @@ def bind_canonical_execute(execute_function):
     expected_run_id = runtime_type.expected_run_id
     expected_run_id_globals = _snapshot_function_globals(expected_run_id)
     expected_run_id_metadata = _snapshot_function_metadata(expected_run_id)
+    paper_value_execute = _value_authority._execute
+    paper_value_execute_globals = _snapshot_function_globals(paper_value_execute)
+    paper_value_execute_metadata = _snapshot_function_metadata(paper_value_execute)
 
     append_owner = next(
         (
@@ -649,11 +652,35 @@ def bind_canonical_execute(execute_function):
 
             trigger_id = None
             saw_canonical_execute = False
+            saw_paper_value_bridge = False
             while cursor is not None:
+                if (
+                    cursor.f_code is paper_value_execute.__code__
+                    and cursor.f_locals.get("self") is self
+                    and cursor.f_locals.get("authorized") is prepared
+                ):
+                    if (
+                        _value_authority._execute is not paper_value_execute
+                        or not _function_globals_match(
+                            paper_value_execute,
+                            paper_value_execute_globals,
+                        )
+                        or not _function_metadata_match(
+                            paper_value_execute,
+                            paper_value_execute_metadata,
+                        )
+                    ):
+                        raise PaperExecutionIntegrityError(
+                            "canonical paper-value execution bridge was rebound"
+                        )
+                    saw_paper_value_bridge = True
                 if (
                     cursor.f_code is canonical_execute_code
                     and cursor.f_locals.get("self") is self
-                    and cursor.f_locals.get("prepared") is prepared
+                    and (
+                        cursor.f_locals.get("prepared") is prepared
+                        or saw_paper_value_bridge
+                    )
                 ):
                     trigger_id = cursor.f_locals.get("trigger_id")
                     saw_canonical_execute = True

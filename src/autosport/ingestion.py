@@ -13,10 +13,17 @@ from .ingestion_health import (
     parse_source_timestamp,
 )
 from .market_bus import MarketEventBus, MarketEventDeliveryError
-from .providers import CanonicalNormalizer, MarketProvider
+from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch
+from .source_continuity import (
+    ProviderContinuityWitness,
+    SourceContinuityStore,
+)
 
 
 Clock = Callable[[], str]
+ContinuityWitnessResolver = Callable[
+    [MarketProvider, ProviderBatch], ProviderContinuityWitness | None
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +36,7 @@ class IngestionStats:
     cursor: str | None
     quality_flags: tuple[str, ...] = ()
     health_status: str = "unknown"
+    continuity_status: str = "unknown"
 
     @property
     def accepted_per_second(self) -> float:
@@ -143,6 +151,7 @@ class CommittedIngestionOutcome:
     latest_source_ts: str | None
     quality_flags: tuple[str, ...]
     health_before: _SourceHealthSnapshot | None = None
+    continuity_witness: ProviderContinuityWitness | None = None
 
     def _record_health_once(self, store: SourceHealthStore) -> SourceHealthState:
         return store.record_success(
@@ -155,6 +164,15 @@ class CommittedIngestionOutcome:
             latest_source_ts=self.latest_source_ts,
             quality_flags=self.quality_flags,
         )
+
+    def _record_continuity_once(self, store: SourceContinuityStore) -> str:
+        state = store.record_success(
+            self.source_id,
+            now=self.now,
+            cursor=self.cursor,
+            witness=self.continuity_witness,
+        )
+        return state.status
 
     def record_health(self, store: SourceHealthStore) -> SourceHealthState:
         """Repair health only when compare-and-apply is atomic and provably safe."""
@@ -175,7 +193,12 @@ class CommittedIngestionOutcome:
             quality_flags=self.quality_flags,
         )
 
-    def stats(self, *, health_status: str | None = None) -> IngestionStats:
+    def stats(
+        self,
+        *,
+        health_status: str | None = None,
+        continuity_status: str = "unknown",
+    ) -> IngestionStats:
         if health_status is None:
             health_status = "degraded" if self.quality_flags else "healthy"
         return IngestionStats(
@@ -187,6 +210,7 @@ class CommittedIngestionOutcome:
             self.cursor,
             self.quality_flags,
             health_status,
+            continuity_status,
         )
 
 
@@ -206,6 +230,22 @@ class CommittedIngestionHealthError(RuntimeError):
         self.delivery_error = delivery_error
 
 
+class CommittedIngestionContinuityError(RuntimeError):
+    """Market persistence succeeded, but durable source-continuity publication failed."""
+
+    def __init__(
+        self,
+        outcome: CommittedIngestionOutcome,
+        *,
+        delivery_error: MarketEventDeliveryError | None = None,
+    ) -> None:
+        super().__init__(
+            "market events were committed but source continuity persistence failed"
+        )
+        self.outcome = outcome
+        self.delivery_error = delivery_error
+
+
 class IngestionEngine:
     """Deterministic provider -> quality -> normalize -> transactional persistence -> subscriber pipeline."""
 
@@ -216,13 +256,90 @@ class IngestionEngine:
         *,
         policy: IngestionPolicy | None = None,
         health_store: SourceHealthStore | None = None,
+        continuity_store: SourceContinuityStore | None = None,
+        continuity_witness_resolver: ContinuityWitnessResolver | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.bus = bus
         self.normalizer = normalizer or CanonicalNormalizer()
         self.policy = policy or IngestionPolicy()
         self.health_store = health_store
+        if continuity_store is not None and not isinstance(
+            continuity_store, SourceContinuityStore
+        ):
+            raise TypeError("continuity_store must be SourceContinuityStore or null")
+        if continuity_store is None and isinstance(health_store, SourceHealthStore):
+            continuity_store = SourceContinuityStore(
+                health_store.path.with_name("source_continuity.json")
+            )
+        if continuity_witness_resolver is not None and not callable(
+            continuity_witness_resolver
+        ):
+            raise TypeError("continuity_witness_resolver must be callable or null")
+        self.continuity_store = continuity_store
+        self.continuity_witness_resolver = continuity_witness_resolver
         self.clock = clock or _utc_now_iso
+
+    def _continuity_witness(
+        self,
+        provider: MarketProvider,
+        batch: ProviderBatch,
+    ) -> ProviderContinuityWitness | None:
+        resolver = self.continuity_witness_resolver
+        if resolver is None:
+            return None
+        witness = resolver(provider, batch)
+        if witness is not None and type(witness) is not ProviderContinuityWitness:
+            raise TypeError(
+                "continuity_witness_resolver must return ProviderContinuityWitness or null"
+            )
+        return witness
+
+    def _record_committed_projections(
+        self,
+        outcome: CommittedIngestionOutcome,
+        *,
+        delivery_error: MarketEventDeliveryError | None = None,
+    ) -> tuple[str, str]:
+        """Attempt each durable projection even when its sibling projection fails."""
+        health_status = "degraded" if outcome.quality_flags else "healthy"
+        continuity_status = "unknown"
+        health_error: Exception | None = None
+        continuity_error: Exception | None = None
+
+        if self.health_store is not None:
+            try:
+                state = outcome._record_health_once(self.health_store)
+            except Exception as exc:
+                health_error = exc
+            else:
+                health_status = state.status
+
+        if self.continuity_store is not None:
+            try:
+                continuity_status = outcome._record_continuity_once(
+                    self.continuity_store
+                )
+            except Exception as exc:
+                continuity_error = exc
+
+        if health_error is not None:
+            wrapped = CommittedIngestionHealthError(
+                outcome,
+                delivery_error=delivery_error,
+            )
+            if continuity_error is not None:
+                wrapped.add_note(
+                    "source continuity persistence also failed: "
+                    f"{type(continuity_error).__name__}: {continuity_error}"
+                )
+            raise wrapped from health_error
+        if continuity_error is not None:
+            raise CommittedIngestionContinuityError(
+                outcome,
+                delivery_error=delivery_error,
+            ) from continuity_error
+        return health_status, continuity_status
 
     def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
@@ -233,9 +350,9 @@ class IngestionEngine:
             )
         started = perf_counter()
 
-        # Bind provider identity exactly once before acquisition. If acquisition or
-        # provider-owned validation fails, failure-health evidence is sampled after the
-        # failed I/O rather than carrying a stale pre-I/O timestamp.
+        # Bind provider identity exactly once before acquisition. Only provider
+        # acquisition/validation failures change current provider health; continuity
+        # witness resolution is a separate evidence domain and runs after this block.
         provider_source_id: str | None = None
         try:
             provider_source_id = provider.source_id
@@ -247,18 +364,47 @@ class IngestionEngine:
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
         except Exception as exc:
+            failure_now = self.clock()
+            health_error: Exception | None = None
+            continuity_error: Exception | None = None
             if self.health_store is not None and provider_source_id is not None:
                 try:
                     self.health_store.record_failure(
-                        provider_source_id, now=self.clock(), error=exc
+                        provider_source_id, now=failure_now, error=exc
                     )
-                except Exception as health_error:
+                except Exception as projection_error:
+                    health_error = projection_error
+            if self.continuity_store is not None and provider_source_id is not None:
+                try:
+                    self.continuity_store.record_failure(
+                        provider_source_id,
+                        now=failure_now,
+                    )
+                except Exception as projection_error:
+                    continuity_error = projection_error
+
+            if health_error is not None:
+                exc.add_note(
+                    "source health failure persistence also failed: "
+                    f"{type(health_error).__name__}: {health_error}"
+                )
+                if continuity_error is not None:
                     exc.add_note(
-                        "source health failure persistence also failed: "
-                        f"{type(health_error).__name__}: {health_error}"
+                        "source continuity failure persistence also failed: "
+                        f"{type(continuity_error).__name__}: {continuity_error}"
                     )
-                    raise exc from health_error
+                raise exc from health_error
+            if continuity_error is not None:
+                exc.add_note(
+                    "source continuity failure persistence also failed: "
+                    f"{type(continuity_error).__name__}: {continuity_error}"
+                )
+                raise exc from continuity_error
             raise
+
+        # Continuity provenance is validated before normalization/persistence but does
+        # not rewrite current provider-health truth when the resolver itself is invalid.
+        continuity_witness = self._continuity_witness(provider, batch)
 
         # One post-acquisition evidence instant governs both quote-age truth and this
         # poll's health transition. Equal instants remain distinct via durable
@@ -330,15 +476,12 @@ class IngestionEngine:
                 latest_source_ts=latest_source_ts,
                 quality_flags=ordered_flags,
                 health_before=health_before,
+                continuity_witness=continuity_witness,
             )
-            if self.health_store is not None:
-                try:
-                    outcome._record_health_once(self.health_store)
-                except Exception as health_error:
-                    raise CommittedIngestionHealthError(
-                        outcome,
-                        delivery_error=delivery_error,
-                    ) from health_error
+            self._record_committed_projections(
+                outcome,
+                delivery_error=delivery_error,
+            )
             raise
 
         outcome = CommittedIngestionOutcome(
@@ -352,15 +495,13 @@ class IngestionEngine:
             latest_source_ts=latest_source_ts,
             quality_flags=ordered_flags,
             health_before=health_before,
+            continuity_witness=continuity_witness,
         )
-        health_status = "degraded" if ordered_flags else "healthy"
-        if self.health_store is not None:
-            try:
-                state = outcome._record_health_once(self.health_store)
-            except Exception as health_error:
-                raise CommittedIngestionHealthError(outcome) from health_error
-            health_status = state.status
-        return outcome.stats(health_status=health_status)
+        health_status, continuity_status = self._record_committed_projections(outcome)
+        return outcome.stats(
+            health_status=health_status,
+            continuity_status=continuity_status,
+        )
 
 
 def _utc_now_iso() -> str:

@@ -10,6 +10,17 @@ from autosport.windows_entry import main
 
 class WindowsEntrypointFailClosedTests(unittest.TestCase):
     @staticmethod
+    def _stop_module(calls: list[str] | None = None) -> types.ModuleType:
+        module = types.ModuleType("autosport.windows_replay_stop")
+
+        def install() -> None:
+            if calls is not None:
+                calls.append("stop")
+
+        module.install_windows_replay_stop = install
+        return module
+
+    @staticmethod
     def _failing_layout_module() -> types.ModuleType:
         module = types.ModuleType("autosport.windows_layout")
 
@@ -64,12 +75,13 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             sys.modules,
             {
                 "autosport.windows_layout": fake_layout,
+                "autosport.windows_replay_stop": self._stop_module(calls),
                 "autosport.windows_gui": fake_gui,
             },
         ):
             self.assertEqual(main([]), 17)
 
-        self.assertEqual(calls, ["layout", "gui"])
+        self.assertEqual(calls, ["layout", "stop", "gui"])
 
     def test_valid_machine_mode_keeps_layout_before_dispatch(self) -> None:
         calls: list[str] = []
@@ -89,12 +101,13 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             sys.modules,
             {
                 "autosport.windows_layout": fake_layout,
+                "autosport.windows_replay_stop": self._stop_module(calls),
                 "autosport.diagnostic": fake_diagnostic,
             },
         ):
             self.assertEqual(main(["--diagnostic-output", "report.json"]), 23)
 
-        self.assertEqual(calls, ["layout", "diagnostic:report.json"])
+        self.assertEqual(calls, ["layout", "stop", "diagnostic:report.json"])
 
 
 if __name__ == "__main__":

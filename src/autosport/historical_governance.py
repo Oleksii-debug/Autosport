@@ -11,6 +11,8 @@ from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from .secret_redaction import redact_operator_text, safe_exception_detail
+
 
 _AUTHORITY_RECORD_KIND = "historical_corpus_governance_authority_record"
 _GOVERNANCE_PROOF_KIND = "historical_corpus_governance_proof"
@@ -368,6 +370,14 @@ def _help_requested(argv: Sequence[str]) -> bool:
     return any(value in {"-h", "--help"} for value in argv)
 
 
+def _expected_failure_detail(exc: OSError | ValueError) -> str:
+    detail = safe_exception_detail(exc)
+    detail = " ".join(detail.splitlines()).strip()
+    if not detail:
+        detail = "exception details unavailable"
+    return redact_operator_text(detail)
+
+
 def _require_bound_governance(argv: Sequence[str]) -> GovernanceAuthorityBinding:
     proof = _argument_value(argv, "--governance-proof")
     if proof is None:
@@ -427,7 +437,7 @@ def corpus_main(argv: list[str] | None = None) -> int:
         with _frozen_governance_args(forwarded, binding) as frozen:
             return canonical_main(frozen)
     except (ValueError, OSError) as exc:
-        print(f"historical_corpus=FAIL_CLOSED error={exc}")
+        print(f"historical_corpus=FAIL_CLOSED error={_expected_failure_detail(exc)}")
         return 3
 
 
@@ -442,5 +452,5 @@ def bundle_corpus_main(argv: list[str] | None = None) -> int:
         with _frozen_governance_args(forwarded, binding) as frozen:
             return canonical_main(frozen)
     except (ValueError, OSError) as exc:
-        print(f"historical_bundle_corpus=FAIL_CLOSED error={exc}")
+        print(f"historical_bundle_corpus=FAIL_CLOSED error={_expected_failure_detail(exc)}")
         return 3

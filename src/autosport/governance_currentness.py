@@ -21,6 +21,7 @@ from enum import Enum
 import math
 import time
 
+from . import bookmaker_capability_registry as _registry_module
 from .bookmaker_capability_registry import (
     BookmakerCapabilityRegistry,
     BookmakerGovernanceEvidence,
@@ -284,10 +285,53 @@ def _product_time_ns() -> int:
 
 # These are read/clock dispatch witnesses, not alternate authorities or stores. The
 # current resolver checks their public dispatch points before invoking the captured
-# canonical callables, so ordinary class/module rebinding cannot redirect positive
-# currentness issuance after validation.
+# canonical callables, so class/module rebinding cannot redirect positive currentness
+# issuance after validation.
 _CANONICAL_PRODUCT_TIME_NS = _product_time_ns
 _CANONICAL_GOVERNANCE_HISTORY = BookmakerCapabilityRegistry.governance_history
+_CANONICAL_REGISTRY_READ_SURFACES = (
+    ("governance_history", BookmakerCapabilityRegistry.governance_history),
+    ("_load_document", BookmakerCapabilityRegistry._load_document),
+    ("_governance_from_document", BookmakerCapabilityRegistry._governance_from_document),
+    ("_governance_key", BookmakerCapabilityRegistry._governance_key),
+    ("_decode_governance", BookmakerCapabilityRegistry._decode_governance),
+)
+_CANONICAL_REGISTRY_READ_CODES = tuple(
+    (name, function, getattr(function, "__code__", None))
+    for name, function in _CANONICAL_REGISTRY_READ_SURFACES
+)
+_CANONICAL_STRICT_JSON_LOADS = _registry_module.strict_json_loads
+_CANONICAL_STRICT_JSON_LOADS_CODE = getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)
+
+
+def _require_registry_read_dispatch(registry: BookmakerCapabilityRegistry) -> None:
+    """Seal the existing durable governance reader graph before positive use."""
+
+    if type(registry) is not BookmakerCapabilityRegistry:
+        raise GovernanceCurrentnessError(
+            "registry must be the exact durable BookmakerCapabilityRegistry"
+        )
+    instance_state = vars(registry)
+    for name, function, expected_code in _CANONICAL_REGISTRY_READ_CODES:
+        if name in instance_state:
+            raise GovernanceCurrentnessError(
+                "governance registry reader dispatch authority changed"
+            )
+        live = getattr(BookmakerCapabilityRegistry, name, None)
+        if live is not function or getattr(function, "__code__", None) is not expected_code:
+            raise GovernanceCurrentnessError(
+                "governance registry reader dispatch authority changed"
+            )
+    if (
+        _registry_module.strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
+        or getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)
+        is not _CANONICAL_STRICT_JSON_LOADS_CODE
+        or _registry_module.BookmakerGovernanceEvidence is not BookmakerGovernanceEvidence
+        or _registry_module.GovernancePermissionState is not GovernancePermissionState
+    ):
+        raise GovernanceCurrentnessError(
+            "governance registry reader dependency authority changed"
+        )
 
 
 def resolve_current_governance(
@@ -319,6 +363,7 @@ def resolve_current_governance(
         raise GovernanceCurrentnessError(
             "governance history dispatch authority changed"
         )
+    _require_registry_read_dispatch(registry)
 
     now_ns = _CANONICAL_PRODUCT_TIME_NS()
     seconds, remainder_ns = divmod(now_ns, 1_000_000_000)
@@ -328,6 +373,7 @@ def resolve_current_governance(
     decision_at = _canonical_utc(decision_time)
 
     history = _CANONICAL_GOVERNANCE_HISTORY(registry, venue_id, account_id)
+    _require_registry_read_dispatch(registry)
     if any(type(item) is not BookmakerGovernanceEvidence for item in history):
         raise GovernanceCurrentnessError(
             "registry returned non-canonical governance evidence"

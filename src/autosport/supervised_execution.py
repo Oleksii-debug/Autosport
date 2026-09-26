@@ -6,11 +6,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+import sys as _timeout_origin_sys
+
+_timeout_authority_module_name = (
+    f"{__package__}.betfair_timeout_reconciliation"
+)
+if _timeout_authority_module_name in _timeout_origin_sys.modules:
+    raise ImportError(
+        "Betfair timeout authority module was resolved before supervised consumer binding"
+    )
 
 from .betfair_timeout_reconciliation import (
     BetfairTimeoutResolutionError,
     assert_betfair_timeout_absence_authoritative,
 )
+
+del _timeout_authority_module_name, _timeout_origin_sys
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
     BookmakerCapability,

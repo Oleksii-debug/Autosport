@@ -12,6 +12,7 @@ from .agents import agent_composition_sha256, validate_agent_names
 from .integrity import atomic_write_json
 from .price_truth import market_price_truth_from_run_summary
 from .run_transaction import RunTransaction
+from .secret_redaction import redact_operator_text, safe_exception_detail
 from .strategies import strategy_spec
 
 
@@ -329,6 +330,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _expected_failure_detail(exc: OSError | ValueError) -> str:
+    detail = safe_exception_detail(exc)
+    detail = " ".join(detail.splitlines()).strip()
+    if not detail:
+        detail = "exception details unavailable"
+    return redact_operator_text(detail)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -336,7 +345,10 @@ def main(argv: list[str] | None = None) -> int:
         report = compare_strategy_runs(runs, baseline_strategy_id=args.baseline_strategy)
         atomic_write_json(args.output, report)
     except (OSError, ValueError) as exc:
-        print(f"strategy_comparison=FAIL_CLOSED error={exc}")
+        print(
+            "strategy_comparison=FAIL_CLOSED "
+            f"error={_expected_failure_detail(exc)}"
+        )
         return 2
     print(
         f"strategy_comparison=OK strategies={len(report['strategies'])} "

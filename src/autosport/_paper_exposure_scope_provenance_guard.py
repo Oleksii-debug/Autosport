@@ -224,7 +224,8 @@ def bind_canonical_execute(execute_function):
         )
     }
 
-    getframe = sys._getframe
+    sys_module = sys
+    getframe = sys_module._getframe
 
     def checked_canonical_json(value: object) -> str:
         if _ledger_impl._canonical is not canonical_json:
@@ -444,6 +445,15 @@ def bind_canonical_execute(execute_function):
         if not _function_metadata_match(expected_run_id, expected_run_id_metadata):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER run-id metadata were rebound"
+            )
+
+        if sys is not sys_module or sys_module._getframe is not getframe:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER frame-authority dispatch was rebound"
+            )
+        if canonical_execute.__code__ is not canonical_execute_code:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER execution code authority was rebound"
             )
 
         current = getframe(0)

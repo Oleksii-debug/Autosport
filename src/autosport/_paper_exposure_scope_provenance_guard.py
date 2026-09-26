@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import sys
 from hashlib import sha256
 from typing import Any, Callable
 
-from . import _paper_execution_append_recovery as _append_recovery
 from . import _paper_execution_reality_legacy as _ledger_impl
-from . import _paper_value_execution_authority as _value_authority
 from .paper_execution_adoption import (
     PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
@@ -125,12 +122,14 @@ def _function_metadata_match(
 
 
 def bind_canonical_execute(execute_function):
-    """Bind scope publication to the existing final PAPER execute authority.
+    """Bind scope publication to exact product-minted scope authority.
 
-    The caller-facing execute wrapper is still the decision-origin/callsite
-    authority. This adds one outer frame witness and replaces only the dedicated
-    scope publisher. It does not replace execute_paper_plan, reserve_run, the ledger
-    append authority, recovery, or any real-money path.
+    The existing decision-origin execute function remains the execution authority.
+    Exposure publication no longer treats Python frame/code/closure identity as a
+    positive capability.  Instead it consumes a distinct exact-object scope
+    registration issued by canonical preparation/verified PaperValue authorization,
+    re-derives the payload from that PreparedPaperExecution, and writes the reserved
+    event through the existing ledger durability primitives.
     """
 
     runtime_type = PaperExecutionAdoptionRuntime
@@ -140,12 +139,6 @@ def bind_canonical_execute(execute_function):
     if getattr(execute_function, "_autosport_exposure_scope_execute_guard", False):
         return execute_function
 
-    # A reload of the decision-origin callsite module constructs a fresh wrapper
-    # object before its idempotent installer runs. Once the product callsite guard
-    # is already installed, that fresh object is not execution authority and must
-    # not replace the exposure-scope publisher's binding. Reuse the exact installed
-    # execute object instead, so module reload repairs mirrors without desynchronizing
-    # the already-composed runtime.
     installed_execute = runtime_type.execute
     if (
         getattr(runtime_type, "_autosport_decision_origin_callsite_guard", False)
@@ -167,6 +160,9 @@ def bind_canonical_execute(execute_function):
     require_minted = runtime_type._require_minted
     require_minted_globals = _snapshot_function_globals(require_minted)
     require_minted_metadata = _snapshot_function_metadata(require_minted)
+    require_scope = runtime_type._require_exposure_scope_authority
+    require_scope_globals = _snapshot_function_globals(require_scope)
+    require_scope_metadata = _snapshot_function_metadata(require_scope)
 
     scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
     if not isinstance(scope_descriptor, classmethod):
@@ -175,18 +171,9 @@ def bind_canonical_execute(execute_function):
     scope_globals = _snapshot_function_globals(scope_function)
     scope_metadata = _snapshot_function_metadata(scope_function)
 
-    baseline_execute = _append_recovery._ORIGINAL_EXECUTE
-    baseline_execute_globals = _snapshot_function_globals(baseline_execute)
-    baseline_execute_metadata = _snapshot_function_metadata(baseline_execute)
-    unlocked_execute = runtime_type._execute_unlocked
-    unlocked_execute_globals = _snapshot_function_globals(unlocked_execute)
-    unlocked_execute_metadata = _snapshot_function_metadata(unlocked_execute)
     expected_run_id = runtime_type.expected_run_id
     expected_run_id_globals = _snapshot_function_globals(expected_run_id)
     expected_run_id_metadata = _snapshot_function_metadata(expected_run_id)
-    paper_value_execute = _value_authority._execute
-    paper_value_execute_globals = _snapshot_function_globals(paper_value_execute)
-    paper_value_execute_metadata = _snapshot_function_metadata(paper_value_execute)
 
     append_owner = next(
         (
@@ -209,7 +196,6 @@ def bind_canonical_execute(execute_function):
     canonical_json = _ledger_impl._canonical
     canonical_json_globals = _snapshot_function_globals(canonical_json)
     canonical_json_metadata = _snapshot_function_metadata(canonical_json)
-    ledger_schema_version = _ledger_impl._SCHEMA_VERSION
     fsync = _ledger_impl.os.fsync
     sha256_digest = sha256
 
@@ -223,9 +209,6 @@ def bind_canonical_execute(execute_function):
             "_with_writer_lock",
         )
     }
-
-    sys_module = sys
-    getframe = sys_module._getframe
 
     def checked_canonical_json(value: object) -> str:
         if _ledger_impl._canonical is not canonical_json:
@@ -310,13 +293,7 @@ def bind_canonical_execute(execute_function):
                 )
         return payload
 
-    # Reuse the already-canonical decision-origin execute function verbatim.
-    # Adding another wrapper frame here changes the direct-caller authority
-    # seen by the decision-origin guard and incorrectly turns valid product
-    # execution into nested execution. Exposure-scope publication consumes
-    # that authority; it must never replace it.
     canonical_execute = execute_function
-    canonical_execute_code = execute_function.__code__
 
     def publish_owned_exposure_scope(
         self: PaperExecutionAdoptionRuntime,
@@ -351,13 +328,23 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical prepared-execution verification was rebound"
             )
-        if not _function_globals_match(require_minted, require_minted_globals):
+        if (
+            not _function_globals_match(require_minted, require_minted_globals)
+            or not _function_metadata_match(require_minted, require_minted_metadata)
+        ):
             raise PaperExecutionAdoptionError(
-                "canonical prepared-execution verification globals were rebound"
+                "canonical prepared-execution verification metadata was rebound"
             )
-        if not _function_metadata_match(require_minted, require_minted_metadata):
+        if runtime_type._require_exposure_scope_authority is not require_scope:
+            raise PaperExecutionIntegrityError(
+                "canonical exposure-scope authority verification was rebound"
+            )
+        if (
+            not _function_globals_match(require_scope, require_scope_globals)
+            or not _function_metadata_match(require_scope, require_scope_metadata)
+        ):
             raise PaperExecutionAdoptionError(
-                "canonical prepared-execution verification metadata were rebound"
+                "canonical exposure-scope authority verification metadata was rebound"
             )
         if type(prepared) is not prepared_type:
             raise TypeError("prepared must be exact PreparedPaperExecution")
@@ -370,13 +357,12 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER exposure-scope payload authority was rebound"
             )
-        if not _function_globals_match(scope_function, scope_globals):
+        if (
+            not _function_globals_match(scope_function, scope_globals)
+            or not _function_metadata_match(scope_function, scope_metadata)
+        ):
             raise PaperExecutionIntegrityError(
-                "canonical PAPER exposure-scope payload globals were rebound"
-            )
-        if not _function_metadata_match(scope_function, scope_metadata):
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER exposure-scope payload metadata were rebound"
+                "canonical PAPER exposure-scope payload metadata was rebound"
             )
 
         if (
@@ -393,13 +379,12 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER exposure-scope event constructor dispatch was rebound"
             )
-        if not _function_globals_match(canonical_event, event_globals):
+        if (
+            not _function_globals_match(canonical_event, event_globals)
+            or not _function_metadata_match(canonical_event, event_metadata)
+        ):
             raise PaperExecutionIntegrityError(
-                "canonical PAPER event constructor globals were rebound"
-            )
-        if not _function_metadata_match(canonical_event, event_metadata):
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER event constructor metadata were rebound"
+                "canonical PAPER event constructor metadata was rebound"
             )
         if _ledger_impl.os.fsync is not fsync:
             raise PaperExecutionIntegrityError(
@@ -414,119 +399,36 @@ def bind_canonical_execute(execute_function):
                     f"canonical PAPER ledger {name} dispatch was rebound"
                 )
 
-        if not _function_globals_match(baseline_execute, baseline_execute_globals):
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER execution globals were rebound"
-            )
-        if not _function_metadata_match(baseline_execute, baseline_execute_metadata):
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER execution metadata were rebound"
-            )
-        if not _function_globals_match(unlocked_execute, unlocked_execute_globals):
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER unlocked execution globals were rebound"
-            )
-        if not _function_metadata_match(unlocked_execute, unlocked_execute_metadata):
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER unlocked execution metadata were rebound"
-            )
-        if runtime_type._execute_unlocked is not unlocked_execute:
-            raise PaperExecutionAdoptionError(
-                "canonical PAPER unlocked execution dispatch was rebound"
-            )
         if runtime_type.expected_run_id is not expected_run_id:
             raise PaperExecutionIntegrityError(
                 "canonical PAPER run-id dispatch was rebound"
             )
-        if not _function_globals_match(expected_run_id, expected_run_id_globals):
+        if (
+            not _function_globals_match(expected_run_id, expected_run_id_globals)
+            or not _function_metadata_match(expected_run_id, expected_run_id_metadata)
+        ):
             raise PaperExecutionIntegrityError(
-                "canonical PAPER run-id globals were rebound"
-            )
-        if not _function_metadata_match(expected_run_id, expected_run_id_metadata):
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER run-id metadata were rebound"
-            )
-
-        if sys is not sys_module or sys_module._getframe is not getframe:
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER frame-authority dispatch was rebound"
-            )
-        if canonical_execute.__code__ is not canonical_execute_code:
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER execution code authority was rebound"
+                "canonical PAPER run-id metadata was rebound"
             )
 
-        current = getframe(0)
-        unlocked_frame = current.f_back
-        execute_frame = None if unlocked_frame is None else unlocked_frame.f_back
-        cursor = None if execute_frame is None else execute_frame.f_back
+        require_minted(self, prepared)
         try:
-            if (
-                unlocked_frame is None
-                or unlocked_frame.f_code is not unlocked_execute.__code__
-                or unlocked_frame.f_locals.get("self") is not self
-                or unlocked_frame.f_locals.get("prepared") is not prepared
-                or execute_frame is None
-                or execute_frame.f_code is not baseline_execute.__code__
-                or execute_frame.f_locals.get("self") is not self
-                or execute_frame.f_locals.get("prepared") is not prepared
-            ):
-                raise PaperExecutionIntegrityError(
-                    "PAPER exposure-scope publication is reserved for canonical execution authority"
-                )
+            require_scope(self, prepared)
+        except PaperExecutionAdoptionError as exc:
+            raise PaperExecutionIntegrityError(
+                "PAPER exposure-scope publication is reserved for canonical execution authority"
+            ) from exc
 
-            trigger_id = None
-            saw_canonical_execute = False
-            saw_paper_value_bridge = False
-            while cursor is not None:
-                if (
-                    cursor.f_code is paper_value_execute.__code__
-                    and cursor.f_locals.get("self") is self
-                    and cursor.f_locals.get("authorized") is prepared
-                ):
-                    if (
-                        _value_authority._execute is not paper_value_execute
-                        or not _function_globals_match(
-                            paper_value_execute,
-                            paper_value_execute_globals,
-                        )
-                        or not _function_metadata_match(
-                            paper_value_execute,
-                            paper_value_execute_metadata,
-                        )
-                    ):
-                        raise PaperExecutionIntegrityError(
-                            "canonical paper-value execution bridge was rebound"
-                        )
-                    saw_paper_value_bridge = True
-                if (
-                    cursor.f_code is canonical_execute_code
-                    and cursor.f_locals.get("self") is self
-                    and (
-                        cursor.f_locals.get("prepared") is prepared
-                        or saw_paper_value_bridge
-                    )
-                ):
-                    trigger_id = cursor.f_locals.get("trigger_id")
-                    saw_canonical_execute = True
-                    break
-                cursor = cursor.f_back
-            if not saw_canonical_execute or type(trigger_id) is not str:
-                raise PaperExecutionIntegrityError(
-                    "PAPER exposure-scope publication is reserved for canonical execution authority"
-                )
-        finally:
-            del current
-            del unlocked_frame
-            del execute_frame
-            del cursor
-
+        trigger_id = prepared.execution_plan.decision_id
+        if type(trigger_id) is not str or not trigger_id or trigger_id.strip() != trigger_id:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope decision identity is invalid"
+            )
         expected_run = expected_run_id(self, prepared, trigger_id)
         if run_id != expected_run:
             raise PaperExecutionIntegrityError(
                 "canonical PAPER exposure-scope run identity changed"
             )
-        require_minted(self, prepared)
 
         body: dict[str, object] = {
             "schema": _RESERVED_SCHEMA,

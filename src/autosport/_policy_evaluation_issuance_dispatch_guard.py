@@ -199,25 +199,25 @@ class _DispatchState:
         # callers can replace FunctionType.__code__ in place while preserving the
         # exact function object. Pin every predecessor/direct helper executable that
         # the guarded issuer invokes so an in-place code swap fails before dispatch.
+        code_witness_functions = (
+            ("predecessor open", issuance_module._open_canonical_authorities),
+            ("predecessor issue", issuance_module.issue_product_policy_evaluation),
+            ("predecessor resolve", issuance_module.resolve_product_policy_evaluation),
+            ("predecessor verify", issuance_module.verify_product_policy_evaluation),
+            ("target", self._target),
+            ("issuance id", self._issuance_id),
+            ("source evaluation", self._require_source),
+            ("derive policy evaluation", self._derive),
+            ("registry get", self._registry_get),
+            ("store read", self._store_read),
+            ("canonical bundle digest", self._canonical_bundle_sha256),
+        )
         object.__setattr__(
             self,
             "_code_witnesses",
-            (
-                ("predecessor open", object.__getattribute__(self, "_DispatchState__original_open"), object.__getattribute__(self, "_DispatchState__original_open").__code__),
-                ("predecessor issue", object.__getattribute__(self, "_DispatchState__original_issue"), object.__getattribute__(self, "_DispatchState__original_issue").__code__),
-                ("predecessor resolve", object.__getattribute__(self, "_DispatchState__original_resolve"), object.__getattribute__(self, "_DispatchState__original_resolve").__code__),
-                ("predecessor verify", object.__getattribute__(self, "_DispatchState__original_verify"), object.__getattribute__(self, "_DispatchState__original_verify").__code__),
-                ("target", self._target, self._target.__code__),
-                ("issuance id", self._issuance_id, self._issuance_id.__code__),
-                ("source evaluation", self._require_source, self._require_source.__code__),
-                ("derive policy evaluation", self._derive, self._derive.__code__),
-                ("registry get", self._registry_get, self._registry_get.__code__),
-                ("store read", self._store_read, self._store_read.__code__),
-                (
-                    "canonical bundle digest",
-                    self._canonical_bundle_sha256,
-                    self._canonical_bundle_sha256.__code__,
-                ),
+            tuple(
+                (label, function, function.__code__)
+                for label, function in code_witness_functions
             ),
         )
 

@@ -219,7 +219,7 @@ def test_wrong_wire_element_or_attribute_casing_is_rejected() -> None:
         parse_get_prices_response(
             _response().replace("<GetPricesResponse", "<getPricesResponse", 1)
         )
-    with pytest.raises(BetdaqSoapProtocolError, match="price/stake"):
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_prices_response(
             _response().replace('Price="2.00"', 'price="2.00"', 1)
         )

@@ -17,16 +17,51 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
   cancel-in-progress: true
 
 jobs:
+  superseded_run_admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
+    steps:
+      - name: Admit non-PR and closed lifecycle events without PR checkout
+        if: github.event_name != 'pull_request' || github.event.action == 'closed'
+        id: lifecycle
+        run: echo "current_head=true" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact PR head for read-only admission helper
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject stale PR rerun before heavy matrix allocation
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        id: admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/cancel_superseded_pr_workflow_runs.py
+          --pr-number "${{ github.event.pull_request.number }}"
+          --event-head-sha "${{ github.event.pull_request.head.sha }}"
+          --workflow-name "${{ github.workflow }}"
+          --current-run-id "${{ github.run_id }}"
+          --admission-only
+
   test:
-    # Draft/closed PRs are not integration-capable; preserve the exact heavy gate
-    # while skipped lifecycle runs displace obsolete work through concurrency.
-    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.draft == false)
+    needs: superseded_run_admission
+    # Draft/closed/stale PRs are not integration-capable; preserve the exact heavy gate
+    # while lifecycle runs displace obsolete fresh work through concurrency.
+    if: >-
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false))
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]

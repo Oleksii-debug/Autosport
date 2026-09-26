@@ -824,6 +824,10 @@ def validate_betfair_realized_match_revision(
         raise RealizedMatchEvidenceError(
             "realized match revision changes immutable execution identity"
         )
+    if previous.bet_id is not None and current.bet_id != previous.bet_id:
+        raise RealizedMatchEvidenceError(
+            "realized match revision changes provider bet identity"
+        )
     if _timestamp(
         current.readback_observed_at,
         "current readback_observed_at",

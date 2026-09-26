@@ -18,6 +18,7 @@ def _install() -> None:
     canonical_loader_code = canonical_loader.__code__
     canonical_json = _json_integrity.json
     canonical_json_loads = canonical_json.loads
+    canonical_json_loads_code = getattr(canonical_json_loads, "__code__", None)
     canonical_math = _json_integrity.math
     canonical_isfinite = canonical_math.isfinite
 
@@ -42,6 +43,7 @@ def _install() -> None:
             or canonical_loader.__code__ is not canonical_loader_code
             or _json_integrity.json is not canonical_json
             or canonical_json.loads is not canonical_json_loads
+            or getattr(canonical_json_loads, "__code__", None) is not canonical_json_loads_code
             or _json_integrity.math is not canonical_math
             or canonical_math.isfinite is not canonical_isfinite
             or _json_integrity._JSON_INTEGER_MAX_DIGITS != canonical_integer_limit

@@ -728,6 +728,56 @@ def test_hardlink_alias_is_rejected_fail_closed(tmp_path: Path) -> None:
     ]
 
 
+def test_constructor_never_adopts_path_replacement_after_verified_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal_path = tmp_path / "forensic-session.jsonl"
+    journal = ForensicSessionJournal(
+        journal_path,
+        clock=FakeClock(),
+        session_id=str(uuid.UUID(int=1)),
+    )
+    journal.append_material("provider.connected", {"provider": "paper"})
+    journal.close()
+
+    original = journal_path.read_bytes()
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(original)
+
+    real_parse = forensic_session_journal._parse_verified_record_bytes
+    swapped = False
+
+    def parse_then_replace(raw: bytes):
+        nonlocal swapped
+        records = real_parse(raw)
+        if not swapped:
+            swapped = True
+            replacement.replace(journal_path)
+        return records
+
+    monkeypatch.setattr(
+        forensic_session_journal,
+        "_parse_verified_record_bytes",
+        parse_then_replace,
+    )
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="journal path identity changed during verification",
+    ):
+        ForensicSessionJournal(
+            journal_path,
+            clock=FakeClock(),
+            session_id=str(uuid.UUID(int=2)),
+        )
+
+    assert swapped is True
+    assert journal_path.read_bytes() == original
+    assert len(journal_path.read_text(encoding="utf-8").splitlines()) == len(
+        original.decode("utf-8").splitlines()
+    )
+
+
 def test_deleted_active_journal_is_never_silently_recreated(tmp_path: Path) -> None:
     path = tmp_path / "forensic-session.jsonl"
     journal = ForensicSessionJournal(path, clock=FakeClock(), session_id=str(uuid.UUID(int=41)))

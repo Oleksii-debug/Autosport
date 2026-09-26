@@ -156,4 +156,3 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 
 # A retained-evidence manifest must never cross precommit without its exact BASE
 # PaperBook sidecar. Legacy staging can backfill only while canonical state is BASE.
-from . import _run_transaction_retained_base_crash_guard as _run_transaction_retained_base_crash_guard  # noqa: F401,E402

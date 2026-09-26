@@ -1058,7 +1058,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ledger.can_retry_action(plan_id="p1", action_id="a1")
             )
 
-    def test_unknown_retry_only_after_not_found_reconciliation(self):
+    def test_not_found_reconciliation_is_diagnostic_not_retry_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             ledger.reserve_plan(plan(action()))
@@ -1083,13 +1083,18 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertEqual(
                 ledger.attempt_state("try-1"), AttemptState.RECONCILED_NOT_FOUND
             )
-            self.assertTrue(ledger.can_retry_action(plan_id="p1", action_id="a1"))
-            ledger.begin_attempt(
-                plan_id="p1",
-                action_id="a1",
-                attempt_id="try-2",
-                reserved_at=RETRY_RESERVED_AT,
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
             )
+            with self.assertRaisesRegex(
+                ExecutionStateError, "product-issued no-effect authority"
+            ):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="try-2",
+                    reserved_at=RETRY_RESERVED_AT,
+                )
 
     def test_stale_not_found_evidence_cannot_authorize_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1157,7 +1162,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
             )
             with self.assertRaisesRegex(
-                ExecutionStateError, "persisted quote expiry"
+                ExecutionStateError, "product-issued no-effect authority"
             ):
                 ledger.begin_attempt(
                     plan_id="p1",

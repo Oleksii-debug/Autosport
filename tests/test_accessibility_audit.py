@@ -8,7 +8,7 @@ import autosport.accessibility_audit as accessibility_audit
 from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
-from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from autosport.windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
 
 
@@ -33,6 +33,7 @@ class AccessibilityAuditTests(unittest.TestCase):
 
     def _passing_description(self):
         shell = WINDOWS_SHELL_AUTOMATION_IDS
+        owner_dialog = OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS
         return SimpleNamespace(
             strategy=_Named("PROVIDER"),
             widgets=(
@@ -41,6 +42,7 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(AUTOMATION_IDS["choose_dataset"], "Вибрати replay dataset", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["run_replay"], "Запустити paper replay", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["repair_workspace"], "Відновити workspace", patterns=("INVOKE",)),
+                self._widget(AUTOMATION_IDS["export_evidence"], "Експортувати evidence", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_refresh"], "Оновити live snapshot", patterns=("INVOKE",)),
@@ -56,6 +58,8 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(shell["owner_economic_open"], "Економічні межі власника", patterns=("INVOKE",)),
                 self._widget(shell["owner_economic_status"], "Стан економічних меж власника", role="TEXT", patterns=("VALUE",)),
                 self._widget(shell["owner_economic_readback"], "Точні економічні межі власника", role="LIST", answers_rows=True),
+                self._widget(owner_dialog["readback"], "Точні економічні межі власника", role="LIST", answers_rows=True),
+                self._widget(owner_dialog["close"], "Закрити", patterns=("INVOKE",)),
                 self._widget(WORKBENCH_AUTOMATION_IDS["open"], "Відкрити робочу поверхню ручних розрахунків", patterns=("INVOKE",)),
                 self._widget(WORKBENCH_AUTOMATION_IDS["operation"], "Операція ручного розрахунку", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(WORKBENCH_AUTOMATION_IDS["input"], "Вхідні значення ручного розрахунку", role="TEXT", patterns=("VALUE",)),
@@ -108,7 +112,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
         report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 27)
+        self.assertEqual(len(report["critical_controls"]), 30)
         bankroll = next(
             item
             for item in report["critical_controls"]
@@ -124,6 +128,83 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_duplicate_critical_automation_id_fails_closed_without_overwrite(self):
+        description = self._passing_description()
+        original = next(
+            item
+            for item in description.widgets
+            if item.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        duplicate = self._widget(
+            original.automation_id,
+            "Дублікат запуску replay",
+            role="PUSH_BUTTON",
+            patterns=("INVOKE",),
+        )
+        duplicate.path = ".!duplicate_run_replay"
+        report = self._summarize(
+            SimpleNamespace(
+                **{
+                    **description.__dict__,
+                    "widgets": description.widgets + (duplicate,),
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any(
+                "duplicate critical control identity" in failure
+                and f"automation_id={original.automation_id}" in failure
+                and f"first_path={original.path}" in failure
+                and f"duplicate_path={duplicate.path}" in failure
+                for failure in report["failures"]
+            )
+        )
+        matching_controls = [
+            item
+            for item in report["critical_controls"]
+            if item["automation_id"] == original.automation_id
+        ]
+        self.assertEqual(len(matching_controls), 1)
+        self.assertEqual(matching_controls[0]["path"], original.path)
+
+    def test_missing_export_evidence_control_fails_closed(self):
+        description = self._passing_description()
+        widgets = tuple(
+            item
+            for item in description.widgets
+            if item.automation_id != AUTOMATION_IDS["export_evidence"]
+        )
+        report = self._summarize(
+            SimpleNamespace(**{**description.__dict__, "widgets": widgets})
+        )
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any(
+                f"automation_id={AUTOMATION_IDS['export_evidence']}: critical control not found"
+                == failure
+                for failure in report["failures"]
+            )
+        )
+
+    def test_owner_dialog_minimum_controls_are_required(self):
+        description = self._passing_description()
+        for key in ("readback", "close"):
+            automation_id = OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS[key]
+            with self.subTest(key=key):
+                widgets = tuple(
+                    item for item in description.widgets if item.automation_id != automation_id
+                )
+                report = self._summarize(
+                    SimpleNamespace(**{**description.__dict__, "widgets": widgets})
+                )
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={automation_id}: critical control not found",
+                    report["failures"],
+                )
+
     def test_wrong_semantic_roles_fail_closed(self):
         cases = (
             (AUTOMATION_IDS["choose_dataset"], "BUTTON", "PUSH_BUTTON"),
@@ -133,6 +214,8 @@ class AccessibilityAuditTests(unittest.TestCase):
             (WINDOWS_BANKROLL_AUTOMATION_ID, "EDIT", "TEXT"),
             (WINDOWS_SHELL_AUTOMATION_IDS["navigation"], "TEXT", "COMBO_BOX"),
             (WINDOWS_SHELL_AUTOMATION_IDS["details"], "TEXT", "LIST"),
+            (OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"], "TEXT", "LIST"),
+            (OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"], "TEXT", "PUSH_BUTTON"),
         )
         for automation_id, wrong_role, expected_role in cases:
             with self.subTest(automation_id=automation_id):
@@ -285,8 +368,14 @@ class AccessibilityAuditTests(unittest.TestCase):
                 _autosport_workbench_controls={},
                 destroy=lambda: None,
             )
+            owner_dialog = SimpleNamespace(destroy=lambda: None)
             with (
                 patch.object(accessibility_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(
+                    accessibility_audit,
+                    "_open_owner_economic_dialog_for_audit",
+                    return_value=owner_dialog,
+                ),
                 patch.object(
                     accessibility_audit,
                     "show_manual_calculation_workbench",

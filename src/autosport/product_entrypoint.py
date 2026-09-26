@@ -17,6 +17,21 @@ from .product_runtime import AutonomousProductRuntime, build_autonomous_product_
 from .secret_redaction import _safe_exception_type_label
 
 
+_SAFE_EXCEPTION_TYPE_LABEL = _safe_exception_type_label
+_SAFE_EXCEPTION_TYPE_LABEL_CODE = _safe_exception_type_label.__code__
+
+
+def _canonical_exception_type_label(exc: BaseException) -> str:
+    """Render a caught exception type through the frozen secret-safe authority."""
+
+    if _SAFE_EXCEPTION_TYPE_LABEL.__code__ is not _SAFE_EXCEPTION_TYPE_LABEL_CODE:
+        return "Exception"
+    try:
+        return _SAFE_EXCEPTION_TYPE_LABEL(exc)
+    except BaseException:
+        return "Exception"
+
+
 _OUTPUT_FORMATS = frozenset({"json", "text"})
 _TEXT_FIELD_ORDER = (
     "kind",
@@ -41,7 +56,7 @@ class ProductRuntimeError(ProductEntrypointError):
         if not isinstance(exc, BaseException):
             raise TypeError("ProductRuntimeError requires a caught exception")
         super().__init__("product runtime failed after start")
-        self.error_type = _safe_exception_type_label(exc)
+        self.error_type = _canonical_exception_type_label(exc)
 
 
 class _SecretSafeArgumentParser(argparse.ArgumentParser):
@@ -431,7 +446,7 @@ def run_product(
                 try:
                     primary_failure.add_note(
                         "runtime STOP also failed during exceptional cleanup: "
-                        f"{_safe_exception_type_label(stop_error)}"
+                        f"{_canonical_exception_type_label(stop_error)}"
                     )
                 except BaseException:
                     pass
@@ -445,7 +460,7 @@ def run_product(
                 try:
                     primary_failure.add_note(
                         "runtime close also failed during cleanup: "
-                        f"{_safe_exception_type_label(exc)}"
+                        f"{_canonical_exception_type_label(exc)}"
                     )
                 except BaseException:
                     pass
@@ -460,7 +475,7 @@ def run_product(
                     try:
                         primary_failure.add_note(
                             "signal handler restoration also failed during cleanup: "
-                            f"{_safe_exception_type_label(exc)}"
+                            f"{_canonical_exception_type_label(exc)}"
                         )
                     except BaseException:
                         pass
@@ -491,7 +506,7 @@ def run_product_command(
         )
     except ProductRuntimeError as exc:
         cause = exc.__cause__
-        error_type = _safe_exception_type_label(
+        error_type = _canonical_exception_type_label(
             cause if isinstance(cause, BaseException) else exc
         )
         _print_failure(
@@ -509,7 +524,7 @@ def run_product_command(
         _print_failure(
             kind="product_start_failure",
             error_code="product_start_failed",
-            error_type=_safe_exception_type_label(exc),
+            error_type=_canonical_exception_type_label(exc),
             output_format=output_format,
         )
         return 3

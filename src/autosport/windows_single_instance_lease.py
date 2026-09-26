@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 from typing import Final
+import weakref
 
 
 _LEASE_DOMAIN: Final[bytes] = b"AUTOSPORT_WINDOWS_SINGLE_INSTANCE_LEASE_V1\x00"
@@ -138,67 +139,122 @@ def _close_windows_handle(handle: int) -> None:
         )
 
 
-@dataclass(slots=True)
-class WindowsLaunchLease:
-    """One held process-lifetime per-user launch lease.
+def _install_lease_authority():
+    """Bind issued lease identity and raw HANDLE state outside caller-writable objects.
 
-    The object must remain reachable for as long as the canonical launcher/runtime
-    is allowed to own the single-instance slot. Windows releases the underlying
-    kernel handle automatically on process termination; explicit release() is
-    idempotent and closes it at most once.
+    CreateFileW remains the one acquisition authority. This closure only ensures the
+    Python object representing that acquisition cannot be manufactured through its
+    public type or redirected to a caller-selected HANDLE before release().
     """
 
-    path: Path
-    lease_key_sha256: str
-    user_scope: str
-    _handle: int
-    _released: bool = False
+    issue_token = object()
+    # identity -> (weak object reference, raw HANDLE, release-attempted)
+    issued: dict[int, tuple[weakref.ReferenceType[object], int, bool]] = {}
 
-    @property
-    def released(self) -> bool:
-        return self._released
+    @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+    class WindowsLaunchLease:
+        """One closure-issued process-lifetime per-user launch lease."""
 
-    def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        _close_windows_handle(self._handle)
+        path: Path
+        lease_key_sha256: str
+        user_scope: str
 
-    def __enter__(self) -> "WindowsLaunchLease":
-        if self._released:
-            raise WindowsLaunchLeaseError("released launch lease cannot be re-entered")
-        return self
+        def __init__(
+            self,
+            *,
+            path: Path,
+            lease_key_sha256: str,
+            user_scope: str,
+            _issuance_token: object | None = None,
+        ) -> None:
+            if _issuance_token is not issue_token:
+                raise WindowsLaunchLeaseError(
+                    "Windows launch leases must be issued by acquire_windows_launch_lease"
+                )
+            object.__setattr__(self, "path", path)
+            object.__setattr__(self, "lease_key_sha256", lease_key_sha256)
+            object.__setattr__(self, "user_scope", user_scope)
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        self.release()
-        return False
+        def _state(self) -> tuple[int, bool]:
+            current = issued.get(id(self))
+            if current is None or current[0]() is not self:
+                raise WindowsLaunchLeaseError(
+                    "Windows launch lease issuance authority is unavailable"
+                )
+            return current[1], current[2]
+
+        @property
+        def released(self) -> bool:
+            _handle, released = self._state()
+            return released
+
+        def release(self) -> None:
+            handle, released = self._state()
+            if released:
+                return
+            # Preserve the existing at-most-once CloseHandle rule. If CloseHandle
+            # reports failure, ownership disposition is uncertain and retrying the same
+            # numeric handle could close an unrelated object after HANDLE reuse.
+            reference = issued[id(self)][0]
+            issued[id(self)] = (reference, handle, True)
+            _close_windows_handle(handle)
+
+        def __enter__(self) -> "WindowsLaunchLease":
+            if self.released:
+                raise WindowsLaunchLeaseError(
+                    "released launch lease cannot be re-entered"
+                )
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            self.release()
+            return False
+
+    WindowsLaunchLease.__name__ = "WindowsLaunchLease"
+    WindowsLaunchLease.__qualname__ = "WindowsLaunchLease"
+
+    def acquire_windows_launch_lease(
+        *,
+        lease_root: str | Path,
+        user_scope: str,
+    ) -> WindowsLaunchLease:
+        """Atomically acquire one Windows single-instance slot for user_scope.
+
+        lease_root is deliberately not discovered here. Canonical Windows entry/
+        installer composition must provide its already-qualified per-user launcher
+        state root. This primitive derives an opaque, domain-separated filename from
+        the canonical user scope and uses CreateFileW with dwShareMode=0.
+        There is no separate check-then-act window: the kernel open is the acquisition.
+
+        PID/process-start metadata from windows_launch_identity remains useful
+        diagnostic/recovery evidence but is not mutual-exclusion authority.
+        """
+
+        path, lease_key = _canonical_lease_path(
+            lease_root=lease_root,
+            user_scope=user_scope,
+        )
+        canonical_scope = _canonical_user_scope(user_scope)
+        handle = _create_exclusive_windows_handle(path)
+        lease = WindowsLaunchLease(
+            path=path,
+            lease_key_sha256=lease_key,
+            user_scope=canonical_scope,
+            _issuance_token=issue_token,
+        )
+        identity = id(lease)
+
+        def remove(reference, *, identity=identity) -> None:
+            current = issued.get(identity)
+            if current is not None and current[0] is reference:
+                issued.pop(identity, None)
+
+        reference = weakref.ref(lease, remove)
+        issued[identity] = (reference, handle, False)
+        return lease
+
+    return WindowsLaunchLease, acquire_windows_launch_lease
 
 
-def acquire_windows_launch_lease(
-    *,
-    lease_root: str | Path,
-    user_scope: str,
-) -> WindowsLaunchLease:
-    """Atomically acquire one Windows single-instance slot for user_scope.
-
-    lease_root is deliberately not discovered here. Canonical Windows entry/
-    installer composition must provide its already-qualified per-user launcher
-    state root. This primitive derives an opaque, domain-separated filename from
-    the canonical user scope and uses CreateFileW with dwShareMode=0.
-    There is no separate check-then-act window: the kernel open is the acquisition.
-
-    PID/process-start metadata from windows_launch_identity remains useful
-    diagnostic/recovery evidence but is not mutual-exclusion authority.
-    """
-
-    path, lease_key = _canonical_lease_path(
-        lease_root=lease_root,
-        user_scope=user_scope,
-    )
-    handle = _create_exclusive_windows_handle(path)
-    return WindowsLaunchLease(
-        path=path,
-        lease_key_sha256=lease_key,
-        user_scope=_canonical_user_scope(user_scope),
-        _handle=handle,
-    )
+WindowsLaunchLease, acquire_windows_launch_lease = _install_lease_authority()
+del _install_lease_authority

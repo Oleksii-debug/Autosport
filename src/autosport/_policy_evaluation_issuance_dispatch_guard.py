@@ -39,6 +39,7 @@ class _DispatchState:
         "__original_verify",
         "_store_type",
         "_store_init",
+        "_store_setattr",
         "_store_init_globals",
         "_store_init_code",
         "_factory_datetime",
@@ -112,6 +113,7 @@ class _DispatchState:
         store_init = store_type.__init__
         object.__setattr__(self, "_store_type", store_type)
         object.__setattr__(self, "_store_init", store_init)
+        object.__setattr__(self, "_store_setattr", store_type.__setattr__)
         object.__setattr__(self, "_store_init_globals", store_init.__globals__)
         object.__setattr__(self, "_store_init_code", marshal_dumps(store_init.__code__))
         object.__setattr__(self, "_factory_datetime", factory_module.datetime)
@@ -216,6 +218,7 @@ class _DispatchState:
             factory_module.FactoryArtifactStore is not self._store_type
             or issuance_module.FactoryArtifactStore is not self._store_type
             or candidate_init is not self._store_init
+            or self._store_type.__setattr__ is not self._store_setattr
             or getattr(candidate_init, "__globals__", None)
             is not self._store_init_globals
             or candidate_code is None

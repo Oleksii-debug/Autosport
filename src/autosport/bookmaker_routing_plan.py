@@ -13,6 +13,11 @@ from .bookmaker_routing import (
     VenueObservation,
     VenueQuote,
     _dedupe_external_receipts,
+    _exact_decimal_add,
+    _exact_decimal_divmod_nonnegative,
+    _exact_decimal_mul_int,
+    _exact_decimal_subtract,
+    _exact_decimal_sum,
     route_residual,
 )
 
@@ -138,9 +143,12 @@ class ParallelRoutingProposal:
             raise RoutingContractError("all legs must belong to the same parent/request")
         if len({leg.leg_id for leg in self.legs}) != len(self.legs):
             raise RoutingContractError("proposal leg identities must be unique")
-        if sum((leg.proposed_stake for leg in self.legs), Decimal("0")) != proposed:
+        if _exact_decimal_sum(leg.proposed_stake for leg in self.legs) != proposed:
             raise RoutingContractError("proposal leg stakes must sum to proposed_total")
-        if any(divmod(leg.proposed_stake, quantum)[1] != 0 for leg in self.legs):
+        if any(
+            _exact_decimal_divmod_nonnegative(leg.proposed_stake, quantum)[1] != 0
+            for leg in self.legs
+        ):
             raise RoutingContractError("every proposal leg must respect stake_quantum")
         if self.state is RoutingState.BLOCKED_UNKNOWN:
             if self.legs or proposed != 0:
@@ -286,7 +294,10 @@ def plan_equal_split_residual(
             legs=(),
         )
 
-    residual_units, residual_remainder = divmod(base.residual, quantum)
+    residual_units, residual_remainder = _exact_decimal_divmod_nonnegative(
+        base.residual,
+        quantum,
+    )
     if residual_remainder != 0:
         raise RoutingContractError(
             "residual stake must be an exact multiple of stake_quantum"
@@ -300,9 +311,9 @@ def plan_equal_split_residual(
         if item.effect is ExternalEffect.MARKET_REFUSED:
             refused.add(identity)
         elif item.effect is ExternalEffect.ACCEPTED:
-            accepted_by_identity[identity] = (
-                accepted_by_identity.get(identity, Decimal("0"))
-                + item.confirmed_accepted
+            accepted_by_identity[identity] = _exact_decimal_add(
+                accepted_by_identity.get(identity, Decimal("0")),
+                item.confirmed_accepted,
             )
 
     eligible: list[VenueQuote] = []
@@ -311,11 +322,11 @@ def plan_equal_split_residual(
         identity = (venue.venue_id, venue.account_id)
         if identity in refused or not venue.account_enabled:
             continue
-        remaining_capacity = venue.acceptance_ceiling - accepted_by_identity.get(
-            identity,
-            Decimal("0"),
+        remaining_capacity = _exact_decimal_subtract(
+            venue.acceptance_ceiling,
+            accepted_by_identity.get(identity, Decimal("0")),
         )
-        units, _ = divmod(remaining_capacity, quantum)
+        units, _ = _exact_decimal_divmod_nonnegative(remaining_capacity, quantum)
         available_units = int(units)
         if available_units <= 0:
             continue
@@ -327,7 +338,7 @@ def plan_equal_split_residual(
     for venue, units in zip(eligible, allocations, strict=True):
         if units <= 0:
             continue
-        proposed_stake = quantum * units
+        proposed_stake = _exact_decimal_mul_int(quantum, units)
         legs.append(
             VenueLegProposal(
                 parent_plan_id=parent_id,
@@ -343,10 +354,7 @@ def plan_equal_split_residual(
             )
         )
 
-    proposed_total = sum(
-        (leg.proposed_stake for leg in legs),
-        Decimal("0"),
-    )
+    proposed_total = _exact_decimal_sum(leg.proposed_stake for leg in legs)
     if proposed_total == base.residual:
         state = RoutingState.ROUTE
     elif proposed_total > 0 or base.confirmed_total > 0:

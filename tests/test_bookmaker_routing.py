@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -314,3 +314,116 @@ def test_selected_quotes_must_share_market_selection_identity() -> None:
     )
     with pytest.raises(RoutingContractError, match="same market selection"):
         _route("10", (a, b))
+
+
+def test_exact_accepted_sum_completes_without_ambient_context_rounding() -> None:
+    a = _venue("book-a", "acct-a")
+    b = _venue("book-b", "acct-b")
+    requested = Decimal("1.0000000000000000000000000001")
+    accepted_a = Decimal("0.50000000000000000000000000006")
+    accepted_b = Decimal("0.50000000000000000000000000004")
+
+    with localcontext() as context:
+        context.prec = 28
+        decision = route_residual(
+            requested,
+            (a, b),
+            (
+                VenueObservation(
+                    a.venue_id,
+                    a.account_id,
+                    ExternalEffect.ACCEPTED,
+                    _REQUEST_ID,
+                    a.quote,
+                    accepted_a,
+                ),
+                VenueObservation(
+                    b.venue_id,
+                    b.account_id,
+                    ExternalEffect.ACCEPTED,
+                    _REQUEST_ID,
+                    b.quote,
+                    accepted_b,
+                ),
+            ),
+            routing_request_id=_REQUEST_ID,
+        )
+
+    assert decision.state is RoutingState.COMPLETE
+    assert decision.confirmed_total == requested
+    assert decision.residual == Decimal("0")
+
+
+def test_exact_accepted_sum_rejects_sub_context_overacceptance() -> None:
+    a = _venue("book-a", "acct-a")
+    b = _venue("book-b", "acct-b")
+    requested = Decimal("1.0000000000000000000000000001")
+    accepted = Decimal("0.50000000000000000000000000006")
+
+    with localcontext() as context:
+        context.prec = 28
+        with pytest.raises(
+            RoutingContractError,
+            match="confirmed accepted stake exceeds requested stake",
+        ):
+            route_residual(
+                requested,
+                (a, b),
+                (
+                    VenueObservation(
+                        a.venue_id,
+                        a.account_id,
+                        ExternalEffect.ACCEPTED,
+                        _REQUEST_ID,
+                        a.quote,
+                        accepted,
+                    ),
+                    VenueObservation(
+                        b.venue_id,
+                        b.account_id,
+                        ExternalEffect.ACCEPTED,
+                        _REQUEST_ID,
+                        b.quote,
+                        accepted,
+                    ),
+                ),
+                routing_request_id=_REQUEST_ID,
+            )
+
+
+def test_exact_per_venue_sum_rejects_sub_context_ceiling_overrun() -> None:
+    ceiling = "1.0000000000000000000000000001"
+    a = _venue("book-a", "acct-a", ceiling)
+    accepted = Decimal("0.50000000000000000000000000006")
+
+    with localcontext() as context:
+        context.prec = 28
+        with pytest.raises(
+            RoutingContractError,
+            match="confirmed accepted stake exceeds venue acceptance ceiling",
+        ):
+            route_residual(
+                Decimal("2"),
+                (a,),
+                (
+                    VenueObservation(
+                        a.venue_id,
+                        a.account_id,
+                        ExternalEffect.ACCEPTED,
+                        _REQUEST_ID,
+                        a.quote,
+                        accepted,
+                        "exact-ceiling-1",
+                    ),
+                    VenueObservation(
+                        a.venue_id,
+                        a.account_id,
+                        ExternalEffect.ACCEPTED,
+                        _REQUEST_ID,
+                        a.quote,
+                        accepted,
+                        "exact-ceiling-2",
+                    ),
+                ),
+                routing_request_id=_REQUEST_ID,
+            )

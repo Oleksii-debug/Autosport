@@ -1,24 +1,49 @@
 from __future__ import annotations
 
+import builtins
 import queue
 import threading
 from dataclasses import dataclass
 from typing import Callable
 
 from .dataset import ReplayDataset
-from .secret_redaction import safe_exception_text
 
 
 DatasetValidationTask = Callable[[], ReplayDataset]
 
 
-def _safe_worker_error(exc: BaseException) -> str:
-    """Render a terminal worker failure through the shared redaction boundary."""
+def _safe_exception_type_label(exc: BaseException) -> str:
+    """Return only a trusted built-in exception category for presentation."""
 
-    return safe_exception_text(
-        exc,
-        unavailable_detail="dataset validation failed; exception details unavailable",
-    )
+    try:
+        exception_type = type(exc)
+        mro = type.__getattribute__(exception_type, "__mro__")
+    except BaseException:
+        return "BaseException"
+
+    if type(mro) is not tuple:
+        return "BaseException"
+
+    for candidate_type in mro:
+        try:
+            name = type.__getattribute__(candidate_type, "__name__")
+            if type(name) is not str:
+                continue
+            if (
+                vars(builtins).get(name) is candidate_type
+                and isinstance(candidate_type, type)
+                and issubclass(candidate_type, BaseException)
+            ):
+                return name
+        except BaseException:
+            continue
+    return "BaseException"
+
+
+def _safe_worker_error(exc: BaseException) -> str:
+    """Render a bounded terminal failure without inspecting exception detail."""
+
+    return f"{_safe_exception_type_label(exc)}: dataset validation failed"
 
 
 @dataclass(frozen=True, slots=True)

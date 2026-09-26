@@ -779,9 +779,10 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ledger.can_retry_action(plan_id="p1", action_id="a1")
             )
 
-    def test_unknown_retry_only_after_not_found_reconciliation(self):
+    def test_generic_not_found_is_diagnostic_and_cannot_authorize_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
             ledger.reserve_plan(plan(action()))
             ledger.begin_attempt(
                 plan_id="p1",
@@ -795,7 +796,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.reconcile_not_found(
                 ReconciliationSnapshot(
                     attempt_id="try-1",
-                    evidence_id="readback-1",
+                    evidence_id="caller-constructible-readback",
                     observed_at=RECONCILED_AT,
                     external_effect_found=False,
                     source="provider-readback",
@@ -804,12 +805,44 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertEqual(
                 ledger.attempt_state("try-1"), AttemptState.RECONCILED_NOT_FOUND
             )
-            self.assertTrue(ledger.can_retry_action(plan_id="p1", action_id="a1"))
-            ledger.begin_attempt(
-                plan_id="p1",
-                action_id="a1",
-                attempt_id="try-2",
-                reserved_at=RETRY_RESERVED_AT,
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
+            )
+            event_count = ledger.verify_integrity()
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "without provider-authoritative retry release",
+            ):
+                ledger.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="try-2",
+                    reserved_at=RETRY_RESERVED_AT,
+                )
+            self.assertEqual(ledger.verify_integrity(), event_count)
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.RECONCILED_NOT_FOUND,
+            )
+            self.assertFalse(
+                restarted.can_retry_action(plan_id="p1", action_id="a1")
+            )
+            restart_event_count = restarted.verify_integrity()
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "without provider-authoritative retry release",
+            ):
+                restarted.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="try-3",
+                    reserved_at=RETRY_RESERVED_AT,
+                )
+            self.assertEqual(
+                restarted.verify_integrity(),
+                restart_event_count,
             )
 
     def test_stale_not_found_evidence_cannot_authorize_retry(self):

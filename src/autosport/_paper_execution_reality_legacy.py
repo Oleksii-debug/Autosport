@@ -848,6 +848,11 @@ class PaperExecutionLedger:
         key: str,
         payload: dict[str, Any],
     ) -> None:
+        if event_type == "PAPER_EXPOSURE_SCOPE_BOUND":
+            raise PaperExecutionIntegrityError(
+                "PAPER exposure-scope event is reserved for canonical adoption authority"
+            )
+
         def mutate() -> None:
             self._ensure_existing_path_durable()
             events = self._load_unlocked()

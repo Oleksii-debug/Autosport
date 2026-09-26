@@ -5,6 +5,7 @@ import math
 import os
 import signal
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -172,7 +173,7 @@ def _status_payload(
 ) -> dict[str, object]:
     return {
         "schema_version": _STATUS_SCHEMA_VERSION,
-        "kind": _STATUS_KIND,
+        "kind": "autosport_continuous_local_observation",
         "run_id": state.run_id,
         "source_id": state.source_id,
         "state": lifecycle_state,
@@ -446,7 +447,12 @@ def run_continuous_observation(
         raise
     finally:
         if store is not None:
-            store.close()
+            primary_failure_active = sys.exc_info()[0] is not None
+            try:
+                store.close()
+            except Exception:
+                if not primary_failure_active:
+                    raise
 
     publish("stopped" if terminal_exit == 0 else "failed", stop_reason=terminal_reason)
     return ContinuousObservationResult(

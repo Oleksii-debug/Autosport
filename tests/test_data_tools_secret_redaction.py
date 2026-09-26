@@ -167,6 +167,28 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
         self.assertIn("exception details unavailable", output)
         self.assertNotIn(secret, output)
 
+    def test_transitive_secret_value_resolver_rebinding_cannot_publish_bare_secret(self) -> None:
+        secret = "AS-DATATOOLS-TRANSITIVE-CONFIGURED-SENTINEL-44d9"
+        exc = ValueError(f"provider rejected credential value {secret}")
+
+        with patch.dict(
+            os.environ,
+            {"AUTOSPORT_TEST_API_KEY": secret},
+            clear=False,
+        ), patch.object(
+            secret_redaction,
+            "_secret_values",
+            lambda _extra: (),
+        ):
+            output = data_tools_entry._expected_failure_message(
+                "verify-dataset",
+                exc,
+            )
+
+        self.assertIn("error=ExpectedFailure", output)
+        self.assertIn("exception details unavailable", output)
+        self.assertNotIn(secret, output)
+
     def test_expected_failure_renderer_rebinding_cannot_publish_raw_secret(self) -> None:
         secret = "AS-DATATOOLS-RENDERER-REBIND-SENTINEL-4a37"
         stderr = io.StringIO()

@@ -176,3 +176,8 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Live positive policy dispositions must re-resolve through the exact canonical
+# Decision Ledger read authority; subclasses and instance-shadowed readers are not
+# product-origin evidence.
+from . import _live_decision_policy_origin_guard as _live_decision_policy_origin_guard  # noqa: F401,E402

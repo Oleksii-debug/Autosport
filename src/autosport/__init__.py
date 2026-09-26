@@ -163,6 +163,15 @@ from . import _research_multiplicity_family_close_dispatch_guard as _research_mu
 # existing issuer hash and send only that detached product-owned value.
 from . import _betfair_authenticated_stream_filter_snapshot as _betfair_authenticated_stream_filter_snapshot  # noqa: F401,E402
 
+# Resolve the product-owned selector location through platform callables captured
+# before the broader executable-dispatch composition freezes the selection chain.
+from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_selection_os_resolver_guard  # noqa: F401,E402
+
+# The machine-state root selector is only an independent trust root if its executable
+# store resolver cannot be replaced after package import. Freeze that dispatch and
+# MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
+from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
+
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.

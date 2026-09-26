@@ -63,16 +63,16 @@ function Get-ExternalActionPattern {
     # resolve that concrete type name. Dynamic member access still exercises the
     # real external DefaultAction/DoDefaultAction contract.
     $legacyPattern = [System.Windows.Automation.AutomationPattern]::LookupById(10018)
-    if ($null -eq $legacyPattern) { return $null }
-
-    $legacyObject = $null
-    if ($Element.TryGetCurrentPattern(
-        $legacyPattern,
-        [ref]$legacyObject
-    ) -and $null -ne $legacyObject) {
-        $defaultAction = [string]$legacyObject.Current.DefaultAction
-        if (-not [string]::IsNullOrWhiteSpace($defaultAction)) {
-            return [pscustomobject]@{ Kind = 'LegacyIAccessible'; Pattern = $legacyObject }
+    if ($null -ne $legacyPattern) {
+        $legacyObject = $null
+        if ($Element.TryGetCurrentPattern(
+            $legacyPattern,
+            [ref]$legacyObject
+        ) -and $null -ne $legacyObject) {
+            $defaultAction = [string]$legacyObject.Current.DefaultAction
+            if (-not [string]::IsNullOrWhiteSpace($defaultAction)) {
+                return [pscustomobject]@{ Kind = 'LegacyIAccessible'; Pattern = $legacyObject }
+            }
         }
     }
 

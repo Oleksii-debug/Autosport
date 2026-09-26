@@ -16,6 +16,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -41,7 +42,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Reject stale PR rerun before heavy matrix allocation
+      - name: Reject stale or duplicate exact-head run before heavy matrix allocation
         if: github.event_name == 'pull_request' && github.event.action != 'closed'
         id: admission
         env:
@@ -53,11 +54,12 @@ jobs:
           --workflow-name "${{ github.workflow }}"
           --current-run-id "${{ github.run_id }}"
           --admission-only
+          --dedupe-same-head
 
   test:
     needs: superseded_run_admission
-    # Draft/closed/stale PRs are not integration-capable; preserve the exact heavy gate
-    # while lifecycle runs displace obsolete fresh work through concurrency.
+    # Draft/closed/stale/duplicate PR runs are not integration-capable; preserve the
+    # exact heavy gate while the lightweight admission prevents runner duplication.
     if: >-
       needs.superseded_run_admission.outputs.current_head == 'true' &&
       (github.event_name != 'pull_request' ||

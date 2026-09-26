@@ -2,6 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autosport.integrity import sha256_file
+from autosport.paper import PaperBook
+from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction, RunTransactionError
 
 
@@ -114,14 +117,29 @@ class RunTransactionPathSafetyTests(unittest.TestCase):
     def test_start_accepts_cyrillic_portable_component_and_writes_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
+            registry = RunRegistry.initialize_pristine(
+                workspace / "run_registry.json"
+            )
+            book_path = workspace / "paper_book.json"
+            PaperBook("10000").save(book_path)
+            book_sha = sha256_file(book_path)
+            experiment_key = registry.begin(
+                "a" * 64,
+                "b" * 64,
+                "baseline-v1",
+                "запуск-002",
+                base_paper_book_sha256=book_sha,
+                base_decision_ledger_sha256="d" * 64,
+            )
+
             transaction = RunTransaction.start(
                 workspace,
                 run_id="запуск-002",
-                experiment_key="experiment",
+                experiment_key=experiment_key,
                 market_sha256="a" * 64,
                 results_sha256="b" * 64,
                 strategy_id="baseline-v1",
-                base_paper_book_sha256="c" * 64,
+                base_paper_book_sha256=book_sha,
                 base_decision_ledger_sha256="d" * 64,
             )
             self.assertTrue(transaction.manifest_path.is_file())

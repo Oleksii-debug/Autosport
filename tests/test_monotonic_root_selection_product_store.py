@@ -105,16 +105,16 @@ def test_root_selection_sha256_attribute_rebinding_fails_closed(
 def test_product_store_fails_closed_if_frozen_clone_globals_are_mutated() -> None:
     public = root_binding.stable_root_selection_store
     implementation = _implementation(public, "_sealed_stable_root_selection_store")
-    original_os = implementation.__globals__["os"]
-    implementation.__globals__["os"] = object()
+    original_os = implementation.__globals__["_os"]
+    implementation.__globals__["_os"] = object()
     try:
         with pytest.raises(
             root_binding.AuthorityRootSelectionConfigurationError,
-            match=r"frozen root-selection store global 'os' was rebound",
+            match=r"frozen root-selection store global '_os' was rebound",
         ):
             public()
     finally:
-        implementation.__globals__["os"] = original_os
+        implementation.__globals__["_os"] = original_os
 
 
 def test_product_store_fails_closed_if_frozen_clone_code_is_mutated() -> None:

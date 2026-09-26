@@ -31,17 +31,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      current_head: ${{ github.event_name != 'pull_request' && 'true' || steps.admission.outputs.current_head }}
+      current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
     steps:
+      - name: Admit non-PR and closed lifecycle events without PR checkout
+        if: github.event_name != 'pull_request' || github.event.action == 'closed'
+        id: lifecycle
+        run: echo "current_head=true" >> "$GITHUB_OUTPUT"
       - name: Checkout exact PR head for read-only admission helper
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Reject stale PR rerun before Windows runner allocation
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
         id: admission
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -56,8 +60,7 @@ jobs:
   build:
     needs: superseded_run_admission
     # Build the expensive Windows candidate only for an integration-capable current-head PR.
-    # ready_for_review starts the full gate; converted_to_draft/closed lets concurrency
-    # displace obsolete work; closed itself never qualifies the candidate.
+    # ready_for_review starts the full gate; closed itself never qualifies the candidate.
     if: >-
       needs.superseded_run_admission.outputs.current_head == 'true' &&
       (github.event_name != 'pull_request' ||

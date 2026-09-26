@@ -312,6 +312,7 @@ def _build_register_evidence_method():
     if type(parser_descriptor) is not classmethod:
         raise RuntimeError("ProviderSportEvidence.from_exact_bytes must remain a classmethod")
     canonical_parser = parser_descriptor.__func__
+    canonical_parser_code = canonical_parser.__code__
     parser_dispatch = {
         "_strict_json_object": _strict_json_object,
         "_canonical_text": _canonical_text,
@@ -328,6 +329,11 @@ def _build_register_evidence_method():
         "_RESERVED_SPORTS": _RESERVED_SPORTS,
         "_EVIDENCE_SCHEMA": _EVIDENCE_SCHEMA,
         "_EVIDENCE_VERSION": _EVIDENCE_VERSION,
+    }
+    parser_dispatch_codes = {
+        name: value.__code__
+        for name, value in parser_dispatch.items()
+        if hasattr(value, "__code__")
     }
     canonical_load = vars(canonical_registry_type)["_load"]
     canonical_load_code = canonical_load.__code__
@@ -363,11 +369,16 @@ def _build_register_evidence_method():
             raise ProviderSportMappingError("canonical provider sport registry type is required")
         if globals().get("_utc_now") is not canonical_clock:
             raise ProviderSportMappingError("product recording clock authority changed")
-        if vars(ProviderSportEvidence).get("from_exact_bytes") is not parser_descriptor:
-            raise ProviderSportMappingError("canonical evidence parser authority changed")
+        current_parser_descriptor = vars(ProviderSportEvidence).get("from_exact_bytes")
+        if current_parser_descriptor is not parser_descriptor or canonical_parser.__code__ is not canonical_parser_code:
+            raise ProviderSportMappingError("canonical evidence parser executable authority changed")
         for name, expected in parser_dispatch.items():
-            if globals().get(name) is not expected:
+            current = globals().get(name)
+            if current is not expected:
                 raise ProviderSportMappingError("canonical evidence parser authority changed")
+            expected_code = parser_dispatch_codes.get(name)
+            if expected_code is not None and getattr(expected, "__code__", None) is not expected_code:
+                raise ProviderSportMappingError("canonical evidence parser executable authority changed")
         _assert_durable_dispatch()
         if "_load" in vars(self) or "_persist" in vars(self) or "_assert_no_overlap" in vars(self):
             raise ProviderSportMappingError("canonical registry instance authority changed")
@@ -640,6 +651,11 @@ def _build_resolve_method():
         "_HEX": _HEX,
         "_RESERVED_SPORTS": _RESERVED_SPORTS,
     }
+    canonical_helper_codes = {
+        name: value.__code__
+        for name, value in canonical_helpers.items()
+        if hasattr(value, "__code__")
+    }
 
     def resolve(
         self: "ProviderSportMappingRegistry",
@@ -662,8 +678,12 @@ def _build_resolve_method():
         if vars(canonical_registry_type).get("registry_sha256") is not canonical_registry_sha_property:
             raise ProviderSportMappingError("canonical registry digest authority changed")
         for name, expected in canonical_helpers.items():
-            if globals().get(name) is not expected:
+            current = globals().get(name)
+            if current is not expected:
                 raise ProviderSportMappingError("canonical provider sport resolution authority changed")
+            expected_code = canonical_helper_codes.get(name)
+            if expected_code is not None and getattr(expected, "__code__", None) is not expected_code:
+                raise ProviderSportMappingError("canonical provider sport resolution executable authority changed")
 
         namespace = _canonical_text("provider_namespace", provider_namespace)
         opaque_id = _opaque_provider_id("provider_sport_id", provider_sport_id)

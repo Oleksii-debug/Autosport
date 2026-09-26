@@ -72,6 +72,24 @@ def test_sealed_product_clock_exposes_no_mutable_default_authority() -> None:
     assert getattr(RunRegistry.begin, "_autosport_predecessor_unreachable", False)
 
 
+def test_causal_begin_declares_same_process_reflection_resistance_unproven() -> None:
+    checked_begin = _checked_boundary(RunRegistry.begin)
+    raw_begin = object.__getattribute__(checked_begin, "_function")
+
+    # Public metadata traversal is sealed, but arbitrary same-process private-slot
+    # reflection can still recover a raw FunctionType capability. Keep that stronger
+    # tamper-resistance claim mechanically false rather than overstating authority.
+    assert isinstance(raw_begin, FunctionType)
+    assert (
+        getattr(
+            RunRegistry.begin,
+            "_autosport_same_process_reflection_tamper_resistance_proven",
+            None,
+        )
+        is False
+    )
+
+
 def test_public_begin_metadata_does_not_expose_authority_predecessor() -> None:
     names = {function.__name__ for function in _reachable_functions(RunRegistry.begin)}
     assert "_begin_with_causal_outcome_publication" not in names

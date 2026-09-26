@@ -73,7 +73,7 @@ def _now() -> str:
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
     try:
         value.encode("utf-8")

@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 import autosport.forensic_session_journal as forensic_session_journal
+from autosport.secret_redaction import is_sensitive_key as canonical_is_sensitive_key
+
 from autosport.forensic_session_journal import (
     REDACTED,
     ForensicSessionJournal,
@@ -119,6 +121,28 @@ def test_redaction_catches_camelcase_and_mixed_separator_credentials() -> None:
     ):
         assert redacted[key] == REDACTED
     assert redacted["market_token_count"] == 7
+
+
+def test_journal_uses_canonical_sensitive_key_authority() -> None:
+    assert forensic_session_journal.is_sensitive_key is canonical_is_sensitive_key
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "X-Application",
+        "appKey",
+        "APPKEY",
+        "betfairAppKey",
+        "betfairAppKeyValue",
+        "BETFAIR_APP_KEY_HEADER",
+    ),
+)
+def test_redaction_catches_canonical_application_key_aliases(key: str) -> None:
+    redacted = redact_payload({key: "must-not-persist", "marketValue": "ordinary"})
+
+    assert redacted[key] == REDACTED
+    assert redacted["marketValue"] == "ordinary"
 
 
 def test_payload_rejects_non_json_safe_values(tmp_path: Path) -> None:
@@ -874,3 +898,53 @@ def test_symlink_lock_sidecar_is_rejected_without_touching_target(tmp_path: Path
         ForensicSessionJournal(path, clock=FakeClock(), session_id=str(uuid.UUID(int=54)))
     assert target.read_bytes() == b"AUTOSPORT_FORENSIC_SESSION_LOCK_V1\n"
     assert not path.exists()
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "X-Application",
+        "appKey",
+        "APPKEY",
+        "betfairAppKey",
+        "betfairAppKeyValue",
+        "BETFAIR_APP_KEY_HEADER",
+    ),
+)
+def test_verifier_rejects_hash_valid_record_with_unredacted_canonical_alias(
+    tmp_path: Path, key: str
+) -> None:
+    import hashlib
+
+    path = tmp_path / f"forensic-sensitive-{key.replace('/', '_')}.jsonl"
+    session_id = str(uuid.UUID(int=78))
+    unsigned = {
+        "schema_version": 1,
+        "seq": 1,
+        "timestamp_utc": "2026-09-21T11:30:00.000000Z",
+        "session_id": session_id,
+        "event_type": "provider.request",
+        "payload": {key: "should-never-be-stored"},
+        "prev_sha256": "0" * 64,
+    }
+    encoded = json.dumps(
+        unsigned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    path.write_text(
+        json.dumps(
+            {**unsigned, "sha256": digest},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JournalIntegrityError, match="unredacted sensitive"):
+        verify_journal(path)
+

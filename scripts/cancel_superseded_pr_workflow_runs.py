@@ -105,30 +105,6 @@ def select_superseded_runs(
     return tuple(sorted(selected))
 
 
-def has_older_current_head_attempt(
-    runs: Iterable[WorkflowRun],
-    *,
-    pr_number: int,
-    live_head_sha: str,
-    workflow_name: str,
-    current_run_id: int,
-) -> bool:
-    """Return whether an older active run already owns this exact-head heavy gate."""
-
-    pr_number = _require_positive_int(pr_number, field="pull request number")
-    current_run_id = _require_positive_int(current_run_id, field="current run id")
-    live_head_sha = _require_sha(live_head_sha, field="live head sha")
-    if not workflow_name:
-        raise CancellationError("workflow name is required")
-    return any(
-        run.run_id < current_run_id
-        and run.workflow_name == workflow_name
-        and pr_number in run.pr_numbers
-        and run.head_sha == live_head_sha
-        for run in runs
-    )
-
-
 class GitHubApi:
     def __init__(self, *, repository: str, token: str) -> None:
         parts = repository.split("/")
@@ -225,34 +201,15 @@ def admit_current_head(
     api: GitHubApi,
     pr_number: int,
     event_head_sha: str,
-    workflow_name: str | None = None,
-    current_run_id: int | None = None,
-    dedupe_same_head: bool = False,
 ) -> CancellationResult:
+    """Read-only PR admission: only the current live head may allocate heavy work."""
+
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     live_head_sha = api.live_pr_head(pr_number)
-    if event_head_sha != live_head_sha:
-        return CancellationResult(current_head=False, cancelled_run_ids=())
-
-    if not dedupe_same_head:
-        return CancellationResult(current_head=True, cancelled_run_ids=())
-    if workflow_name is None or current_run_id is None:
-        raise CancellationError(
-            "workflow_name and current_run_id are required for same-head dedup"
-        )
-
-    active_runs = api.active_runs()
-    if api.live_pr_head(pr_number) != live_head_sha:
-        return CancellationResult(current_head=False, cancelled_run_ids=())
-    if has_older_current_head_attempt(
-        active_runs,
-        pr_number=pr_number,
-        live_head_sha=live_head_sha,
-        workflow_name=workflow_name,
-        current_run_id=current_run_id,
-    ):
-        return CancellationResult(current_head=False, cancelled_run_ids=())
-    return CancellationResult(current_head=True, cancelled_run_ids=())
+    return CancellationResult(
+        current_head=event_head_sha == live_head_sha,
+        cancelled_run_ids=(),
+    )
 
 
 def cancel_superseded(
@@ -301,7 +258,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workflow-name", required=True)
     parser.add_argument("--current-run-id", type=int, required=True)
     parser.add_argument("--admission-only", action="store_true")
-    parser.add_argument("--dedupe-same-head", action="store_true")
     args = parser.parse_args(argv)
     try:
         api = GitHubApi(
@@ -313,9 +269,6 @@ def main(argv: list[str] | None = None) -> int:
                 api=api,
                 pr_number=args.pr_number,
                 event_head_sha=args.event_head_sha,
-                workflow_name=args.workflow_name,
-                current_run_id=args.current_run_id,
-                dedupe_same_head=args.dedupe_same_head,
             )
         else:
             result = cancel_superseded(

@@ -52,6 +52,57 @@ def _canonical_selector(value: _Selector, field: str) -> _Selector:
     return value
 
 
+def _bind_scientific_registry_loader(
+    canonical_registry_type: type,
+    registry_path: Path,
+    workspace_provider: Callable[[], Path],
+) -> Callable[[], ScientificRegistry]:
+    """Bind canonical registry reconstruction without late public dispatch.
+
+    The product intentionally supports dependency substitution only while composing a
+    cycle (the existing focused tests use that seam). Once composition succeeds, the
+    registry constructor that passed the exact-type/workspace checks becomes part of the
+    product authority. Later mutation of the module-global dispatch or in-place mutation
+    of that constructor executable must therefore fail closed before caller code runs.
+    """
+
+    canonical_init = canonical_registry_type.__init__
+    canonical_init_code = getattr(canonical_init, "__code__", None)
+
+    def load_current_scientific_registry() -> ScientificRegistry:
+        if ScientificRegistry is not canonical_registry_type:
+            raise ProductPaperDecisionCycleError(
+                "canonical ScientificRegistry authority changed after composition"
+            )
+        current_init = canonical_registry_type.__init__
+        if current_init is not canonical_init or (
+            canonical_init_code is not None
+            and getattr(canonical_init, "__code__", None) is not canonical_init_code
+        ):
+            raise ProductPaperDecisionCycleError(
+                "canonical ScientificRegistry constructor authority changed"
+            )
+        try:
+            registry = canonical_registry_type(registry_path)
+        except Exception as exc:
+            raise ProductPaperDecisionCycleError(
+                "canonical product scientific registry cannot be reconstructed"
+            ) from exc
+        if type(registry) is not canonical_registry_type:
+            raise ProductPaperDecisionCycleError(
+                "scientific registry reconstruction returned a non-canonical type"
+            )
+        resolved = Path(registry.path).resolve(strict=False)
+        workspace = Path(workspace_provider()).resolve(strict=False)
+        if resolved != registry_path or resolved.parent != workspace:
+            raise ProductPaperDecisionCycleError(
+                "scientific registry reconstruction escaped the product workspace"
+            )
+        return registry
+
+    return load_current_scientific_registry
+
+
 @dataclass(frozen=True, slots=True)
 class ProductDecisionInput:
     """One durable live-decision dependency registration for supported product PAPER."""
@@ -140,6 +191,7 @@ class ProductPaperDecisionCycle:
         bounds: LiveLoopBounds | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        canonical_scientific_registry_type = ScientificRegistry
         if type(runtime) is not AutonomousProductRuntime:
             raise TypeError("runtime must be the canonical AutonomousProductRuntime")
         if type(loop_id) is not str or not loop_id or loop_id.strip() != loop_id:
@@ -157,7 +209,7 @@ class ProductPaperDecisionCycle:
             raise TypeError(
                 "intent_factory must expose canonical strategy_version_id"
             )
-        if type(scientific_registry) is not ScientificRegistry:
+        if type(scientific_registry) is not canonical_scientific_registry_type:
             raise TypeError("scientific_registry must be the canonical ScientificRegistry")
         if not isinstance(execution_config, PaperExecutionModelConfig):
             raise TypeError("execution_config must be PaperExecutionModelConfig")
@@ -198,10 +250,15 @@ class ProductPaperDecisionCycle:
         self.loop_id = loop_id
         self.authority = authority
         self.intent_factory = intent_factory
-        # Bind the product-owned registry location, not the caller-held Python object.
-        # Every decision cycle reconstructs a fresh canonical registry from this exact
-        # workspace path before resolving StrategyVersion/ModelVersion provenance.
+        # Bind the product-owned registry location and the exact constructor that was
+        # canonical at composition time. Later public/global redispatch cannot replace
+        # the provenance authority used by a decision cycle.
         self._scientific_registry_path = registry_path
+        self._scientific_registry_loader = _bind_scientific_registry_loader(
+            canonical_scientific_registry_type,
+            registry_path,
+            lambda: Path(self.runtime.workspace),
+        )
         self.execution_config = execution_config
         self.max_quote_age = max_quote_age
         self.inputs = inputs
@@ -214,33 +271,9 @@ class ProductPaperDecisionCycle:
         return Path(self.runtime.workspace)
 
     def _load_current_scientific_registry(self) -> ScientificRegistry:
-        """Reconstruct current product scientific authority from the bound path.
+        """Reconstruct current product scientific authority from the bound path."""
 
-        The constructor accepts only the exact canonical registry type, then retains
-        only its canonical product-workspace location. This prevents a caller-owned
-        subclass or a post-construction mutation of that original instance from
-        becoming StrategyVersion/ModelVersion provenance authority later in a cycle.
-        """
-
-        try:
-            registry = ScientificRegistry(self._scientific_registry_path)
-        except Exception as exc:
-            raise ProductPaperDecisionCycleError(
-                "canonical product scientific registry cannot be reconstructed"
-            ) from exc
-        if type(registry) is not ScientificRegistry:
-            raise ProductPaperDecisionCycleError(
-                "scientific registry reconstruction returned a non-canonical type"
-            )
-        resolved = Path(registry.path).resolve(strict=False)
-        if (
-            resolved != self._scientific_registry_path
-            or resolved.parent != self.workspace.resolve(strict=False)
-        ):
-            raise ProductPaperDecisionCycleError(
-                "scientific registry reconstruction escaped the product workspace"
-            )
-        return registry
+        return self._scientific_registry_loader()
 
     def _require_running_runtime(self) -> None:
         try:

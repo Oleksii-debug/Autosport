@@ -345,6 +345,48 @@ def test_success_with_failure_indicators_never_issues_authority_and_closes(
     assert not transport.is_authenticated
 
 
+@pytest.mark.parametrize(
+    "connection_closed",
+    [None, 0, 1, "", "false"],
+)
+def test_success_requires_exact_false_connection_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    connection_closed: object,
+) -> None:
+    payload: dict[str, object] = {
+        "op": "status",
+        "id": 7,
+        "statusCode": "SUCCESS",
+        "connectionClosed": connection_closed,
+    }
+    tail = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(monkeypatch, tail)
+
+    with pytest.raises(BetfairAuthenticatedStreamError, match="not acknowledged SUCCESS"):
+        _open(transport)
+
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
+def test_success_without_connection_closed_never_issues_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload: dict[str, object] = {
+        "op": "status",
+        "id": 7,
+        "statusCode": "SUCCESS",
+    }
+    tail = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(monkeypatch, tail)
+
+    with pytest.raises(BetfairAuthenticatedStreamError, match="not acknowledged SUCCESS"):
+        _open(transport)
+
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
 def test_prior_post_auth_frame_prevents_subscription_relabeling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

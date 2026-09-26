@@ -178,7 +178,7 @@ class SettlementResolution:
             raise ValueError("settlement evidence is not causally available at session cutoff")
         if (
             type(self.quote_outcomes) is not dict
-            and not isinstance(self.quote_outcomes, _ValidatedQuoteOutcomes)
+            and type(self.quote_outcomes) is not _ValidatedQuoteOutcomes
         ) or not self.quote_outcomes:
             raise ValueError("quote_outcomes must be a non-empty exact dict")
         for quote_key, outcome in self.quote_outcomes.items():
@@ -187,7 +187,7 @@ class SettlementResolution:
                 raise ValueError("quote_outcomes contains unsupported outcome")
 
         quote_outcomes_sha256 = _settlement_quote_outcomes_sha256(self.quote_outcomes)
-        if isinstance(self.quote_outcomes, _ValidatedQuoteOutcomes):
+        if type(self.quote_outcomes) is _ValidatedQuoteOutcomes:
             if self.quote_outcomes.validated_sha256 != quote_outcomes_sha256:
                 raise ValueError(
                     "settlement resolution quote_outcomes changed after validation"
@@ -332,7 +332,7 @@ class _ValidatedQuoteOutcomes(dict[str, str]):
 def _settlement_quote_outcomes_sha256(outcomes: dict[str, str]) -> str:
     if (
         type(outcomes) is not dict
-        and not isinstance(outcomes, _ValidatedQuoteOutcomes)
+        and type(outcomes) is not _ValidatedQuoteOutcomes
     ) or not outcomes:
         raise ValueError("quote_outcomes must be a non-empty exact dict")
     canonical: list[list[str]] = []
@@ -366,7 +366,7 @@ def _canonical_settlement_handoff_snapshot(
         validation_cutoff = resolution.available_at if as_of is None else as_of
         resolution.validate(as_of=validation_cutoff)
         outcomes = resolution.quote_outcomes
-        if not isinstance(outcomes, _ValidatedQuoteOutcomes):
+        if type(outcomes) is not _ValidatedQuoteOutcomes:
             raise ContinuousSessionError(
                 "validated settlement outcomes lost canonical seal"
             )
@@ -390,7 +390,7 @@ def _canonical_settlement_handoff_snapshot(
         snapshot.validate(as_of=validation_cutoff)
         snapshot_outcomes = snapshot.quote_outcomes
         if (
-            not isinstance(snapshot_outcomes, _ValidatedQuoteOutcomes)
+            type(snapshot_outcomes) is not _ValidatedQuoteOutcomes
             or snapshot_outcomes.validated_sha256 != validated_sha256
         ):
             raise ContinuousSessionError(

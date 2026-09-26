@@ -651,6 +651,36 @@ def _validate_common_result(
         )
 
 
+def _validate_baseline_semantics(
+    definition: BaselineDefinition,
+    result: PolicyEvaluation,
+) -> None:
+    """Fail closed when a baseline result contradicts its frozen baseline meaning."""
+
+    if definition.kind is not BaselineKind.NO_BET_WAIT:
+        return
+
+    # NO_BET_WAIT constrains action semantics, not the complete economic
+    # cost surface. A zero-position policy may still carry fixed/shared costs
+    # already bound by the frozen cost_model_sha256. Cost provenance and
+    # completeness remain separate authorities; this validator must not erase
+    # a canonically applicable cost merely because no execution was requested.
+    zero_action_fields = (
+        ("metric_value", result.metric_value),
+        ("uncertainty_low", result.uncertainty_low),
+        ("uncertainty_high", result.uncertainty_high),
+    )
+    if (
+        result.scored_count != 0
+        or result.abstention_count != result.observed_count
+        or any(_decimal(value, field) != 0 for field, value in zero_action_fields)
+    ):
+        raise ExternalValidityError(
+            f"{definition.baseline_id}: no-bet-wait baseline must represent "
+            "deterministic zero action"
+        )
+
+
 def build_external_validity_report(
     protocol: FrozenBaselineProtocol,
     candidate: PolicyEvaluation,
@@ -731,6 +761,7 @@ def build_external_validity_report(
             raise ExternalValidityError(
                 f"{definition.baseline_id}: baseline definition changed after freeze"
             )
+        _validate_baseline_semantics(definition, result)
 
         baseline_value = _decimal(result.metric_value, "baseline metric_value")
         baseline_low = _decimal(result.uncertainty_low, "baseline uncertainty_low")

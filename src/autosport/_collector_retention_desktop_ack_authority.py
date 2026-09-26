@@ -363,7 +363,7 @@ _ACK_CONTEXT: ContextVar[
     tuple[
         DesktopDeltaCheckpointStore,
         _CanonicalCollectorDeltaStore,
-        CanonicalDesktopApplication,
+        _legacy.DesktopDeltaConsumer,
     ]
     | None
 ] = ContextVar(
@@ -579,7 +579,12 @@ def _guarded_ack_locked(
             "desktop ACK write requires the canonical consumer handoff"
         )
     collector = authority[1]
-    application = authority[2]
+    consumer = authority[2]
+    if consumer.checkpoint is not self or consumer.collector is not collector:
+        raise _legacy.ApplicationReceiptError(
+            "desktop ACK consumer scope does not match canonical stores"
+        )
+    application = _canonical_application_for_consumer(consumer)
     canonical_delta = _collector_call(collector, "get", delta.delta_id)
     if canonical_delta is None or canonical_delta != delta:
         raise _legacy.ApplicationReceiptError(
@@ -612,8 +617,7 @@ def _guarded_consumer_drain(
     as_of: str,
     view: _legacy.CausalView = _legacy.CausalView.AS_KNOWN_AT_DECISION,
 ) -> tuple[str, ...]:
-    application = _canonical_application_for_consumer(self)
-    token = _ACK_CONTEXT.set((self.checkpoint, self.collector, application))
+    token = _ACK_CONTEXT.set((self.checkpoint, self.collector, self))
     try:
         return _ORIGINAL_CONSUMER_DRAIN(self, as_of=as_of, view=view)
     finally:

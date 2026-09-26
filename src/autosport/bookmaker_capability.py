@@ -277,8 +277,10 @@ class BookmakerPositionObservation:
     ``provider_amount`` deliberately has no universal stake/liability meaning. Its exact
     provider meaning is carried by ``provider_amount_semantics`` (for example Betfair
     ``size`` can be recorded as ``backer_stake`` for both BACK and LAY). ``provider_side``
-    preserves the provider's side label when one exists. Consumers must not infer liability,
-    canonical stake, or P&L from these fields without a separate authoritative contract.
+    preserves the provider's side label when one exists. ``provider_status`` preserves an
+    opaque provider-native position/settlement status without interpreting it as canonical
+    settlement or P&L truth. Consumers must not infer liability, canonical stake, settlement,
+    or P&L from these fields without a separate authoritative contract.
 
     ``stake=`` remains an input-only compatibility shim for this not-yet-merged lineage. It
     is converted to ``provider_amount`` with semantics ``legacy_stake`` and is never stored
@@ -301,6 +303,7 @@ class BookmakerPositionObservation:
     gross_return: Decimal | None = None
     external_receipt_id: str | None = None
     stake: InitVar[Decimal | None] = None
+    provider_status: str | None = None
 
     def __post_init__(self, stake: Decimal | None) -> None:
         _text(self.venue_id, "venue_id")
@@ -332,6 +335,8 @@ class BookmakerPositionObservation:
         object.__setattr__(self, "provider_amount_semantics", provider_amount_semantics)
         if self.provider_side is not None:
             _text(self.provider_side, "provider_side")
+        if self.provider_status is not None:
+            _text(self.provider_status, "provider_status")
 
         _currency(self.currency)
         _timestamp(self.observed_at, "observed_at")

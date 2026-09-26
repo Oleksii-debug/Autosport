@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 
 _API_VERSION = "2022-11-28"
 _ACCEPT = "application/vnd.github+json"
+_ACTIVE_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
+_RUNS_PER_PAGE = 100
 
 
 class CancellationError(RuntimeError):
@@ -59,7 +61,7 @@ def parse_run(payload: object) -> WorkflowRun:
     pulls = payload.get("pull_requests")
     if not isinstance(name, str) or not name:
         raise CancellationError("invalid workflow name")
-    if status not in {"queued", "in_progress", "waiting", "pending", "requested"}:
+    if status not in _ACTIVE_STATUSES:
         raise CancellationError("invalid active workflow status")
     if not isinstance(pulls, list):
         raise CancellationError("invalid pull_requests")
@@ -67,7 +69,9 @@ def parse_run(payload: object) -> WorkflowRun:
     for item in pulls:
         if not isinstance(item, dict):
             raise CancellationError("invalid pull request reference")
-        pr_numbers.append(_require_positive_int(item.get("number"), field="pull request number"))
+        pr_numbers.append(
+            _require_positive_int(item.get("number"), field="pull request number")
+        )
     return WorkflowRun(
         run_id=run_id,
         head_sha=head_sha,
@@ -126,7 +130,9 @@ class GitHubApi:
             with urlopen(request, timeout=20) as response:
                 body = response.read()
         except (HTTPError, URLError, TimeoutError) as exc:
-            raise CancellationError(f"GitHub API request failed: {type(exc).__name__}") from exc
+            raise CancellationError(
+                f"GitHub API request failed: {type(exc).__name__}"
+            ) from exc
         if not body:
             return None
         try:
@@ -143,14 +149,44 @@ class GitHubApi:
             raise CancellationError("invalid pull request head")
         return _require_sha(head.get("sha"), field="live pull request head")
 
+    def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
+        if status not in _ACTIVE_STATUSES:
+            raise CancellationError("invalid active workflow status")
+        runs: list[WorkflowRun] = []
+        page = 1
+        while True:
+            query = urlencode(
+                {
+                    "event": "pull_request",
+                    "status": status,
+                    "per_page": _RUNS_PER_PAGE,
+                    "page": page,
+                }
+            )
+            payload = self._request(f"/actions/runs?{query}")
+            if (
+                not isinstance(payload, dict)
+                or type(payload.get("total_count")) is not int
+                or payload["total_count"] < 0
+                or not isinstance(payload.get("workflow_runs"), list)
+            ):
+                raise CancellationError("invalid workflow-runs response")
+            page_runs = payload["workflow_runs"]
+            runs.extend(parse_run(item) for item in page_runs)
+            total_count = payload["total_count"]
+            if not page_runs or len(runs) >= total_count:
+                break
+            if len(page_runs) < _RUNS_PER_PAGE:
+                raise CancellationError(
+                    "workflow-runs pagination ended before reported total_count"
+                )
+            page += 1
+        return tuple(runs)
+
     def active_runs(self) -> tuple[WorkflowRun, ...]:
         runs: list[WorkflowRun] = []
-        for status in ("queued", "in_progress", "waiting", "pending", "requested"):
-            query = urlencode({"event": "pull_request", "status": status, "per_page": 100})
-            payload = self._request(f"/actions/runs?{query}")
-            if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
-                raise CancellationError("invalid workflow-runs response")
-            runs.extend(parse_run(item) for item in payload["workflow_runs"])
+        for status in _ACTIVE_STATUSES:
+            runs.extend(self._active_runs_for_status(status))
         return tuple(runs)
 
     def cancel(self, run_id: int) -> None:
@@ -160,7 +196,9 @@ class GitHubApi:
             raise CancellationError("unexpected cancel response body")
 
 
-def admit_current_head(*, api: GitHubApi, pr_number: int, event_head_sha: str) -> CancellationResult:
+def admit_current_head(
+    *, api: GitHubApi, pr_number: int, event_head_sha: str
+) -> CancellationResult:
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     live_head_sha = api.live_pr_head(pr_number)
     return CancellationResult(

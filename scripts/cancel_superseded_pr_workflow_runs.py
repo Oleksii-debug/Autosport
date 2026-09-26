@@ -36,6 +36,12 @@ class WorkflowRun:
 
 
 @dataclass(frozen=True)
+class PullRequestQualification:
+    head_sha: str
+    integration_capable: bool
+
+
+@dataclass(frozen=True)
 class CancellationResult:
     current_head: bool
     cancelled_run_ids: tuple[int, ...]
@@ -167,6 +173,20 @@ class GitHubApi:
             raise CancellationError("invalid pull request response")
         return payload
 
+    def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+        payload = self._pull_request(pr_number)
+        head = payload.get("head")
+        state = payload.get("state")
+        draft = payload.get("draft")
+        if not isinstance(head, dict):
+            raise CancellationError("invalid pull request head")
+        if state not in ("open", "closed") or type(draft) is not bool:
+            raise CancellationError("invalid pull request qualification state")
+        return PullRequestQualification(
+            head_sha=_require_sha(head.get("sha"), field="live pull request head"),
+            integration_capable=state == "open" and draft is False,
+        )
+
     def live_pr_head(self, pr_number: int) -> str:
         payload = self._pull_request(pr_number)
         head = payload.get("head")
@@ -251,18 +271,38 @@ class GitHubApi:
             raise CancellationError("unexpected cancel response body")
 
 
+def _qualification_snapshot(
+    api: GitHubApi,
+    pr_number: int,
+    *,
+    legacy_cancel_same_head: bool | None = None,
+) -> PullRequestQualification:
+    resolver = getattr(api, "live_pr_qualification", None)
+    if callable(resolver):
+        return resolver(pr_number)
+    # Preserve the deliberately small fake API used by focused unit tests. Production
+    # GitHubApi always exposes the atomic head/state/draft resolver above.
+    return PullRequestQualification(
+        head_sha=api.live_pr_head(pr_number),
+        integration_capable=not bool(legacy_cancel_same_head),
+    )
+
+
 def admit_current_head(
     *,
     api: GitHubApi,
     pr_number: int,
     event_head_sha: str,
 ) -> CancellationResult:
-    """Read-only PR admission: only the current live head may allocate heavy work."""
+    """Admit heavy work only for a current, live integration-capable PR snapshot."""
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
-    live_head_sha = api.live_pr_head(pr_number)
+    qualification = _qualification_snapshot(api, pr_number)
     return CancellationResult(
-        current_head=event_head_sha == live_head_sha,
+        current_head=(
+            event_head_sha == qualification.head_sha
+            and qualification.integration_capable
+        ),
         cancelled_run_ids=(),
     )
 
@@ -274,16 +314,24 @@ def cancel_superseded(
     event_head_sha: str,
     workflow_name: str,
     current_run_id: int,
-    cancel_same_head: bool = False,
+    cancel_same_head: bool | None = None,
 ) -> CancellationResult:
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
-    if type(cancel_same_head) is not bool:
-        raise CancellationError("cancel_same_head must be boolean")
-    live_head_sha = api.live_pr_head(pr_number)
+    if cancel_same_head is not None and type(cancel_same_head) is not bool:
+        raise CancellationError("cancel_same_head must be boolean or None")
+    qualification = _qualification_snapshot(
+        api, pr_number, legacy_cancel_same_head=cancel_same_head
+    )
+    live_head_sha = qualification.head_sha
     if event_head_sha != live_head_sha:
         return CancellationResult(current_head=False, cancelled_run_ids=())
+    derived_cancel_same_head = not qualification.integration_capable
+    if cancel_same_head is not None and cancel_same_head != derived_cancel_same_head:
+        raise CancellationError("cancel_same_head conflicts with live PR qualification")
     active_runs = api.active_runs()
-    if api.live_pr_head(pr_number) != live_head_sha:
+    if _qualification_snapshot(
+        api, pr_number, legacy_cancel_same_head=cancel_same_head
+    ) != qualification:
         return CancellationResult(current_head=False, cancelled_run_ids=())
     selected = select_superseded_runs(
         active_runs,
@@ -291,13 +339,16 @@ def cancel_superseded(
         live_head_sha=live_head_sha,
         workflow_name=workflow_name,
         current_run_id=current_run_id,
-        cancel_same_head=cancel_same_head,
+        cancel_same_head=derived_cancel_same_head,
     )
     cancelled: list[int] = []
     for run_id in selected:
-        # The PR can move again, including an ABA reset to an older SHA, after the
-        # post-listing check. Re-resolve immediately before every irreversible POST.
-        if api.live_pr_head(pr_number) != live_head_sha:
+        # Head and lifecycle eligibility are one authority snapshot. If either changes
+        # (including same-head draft/ready transitions), revoke cancellation authority
+        # before the next irreversible POST.
+        if _qualification_snapshot(
+            api, pr_number, legacy_cancel_same_head=cancel_same_head
+        ) != qualification:
             return CancellationResult(
                 current_head=False,
                 cancelled_run_ids=tuple(cancelled),
@@ -345,7 +396,6 @@ def main(argv: list[str] | None = None) -> int:
                 event_head_sha=args.event_head_sha,
                 workflow_name=args.workflow_name,
                 current_run_id=args.current_run_id,
-                cancel_same_head=not api.pr_is_integration_capable(args.pr_number),
             )
         _write_github_output(result)
     except CancellationError as exc:

@@ -7,9 +7,10 @@ from autosport.secret_redaction import safe_exception_detail
 
 # Expected failures are an operator-presentation boundary, not an extensible exception
 # registry. Capture the concrete interpreter-owned classes and canonical redactor once
-# so later module-global rebinding cannot mint presentation authority.
+# so later module-global or builtins rebinding cannot mint presentation authority.
 _CANONICAL_VALUE_ERROR = ValueError
 _CANONICAL_OS_ERROR = OSError
+_CANONICAL_FILE_NOT_FOUND_ERROR = FileNotFoundError
 _CANONICAL_SAFE_EXCEPTION_DETAIL = safe_exception_detail
 _EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
 
@@ -128,10 +129,18 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
 
 def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    # The exception category is deliberately product-owned. Exception classes and the
-    # builtins namespace are mutable runtime presentation inputs, so neither may choose
-    # the operator-visible type label. Only the canonical redactor owns detail text.
+    # Type labels are selected only from captured interpreter-owned classes. Custom
+    # exception metadata and the mutable builtins namespace never become presentation
+    # authority. Unknown OSError subclasses intentionally collapse to OSError.
+    if isinstance(exc, _CANONICAL_VALUE_ERROR):
+        error_label = "ValueError"
+    elif isinstance(exc, _CANONICAL_FILE_NOT_FOUND_ERROR):
+        error_label = "FileNotFoundError"
+    else:
+        error_label = "OSError"
+
     if safe_exception_detail is not _CANONICAL_SAFE_EXCEPTION_DETAIL:
+        error_label = "ExpectedFailure"
         detail = "exception details unavailable"
     else:
         detail = _CANONICAL_SAFE_EXCEPTION_DETAIL(
@@ -140,7 +149,7 @@ def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
         )
     detail = " ".join(detail.splitlines()).strip()
     suffix = "" if not detail else f": {detail}"
-    return f"Autosport-Data: {command}=FAIL_CLOSED error=ExpectedFailure{suffix}"
+    return f"Autosport-Data: {command}=FAIL_CLOSED error={error_label}{suffix}"
 
 
 def main(argv: list[str] | None = None) -> int:

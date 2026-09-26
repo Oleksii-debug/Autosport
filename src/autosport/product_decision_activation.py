@@ -35,6 +35,7 @@ DECISION_CYCLE_CONTRACT: Final = "autosport.product-paper-decision-cycle.v1"
 PAPER_EXECUTION_MODE: Final = "PAPER"
 _ACTIVATION_AUTHORITY_DOMAIN: Final = "autosport.product-decision-activation.v1"
 _PRODUCT_AUTHORITY_ROOT_NAME: Final = "product-decision-activation-authority-v1"
+_MAX_DURABLE_JSON_BYTES: Final = 1024 * 1024
 
 # Freeze the exact product-import-time fingerprint authority. Exact instance type alone
 # is insufficient because Python permits replacing a class property at runtime. START
@@ -315,9 +316,15 @@ def _read_regular_file(path: Path, label: str) -> bytes:
     try:
         if path.is_symlink() or not path.is_file():
             raise ProductDecisionActivationError(f"{label} must be a regular file")
-        return path.read_bytes()
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_DURABLE_JSON_BYTES + 1)
     except OSError as exc:
         raise ProductDecisionActivationError(f"cannot read {label}") from exc
+    if len(raw) > _MAX_DURABLE_JSON_BYTES:
+        raise ProductDecisionActivationError(
+            f"{label} exceeds bounded durable-state size"
+        )
+    return raw
 
 
 def _require_workspace_path(
@@ -1513,6 +1520,7 @@ def _seal_product_decision_activation_derive_dispatch() -> None:
         "is_symlink",
         "is_file",
         "exists",
+        "open",
         "read_bytes",
         "read_text",
         "lstat",

@@ -21,7 +21,12 @@ from .scientific_registry import RegistryEntry, ScientificRegistry
 
 
 DRIFT_SCHEMA_VERSION = 1
-DRIFT_ALGORITHM_VERSION = "autosport.drift.mean-absolute-shift.v1"
+DRIFT_ALGORITHM_VERSION_V1 = "autosport.drift.mean-absolute-shift.v1"
+DRIFT_ALGORITHM_VERSION_V2 = "autosport.drift.mean-absolute-shift.v2"
+DRIFT_ALGORITHM_VERSION = DRIFT_ALGORITHM_VERSION_V2
+_SUPPORTED_DRIFT_ALGORITHM_VERSIONS = frozenset(
+    {DRIFT_ALGORITHM_VERSION_V1, DRIFT_ALGORITHM_VERSION_V2}
+)
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -163,13 +168,80 @@ def _canonical_effective_sample_size(
     value: object | None,
     sample_count: int,
 ) -> int | None:
+    if type(sample_count) is not int or sample_count < 0:
+        raise ValueError("sample_count must be a non-negative integer")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ValueError("effective_sample_size must be a positive integer")
     if value > sample_count:
         raise ValueError("effective_sample_size cannot exceed sample_count")
     return value
+
+
+def _sample_insufficiency_reason(
+    *,
+    algorithm_version: object,
+    min_samples: object,
+    baseline_count: object,
+    baseline_effective_sample_size: object | None,
+    current_count: object,
+    current_effective_sample_size: object | None,
+) -> str | None:
+    algorithm = _text(algorithm_version, "algorithm_version")
+    if algorithm not in _SUPPORTED_DRIFT_ALGORITHM_VERSIONS:
+        raise ValueError("unsupported drift algorithm version")
+    if type(min_samples) is not int:
+        raise ValueError("min_samples must be an integer")
+    if min_samples <= 0:
+        raise ValueError("min_samples must be positive")
+
+    for count, name in (
+        (baseline_count, "baseline_count"),
+        (current_count, "current_count"),
+    ):
+        if type(count) is not int or count < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+
+    assert type(baseline_count) is int
+    assert type(current_count) is int
+    baseline_effective = _canonical_effective_sample_size(
+        baseline_effective_sample_size,
+        baseline_count,
+    )
+    current_effective = _canonical_effective_sample_size(
+        current_effective_sample_size,
+        current_count,
+    )
+
+    if algorithm == DRIFT_ALGORITHM_VERSION_V1:
+        baseline_evidence_count = baseline_count
+        current_evidence_count = current_count
+        baseline_reason = "REFERENCE_SAMPLE_COUNT"
+        current_reason = "CURRENT_SAMPLE_COUNT"
+    else:
+        baseline_evidence_count = (
+            baseline_count if baseline_effective is None else baseline_effective
+        )
+        current_evidence_count = (
+            current_count if current_effective is None else current_effective
+        )
+        baseline_reason = (
+            "REFERENCE_SAMPLE_COUNT"
+            if baseline_effective is None
+            else "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+        )
+        current_reason = (
+            "CURRENT_SAMPLE_COUNT"
+            if current_effective is None
+            else "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+        )
+
+    if baseline_evidence_count < min_samples:
+        return baseline_reason
+    if current_evidence_count < min_samples:
+        return current_reason
+    return None
 
 
 def _window_evidence_sha256(
@@ -455,11 +527,11 @@ class DriftReference:
             raise ValueError("baseline window timestamps are inconsistent")
         if training > start:
             raise DriftCausalityError("baseline window predates the model training cutoff")
-        if isinstance(self.min_samples, bool) or not isinstance(self.min_samples, int):
+        if type(self.min_samples) is not int:
             raise ValueError("min_samples must be an integer")
         if self.min_samples <= 0:
             raise ValueError("min_samples must be positive")
-        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int):
+        if type(self.sample_count) is not int:
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative")
@@ -608,7 +680,7 @@ class DriftObservation:
             raise ValueError("observation window timestamps are inconsistent")
         _sha256(self.evidence_sha256, "evidence_sha256")
         _canonical_scope(sport=self.sport, league=self.league, regime=self.regime)
-        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int):
+        if type(self.sample_count) is not int:
             raise ValueError("sample_count must be an integer")
         if self.sample_count < 0:
             raise ValueError("sample_count must be non-negative")
@@ -729,6 +801,7 @@ class DriftFinding:
     insufficiency_reason: str | None
     evaluated_at: str
     evidence_sha256: str
+    algorithm_version: str = DRIFT_ALGORITHM_VERSION
 
     def __post_init__(self) -> None:
         for name in (
@@ -776,10 +849,13 @@ class DriftFinding:
             raise ValueError("detected drift requires a bounded recommendation")
         _instant(self.evaluated_at, "evaluated_at")
         _sha256(self.evidence_sha256, "evidence_sha256")
+        algorithm_version = _text(self.algorithm_version, "algorithm_version")
+        if algorithm_version not in _SUPPORTED_DRIFT_ALGORITHM_VERSIONS:
+            raise ValueError("unsupported drift algorithm version")
         expected_id = _digest(
             {
                 "schema_version": DRIFT_SCHEMA_VERSION,
-                "algorithm_version": DRIFT_ALGORITHM_VERSION,
+                "algorithm_version": algorithm_version,
                 "reference_id": self.reference_id,
                 "observation_id": self.observation_id,
             }
@@ -802,7 +878,7 @@ class DriftFinding:
     def to_payload(self) -> dict[str, Any]:
         return {
             "schema_version": DRIFT_SCHEMA_VERSION,
-            "algorithm_version": DRIFT_ALGORITHM_VERSION,
+            "algorithm_version": self.algorithm_version,
             "finding_id": self.finding_id,
             "reference_id": self.reference_id,
             "observation_id": self.observation_id,
@@ -830,8 +906,8 @@ class DriftMonitor:
     """Create immutable drift evidence and bounded scientific recommendations."""
 
     def __init__(self, scientific_registry: ScientificRegistry) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be exact ScientificRegistry")
         self.scientific_registry = scientific_registry
 
     def _require_record(
@@ -859,6 +935,8 @@ class DriftMonitor:
         return entry
 
     def _validate_window_dataset(self, window: DriftWindow) -> RegistryEntry:
+        if type(window) is not DriftWindow:
+            raise TypeError("window must be exact DriftWindow")
         entry = self._require_record(
             "DatasetSnapshot", window.dataset_snapshot_id, as_of=window.as_of
         )
@@ -906,13 +984,15 @@ class DriftMonitor:
         threshold: str,
         metric_definition_sha256: str,
     ) -> DriftReference:
+        if type(baseline) is not DriftWindow:
+            raise TypeError("baseline must be exact DriftWindow")
         if not isinstance(drift_kind, DriftKind):
             raise TypeError("drift_kind must be DriftKind")
         if not isinstance(metric, DriftMetric):
             raise TypeError("metric must be DriftMetric")
         if metric is not DriftMetric.MEAN_ABSOLUTE_SHIFT:
             raise ValueError("unsupported drift metric")
-        if isinstance(min_samples, bool) or not isinstance(min_samples, int):
+        if type(min_samples) is not int:
             raise ValueError("min_samples must be an integer")
         if min_samples <= 0:
             raise ValueError("min_samples must be positive")
@@ -1008,6 +1088,8 @@ class DriftMonitor:
         *,
         evaluated_at: str,
     ) -> DriftFinding:
+        if type(current) is not DriftWindow:
+            raise TypeError("current must be exact DriftWindow")
         reference_entry = self._require_record(
             "DriftReference", reference_id, as_of=evaluated_at
         )
@@ -1049,25 +1131,36 @@ class DriftMonitor:
         )
         observation_sha = self.scientific_registry.append(observation)
 
-        min_samples = reference.get("min_samples")
-        if isinstance(min_samples, bool) or not isinstance(min_samples, int):
-            raise DriftLineageError("drift reference has invalid min_samples")
-        baseline_count = reference.get("sample_count")
-        if isinstance(baseline_count, bool) or not isinstance(baseline_count, int):
-            raise DriftLineageError("drift reference has invalid sample_count")
+        try:
+            insufficiency_reason = _sample_insufficiency_reason(
+                algorithm_version=DRIFT_ALGORITHM_VERSION,
+                min_samples=reference.get("min_samples"),
+                baseline_count=reference.get("sample_count"),
+                baseline_effective_sample_size=reference.get(
+                    "effective_sample_size"
+                ),
+                current_count=current.sample_count,
+                current_effective_sample_size=current.effective_sample_size,
+            )
+        except (TypeError, ValueError) as exc:
+            raise DriftLineageError(
+                "drift reference sample policy is invalid"
+            ) from exc
 
-        insufficiency_reason: str | None = None
-        if baseline_count < min_samples:
-            insufficiency_reason = "REFERENCE_SAMPLE_COUNT"
-        elif current.sample_count < min_samples:
-            insufficiency_reason = "CURRENT_SAMPLE_COUNT"
-        elif current.source_identity != reference.get("source_identity"):
+        if (
+            insufficiency_reason is None
+            and current.source_identity != reference.get("source_identity")
+        ):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
-        elif _canonical_scope(
-            sport=current.sport,
-            league=current.league,
-            regime=current.regime,
-        ) != _scope_from_payload(reference):
+        elif (
+            insufficiency_reason is None
+            and _canonical_scope(
+                sport=current.sport,
+                league=current.league,
+                regime=current.regime,
+            )
+            != _scope_from_payload(reference)
+        ):
             insufficiency_reason = "SCOPE_MISMATCH"
 
         delta_text: str | None
@@ -1136,6 +1229,7 @@ class DriftMonitor:
             # immutable observation boundary for restart-idempotent findings.
             evaluated_at=current.as_of,
             evidence_sha256=evidence_sha256,
+            algorithm_version=DRIFT_ALGORITHM_VERSION,
         )
         self.scientific_registry.append(finding)
         return finding
@@ -1152,7 +1246,11 @@ class DriftMonitor:
         finding = finding_entry.payload
         if finding.get("schema_version") != DRIFT_SCHEMA_VERSION:
             raise DriftLineageError("unsupported drift finding schema")
-        if finding.get("algorithm_version") != DRIFT_ALGORITHM_VERSION:
+        algorithm_version = finding.get("algorithm_version")
+        if (
+            type(algorithm_version) is not str
+            or algorithm_version not in _SUPPORTED_DRIFT_ALGORITHM_VERSIONS
+        ):
             raise DriftLineageError("unsupported drift finding algorithm")
         if finding.get("finding_id") != finding_id:
             raise DriftLineageError("drift finding payload identity mismatch")
@@ -1250,7 +1348,7 @@ class DriftMonitor:
         expected_finding_id = _digest(
             {
                 "schema_version": DRIFT_SCHEMA_VERSION,
-                "algorithm_version": DRIFT_ALGORITHM_VERSION,
+                "algorithm_version": algorithm_version,
                 "reference_id": reference_entry.record_id,
                 "observation_id": observation_entry.record_id,
             }
@@ -1271,29 +1369,36 @@ class DriftMonitor:
             if finding.get(key) != expected:
                 raise DriftLineageError(f"drift finding {key} does not match reference")
 
-        min_samples = reference.get("min_samples")
-        baseline_count = reference.get("sample_count")
-        if (
-            isinstance(min_samples, bool)
-            or not isinstance(min_samples, int)
-            or min_samples <= 0
-            or isinstance(baseline_count, bool)
-            or not isinstance(baseline_count, int)
-        ):
-            raise DriftLineageError("drift reference sample policy is invalid")
+        try:
+            insufficiency_reason = _sample_insufficiency_reason(
+                algorithm_version=algorithm_version,
+                min_samples=reference.get("min_samples"),
+                baseline_count=reference.get("sample_count"),
+                baseline_effective_sample_size=reference.get(
+                    "effective_sample_size"
+                ),
+                current_count=current.sample_count,
+                current_effective_sample_size=current.effective_sample_size,
+            )
+        except (TypeError, ValueError) as exc:
+            raise DriftLineageError(
+                "drift reference sample policy is invalid"
+            ) from exc
 
-        insufficiency_reason: str | None = None
-        if baseline_count < min_samples:
-            insufficiency_reason = "REFERENCE_SAMPLE_COUNT"
-        elif current.sample_count < min_samples:
-            insufficiency_reason = "CURRENT_SAMPLE_COUNT"
-        elif current.source_identity != reference.get("source_identity"):
+        if (
+            insufficiency_reason is None
+            and current.source_identity != reference.get("source_identity")
+        ):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
-        elif _canonical_scope(
-            sport=current.sport,
-            league=current.league,
-            regime=current.regime,
-        ) != _scope_from_payload(reference):
+        elif (
+            insufficiency_reason is None
+            and _canonical_scope(
+                sport=current.sport,
+                league=current.league,
+                regime=current.regime,
+            )
+            != _scope_from_payload(reference)
+        ):
             insufficiency_reason = "SCOPE_MISMATCH"
 
         delta_text: str | None
@@ -1342,7 +1447,7 @@ class DriftMonitor:
 
         expected_evidence = _digest(
             {
-                "algorithm_version": DRIFT_ALGORITHM_VERSION,
+                "algorithm_version": algorithm_version,
                 "reference_record_sha256": reference_entry.record_sha256,
                 "observation_record_sha256": observation_entry.record_sha256,
                 "state": state.value,
@@ -1361,6 +1466,6 @@ class DriftMonitor:
 
     @staticmethod
     def finding_binding(finding: DriftFinding) -> tuple[tuple[str, str], ...]:
-        if not isinstance(finding, DriftFinding):
-            raise TypeError("finding must be DriftFinding")
+        if type(finding) is not DriftFinding:
+            raise TypeError("finding must be exact DriftFinding")
         return (("drift_finding_id", finding.finding_id),)

@@ -157,3 +157,8 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # A supported START is not caller-visible until the exact durable activation bytes
 # have been re-read against the already-committed monotonic witness.
 from . import _product_decision_activation_commit_return_guard as _product_decision_activation_commit_return_guard  # noqa: F401,E402
+
+# Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
+# exponent forms and oversized text before Decimal fixed-point materialization so
+# tiny hostile inputs cannot amplify into attacker-sized evidence strings.
+from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402

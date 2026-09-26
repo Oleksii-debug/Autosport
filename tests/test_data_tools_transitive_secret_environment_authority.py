@@ -117,3 +117,25 @@ def test_transitive_url_decoder_rebinding_fails_closed_before_redaction() -> Non
         output = _render_with_configured_secret(secret)
 
     _assert_fail_closed(output, secret)
+
+
+def test_transitive_builtin_len_shadow_cannot_hide_configured_secret() -> None:
+    """Helper code identity must not trust a module-global builtin shadow."""
+
+    secret = "AS-DATATOOLS-TRANSITIVE-BUILTIN-LEN-SENTINEL-2c91"
+    with patch.dict(
+        os.environ,
+        {"AUTOSPORT_TEST_API_KEY": secret},
+        clear=False,
+    ), patch.object(
+        secret_redaction,
+        "len",
+        lambda _value: 0,
+        create=True,
+    ):
+        # Without the presentation guard this makes the canonical environment resolver
+        # discard the configured secret while retaining every helper object/code.
+        assert secret_redaction._environment_secret_values() == ()
+        output = _render_with_configured_secret(secret)
+
+    _assert_fail_closed(output, secret)

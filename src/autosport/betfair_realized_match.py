@@ -881,7 +881,109 @@ def _install_realized_match_authority() -> None:
     error_type = RealizedMatchEvidenceError
     hash_payload = _sha256
     weak_ref = ref
+    evidence_payload = evidence_type._payload
+    evidence_identity_payload = evidence_type._identity_payload
     validate_integrity = evidence_type._validate_integrity
+    owning_resolve_code = owning_resolve.__code__
+    owning_validate_revision_code = owning_validate_revision.__code__
+    resolver_helper_witnesses = (
+        ("decimal text", "_decimal_text", _decimal_text, _decimal_text.__code__),
+        ("canonical JSON", "_canonical", _canonical, _canonical.__code__),
+        ("sha256", "_sha256", _sha256, _sha256.__code__),
+        ("timestamp", "_timestamp", _timestamp, _timestamp.__code__),
+        (
+            "plan fingerprint",
+            "_exact_plan_fingerprint",
+            _exact_plan_fingerprint,
+            _exact_plan_fingerprint.__code__,
+        ),
+        ("attempt binding", "_attempt_binding", _attempt_binding, _attempt_binding.__code__),
+        ("identity check", "_identity_check", _identity_check, _identity_check.__code__),
+        (
+            "row identity",
+            "_check_common_row_identity",
+            _check_common_row_identity,
+            _check_common_row_identity.__code__,
+        ),
+        ("flatten rows", "_flatten_rows", _flatten_rows, _flatten_rows.__code__),
+        (
+            "cleared source digest",
+            "_cleared_source_digest",
+            _cleared_source_digest,
+            _cleared_source_digest.__code__,
+        ),
+        (
+            "cleared economics",
+            "_resolve_cleared_economics",
+            _resolve_cleared_economics,
+            _resolve_cleared_economics.__code__,
+        ),
+        ("evidence builder", "_make_evidence", _make_evidence, _make_evidence.__code__),
+    )
+    resolver_global_witnesses = (
+        ("AttemptState", AttemptState),
+        ("ExecutionAction", ExecutionAction),
+        ("ExecutionPlan", ExecutionPlan),
+        ("RealExecutionLedger", RealExecutionLedger),
+        ("BetfairCurrentOrderObservation", BetfairCurrentOrderObservation),
+        ("BetfairClearedOrderObservation", BetfairClearedOrderObservation),
+        ("BetfairExecutionReadbackEnvelope", BetfairExecutionReadbackEnvelope),
+        ("BetfairReadOnlyError", BetfairReadOnlyError),
+        ("BetfairRealizedMatchEvidence", BetfairRealizedMatchEvidence),
+        ("RealizedMatchSource", RealizedMatchSource),
+        ("RealizedMatchEvidenceError", RealizedMatchEvidenceError),
+        ("_AttemptBinding", _AttemptBinding),
+        ("_LEDGER_VERIFIED_SNAPSHOT", _LEDGER_VERIFIED_SNAPSHOT),
+        ("_LEDGER_SAGA", _LEDGER_SAGA),
+        ("_LEDGER_PROVIDER_ORDER_REFERENCE", _LEDGER_PROVIDER_ORDER_REFERENCE),
+        ("_LEDGER_READ_SURFACES", _LEDGER_READ_SURFACES),
+        ("_READBACK_ASSERT_AUTHORITATIVE", _READBACK_ASSERT_AUTHORITATIVE),
+        ("_READBACK_AUTHORITY_FINGERPRINT", _READBACK_AUTHORITY_FINGERPRINT),
+        ("replace", replace),
+        ("datetime", datetime),
+        ("Decimal", Decimal),
+        ("hashlib", hashlib),
+        ("json", json),
+    )
+    source_rank = _SOURCE_RANK
+    source_rank_snapshot = tuple(source_rank.items())
+    hashlib_sha256 = hashlib.sha256
+    json_dumps = json.dumps
+
+    def require_resolver_dispatch() -> None:
+        module_globals = globals()
+        if (
+            getattr(owning_resolve, "__code__", None) is not owning_resolve_code
+            or getattr(owning_validate_revision, "__code__", None)
+            is not owning_validate_revision_code
+        ):
+            raise error_type("canonical realized match resolver executable changed")
+        for label, name, function, expected_code in resolver_helper_witnesses:
+            if (
+                module_globals.get(name) is not function
+                or getattr(function, "__code__", None) is not expected_code
+            ):
+                raise error_type(
+                    "canonical realized match helper dispatch changed: " + label
+                )
+        for name, expected in resolver_global_witnesses:
+            if module_globals.get(name) is not expected:
+                raise error_type(
+                    "canonical realized match helper global changed: " + name
+                )
+        if (
+            evidence_type._payload is not evidence_payload
+            or evidence_type._identity_payload is not evidence_identity_payload
+            or evidence_type._validate_integrity is not validate_integrity
+        ):
+            raise error_type("canonical realized match evidence helper changed")
+        if (
+            module_globals.get("_SOURCE_RANK") is not source_rank
+            or tuple(source_rank.items()) != source_rank_snapshot
+        ):
+            raise error_type("canonical realized match source rank changed")
+        if hashlib.sha256 is not hashlib_sha256 or json.dumps is not json_dumps:
+            raise error_type("canonical realized match module dependency changed")
 
     def authoritative_resolve(
         plan: ExecutionPlan,
@@ -890,6 +992,7 @@ def _install_realized_match_authority() -> None:
         *,
         attempt_id: str,
     ) -> BetfairRealizedMatchEvidence:
+        require_resolver_dispatch()
         if globals().get("_resolve_betfair_realized_match") is not owning_resolve:
             raise error_type(
                 "canonical realized match resolver implementation changed"
@@ -902,6 +1005,7 @@ def _install_realized_match_authority() -> None:
             readback,
             attempt_id=attempt_id,
         )
+        require_resolver_dispatch()
         if globals().get("_resolve_betfair_realized_match") is not owning_resolve:
             raise error_type(
                 "canonical realized match resolver implementation changed during resolution"
@@ -923,6 +1027,7 @@ def _install_realized_match_authority() -> None:
     def assert_authoritative(
         self: BetfairRealizedMatchEvidence,
     ) -> None:
+        require_resolver_dispatch()
         if type(self) is not evidence_type:
             raise TypeError("evidence must be exact BetfairRealizedMatchEvidence")
         validate_integrity(self)
@@ -939,11 +1044,13 @@ def _install_realized_match_authority() -> None:
             raise error_type(
                 "realized match evidence payload changed after canonical resolution"
             )
+        require_resolver_dispatch()
 
     def authoritative_validate_revision(
         previous: BetfairRealizedMatchEvidence,
         current: BetfairRealizedMatchEvidence,
     ) -> BetfairRealizedMatchEvidence:
+        require_resolver_dispatch()
         if (
             globals().get("validate_betfair_realized_match_revision")
             is not authoritative_validate_revision
@@ -956,6 +1063,7 @@ def _install_realized_match_authority() -> None:
         assert_authoritative(previous)
         assert_authoritative(current)
         result = owning_validate_revision(previous, current)
+        require_resolver_dispatch()
         if (
             globals().get("validate_betfair_realized_match_revision")
             is not authoritative_validate_revision

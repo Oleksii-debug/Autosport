@@ -333,6 +333,76 @@ def test_private_resolver_rebind_cannot_mint_canonical_origin(
         forged.assert_authoritative()
 
 
+def test_evidence_builder_rebind_cannot_mint_canonical_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, ledger, provider_ref, template = _resolve_current(tmp_path)
+    forged = replace(template)
+    calls = 0
+
+    def forged_builder(**kwargs):
+        nonlocal calls
+        calls += 1
+        del kwargs
+        return forged
+
+    monkeypatch.setattr(realized_match_module, "_make_evidence", forged_builder)
+    readback = _capture(
+        provider_ref,
+        observed_at=datetime(2026, 9, 21, 9, 56, tzinfo=timezone.utc),
+        current=_current(provider_ref, matched_price=3.1),
+    )
+
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="canonical realized match helper dispatch changed: evidence builder",
+    ):
+        resolve_betfair_realized_match(
+            plan,
+            ledger,
+            readback,
+            attempt_id=ATTEMPT_ID,
+        )
+
+    assert calls == 0
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="not issued by canonical resolver",
+    ):
+        forged.assert_authoritative()
+
+
+def test_evidence_builder_code_swap_fails_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, ledger, provider_ref = _prepared(tmp_path)
+    readback = _capture(
+        provider_ref,
+        observed_at=datetime(2026, 9, 21, 9, 55, tzinfo=timezone.utc),
+        current=_current(provider_ref, matched_price=3.1),
+    )
+    canonical_builder = realized_match_module._make_evidence
+
+    def forged_builder(**kwargs):
+        del kwargs
+        raise AssertionError("rebound builder executed")
+
+    monkeypatch.setattr(canonical_builder, "__code__", forged_builder.__code__)
+
+    with pytest.raises(
+        RealizedMatchEvidenceError,
+        match="canonical realized match helper dispatch changed: evidence builder",
+    ):
+        resolve_betfair_realized_match(
+            plan,
+            ledger,
+            readback,
+            attempt_id=ATTEMPT_ID,
+        )
+
+
 def test_revision_dispatch_rebind_fails_before_captured_validator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

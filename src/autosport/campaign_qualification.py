@@ -317,6 +317,35 @@ class CampaignQualificationReport:
     whole_product_complete: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.state) is not QualificationState:
+            raise TypeError("state must be QualificationState")
+        if type(self.blockers) is not tuple:
+            raise TypeError("blockers must be a tuple")
+        for index, blocker in enumerate(self.blockers):
+            _text(blocker, f"blockers[{index}]")
+        if self.state is QualificationState.COMPLETE_FOR_CANONICAL_RESOLUTION:
+            if self.blockers:
+                raise CampaignQualificationError(
+                    "complete campaign qualification cannot carry blockers"
+                )
+        elif not self.blockers:
+            raise CampaignQualificationError(
+                "blocked campaign qualification must carry at least one blocker"
+            )
+
+        _sha(self.identity_sha256, "identity_sha256")
+        _sha(
+            self.expected_terminal_bundle_sha256,
+            "expected_terminal_bundle_sha256",
+        )
+        if type(self.episode_sha256s) is not tuple or not self.episode_sha256s:
+            raise CampaignQualificationError(
+                "episode_sha256s must be a non-empty tuple"
+            )
+        for index, episode_sha256 in enumerate(self.episode_sha256s):
+            _sha(episode_sha256, f"episode_sha256s[{index}]")
+        _sha(self.qualification_sha256, "qualification_sha256")
+
         for name in (
             "canonical_authority_verified",
             "promotion_authority",

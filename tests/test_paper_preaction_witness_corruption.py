@@ -59,7 +59,11 @@ class PaperPreActionWitnessCorruptionTests(unittest.TestCase):
     def test_invalid_utf8_pre_action_witness_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "live_decision_pre_action_book.json"
-            path.write_bytes(b'{"schema_version":4,"corrupt":"\\xff"}')
+            path.write_bytes(
+                b'{"schema_version":4,"corrupt":"'
+                + bytes((0xFF,))
+                + b'"}'
+            )
 
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,

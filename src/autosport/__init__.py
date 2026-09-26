@@ -154,6 +154,10 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
+# Family-close evidence is useful only if canonical re-resolution cannot be paired
+# with caller-rebound evidence constructors/digests. Seal its publication surface.
+from . import _research_multiplicity_family_close_dispatch_guard as _research_multiplicity_family_close_dispatch_guard  # noqa: F401,E402
+
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.

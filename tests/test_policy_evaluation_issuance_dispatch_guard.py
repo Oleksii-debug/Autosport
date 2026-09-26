@@ -84,6 +84,29 @@ def test_product_issuer_rejects_in_place_store_constructor_code_rebind(
         canonical_init.__code__ = canonical_code
 
 
+def test_product_issue_rejects_in_place_derive_code_rebind_before_arguments():
+    canonical_derive = issuance._derive_policy_evaluation
+    canonical_code = canonical_derive.__code__
+
+    def forged_derive(protocol, target, source):
+        del protocol, target, source
+        raise AssertionError("forged derive code must not execute")
+
+    canonical_derive.__code__ = forged_derive.__code__
+    try:
+        with pytest.raises(
+            issuance.ProductPolicyEvaluationIssuanceError,
+            match=r"direct helper executable \(derive policy evaluation\)",
+        ):
+            issuance.issue_product_policy_evaluation(
+                None,
+                None,
+                source_evaluation_bundle_id="caller-forged",
+            )
+    finally:
+        canonical_derive.__code__ = canonical_code
+
+
 def test_product_issuer_rejects_same_class_store_setattr_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

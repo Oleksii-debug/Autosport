@@ -157,3 +157,17 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # Family-close evidence is useful only if canonical re-resolution cannot be paired
 # with caller-rebound evidence constructors/digests. Seal its publication surface.
 from . import _research_multiplicity_family_close_dispatch_guard as _research_multiplicity_family_close_dispatch_guard  # noqa: F401,E402
+
+# Caller-owned market-filter containers cannot remain authority-bearing after the
+# authenticated Betfair subscription starts. Snapshot once, then let the canonical
+# existing issuer hash and send only that detached product-owned value.
+from . import _betfair_authenticated_stream_filter_snapshot as _betfair_authenticated_stream_filter_snapshot  # noqa: F401,E402
+
+# Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
+# exponent forms and oversized text before Decimal fixed-point materialization so
+# tiny hostile inputs cannot amplify into attacker-sized evidence strings.
+from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402
+
+# K07 authenticated account identity must acquire account details from a sealed
+# product-origin snapshot, not mutable live-client fields during provider I/O.
+from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402

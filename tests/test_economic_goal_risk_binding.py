@@ -113,6 +113,70 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         values.update(overrides)
         return PaperRiskPolicy(**values)  # type: ignore[arg-type]
 
+    def test_risk_portfolio_digest_binds_full_ticket_leg_identity(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg(
+            "event-risk-identity",
+            "market-risk-identity",
+            "selection-risk-identity",
+            Decimal("2"),
+            sport="football",
+            exchange_side="BACK",
+        )
+        ticket = book.open_ticket(
+            [leg],
+            Decimal("1"),
+            placed_at="2026-09-16T15:00:00+00:00",
+        )
+        stored_leg = ticket.legs[0]
+        baseline = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(baseline)
+
+        object.__setattr__(stored_leg, "exchange_side", "LAY")
+        changed_side = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(changed_side)
+        self.assertNotEqual(changed_side, baseline)
+
+        object.__setattr__(stored_leg, "exchange_side", "BACK")
+        object.__setattr__(stored_leg, "sport", "tennis")
+        changed_sport = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertIsNotNone(changed_sport)
+        self.assertNotEqual(changed_sport, baseline)
+
+    def test_risk_candidate_digest_binds_full_ticket_leg_identity(self) -> None:
+        def context(*, sport: str, exchange_side: str) -> ProposedTicketRiskContext:
+            return ProposedTicketRiskContext(
+                legs=(
+                    TicketLeg(
+                        "event-risk-candidate",
+                        "market-risk-candidate",
+                        "selection-risk-candidate",
+                        Decimal("2"),
+                        sport=sport,
+                        exchange_side=exchange_side,
+                    ),
+                ),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+                proposal_ts="2026-09-16T15:00:02+00:00",
+            )
+
+        baseline = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
+            context(sport="football", exchange_side="BACK")
+        )
+        changed_side = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
+            context(sport="football", exchange_side="LAY")
+        )
+        changed_sport = PaperRiskPolicy.risk_of_ruin_candidate_sha256(
+            context(sport="tennis", exchange_side="BACK")
+        )
+
+        self.assertIsNotNone(baseline)
+        self.assertIsNotNone(changed_side)
+        self.assertIsNotNone(changed_sport)
+        self.assertNotEqual(changed_side, baseline)
+        self.assertNotEqual(changed_sport, baseline)
+
     def test_owner_stake_fraction_tightens_executable_policy_at_exact_boundary(self) -> None:
         policy = self._policy(self._goal(max_stake_fraction=Decimal("0.10")))
         book = PaperBook("100")

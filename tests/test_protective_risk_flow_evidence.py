@@ -1,6 +1,8 @@
 import copy
 import unittest
+from collections.abc import Sequence
 from decimal import Decimal, ROUND_UP, localcontext
+from unittest.mock import patch
 
 from autosport.protective_risk_evidence import (
     PercentageEvidenceStatus,
@@ -337,6 +339,34 @@ class ProtectiveRiskFlowEvidenceTests(unittest.TestCase):
         with self.assertRaises(ProtectiveRiskEvidenceError) as caught:
             _build((one,) * 10_001)
         self.assertEqual(caught.exception.code, "EVIDENCE_RESOURCE_LIMIT")
+
+    def test_event_count_bound_does_not_trust_sequence_length(self) -> None:
+        class LyingSequence(Sequence):
+            def __init__(self, values):
+                self._values = values
+
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, index):
+                return self._values[index]
+
+            def __iter__(self):
+                return iter(self._values)
+
+        events = LyingSequence(
+            (
+                _valuation(1, "v1", "1000", T0),
+                _valuation(2, "v2", "900", T1),
+                _valuation(3, "v3", "800", T1),
+            )
+        )
+        with patch("autosport.protective_risk_evidence._MAX_EVENTS", 2):
+            with self.assertRaises(ProtectiveRiskEvidenceError) as caught:
+                _build(events)
+
+        self.assertEqual(caught.exception.code, "EVIDENCE_RESOURCE_LIMIT")
+
 
     def test_decimal_result_is_independent_of_hostile_caller_context(self) -> None:
         events = (

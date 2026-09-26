@@ -29,7 +29,6 @@ def _event(exchange_side: str) -> MarketEvent:
         sequence=1,
         sport="basketball",
         exchange_side=exchange_side,
-        market_semantics_id="basketball:h2h:v1",
     )
 
 
@@ -65,7 +64,6 @@ def test_paper_value_agent_preserves_exchange_side_in_proposed_leg() -> None:
     assert len(policy.captured_context.legs) == 1
     leg = policy.captured_context.legs[0]
     assert leg.exchange_side == "back"
-    assert leg.market_semantics_id == event.market_semantics_id
     assert leg.quote_key == event.quote_key
 
 
@@ -82,7 +80,6 @@ def test_restart_matcher_rejects_same_selection_on_opposite_exchange_side() -> N
                 locked_odds=back_event.decimal_odds,
                 sport=back_event.sport,
                 exchange_side="back",
-                market_semantics_id=back_event.market_semantics_id,
             ),
         ),
         placed_at=back_event.observed_ts,

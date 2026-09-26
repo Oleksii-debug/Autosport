@@ -58,64 +58,62 @@ def test_paperbook_round_trip_preserves_supported_back_side_identity(tmp_path) -
     back = _leg("back")
     ticket = book.open_ticket([back], "10", placed_at=_TS)
 
-    assert [item.quote_key for item in ticket.legs] == [back.quote_key]
+    assert ticket.legs[0].quote_key == back.quote_key
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 8
-    assert [item["exchange_side"] for item in payload["tickets"][0]["legs"]] == [
-        "back",
-    ]
+    assert payload["schema_version"] == 7
+    assert payload["tickets"][0]["legs"][0]["exchange_side"] == "back"
 
-    restored = PaperBook.load(path)
-    restored_legs = next(iter(restored.tickets.values())).legs
-    assert [item.exchange_side for item in restored_legs] == ["back"]
-    assert [item.quote_key for item in restored_legs] == [back.quote_key]
+    restored_leg = next(iter(PaperBook.load(path).tickets.values())).legs[0]
+    assert restored_leg.exchange_side == "back"
+    assert restored_leg.quote_key == back.quote_key
 
 
-@pytest.mark.parametrize(
-    "legs",
-    [
-        (_leg("lay"),),
-        (_leg("back"), _leg("lay")),
-    ],
-)
-def test_paperbook_rejects_lay_before_economic_state_mutation(
-    legs: tuple[TicketLeg, ...],
-) -> None:
+def test_paperbook_rejects_lay_before_open_economic_mutation() -> None:
     book = PaperBook("100")
+    balance_before = book.balance
 
-    with pytest.raises(ValueError, match="LAY materialization is unsupported"):
-        book.open_ticket(legs, "10", placed_at=_TS)
+    with pytest.raises(ValueError, match="LAY economic materialization"):
+        book.open_ticket([_leg("lay")], "10", placed_at=_TS)
 
-    assert book.balance == Decimal("100")
+    assert book.balance == balance_before
     assert book.tickets == {}
+    assert book._lifecycle == []
 
 
-def test_paperbook_save_rejects_caller_mutated_lay_ticket(tmp_path) -> None:
+def test_paperbook_rejects_lay_mutation_before_settlement() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg("back")], "10", placed_at=_TS)
+    lay = _leg("lay")
+    ticket.legs = (lay,)
+    balance_before = book.balance
+
+    with pytest.raises(ValueError, match="LAY economic materialization"):
+        book.settle(ticket.ticket_id, {lay.quote_key}, settled_at=_TS)
+
+    assert book.balance == balance_before
+    assert ticket.status.value == "open"
+    assert ticket.payout == Decimal("0")
+    assert book._lifecycle == [("open", ticket.ticket_id, (), ())]
+
+
+def test_paperbook_save_and_load_fail_closed_on_lay_materialization(tmp_path) -> None:
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
     ticket = book.open_ticket([_leg("back")], "10", placed_at=_TS)
-    ticket.legs = (_leg("lay"),)
-
-    with pytest.raises(ValueError, match="LAY materialization is unsupported"):
-        book.save(path)
-
-    assert not path.exists()
-
-
-def test_schema8_lay_snapshot_is_not_trusted_as_back_economics(tmp_path) -> None:
-    path = tmp_path / "paper-book.json"
-    book = PaperBook("100")
-    book.open_ticket([_leg("back")], "10", placed_at=_TS)
     book.save(path)
+    durable_before = path.read_bytes()
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 8
+    ticket.legs = (_leg("lay"),)
+    with pytest.raises(ValueError, match="LAY economic materialization"):
+        book.save(path)
+    assert path.read_bytes() == durable_before
+
+    payload = json.loads(durable_before.decode("utf-8"))
     payload["tickets"][0]["legs"][0]["exchange_side"] = "lay"
     path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="LAY materialization is unsupported"):
+    with pytest.raises(ValueError, match="LAY economic materialization"):
         PaperBook.load(path)
 
 
@@ -144,8 +142,6 @@ def test_schema7_requires_explicit_exchange_side_field_even_when_none(tmp_path) 
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["schema_version"] = 7
-    payload["tickets"][0]["legs"][0].pop("market_semantics_id")
     payload["tickets"][0]["legs"][0].pop("exchange_side")
     path.write_text(json.dumps(payload), encoding="utf-8")
 

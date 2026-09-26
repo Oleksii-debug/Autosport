@@ -61,11 +61,7 @@ class PaperValueAgent:
         self.stake = Decimal(str(stake))
         self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
         self.risk_policy = risk_policy or PaperRiskPolicy()
-        self._acted: set[tuple[str, str | None]] = set()
-
-    @staticmethod
-    def _event_settlement_identity(event: MarketEvent) -> tuple[str, str | None]:
-        return event.quote_key, event.market_semantics_id
+        self._acted: set[str] = set()
 
     @classmethod
     def _material_action_id(cls, context: AgentContext, event: MarketEvent) -> str:
@@ -78,11 +74,6 @@ class PaperValueAgent:
             "action": _MATERIAL_ACTION_NAME,
             "quote_key": event.quote_key,
         }
-        # Preserve the exact pre-market-semantics durable identity for legacy
-        # events. Adding a null field would change the hash and could create a
-        # second material-action lineage after upgrade.
-        if event.market_semantics_id is not None:
-            identity["market_semantics_id"] = event.market_semantics_id
         canonical = json.dumps(
             identity,
             ensure_ascii=False,
@@ -124,11 +115,7 @@ class PaperValueAgent:
         ):
             return False
         leg = ticket.legs[0]
-        return (
-            leg.quote_key == event.quote_key
-            and leg.market_semantics_id == event.market_semantics_id
-            and leg.locked_odds == event.decimal_odds
-        )
+        return leg.quote_key == event.quote_key and leg.locked_odds == event.decimal_odds
 
     def _derive_goal_stake(
         self,
@@ -211,7 +198,6 @@ class PaperValueAgent:
             or persisted.observed_ts != event.observed_ts
             or payload.get("material_action_id") != material_action_id
             or payload.get("quote_key") != event.quote_key
-            or payload.get("market_semantics_id") != event.market_semantics_id
             or payload.get("ticket_id") != ticket.ticket_id
             or payload.get("stake") != str(ticket.stake)
             or not self._ticket_matches_event(ticket, event)
@@ -220,7 +206,7 @@ class PaperValueAgent:
                 "PaperBook and Decision Ledger material-action evidence do not match exactly"
             )
 
-        self._acted.add(self._event_settlement_identity(event))
+        self._acted.add(event.quote_key)
         return True
 
     @staticmethod
@@ -272,7 +258,7 @@ class PaperValueAgent:
             return False
 
     def on_market_event(self, event: MarketEvent, context: AgentContext) -> None:
-        if self._event_settlement_identity(event) in self._acted or event.status != "open":
+        if event.quote_key in self._acted or event.status != "open":
             return
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
@@ -350,7 +336,6 @@ class PaperValueAgent:
                 or persisted.observed_ts != event.observed_ts
                 or payload.get("material_action_id") != material_action_id
                 or payload.get("quote_key") != event.quote_key
-                or payload.get("market_semantics_id") != event.market_semantics_id
             ):
                 raise PaperDecisionReconciliationRequired(
                     "durable paper-value decision identity changed across restart"
@@ -388,7 +373,6 @@ class PaperValueAgent:
             event.decimal_odds,
             sport=event.sport,
             exchange_side=event.exchange_side,
-            market_semantics_id=event.market_semantics_id,
         )
         proposal_context = None
         if goal is not None:
@@ -437,7 +421,6 @@ class PaperValueAgent:
             if persisted is None:
                 payload = {
                     "quote_key": event.quote_key,
-                    "market_semantics_id": event.market_semantics_id,
                     "forecast_model": forecast.model_id,
                     "probability": str(forecast.probability),
                     "expected_profit_per_unit": str(expected_profit_per_unit),
@@ -535,4 +518,4 @@ class PaperValueAgent:
                 "paper-value execution resolved a different durable #623 run"
             )
 
-        self._acted.add(self._event_settlement_identity(event))
+        self._acted.add(event.quote_key)

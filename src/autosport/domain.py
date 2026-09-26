@@ -301,6 +301,15 @@ class MarketEvent:
     exchange_side: str | None = None
 
     def __post_init__(self) -> None:
+        _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
+        _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
+        if self.source_ts is not None:
+            _timezone_aware_iso8601_value(self.source_ts, "source_ts")
+        object.__setattr__(
+            self,
+            "metadata",
+            _serialized_metadata({"metadata": self.metadata}),
+        )
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         for field_name in (
@@ -364,12 +373,15 @@ class MarketEvent:
         event_id = _required_canonical_string(raw, "event_id")
         market_id = _required_canonical_string(raw, "market_id")
         selection_id = _required_canonical_string(raw, "selection_id")
-        observed_ts = _required_canonical_string(raw, "observed_ts")
+        observed_ts = _timezone_aware_iso8601_value(raw.get("observed_ts"), "observed_ts")
         source_id = _required_canonical_string(raw, "source_id")
         sequence = _required_sequence(raw)
         decimal_odds = _required_decimal_odds(raw)
 
-        ingest_ts = _canonical_string_value(raw.get("ingest_ts", observed_ts), "ingest_ts")
+        ingest_ts = _timezone_aware_iso8601_value(
+            raw.get("ingest_ts", observed_ts),
+            "ingest_ts",
+        )
 
         market_type_raw = _canonical_string_value(raw.get("market_type", "other"), "market_type")
         try:
@@ -422,7 +434,7 @@ class MarketEvent:
             "source_ts": self.source_ts,
             "ingest_ts": self.ingest_ts,
             "score_state": self.score_state,
-            "metadata": self.metadata,
+            "metadata": _serialized_metadata({"metadata": self.metadata}),
         }
         if self.sport is not None:
             payload["sport"] = self.sport
@@ -445,18 +457,12 @@ class TicketLeg:
     locked_odds: Decimal
     sport: str | None = None
     exchange_side: str | None = None
-    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         if self.exchange_side is not None:
             _canonical_exchange_side(self.exchange_side)
-        if self.market_semantics_id is not None:
-            _canonical_semantic_identity(
-                self.market_semantics_id,
-                "market_semantics_id",
-            )
 
     @property
     def quote_key(self) -> str:
@@ -467,12 +473,6 @@ class TicketLeg:
             self.sport,
             self.exchange_side,
         )
-
-    @property
-    def settlement_identity(self) -> tuple[str, str | None]:
-        """Exact quote plus canonical decision-time market-rule identity."""
-
-        return self.quote_key, self.market_semantics_id
 
 
 @dataclass(slots=True)
@@ -490,15 +490,6 @@ class PaperTicket:
     bankroll_id: str | None = None
     currency: str | None = None
     settled_at: str | None = None
-    _opening_stake: Decimal = field(init=False, repr=False, compare=False)
-    _opening_legs: tuple[TicketLeg, ...] = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        # Settlement state is mutable, but the admitted monetary identity is not.
-        # Keep an internal witness so PaperBook can fail closed if a caller
-        # rewrites stake or locked legs after the opening debit was committed.
-        object.__setattr__(self, "_opening_stake", self.stake)
-        object.__setattr__(self, "_opening_legs", self.legs)
 
     @property
     def combined_odds(self) -> Decimal:

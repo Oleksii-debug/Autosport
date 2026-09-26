@@ -40,7 +40,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         book.save(self.path)
 
         payload = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 8)
+        self.assertEqual(payload["schema_version"], 7)
         self.assertEqual(
             payload["lifecycle"],
             [
@@ -249,7 +249,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
 
         self.assertFalse(self.path.exists())
 
-    def test_legacy_open_only_snapshot_is_read_only_without_durable_authority(self) -> None:
+    def test_legacy_open_only_snapshot_remains_loadable_and_upgrades_on_save(self) -> None:
         payload = {
             "initial_bankroll": "100",
             "balance": "90",
@@ -272,20 +272,17 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 }
             ],
         }
-        original = json.dumps(payload)
-        self.path.write_text(original, encoding="utf-8")
+        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         book = PaperBook.load(self.path)
-        self.assertEqual(tuple(book.tickets), ("ticket-1",))
-        self.assertEqual(book.balance, Decimal("90"))
+        book.save(self.path)
+        upgraded = json.loads(self.path.read_text(encoding="utf-8"))
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "lacks independent durable witness authority",
-        ):
-            book.save(self.path)
-
-        self.assertEqual(self.path.read_text(encoding="utf-8"), original)
+        self.assertEqual(upgraded["schema_version"], 7)
+        self.assertEqual(
+            upgraded["lifecycle"],
+            [{"action": "open", "ticket_id": "ticket-1"}],
+        )
 
     def test_legacy_settled_snapshot_fails_closed_without_lifecycle_provenance(self) -> None:
         payload = {

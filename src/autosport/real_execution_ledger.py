@@ -737,6 +737,7 @@ class RealExecutionLedger:
     def _plan_event(
         events: list[dict[str, Any]], plan_id: str
     ) -> dict[str, Any] | None:
+        _text(plan_id, "plan_id")
         matches = [
             event
             for event in events
@@ -757,6 +758,7 @@ class RealExecutionLedger:
     def _attempt_events(
         events: list[dict[str, Any]], attempt_id: str
     ) -> list[dict[str, Any]]:
+        _text(attempt_id, "attempt_id")
         return [event for event in events if event["attempt_id"] == attempt_id]
 
     @classmethod
@@ -881,6 +883,7 @@ class RealExecutionLedger:
         plan_id: str,
         action_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        _text(action_id, "action_id")
         plan_event = cls._plan_event(events, plan_id)
         if plan_event is None:
             raise ExecutionStateError(f"plan {plan_id!r} is not reserved")

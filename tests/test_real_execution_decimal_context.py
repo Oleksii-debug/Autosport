@@ -601,9 +601,7 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
             hostile_action_id = _HostileText("forged-action-id")
             _HostileText.reset_calls()
 
-            with self.assertRaisesRegex(
-                ExecutionLedgerIntegrityError, r"invalid plan_id"
-            ):
+            with self.assertRaisesRegex(ValueError, r"plan_id must be non-empty text"):
                 ledger.begin_attempt(
                     plan_id=hostile_plan_id,
                     action_id=hostile_action_id,
@@ -613,7 +611,7 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
 
             self.assertEqual(ledger_path.read_bytes(), original_bytes)
             self.assertEqual(RealExecutionLedger(ledger_path).verify_integrity(), 1)
-            self.assertGreater(_HostileText.comparison_calls, 0)
+            self.assertEqual(_HostileText.comparison_calls, 0)
             self.assertEqual(_HostileText.strip_calls, 0)
             self.assertEqual(_HostileText.encode_calls, 0)
 

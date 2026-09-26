@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from autosport.parlay_sport_catalog_acquisition import ParlaySportCatalogAcquisition
+from autosport.parlay_sport_catalog_acquisition import (
+    ParlaySportCatalogAcquisition,
+    is_product_origin_acquisition,
+)
 
 
 def _caller_constructed_acquisition() -> ParlaySportCatalogAcquisition:
@@ -19,18 +22,14 @@ def _caller_constructed_acquisition() -> ParlaySportCatalogAcquisition:
 
 
 def test_provider_origin_authority_is_not_caller_mintable_via_object_setattr() -> None:
-    """A frozen dataclass flag must not be the positive provider-origin authority.
-
-    ``frozen=True`` only routes ordinary assignment through a guard; callers can invoke
-    ``object.__setattr__`` directly.  If the public ``provider_origin_verified`` value
-    is intended to authorize downstream provider-origin composition, that value must
-    therefore be backed by product issuance/verification rather than a mutable slot.
-    """
+    """Positive origin must come from product issuance, never caller-writable DTO state."""
 
     acquisition = _caller_constructed_acquisition()
     assert acquisition.provider_origin_verified is False
+    assert is_product_origin_acquisition(acquisition) is False
 
     with pytest.raises((AttributeError, TypeError)):
         object.__setattr__(acquisition, "provider_origin_verified", True)
 
     assert acquisition.provider_origin_verified is False
+    assert is_product_origin_acquisition(acquisition) is False

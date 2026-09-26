@@ -115,7 +115,11 @@ class _DispatchState:
         object.__setattr__(self, "_store_init", store_init)
         object.__setattr__(self, "_store_setattr", store_type.__setattr__)
         object.__setattr__(self, "_store_init_globals", store_init.__globals__)
-        object.__setattr__(self, "_store_init_code", marshal_dumps(store_init.__code__))
+        # ``FunctionType.__code__`` replacement swaps the code object; code objects are
+        # immutable to ordinary Python callers. Pin exact code-object identity rather than
+        # a marshalled image, which is serialization evidence rather than runtime dispatch
+        # identity and can create interpreter-dependent false positives.
+        object.__setattr__(self, "_store_init_code", store_init.__code__)
         object.__setattr__(self, "_factory_datetime", factory_module.datetime)
         object.__setattr__(self, "_factory_timezone", factory_module.timezone)
 
@@ -231,7 +235,7 @@ class _DispatchState:
             getattr(candidate_init, "__globals__", None)
             is not self._store_init_globals
             or candidate_code is None
-            or self._marshal_dumps(candidate_code) != self._store_init_code
+            or candidate_code is not self._store_init_code
         ):
             raise self._error_type(f"{error_prefix}: constructor executable")
         if (

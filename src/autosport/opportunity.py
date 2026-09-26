@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Iterable
 
-from .domain import MarketEvent, _quote_identity
+from .domain import MarketEvent, _canonical_semantic_identity, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp
 
 
@@ -56,6 +56,18 @@ def _optional_text(value: object, field_name: str) -> str | None:
     if value is None:
         return None
     return _canonical_text(value, field_name)
+
+
+def _optional_market_semantics_id(
+    value: object,
+    field_name: str = "market_semantics_id",
+) -> str | None:
+    if value is None:
+        return None
+    try:
+        return _canonical_semantic_identity(value, field_name)
+    except (TypeError, ValueError) as exc:
+        raise OpportunityContractError(str(exc)) from exc
 
 
 def _optional_sport(value: object, field_name: str = "quote sport") -> str | None:
@@ -203,6 +215,7 @@ class QuoteRef:
     market_event_hash: str
     market_snapshot_hash: str | None = None
     sport: str | None = None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -216,6 +229,12 @@ class QuoteRef:
             _canonical_text(getattr(self, name), f"quote {name}")
         _optional_text(self.source_ts, "quote source_ts")
         _optional_sport(self.sport)
+        canonical_semantics = _optional_market_semantics_id(
+            self.market_semantics_id,
+            "quote market_semantics_id",
+        )
+        if canonical_semantics is not None:
+            object.__setattr__(self, "market_semantics_id", canonical_semantics)
         if type(self.sequence) is not int or self.sequence < 0:
             raise OpportunityContractError(
                 "quote sequence must be a non-negative non-boolean int"
@@ -280,6 +299,7 @@ class QuoteRef:
                 "market_snapshot_hash",
             ),
             sport=canonical.sport,
+            market_semantics_id=canonical.market_semantics_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -298,6 +318,8 @@ class QuoteRef:
         }
         if self.sport is not None:
             payload["sport"] = self.sport
+        if self.market_semantics_id is not None:
+            payload["market_semantics_id"] = self.market_semantics_id
         return payload
 
     @classmethod
@@ -318,6 +340,8 @@ class QuoteRef:
         if type(raw) is not dict or frozenset(raw) not in {
             frozenset(expected),
             frozenset(expected | {"sport"}),
+            frozenset(expected | {"market_semantics_id"}),
+            frozenset(expected | {"sport", "market_semantics_id"}),
         }:
             raise OpportunityContractError(
                 "quote reference must contain canonical fields"
@@ -350,6 +374,10 @@ class QuoteRef:
                 raw["market_snapshot_hash"], "market_snapshot_hash"
             ),
             sport=_optional_sport(raw.get("sport")),
+            market_semantics_id=_optional_market_semantics_id(
+                raw.get("market_semantics_id"),
+                "quote market_semantics_id",
+            ),
         )
 
 
@@ -522,6 +550,7 @@ class ForecastRef:
     strategy_version: str | None = None
     uncertainty: Decimal | None = None
     predictive_eligibility: PredictiveEligibilityEvidence | None = None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
@@ -541,6 +570,12 @@ class ForecastRef:
             self.quote_market_event_hash,
             "quote_market_event_hash",
         )
+        canonical_semantics = _optional_market_semantics_id(
+            self.market_semantics_id,
+            "forecast market_semantics_id",
+        )
+        if canonical_semantics is not None:
+            object.__setattr__(self, "market_semantics_id", canonical_semantics)
 
         metadata = (
             self.model_id,
@@ -606,6 +641,10 @@ class ForecastRef:
             raise OpportunityContractError(
                 "forecast quote_key does not match bound QuoteRef"
             )
+        if forecast.market_semantics_id != quote.market_semantics_id:
+            raise OpportunityContractError(
+                "forecast market_semantics_id does not match bound QuoteRef"
+            )
         if forecast.market_snapshot_hash is None:
             raise OpportunityContractError(
                 "forecast requires canonical market_snapshot_hash evidence"
@@ -631,6 +670,7 @@ class ForecastRef:
             strategy_version=forecast.strategy_version,
             uncertainty=forecast.uncertainty,
             predictive_eligibility=predictive_eligibility,
+            market_semantics_id=forecast.market_semantics_id,
         )
 
     def predictive_eligibility_reason(
@@ -669,7 +709,7 @@ class ForecastRef:
         return None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema": "autosport.forecast_ref",
             "schema_version": 2,
             "forecast_id": self.forecast_id,
@@ -691,6 +731,10 @@ class ForecastRef:
                 else self.predictive_eligibility.to_dict()
             ),
         }
+        if self.market_semantics_id is not None:
+            payload["schema_version"] = 3
+            payload["market_semantics_id"] = self.market_semantics_id
+        return payload
 
     @classmethod
     def from_dict(cls, raw: object) -> "ForecastRef":
@@ -726,7 +770,7 @@ class ForecastRef:
                 ),
             )
 
-        expected = legacy | {
+        expected_v2 = legacy | {
             "schema",
             "schema_version",
             "model_id",
@@ -735,27 +779,36 @@ class ForecastRef:
             "uncertainty",
             "predictive_eligibility",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        expected_v3 = expected_v2 | {"market_semantics_id"}
+        if type(raw) is not dict:
             raise OpportunityContractError(
                 "forecast reference must contain canonical fields"
             )
-        if (
-            raw["schema"] != "autosport.forecast_ref"
-            or raw["schema_version"] != 2
-        ):
+        fields = set(raw)
+        if fields == expected_v2:
+            if raw["schema"] != "autosport.forecast_ref" or raw["schema_version"] != 2:
+                raise OpportunityContractError("unsupported forecast reference schema")
+            market_semantics_id = None
+        elif fields == expected_v3:
+            if raw["schema"] != "autosport.forecast_ref" or raw["schema_version"] != 3:
+                raise OpportunityContractError("unsupported forecast reference schema")
+            market_semantics_id = _optional_market_semantics_id(
+                raw["market_semantics_id"], "forecast market_semantics_id"
+            )
+            if market_semantics_id is None:
+                raise OpportunityContractError(
+                    "forecast schema v3 requires market_semantics_id"
+                )
+        else:
             raise OpportunityContractError(
-                "unsupported forecast reference schema"
+                "forecast reference must contain canonical fields"
             )
         uncertainty_raw = raw["uncertainty"]
         eligibility_raw = raw["predictive_eligibility"]
         return cls(
             forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
-            forecast_hash=_canonical_hash(
-                raw["forecast_hash"], "forecast_hash"
-            ),
-            quote_key=_canonical_text(
-                raw["quote_key"], "forecast quote_key"
-            ),
+            forecast_hash=_canonical_hash(raw["forecast_hash"], "forecast_hash"),
+            quote_key=_canonical_text(raw["quote_key"], "forecast quote_key"),
             probability=_decimal_from_serialized(
                 raw["probability"], "forecast probability"
             ),
@@ -787,6 +840,7 @@ class ForecastRef:
                 if eligibility_raw is None
                 else PredictiveEligibilityEvidence.from_dict(eligibility_raw)
             ),
+            market_semantics_id=market_semantics_id,
         )
 
 
@@ -884,6 +938,7 @@ class Opportunity:
             if (
                 forecast.quote_market_event_hash != quote.market_event_hash
                 or forecast.market_snapshot_hash != quote.market_snapshot_hash
+                or forecast.market_semantics_id != quote.market_semantics_id
             ):
                 raise OpportunityContractError(
                     "forecast evidence does not bind the exact opportunity quote snapshot"

@@ -33,9 +33,23 @@ def _verify_product_risk_of_ruin_authority(
     # Import only when the mature authority-bearing policy path is evaluated.
     # Importing this module while autosport.risk itself is initializing creates
     # a cycle through ScientificRegistry -> agents -> decision_ledger -> risk.
-    from .risk_of_ruin_authority import verify_risk_of_ruin_authority
+    from . import risk_of_ruin_authority as authority_module
+    from ._scientific_registry_read_authority import (
+        ScientificRegistryReadAuthorityError,
+        _source_owned_function,
+    )
 
-    return verify_risk_of_ruin_authority(
+    try:
+        verifier = _source_owned_function(
+            authority_module.verify_risk_of_ruin_authority,
+            module=authority_module,
+            qualname="verify_risk_of_ruin_authority",
+        )
+    except ScientificRegistryReadAuthorityError:
+        prefix = "portfolio" if kind == "single" else "portfolio vector"
+        return False, f"{prefix} risk-of-ruin product authority verifier changed"
+
+    return verifier(
         registry_path,
         evidence,
         kind=kind,

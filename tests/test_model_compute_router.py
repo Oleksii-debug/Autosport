@@ -508,18 +508,51 @@ class ModelComputeRouterTests(unittest.TestCase):
         value,
         observation,
         *,
+        policy_value=None,
+        candidate_values=None,
         context_overrides=None,
         publish=True,
     ):
+        active_policy = policy() if policy_value is None else policy_value
+        active_candidates = (
+            self.candidates
+            if candidate_values is None
+            else tuple(candidate_values)
+        )
+        cloud_backend_id = next(
+            (
+                item.backend_id
+                for item in active_candidates
+                if item.candidate_id == value.cloud_candidate_id
+                and item.tier is ComputeTier.CLOUD
+            ),
+            "NONE",
+        )
         context = {
             "request_id": value.request_id,
             "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
             "regime_id": value.voc_regime_id,
             "urgency_id": value.voc_urgency_id,
             "contradiction_state": value.voc_contradiction_state,
+            "routing_policy_id": active_policy.policy_id,
+            "routing_policy_version": str(active_policy.policy_version),
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    active_policy.payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "cloud_permission": (
+                "ALLOW" if active_policy.cloud_enabled else "DENY"
+            ),
+            "cloud_backend_id": cloud_backend_id,
         }
         if context_overrides:
             context.update(context_overrides)
@@ -546,7 +579,19 @@ class ModelComputeRouterTests(unittest.TestCase):
                 and value.decision_evidence_sha256 is not None
                 and isinstance(observation, SportDomainFitnessObservation)
             ):
-                value = self.canonical_request(value, observation)
+                value = self.canonical_request(
+                    value,
+                    observation,
+                    policy_value=(
+                        args[2]
+                        if len(args) > 2
+                        and isinstance(args[2], ComputeRoutingPolicy)
+                        else None
+                    ),
+                    candidate_values=(
+                        args[1] if len(args) > 1 else None
+                    ),
+                )
                 args = (value, *args[1:])
         return route_compute(*args, **kwargs)
 
@@ -558,7 +603,12 @@ class ModelComputeRouterTests(unittest.TestCase):
             and value.decision_evidence_sha256 is not None
             and isinstance(observation, SportDomainFitnessObservation)
         ):
-            value = self.canonical_request(value, observation)
+            value = self.canonical_request(
+                value,
+                observation,
+                policy_value=policy_value,
+                candidate_values=candidates,
+            )
         return store.route(value, candidates, policy_value, **kwargs)
 
     def router_store(self, path):
@@ -596,7 +646,319 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("non-public", decision.reason)
 
-    def test_cloud_requires_positive_fresh_measured_paired_voc(self):
+    def test_candidate_subclass_cannot_rebind_tier_between_validation_and_build(self):
+        class StatefulCandidate(ComputeCandidate):
+            hook_reads = 0
+            tier_reads = 0
+
+            def __getattribute__(self, name):
+                if name in {
+                    "candidate_id",
+                    "tier",
+                    "backend_id",
+                    "model_id",
+                    "config_sha256",
+                    "capabilities",
+                    "estimated_cost",
+                    "estimated_latency_seconds",
+                }:
+                    cls = type(self)
+                    cls.hook_reads += 1
+                    if name == "tier":
+                        cls.tier_reads += 1
+                        return (
+                            ComputeTier.LOCAL
+                            if cls.tier_reads == 1
+                            else ComputeTier.CLOUD
+                        )
+                return super().__getattribute__(name)
+
+        candidate_value = StatefulCandidate(
+            candidate_id="local",
+            tier=ComputeTier.LOCAL,
+            backend_id="local-cpu",
+            model_id="baseline-v1",
+            config_sha256=SHA_A,
+            capabilities=("forecast",),
+            estimated_cost=Decimal("1"),
+            estimated_latency_seconds=Decimal("2"),
+        )
+        StatefulCandidate.hook_reads = 0
+        StatefulCandidate.tier_reads = 0
+
+        with self.assertRaisesRegex(TypeError, "exact ComputeCandidate"):
+            route_compute(
+                request(
+                    request_id="req-candidate-subclass",
+                    allow_cloud=False,
+                    cloud_candidate_id=None,
+                ),
+                (candidate_value,),
+                ComputeRoutingPolicy(
+                    policy_id="candidate-subclass",
+                    policy_version=1,
+                ),
+                as_of=T1,
+            )
+
+        self.assertEqual(StatefulCandidate.hook_reads, 0)
+        self.assertEqual(StatefulCandidate.tier_reads, 0)
+
+    def test_decimal_subclass_is_rejected_before_numeric_hooks_execute(self):
+        class HostileDecimal(Decimal):
+            hook_calls = 0
+
+            def is_finite(self):
+                type(self).hook_calls += 1
+                return True
+
+            def __lt__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+            def __le__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+            def __gt__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+            def __ge__(self, other):
+                type(self).hook_calls += 1
+                return True
+
+            def __str__(self):
+                type(self).hook_calls += 1
+                return "0"
+
+        hostile = HostileDecimal("-1")
+        HostileDecimal.hook_calls = 0
+
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "finite exact Decimal",
+        ):
+            ComputeCandidate(
+                candidate_id="hostile-decimal",
+                tier=ComputeTier.LOCAL,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                capabilities=("forecast",),
+                estimated_cost=hostile,
+                estimated_latency_seconds=Decimal("2"),
+            )
+
+        self.assertEqual(HostileDecimal.hook_calls, 0)
+
+    def test_voc_sample_threshold_int_subclass_is_rejected_before_hooks_execute(self):
+        class HostileInt(int):
+            hook_calls = 0
+
+            def __lt__(self, other):
+                type(self).hook_calls += 1
+                return False
+
+        hostile = HostileInt(-1)
+        HostileInt.hook_calls = 0
+
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "voc_min_effective_sample_size must be a positive integer",
+        ):
+            ComputeRoutingPolicy(
+                policy_id="hostile-threshold",
+                policy_version=1,
+                voc_min_effective_sample_size=hostile,
+            )
+
+        self.assertEqual(HostileInt.hook_calls, 0)
+
+    def test_cloud_requires_product_owned_matching_data_classification(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-data-classification")
+
+        mismatched_request = request(request_id="req-classification-mismatch")
+        mismatched_request = self.canonical_request(
+            mismatched_request,
+            observation,
+            context_overrides={
+                "data_classification": DataClassification.PRIVATE.value,
+            },
+        )
+        mismatched = self.route_compute(
+            mismatched_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(mismatched.tier, ComputeTier.LOCAL)
+        self.assertIn("data classification does not match", mismatched.reason)
+
+        legacy_request = request(request_id="req-classification-legacy")
+        legacy_context = {
+            "request_id": legacy_request.request_id,
+            "decision_input_sha256": legacy_request.decision_input_sha256,
+            "task_class": legacy_request.required_capability,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": legacy_request.voc_regime_id,
+            "urgency_id": legacy_request.voc_urgency_id,
+            "contradiction_state": legacy_request.voc_contradiction_state,
+        }
+        legacy_digest = hashlib.sha256(
+            json.dumps(
+                legacy_context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._canonical_voc.publish_context(legacy_digest, legacy_context)
+        legacy_request = replace(
+            legacy_request,
+            decision_evidence_sha256=legacy_digest,
+        )
+        legacy = self.route_compute(
+            legacy_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(legacy.tier, ComputeTier.LOCAL)
+        self.assertIn("lacks data classification", legacy.reason)
+
+    def test_cloud_requires_product_owned_permission_scope(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-cloud-permission-scope")
+
+        denied_request = request(request_id="req-cloud-permission-deny")
+        denied_request = self.canonical_request(
+            denied_request,
+            observation,
+            context_overrides={"cloud_permission": "DENY"},
+        )
+        denied = self.route_compute(
+            denied_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(denied.tier, ComputeTier.LOCAL)
+        self.assertIn("does not allow cloud", denied.reason)
+
+        wrong_backend_request = request(
+            request_id="req-cloud-permission-wrong-backend"
+        )
+        wrong_backend_request = self.canonical_request(
+            wrong_backend_request,
+            observation,
+            context_overrides={"cloud_backend_id": "other-cloud"},
+        )
+        wrong_backend = self.route_compute(
+            wrong_backend_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(wrong_backend.tier, ComputeTier.LOCAL)
+        self.assertIn("cloud backend", wrong_backend.reason)
+
+        wrong_policy_request = request(
+            request_id="req-cloud-permission-wrong-policy"
+        )
+        wrong_policy_request = self.canonical_request(
+            wrong_policy_request,
+            observation,
+            context_overrides={"routing_policy_version": "999"},
+        )
+        wrong_policy = self.route_compute(
+            wrong_policy_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(wrong_policy.tier, ComputeTier.LOCAL)
+        self.assertIn("routing policy", wrong_policy.reason)
+
+        canonical_policy = policy()
+        altered_policy = policy(max_cloud_cost=Decimal("999"))
+        digest_request = request(
+            request_id="req-cloud-permission-policy-digest"
+        )
+        digest_request = self.canonical_request(
+            digest_request,
+            observation,
+            policy_value=canonical_policy,
+        )
+        digest_mismatch = self.route_compute(
+            digest_request,
+            self.candidates,
+            altered_policy,
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(digest_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("routing policy", digest_mismatch.reason)
+
+    def test_v2_context_is_readable_but_cannot_mint_cloud_permission(self):
+        observation = slow_observation()
+        evidence = self.qualified_voc(evidence_id="voc-v2-permission")
+        value = request(request_id="req-v2-permission")
+        context = {
+            "request_id": value.request_id,
+            "decision_input_sha256": value.decision_input_sha256,
+            "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": value.voc_regime_id,
+            "urgency_id": value.voc_urgency_id,
+            "contradiction_state": value.voc_contradiction_state,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._canonical_voc.publish_context(digest, context)
+        value = replace(value, decision_evidence_sha256=digest)
+
+        decision = self.route_compute(
+            value,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("lacks product cloud permission", decision.reason)
+
+    def test_positive_voc_still_needs_product_issued_cloud_permission(self):
         decision = self.route_compute(
             request(),
             self.candidates,
@@ -605,11 +967,15 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=self.qualified_voc(),
             domain_observation=slow_observation(),
         )
-        self.assertEqual(decision.tier, ComputeTier.CLOUD)
-        self.assertEqual(decision.backend_id, "permitted-cloud")
-        self.assertEqual(decision.model_id, "challenger-v2")
-        self.assertEqual(decision.config_sha256, SHA_B)
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertEqual(decision.backend_id, "local-cpu")
+        self.assertEqual(decision.model_id, "baseline-v1")
+        self.assertEqual(decision.config_sha256, SHA_A)
         self.assertEqual(decision.domain_observation_id, "fitness-1")
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            decision.reason,
+        )
 
         no_voc = self.route_compute(
             replace(request(), request_id="req-no-voc"),
@@ -683,7 +1049,11 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=evidence,
             domain_observation=slow_observation(),
         )
-        self.assertEqual(current.tier, ComputeTier.CLOUD)
+        self.assertEqual(current.tier, ComputeTier.LOCAL)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            current.reason,
+        )
 
         source_decision = self.route_compute(
             request(
@@ -817,10 +1187,14 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=self.qualified_voc(evidence_id="voc-exact-compute-identity"),
             domain_observation=slow_observation(),
         )
-        self.assertEqual(exact.tier, ComputeTier.CLOUD)
-        self.assertEqual(exact.backend_id, "permitted-cloud")
-        self.assertEqual(exact.model_id, "challenger-v2")
-        self.assertEqual(exact.config_sha256, SHA_B)
+        self.assertEqual(exact.tier, ComputeTier.LOCAL)
+        self.assertEqual(exact.backend_id, "local-cpu")
+        self.assertEqual(exact.model_id, "baseline-v1")
+        self.assertEqual(exact.config_sha256, SHA_A)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            exact.reason,
+        )
 
     def test_voc_exact_compute_identity_survives_restart_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -836,7 +1210,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=evidence,
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(first.tier, ComputeTier.CLOUD)
+            self.assertEqual(first.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                first.reason,
+            )
 
             reopened = self.router_store(path)
             readback = self.store_route(reopened, 
@@ -917,6 +1295,43 @@ class ModelComputeRouterTests(unittest.TestCase):
             as_of=T2,
         )
         self.assertEqual(deadline.tier, ComputeTier.WAIT)
+
+        exact_deadline = self.route_compute(
+            request(
+                request_id="req-deadline-exact",
+                decision_deadline=T1,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+        )
+        self.assertEqual(exact_deadline.tier, ComputeTier.WAIT)
+        self.assertIn("deadline", exact_deadline.reason)
+
+        boundary_candidate = candidate(
+            "deadline-boundary-local",
+            backend_id="local-cpu",
+            model_id="baseline-v1",
+            config_sha256=SHA_A,
+            cost="0",
+            latency="10",
+        )
+        exact_estimated_completion = self.route_compute(
+            request(
+                request_id="req-deadline-estimate-exact",
+                decision_deadline=T1,
+                max_cost=Decimal("1"),
+                baseline_candidate_id="deadline-boundary-local",
+                cloud_candidate_id=None,
+            ),
+            (boundary_candidate,),
+            policy(),
+            as_of=T0,
+        )
+        self.assertEqual(
+            exact_estimated_completion.tier,
+            ComputeTier.WAIT,
+        )
 
         over_budget_baseline = self.route_compute(
             request(
@@ -1018,7 +1433,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-route-cloud"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(cloud_decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                cloud_decision.reason,
+            )
 
             local_request = request(
                 request_id="req-route-local",
@@ -1112,7 +1531,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-cloud-authority"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                decision.reason,
+            )
             original = path.read_text(encoding="utf-8")
 
             def assert_semantic_forgery_rejected(mutate):
@@ -1127,7 +1550,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 rewrite_route_with_valid_hashes(path, raw, route)
                 with self.assertRaisesRegex(
                     ModelComputeRouterError,
-                    "persisted CLOUD decision is not authorized "
+                    "persisted LOCAL decision is not authorized "
                     "by persisted route inputs|"
                     "VOC evaluation utility/cost values do not match evidence",
                 ):
@@ -1292,7 +1715,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-load-cloud"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(cloud_decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                cloud_decision.reason,
+            )
             cloud_execution = store.record_execution(
                 execution_id="exec-load-cloud",
                 request_id=cloud_request.request_id,
@@ -1308,8 +1735,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 cloud_execution.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("backend/model/config identity", cloud_execution.reason)
 
             original = path.read_text(encoding="utf-8")
 
@@ -1352,18 +1780,6 @@ class ModelComputeRouterTests(unittest.TestCase):
             ):
                 self.router_store(path)
 
-            raw = json.loads(original)
-            next(
-                item
-                for item in raw["executions"]
-                if item["execution_id"] == "exec-load-cloud"
-            )["actual_cost"] = "10.01"
-            rewrite_store_with_valid_state_hash(path, raw)
-            with self.assertRaisesRegex(
-                ModelComputeRouterError,
-                "accepted cloud execution cost exceeds policy",
-            ):
-                self.router_store(path)
 
     def test_restart_rejects_rehashed_rejected_execution_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1638,12 +2054,14 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 first.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
             self.assertEqual(
                 second.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("backend/model/config identity", first.reason)
+            self.assertIn("backend/model/config identity", second.reason)
             raw = json.loads(path.read_text(encoding="utf-8"))
             raw["executions"] = [
                 item
@@ -1777,6 +2195,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 "first_cost": Decimal("1.25"),
                 "second_cost": Decimal("0.80"),
                 "retry_cost": Decimal("0.70"),
+                "first_disposition": ExecutionDisposition.ACCEPTED,
+                "second_disposition": ExecutionDisposition.REJECTED_COST,
             },
             {
                 "name": "cloud",
@@ -1793,6 +2213,8 @@ class ModelComputeRouterTests(unittest.TestCase):
                 "first_cost": Decimal("6"),
                 "second_cost": Decimal("4.01"),
                 "retry_cost": Decimal("4"),
+                "first_disposition": ExecutionDisposition.REJECTED_IDENTITY,
+                "second_disposition": ExecutionDisposition.REJECTED_IDENTITY,
             },
         )
         for case in cases:
@@ -1836,11 +2258,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         first.disposition,
-                        ExecutionDisposition.ACCEPTED,
+                        case["first_disposition"],
                     )
                     self.assertEqual(
                         second.disposition,
-                        ExecutionDisposition.REJECTED_COST,
+                        case["second_disposition"],
                     )
 
                     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -1967,6 +2389,88 @@ class ModelComputeRouterTests(unittest.TestCase):
                 ExecutionDisposition.ACCEPTED,
             )
 
+
+    def test_durable_router_json_rejects_duplicate_object_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            self.router_store(path)
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            encoded = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            marker = '"version":6'
+            self.assertIn(marker, encoded)
+            path.write_text(
+                encoded.replace(
+                    marker,
+                    '"version":999,"version":6',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "routing store is unreadable",
+            ):
+                self.router_store(path)
+
+    def test_authority_journals_reject_duplicate_object_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "router.json"
+            store = self.router_store(path)
+            req = request(
+                request_id="req-authority-duplicate-key",
+                allow_cloud=False,
+                cloud_candidate_id=None,
+            )
+            self.store_route(store, req, self.candidates, policy(), as_of=T1)
+            store.record_execution(
+                execution_id="exec-authority-duplicate-key",
+                request_id=req.request_id,
+                completed_at=T1,
+                available_at=T1,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("1"),
+                actual_latency_seconds=Decimal("2"),
+                evidence_sha256=SHA_C,
+                as_of=T1,
+            )
+
+            execution_authority_path = path.with_name(
+                f"{path.name}.execution-authority.jsonl"
+            )
+            line = execution_authority_path.read_text(
+                encoding="utf-8"
+            ).splitlines()[0]
+            execution_authority_path.write_text(
+                '{"authority_sequence":999,' + line[1:] + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "execution authority journal contains invalid JSON",
+            ):
+                self.router_store(path)
+
+            execution_authority_path.unlink()
+            shadow_path = store._voc_shadow_authority_path
+            shadow_path.write_text(
+                '{"authority_sequence":1,"authority_sequence":1}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "VOC shadow execution authority journal contains invalid JSON",
+            ):
+                store._read_voc_shadow_authority_records()
 
     def test_authority_partial_tail_and_state_ahead_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2099,6 +2603,24 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 availability_late.disposition,
+                ExecutionDisposition.REJECTED_LATE,
+            )
+
+            exact_deadline = store.record_execution(
+                execution_id="exec-deadline-exact",
+                request_id="req-exec",
+                completed_at=T2,
+                available_at=T3,
+                backend_id="local-cpu",
+                model_id="baseline-v1",
+                config_sha256=SHA_A,
+                actual_cost=Decimal("0"),
+                actual_latency_seconds=Decimal("10"),
+                evidence_sha256=SHA_C,
+                as_of=T3,
+            )
+            self.assertEqual(
+                exact_deadline.disposition,
                 ExecutionDisposition.REJECTED_LATE,
             )
 
@@ -2262,7 +2784,11 @@ class ModelComputeRouterTests(unittest.TestCase):
                 voc_evidence=self.qualified_voc(evidence_id="voc-actual-cloud-budget"),
                 domain_observation=slow_observation(),
             )
-            self.assertEqual(cloud_decision.tier, ComputeTier.CLOUD)
+            self.assertEqual(cloud_decision.tier, ComputeTier.LOCAL)
+            self.assertIn(
+                "product-issued cloud permission authority is unavailable",
+                cloud_decision.reason,
+            )
             cloud_overrun = store.record_execution(
                 execution_id="exec-cloud-budget-overrun",
                 request_id=cloud_request.request_id,
@@ -2278,9 +2804,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 cloud_overrun.disposition,
-                ExecutionDisposition.REJECTED_COST,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn("policy cloud-cost", cloud_overrun.reason)
+            self.assertIn("backend/model/config identity", cloud_overrun.reason)
 
             reopened = self.router_store(path)
             self.assertEqual(
@@ -2381,8 +2907,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 first_cloud.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("backend/model/config identity", first_cloud.reason)
             second_cloud = store.record_execution(
                 execution_id="exec-cumulative-cloud-2",
                 request_id=cloud_request.request_id,
@@ -2398,12 +2925,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 second_cloud.disposition,
-                ExecutionDisposition.REJECTED_COST,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
-            self.assertIn(
-                "cumulative actual cloud execution cost",
-                second_cloud.reason,
-            )
+            self.assertIn("backend/model/config identity", second_cloud.reason)
             self.assertEqual(
                 store.total_actual_cost(cloud_request.request_id),
                 Decimal("10.01"),
@@ -2549,8 +3073,9 @@ class ModelComputeRouterTests(unittest.TestCase):
             )
             self.assertEqual(
                 accepted_cloud_tail.disposition,
-                ExecutionDisposition.ACCEPTED,
+                ExecutionDisposition.REJECTED_IDENTITY,
             )
+            self.assertIn("backend/model/config identity", accepted_cloud_tail.reason)
             original = path.read_text(encoding="utf-8")
 
             for execution_id in (

@@ -49,6 +49,97 @@ T3 = "2026-01-01T00:00:30Z"
 T4 = "2026-01-01T00:00:40Z"
 
 
+class _HostileDecimal(Decimal):
+    hook_calls = 0
+
+    def _hook(self):
+        type(self).hook_calls += 1
+
+    def is_finite(self):
+        self._hook()
+        return True
+
+    def __lt__(self, other):
+        self._hook()
+        return False
+
+    def __le__(self, other):
+        self._hook()
+        return True
+
+    def __gt__(self, other):
+        self._hook()
+        return False
+
+    def __ge__(self, other):
+        self._hook()
+        return True
+
+    def __add__(self, other):
+        self._hook()
+        return Decimal(self) + other
+
+    def __sub__(self, other):
+        self._hook()
+        return Decimal(self) - other
+
+
+class _HostileInt(int):
+    hook_calls = 0
+
+    def _hook(self):
+        type(self).hook_calls += 1
+
+    def __lt__(self, other):
+        self._hook()
+        return False
+
+    def __le__(self, other):
+        self._hook()
+        return True
+
+    def __gt__(self, other):
+        self._hook()
+        return False
+
+    def __ge__(self, other):
+        self._hook()
+        return True
+
+
+class _HostilePairedVOCEvaluation(PairedVOCEvaluation):
+    __slots__ = ()
+    payload_hook_calls = 0
+
+    def payload(self):
+        type(self).payload_hook_calls += 1
+        raise AssertionError("hostile PairedVOCEvaluation payload dispatch executed")
+
+
+class _HostileOutcomeDerivedVOCScore(OutcomeDerivedVOCScore):
+    __slots__ = ()
+    field_hook_calls = 0
+    dispatch_enabled = False
+
+    def __getattribute__(self, name):
+        if (
+            type(self).dispatch_enabled
+            and name
+            in {
+                "available_at",
+                "evaluation_id",
+                "outcome_evidence_sha256",
+                "scoring_rule_sha256",
+                "research_protocol_sha256",
+                "holdout_access_id",
+                "multiple_comparison_control_sha256",
+            }
+        ):
+            type(self).field_hook_calls += 1
+            raise AssertionError("hostile OutcomeDerivedVOCScore field dispatch executed")
+        return super().__getattribute__(name)
+
+
 def evaluation(**overrides):
     values = dict(
         evaluation_id="voc-eval-1",
@@ -406,7 +497,88 @@ def outcome_score(value):
     )
 
 
+
+def hostile_outcome_score(value):
+    source = outcome_score(value)
+    _HostileOutcomeDerivedVOCScore.dispatch_enabled = False
+    hostile = _HostileOutcomeDerivedVOCScore(
+        **{
+            name: object.__getattribute__(source, name)
+            for name in OutcomeDerivedVOCScore.__dataclass_fields__
+        }
+    )
+    _HostileOutcomeDerivedVOCScore.field_hook_calls = 0
+    _HostileOutcomeDerivedVOCScore.dispatch_enabled = True
+    return hostile
+
+
 class PairedVOCEvaluationTests(unittest.TestCase):
+    @staticmethod
+    def _hostile_evaluation(value=None):
+        source = evaluation() if value is None else value
+        return _HostilePairedVOCEvaluation(
+            **{
+                name: getattr(source, name)
+                for name in PairedVOCEvaluation.__dataclass_fields__
+            }
+        )
+
+    def test_store_rejects_evaluation_subclass_before_payload_dispatch(self):
+        _HostilePairedVOCEvaluation.payload_hook_calls = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            store = VOCEvaluationStore(Path(tmp) / "voc.json")
+            hostile = self._hostile_evaluation()
+            with self.assertRaisesRegex(TypeError, "evaluation must be PairedVOCEvaluation"):
+                store.record(hostile)
+        self.assertEqual(_HostilePairedVOCEvaluation.payload_hook_calls, 0)
+
+    def test_production_resolver_rejects_evaluation_subclass_before_payload_dispatch(self):
+        resolver, paired = self._production_resolver_fixture()
+        hostile = self._hostile_evaluation(paired)
+        _HostilePairedVOCEvaluation.payload_hook_calls = 0
+        with self.assertRaisesRegex(TypeError, "evaluation must be PairedVOCEvaluation"):
+            resolver.resolve(hostile, as_of=T2)
+        self.assertEqual(_HostilePairedVOCEvaluation.payload_hook_calls, 0)
+
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        _HostileDecimal.hook_calls = 0
+        with self.assertRaisesRegex(VOCEvaluationError, "finite Decimal"):
+            evaluation(baseline_utility=_HostileDecimal("1"))
+        self.assertEqual(_HostileDecimal.hook_calls, 0)
+
+    def test_paired_sample_int_subclasses_are_rejected_before_comparison(self):
+        for field, value in (
+            ("paired_sample_count", 20),
+            ("effective_sample_size", 12),
+        ):
+            with self.subTest(field=field):
+                _HostileInt.hook_calls = 0
+                with self.assertRaisesRegex(VOCEvaluationError, "positive integer"):
+                    evaluation(**{field: _HostileInt(value)})
+                self.assertEqual(_HostileInt.hook_calls, 0)
+
+    def test_routing_minimum_ess_int_subclass_is_rejected_before_comparison(self):
+        paired = evaluation()
+        _HostileInt.hook_calls = 0
+        with self.assertRaisesRegex(VOCEvaluationError, "must be positive"):
+            paired.routing_ineligibility_reason(
+                as_of=T2,
+                minimum_effective_sample_size=_HostileInt(8),
+            )
+        self.assertEqual(_HostileInt.hook_calls, 0)
+
+    def test_outcome_score_sample_int_subclasses_are_rejected_before_comparison(self):
+        score = outcome_score(evaluation())
+        for field, value in (
+            ("paired_sample_count", 20),
+            ("effective_sample_size", 12),
+        ):
+            with self.subTest(field=field):
+                _HostileInt.hook_calls = 0
+                with self.assertRaisesRegex(VOCEvaluationError, "positive"):
+                    replace(score, **{field: _HostileInt(value)})
+                self.assertEqual(_HostileInt.hook_calls, 0)
+
     def _production_resolver_fixture(
         self,
         value=None,
@@ -683,6 +855,36 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         resolver.outcome_score_authority = score_authority
         return resolver, paired
 
+    def test_production_resolver_rejects_outcome_score_subclass_before_field_dispatch(self):
+        resolver, paired = self._production_resolver_fixture()
+        hostile = hostile_outcome_score(paired)
+        resolver.outcome_score_authority._records[paired.evaluation_id] = hostile
+
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical outcome-derived VOC score is invalid",
+        ):
+            resolver.resolve(paired, as_of=T2)
+        self.assertEqual(_HostileOutcomeDerivedVOCScore.field_hook_calls, 0)
+        _HostileOutcomeDerivedVOCScore.dispatch_enabled = False
+
+    def test_production_resolver_rejects_episode_score_subclass_before_field_dispatch(self):
+        resolver, paired = self._production_resolver_fixture()
+        canonical_authority = resolver.outcome_score_authority
+        hostile = hostile_outcome_score(paired)
+        resolver.outcome_score_authority = SimpleNamespace(
+            resolve=canonical_authority.resolve,
+            resolve_episode=lambda evaluation_id, *, as_of: hostile,
+        )
+
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical outcome-derived VOC episode score is missing",
+        ):
+            resolver.resolve(paired, as_of=T2)
+        self.assertEqual(_HostileOutcomeDerivedVOCScore.field_hook_calls, 0)
+        _HostileOutcomeDerivedVOCScore.dispatch_enabled = False
+
     def test_production_resolver_binds_decision_protocol_and_outcome_scope(self):
         resolver, paired = self._production_resolver_fixture()
         self.assertEqual(resolver.resolve(paired, as_of=T2), paired)
@@ -870,16 +1072,55 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             self.voc_store.record(evidence.evaluation)
         return evidence
 
-    def canonical_request(self, value, observation, *, context_overrides=None):
+    def canonical_request(
+        self,
+        value,
+        observation,
+        *,
+        policy_value=None,
+        candidate_values=None,
+        context_overrides=None,
+    ):
+        active_policy = policy() if policy_value is None else policy_value
+        active_candidates = (
+            candidates()
+            if candidate_values is None
+            else tuple(candidate_values)
+        )
+        cloud_backend_id = next(
+            (
+                item.backend_id
+                for item in active_candidates
+                if item.candidate_id == value.cloud_candidate_id
+                and item.tier is ComputeTier.CLOUD
+            ),
+            "NONE",
+        )
         context = {
             "request_id": value.request_id,
             "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
+            "data_classification": value.data_classification.value,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
             "regime_id": value.voc_regime_id,
             "urgency_id": value.voc_urgency_id,
             "contradiction_state": value.voc_contradiction_state,
+            "routing_policy_id": active_policy.policy_id,
+            "routing_policy_version": str(active_policy.policy_version),
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    active_policy.payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "cloud_permission": (
+                "ALLOW" if active_policy.cloud_enabled else "DENY"
+            ),
+            "cloud_backend_id": cloud_backend_id,
         }
         if context_overrides:
             context.update(context_overrides)
@@ -905,7 +1146,19 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 and value.decision_evidence_sha256 is not None
                 and isinstance(observation, SportDomainFitnessObservation)
             ):
-                value = self.canonical_request(value, observation)
+                value = self.canonical_request(
+                    value,
+                    observation,
+                    policy_value=(
+                        args[2]
+                        if len(args) > 2
+                        and isinstance(args[2], ComputeRoutingPolicy)
+                        else None
+                    ),
+                    candidate_values=(
+                        args[1] if len(args) > 1 else None
+                    ),
+                )
                 args = (value, *args[1:])
         return route_compute(*args, **kwargs)
 
@@ -927,7 +1180,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("missing canonical VOC authority resolver", decision.reason)
 
-    def test_qualified_paired_evaluation_can_authorize_cloud(self):
+    def test_qualified_paired_evaluation_cannot_bypass_cloud_permission(self):
         resolver, paired = self._production_resolver_fixture()
         production_store = VOCEvaluationStore(
             Path(self._router_tmp.name) / "production-voc.json",
@@ -939,11 +1192,25 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             "request_id": production_request.request_id,
             "decision_input_sha256": production_request.decision_input_sha256,
             "task_class": production_request.required_capability,
+            "data_classification": production_request.data_classification.value,
             "sport_id": "table-tennis",
             "league_id": "league-1",
             "regime_id": production_request.voc_regime_id,
             "urgency_id": production_request.voc_urgency_id,
             "contradiction_state": production_request.voc_contradiction_state,
+            "routing_policy_id": "policy-voc",
+            "routing_policy_version": "1",
+            "routing_policy_sha256": hashlib.sha256(
+                json.dumps(
+                    policy().payload(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "cloud_permission": "ALLOW",
+            "cloud_backend_id": "cloud-backend",
         }
         production_context_record = DecisionRecord(
             replay_run_id="replay-current-voc",
@@ -971,7 +1238,11 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             voc_evaluation_store=production_store,
             domain_observation=slow_observation(),
         )
-        self.assertEqual(decision.tier, ComputeTier.CLOUD)
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn(
+            "product-issued cloud permission authority is unavailable",
+            decision.reason,
+        )
 
     def test_historical_voc_cannot_authorize_its_source_decision(self):
         paired = evaluation()
@@ -1286,6 +1557,36 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 VOCEvaluationError,
                 "state SHA-256 mismatch",
+            ):
+                VOCEvaluationStore(path)
+
+    def test_store_restart_rejects_duplicate_json_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "voc.json"
+            VOCEvaluationStore(path)
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            encoded = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            marker = '"version":3'
+            self.assertIn(marker, encoded)
+            path.write_text(
+                encoded.replace(
+                    marker,
+                    '"version":999,"version":3',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                VOCEvaluationError,
+                "VOC evaluation store is unreadable",
             ):
                 VOCEvaluationStore(path)
 

@@ -273,9 +273,18 @@ def cancel_superseded(
         workflow_name=workflow_name,
         current_run_id=current_run_id,
     )
+    cancelled: list[int] = []
     for run_id in selected:
+        # The PR can move again, including an ABA reset to an older SHA, after the
+        # post-listing check. Re-resolve immediately before every irreversible POST.
+        if api.live_pr_head(pr_number) != live_head_sha:
+            return CancellationResult(
+                current_head=False,
+                cancelled_run_ids=tuple(cancelled),
+            )
         api.cancel(run_id)
-    return CancellationResult(current_head=True, cancelled_run_ids=selected)
+        cancelled.append(run_id)
+    return CancellationResult(current_head=True, cancelled_run_ids=tuple(cancelled))
 
 
 def _write_github_output(result: CancellationResult) -> None:

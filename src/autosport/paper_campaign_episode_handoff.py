@@ -836,15 +836,15 @@ class PaperCampaignEpisodeHandoff:
         changed identity fails closed instead of minting a second child episode.
         """
 
-        if not isinstance(registry, ScientificRegistry):
-            raise TypeError("registry must be ScientificRegistry")
-        if not isinstance(artifact_store, FactoryArtifactStore):
-            raise TypeError("artifact_store must be FactoryArtifactStore")
-        if not isinstance(identity, EnvironmentIdentity):
-            raise TypeError("identity must be EnvironmentIdentity")
-        if not isinstance(admissible_actions, frozenset) or not admissible_actions:
+        if type(registry) is not ScientificRegistry:
+            raise TypeError("registry must be exact ScientificRegistry")
+        if type(artifact_store) is not FactoryArtifactStore:
+            raise TypeError("artifact_store must be exact FactoryArtifactStore")
+        if type(identity) is not EnvironmentIdentity:
+            raise TypeError("identity must be exact EnvironmentIdentity")
+        if type(admissible_actions) is not frozenset or not admissible_actions:
             raise PaperCampaignEpisodeHandoffError(
-                "admissible_actions must be a non-empty frozenset"
+                "admissible_actions must be a non-empty exact frozenset"
             )
         for action in admissible_actions:
             _text(action, "admissible action")

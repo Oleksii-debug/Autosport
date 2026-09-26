@@ -75,7 +75,7 @@ class AnnouncementEvent:
 
     def __post_init__(self) -> None:
         if type(self.kind) is not AnnouncementKind:
-            raise TypeError("kind must be exact AnnouncementKind")
+            raise TypeError("kind must be AnnouncementKind")
         _require_trimmed("text", self.text)
         _require_trimmed("state_token", self.state_token)
 
@@ -112,7 +112,7 @@ class AnnouncementDecision:
         if type(self.emit) is not bool:
             raise TypeError("emit must be bool")
         if type(self.priority) is not AnnouncementPriority:
-            raise TypeError("priority must be exact AnnouncementPriority")
+            raise TypeError("priority must be AnnouncementPriority")
         if type(self.move_focus) is not bool:
             raise TypeError("move_focus must be bool")
         if self.emit:
@@ -147,28 +147,31 @@ class AnnouncementGate:
     to bypass deduplication.
     """
 
-    __slots__ = ("_max_history", "_history", "_issued_for_emission")
+    __slots__ = ("__max_history", "__history", "__issued_for_emission")
 
     def __init__(self, *, max_history: int = 128) -> None:
         if type(max_history) is not int:
-            raise ValueError("max_history must be an exact positive integer")
+            raise ValueError("max_history must be a positive integer")
         if max_history <= 0:
-            raise ValueError("max_history must be an exact positive integer")
-        self._max_history = max_history
-        self._history: OrderedDict[tuple[str, ...], None] = OrderedDict()
-        self._issued_for_emission: OrderedDict[int, AnnouncementDecision] = OrderedDict()
+            raise ValueError("max_history must be a positive integer")
+        object.__setattr__(self, "_AnnouncementGate__max_history", max_history)
+        object.__setattr__(self, "_AnnouncementGate__history", ())
+        object.__setattr__(self, "_AnnouncementGate__issued_for_emission", ())
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("AnnouncementGate state is product-owned and immutable")
 
     @property
     def history_size(self) -> int:
-        return len(self._history)
+        return len(self.__history)
 
     @property
     def max_history(self) -> int:
-        return self._max_history
+        return self.__max_history
 
     def decide(self, event: AnnouncementEvent) -> AnnouncementDecision:
         if type(event) is not AnnouncementEvent:
-            raise TypeError("event must be exact AnnouncementEvent")
+            raise TypeError("event must be AnnouncementEvent")
 
         # Snapshot and revalidate authority-bearing fields at the gate.
         kind = event.kind
@@ -199,11 +202,15 @@ class AnnouncementGate:
             key = ("POLITE", state_token)
             duplicate_reason = "DUPLICATE_STATE_TRANSITION"
 
-        if key in self._history:
-            self._history.move_to_end(key)
+        if key in self.__history:
+            history = tuple(item for item in self.__history if item != key) + (key,)
+            object.__setattr__(self, "_AnnouncementGate__history", history)
             return _suppressed(duplicate_reason)
 
-        self._remember(key)
+        history = self.__history + (key,)
+        if len(history) > self.__max_history:
+            history = history[-self.__max_history :]
+        object.__setattr__(self, "_AnnouncementGate__history", history)
 
         # Deliberately inline construction: no generic module-level mint can
         # manufacture emitter-eligible decisions. Eligibility additionally
@@ -219,7 +226,10 @@ class AnnouncementGate:
         ):
             object.__setattr__(decision, name, value)
         decision.__post_init__()
-        self._remember_issued_for_emission(decision)
+        issued = self.__issued_for_emission + (decision,)
+        if len(issued) > self.__max_history:
+            issued = issued[-self.__max_history :]
+        object.__setattr__(self, "_AnnouncementGate__issued_for_emission", issued)
         return decision
 
     def consume_for_emission(self, decision: AnnouncementDecision) -> AnnouncementDecision:
@@ -227,28 +237,22 @@ class AnnouncementGate:
 
         if type(decision) is not AnnouncementDecision:
             raise TypeError("decision must be exact AnnouncementDecision")
-        registered = self._issued_for_emission.get(id(decision))
-        if registered is not decision:
+        index = next(
+            (i for i, issued in enumerate(self.__issued_for_emission) if issued is decision),
+            None,
+        )
+        if index is None:
             raise ValueError("decision was not issued for emission by this AnnouncementGate")
-        del self._issued_for_emission[id(decision)]
+        remaining = self.__issued_for_emission[:index] + self.__issued_for_emission[index + 1 :]
+        object.__setattr__(self, "_AnnouncementGate__issued_for_emission", remaining)
         return decision
-
-    def _remember(self, key: tuple[str, ...]) -> None:
-        self._history[key] = None
-        while len(self._history) > self._max_history:
-            self._history.popitem(last=False)
-
-    def _remember_issued_for_emission(self, decision: AnnouncementDecision) -> None:
-        self._issued_for_emission[id(decision)] = decision
-        while len(self._issued_for_emission) > self._max_history:
-            self._issued_for_emission.popitem(last=False)
 
 
 def priority_for_kind(kind: AnnouncementKind) -> AnnouncementPriority:
     """Return product-owned priority without allowing caller escalation."""
 
     if type(kind) is not AnnouncementKind:
-        raise TypeError("kind must be exact AnnouncementKind")
+        raise TypeError("kind must be AnnouncementKind")
     return _PRIORITY_BY_KIND[kind]
 
 

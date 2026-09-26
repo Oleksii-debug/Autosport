@@ -326,6 +326,8 @@ def _build_register_evidence_method():
         "datetime": datetime,
         "timezone": timezone,
         "_RESERVED_SPORTS": _RESERVED_SPORTS,
+        "_EVIDENCE_SCHEMA": _EVIDENCE_SCHEMA,
+        "_EVIDENCE_VERSION": _EVIDENCE_VERSION,
     }
     canonical_load = vars(canonical_registry_type)["_load"]
     canonical_persist = vars(canonical_registry_type)["_persist"]
@@ -440,6 +442,8 @@ class ProviderSportMappingRegistry:
     ) -> CanonicalSportResolution:
         if type(self) is not ProviderSportMappingRegistry:
             raise ProviderSportMappingError("canonical provider sport registry type is required")
+        if "_load" in vars(self):
+            raise ProviderSportMappingError("canonical registry load authority changed")
         namespace = _canonical_text("provider_namespace", provider_namespace)
         opaque_id = _opaque_provider_id("provider_sport_id", provider_sport_id)
         instant = _instant("as_of", as_of)

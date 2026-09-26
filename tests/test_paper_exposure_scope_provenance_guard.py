@@ -600,6 +600,43 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 hashlib.sha256(encoded).hexdigest(),
             )
 
+    def test_hidden_require_minted_code_rebinding_cannot_admit_unminted_execution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            minted = _prepared(runtime)
+            unminted = PreparedPaperExecution(
+                execution_plan=minted.execution_plan,
+                exposure_bindings=minted.exposure_bindings,
+                intent_evidence_json=minted.intent_evidence_json,
+            )
+            hidden_matches = [
+                function
+                for function in _reachable_functions(
+                    PaperExecutionAdoptionRuntime._publish_exposure_scope
+                )
+                if function.__name__ == "_require_minted"
+            ]
+            self.assertEqual(len(hidden_matches), 1)
+            hidden_require_minted = hidden_matches[0]
+            original_code = hidden_require_minted.__code__
+
+            def forged_require_minted(_self, _prepared):
+                return None
+
+            hidden_require_minted.__code__ = forged_require_minted.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "prepared-execution verification metadata were rebound",
+                ):
+                    _execute(runtime, unminted)
+            finally:
+                hidden_require_minted.__code__ = original_code
+
+            self.assertEqual(ledger.events(), ())
+
     def test_unminted_prepared_cannot_enter_canonical_execute_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))

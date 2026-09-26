@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import FunctionType
+
 import autosport.product_entrypoint as entry
 
 
@@ -41,3 +43,18 @@ def test_start_failure_type_fails_closed_on_in_place_renderer_code_mutation(monk
     assert exit_code == 3
     assert _SECRET not in output
     assert '"error_type":"Exception"' in output
+
+
+def test_same_code_different_renderer_object_fails_closed(monkeypatch) -> None:
+    canonical = entry._SAFE_EXCEPTION_TYPE_LABEL
+    replacement = FunctionType(
+        canonical.__code__,
+        dict(canonical.__globals__),
+        name="same_code_different_dispatch",
+    )
+    assert replacement is not canonical
+    assert replacement.__code__ is canonical.__code__
+
+    monkeypatch.setattr(entry, "_SAFE_EXCEPTION_TYPE_LABEL", replacement)
+
+    assert entry._canonical_exception_type_label(ValueError("ordinary failure")) == "Exception"

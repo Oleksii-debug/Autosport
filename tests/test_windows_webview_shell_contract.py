@@ -68,7 +68,9 @@ def test_webview_shell_assets_are_packaged_and_edgechromium_is_explicit() -> Non
     assert '"pywebview==6.2.1"' in pyproject
     assert "windows_web/*.html" in pyproject
     assert "--add-data $trustedWebAssetsSpec" in build
-    assert 'webview.start(gui="edgechromium")' in shell_source
+    assert 'required_renderer = "edgechromium"' in shell_source
+    assert "webview.start(" in shell_source
+    assert "gui=required_renderer" in shell_source
 
 
 def test_packaged_interactive_entry_no_longer_imports_legacy_tk_operator_shell() -> None:

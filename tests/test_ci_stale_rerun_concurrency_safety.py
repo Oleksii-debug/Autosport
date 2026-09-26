@@ -30,13 +30,12 @@ def _concurrency_group_expression(workflow_text: str) -> str:
 def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     workflow_path: Path,
 ) -> None:
-    """A later obsolete rerun must never cancel current exact-head qualification.
+    """A later obsolete rerun must never pre-cancel current exact-head qualification.
 
     GitHub evaluates workflow concurrency before job-level admission checks. Therefore a
-    single last-writer-wins PR/ref group with ``cancel-in-progress: true`` is unsafe:
-    manually rerunning an obsolete head after a newer head starts can evict the newer
-    exact-head qualification. Reruns must retain an attempt/head discriminator (or an
-    equivalent head discriminator) while stale-work cleanup is performed asymmetrically.
+    single last-writer-wins PR/ref group with ``cancel-in-progress: true`` is unsafe.
+    Either head/attempt identity or the stronger per-run identity must isolate PR runs
+    until the lightweight live-head admission has executed.
     """
 
     text = workflow_path.read_text(encoding="utf-8")
@@ -45,15 +44,16 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     assert "cancel-in-progress: true" in text
     assert "github.event.pull_request.number" in group or "github.ref" in group
 
-    has_stale_rerun_isolation = any(
+    has_pre_admission_isolation = any(
         token in group
         for token in (
+            "github.run_id",
             "github.run_attempt",
             "github.sha",
             "github.event.pull_request.head.sha",
         )
     )
-    assert has_stale_rerun_isolation, (
+    assert has_pre_admission_isolation, (
         f"{workflow_path} uses a symmetric PR/ref concurrency group: {group!r}; "
-        "a later rerun of an obsolete head could cancel the current exact-head run"
+        "a later obsolete PR event could cancel useful qualification before admission"
     )

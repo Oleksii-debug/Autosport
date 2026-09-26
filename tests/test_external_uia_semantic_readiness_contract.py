@@ -110,9 +110,10 @@ def test_external_uia_button_activation_is_real_and_not_focus_only() -> None:
     helper = script[helper_start:helper_end]
 
     assert "[System.Windows.Automation.InvokePattern]::Pattern" in helper
-    assert "[System.Windows.Automation.LegacyIAccessiblePattern]::Pattern" in helper
-    assert "$legacy.Current.DefaultAction" in helper
-    assert ".DoDefaultAction()" in helper
+    assert "[System.Windows.Automation.AutomationPattern]::LookupById(10018)" in helper
+    assert "[System.Windows.Automation.LegacyIAccessiblePattern]" not in helper
+    assert "$legacyObject.Current.DefaultAction" in helper
+    assert "$action.Pattern.DoDefaultAction()" in helper
     assert "required_pattern = 'Action'" in script
     assert "return $null -ne (Get-ExternalActionPattern -Element $Element)" in helper
 

@@ -646,6 +646,64 @@ class ModelComputeRouterTests(unittest.TestCase):
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("non-public", decision.reason)
 
+    def test_candidate_subclass_cannot_rebind_tier_between_validation_and_build(self):
+        class StatefulCandidate(ComputeCandidate):
+            hook_reads = 0
+            tier_reads = 0
+
+            def __getattribute__(self, name):
+                if name in {
+                    "candidate_id",
+                    "tier",
+                    "backend_id",
+                    "model_id",
+                    "config_sha256",
+                    "capabilities",
+                    "estimated_cost",
+                    "estimated_latency_seconds",
+                }:
+                    cls = type(self)
+                    cls.hook_reads += 1
+                    if name == "tier":
+                        cls.tier_reads += 1
+                        return (
+                            ComputeTier.LOCAL
+                            if cls.tier_reads == 1
+                            else ComputeTier.CLOUD
+                        )
+                return super().__getattribute__(name)
+
+        candidate_value = StatefulCandidate(
+            candidate_id="local",
+            tier=ComputeTier.LOCAL,
+            backend_id="local-cpu",
+            model_id="baseline-v1",
+            config_sha256=SHA_A,
+            capabilities=("forecast",),
+            estimated_cost=Decimal("1"),
+            estimated_latency_seconds=Decimal("2"),
+        )
+        StatefulCandidate.hook_reads = 0
+        StatefulCandidate.tier_reads = 0
+
+        with self.assertRaisesRegex(TypeError, "exact ComputeCandidate"):
+            route_compute(
+                request(
+                    request_id="req-candidate-subclass",
+                    allow_cloud=False,
+                    cloud_candidate_id=None,
+                ),
+                (candidate_value,),
+                ComputeRoutingPolicy(
+                    policy_id="candidate-subclass",
+                    policy_version=1,
+                ),
+                as_of=T1,
+            )
+
+        self.assertEqual(StatefulCandidate.hook_reads, 0)
+        self.assertEqual(StatefulCandidate.tier_reads, 0)
+
     def test_cloud_requires_product_owned_matching_data_classification(self):
         observation = slow_observation()
         evidence = self.qualified_voc(evidence_id="voc-data-classification")

@@ -172,6 +172,42 @@ class ProductDayRiskWindowStoreTests(unittest.TestCase):
         with self.assertRaises(RiskDayWindowIntegrityError):
             self._store().current()
 
+    def test_oversized_durable_state_fails_closed_before_decode(self) -> None:
+        store = self._store()
+        store.current()
+        store.state_path.write_bytes(b"{" + b" " * day_window._MAX_STATE_BYTES)
+
+        with self.assertRaisesRegex(
+            RiskDayWindowIntegrityError,
+            "exceeds bounded durable-state size",
+        ):
+            store.current()
+
+    def test_state_growth_during_read_cannot_escape_bound(self) -> None:
+        store = self._store()
+        store.current()
+        original_read = day_window.os.read
+        calls = 0
+
+        def growing_read(descriptor: int, count: int) -> bytes:
+            nonlocal calls
+            chunk = original_read(descriptor, count)
+            calls += 1
+            if calls == 1:
+                with store.state_path.open("ab") as handle:
+                    handle.write(b"x" * day_window._MAX_STATE_BYTES)
+            return chunk
+
+        day_window.os.read = growing_read
+        try:
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "exceeds bounded durable-state size",
+            ):
+                day_window._read_regular_bytes(store.state_path)
+        finally:
+            day_window.os.read = original_read
+
     def test_value_contract_rejects_caller_narrowed_boundary(self) -> None:
         with self.assertRaises(RiskDayWindowIntegrityError):
             ProductDayRiskWindow(

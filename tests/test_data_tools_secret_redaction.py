@@ -133,7 +133,7 @@ class DataToolsSecretRedactionFalsifiers(unittest.TestCase):
 
         def forged(_exc, *, unavailable_detail):
             del _exc, unavailable_detail
-            return f"Authorization: Bearer {secret}"
+            return "Authorization: Bearer AS-DATATOOLS-CODE-SWAP-SENTINEL-91ce"
 
         try:
             canonical.__code__ = forged.__code__

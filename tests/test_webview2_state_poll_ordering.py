@@ -13,7 +13,9 @@ def _javascript_function_body(source: str, name: str) -> str:
     marker = f"function {name}("
     start = source.find(marker)
     assert start >= 0, f"missing JavaScript function {name}"
-    brace = source.find("{", start)
+    signature_end = source.find(")", start)
+    assert signature_end >= 0
+    brace = source.find("{", signature_end)
     assert brace >= 0
 
     depth = 0

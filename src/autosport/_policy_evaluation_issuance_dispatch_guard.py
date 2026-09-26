@@ -73,6 +73,10 @@ class _DispatchState:
         "_common_guard",
         "_trusted_clock_callable",
         "_code_witnesses",
+        "_transitive_helper_witnesses",
+        "_transitive_global_witnesses",
+        "_hashlib_sha256",
+        "_json_dumps",
         "_sealed",
     )
 
@@ -221,6 +225,49 @@ class _DispatchState:
             ),
         )
 
+        # The exact public/direct helper FunctionTypes above still execute through
+        # external_validity_policy_issuance.__globals__. Seal the transitive
+        # canonicalization and uncertainty helpers that those exact code objects
+        # resolve at runtime; otherwise replacing (for example) _bootstrap_interval
+        # can alter an issued PolicyEvaluation while _derive_policy_evaluation itself
+        # retains the exact witnessed FunctionType and CodeType.
+        transitive_helper_functions = (
+            ("text", "_text", issuance_module._text),
+            ("sha256", "_sha256", issuance_module._sha256),
+            ("instant", "_instant", issuance_module._instant),
+            ("decimal", "_decimal", issuance_module._decimal),
+            ("decimal text", "_decimal_text", issuance_module._decimal_text),
+            ("digest", "_digest", issuance_module._digest),
+            ("bootstrap interval", "_bootstrap_interval", issuance_module._bootstrap_interval),
+        )
+        object.__setattr__(
+            self,
+            "_transitive_helper_witnesses",
+            tuple(
+                (label, name, function, function.__code__)
+                for label, name, function in transitive_helper_functions
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_transitive_global_witnesses",
+            (
+                ("hashlib", issuance_module.hashlib),
+                ("json", issuance_module.json),
+                ("Decimal", issuance_module.Decimal),
+                ("InvalidOperation", issuance_module.InvalidOperation),
+                ("localcontext", issuance_module.localcontext),
+                ("datetime", issuance_module.datetime),
+                ("timezone", issuance_module.timezone),
+                ("EvaluationContractFamily", issuance_module.EvaluationContractFamily),
+                ("_Target", issuance_module._Target),
+                ("_SourceEvaluation", issuance_module._SourceEvaluation),
+                ("_BOOTSTRAP_REPLICATES", issuance_module._BOOTSTRAP_REPLICATES),
+            ),
+        )
+        object.__setattr__(self, "_hashlib_sha256", issuance_module.hashlib.sha256)
+        object.__setattr__(self, "_json_dumps", issuance_module.json.dumps)
+
     def __getattribute__(self, name: str):
         if name.startswith("_DispatchState__original_"):
             raise AttributeError("unguarded predecessor entrypoints are not exposed")
@@ -305,6 +352,29 @@ class _DispatchState:
                     "product PolicyEvaluation issuance authority was rebound: "
                     f"direct helper executable ({label})"
                 )
+        for label, name, function, expected_code in self._transitive_helper_witnesses:
+            if (
+                getattr(issuance_module, name, None) is not function
+                or getattr(function, "__code__", None) is not expected_code
+            ):
+                raise self._error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    f"transitive helper ({label})"
+                )
+        for name, expected in self._transitive_global_witnesses:
+            if getattr(issuance_module, name, None) is not expected:
+                raise self._error_type(
+                    "product PolicyEvaluation issuance authority was rebound: "
+                    f"transitive helper global ({name})"
+                )
+        if (
+            issuance_module.hashlib.sha256 is not self._hashlib_sha256
+            or issuance_module.json.dumps is not self._json_dumps
+        ):
+            raise self._error_type(
+                "product PolicyEvaluation issuance authority was rebound: "
+                "transitive helper module dependency"
+            )
         if (
             issuance_module._open_canonical_authorities is not self._public_open
             or issuance_module.issue_product_policy_evaluation is not self._public_issue

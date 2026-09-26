@@ -377,7 +377,6 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
             ):
                 handoff.committed_children()
 
-
     def test_child_authority_subclasses_are_rejected_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

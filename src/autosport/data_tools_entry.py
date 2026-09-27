@@ -149,7 +149,18 @@ def _install_expected_failure_message():
     canonical_module_builtins = redaction_module.__dict__.get("__builtins__")
     if canonical_module_builtins is None:
         raise RuntimeError("secret redaction builtin dispatch is unavailable")
-    module_builtins_is_dict = type(canonical_module_builtins) is dict
+
+    # These checks are themselves security authority. Capture their interpreter-owned
+    # helpers once so a later module-global shadow cannot give the guard a stale view
+    # while the canonical redactor dispatches through the real mutated objects.
+    exact_dict = dict
+    exact_getattr = getattr
+    exact_isinstance = isinstance
+    exact_sorted = sorted
+    exact_tuple = tuple
+    exact_type = type
+    module_builtins_is_dict = exact_type(canonical_module_builtins) is exact_dict
+
     builtin_names = (
         "BaseException",
         "TypeError",
@@ -157,6 +168,7 @@ def _install_expected_failure_message():
         "any",
         "chr",
         "dict",
+        "enumerate",
         "int",
         "isinstance",
         "len",
@@ -168,8 +180,8 @@ def _install_expected_failure_message():
         "tuple",
         "type",
     )
-    builtin_witnesses = tuple(
-        (name, getattr(canonical_builtins, name)) for name in builtin_names
+    builtin_witnesses = exact_tuple(
+        (name, exact_getattr(canonical_builtins, name)) for name in builtin_names
     )
     callable_names = (
         "redact_operator_text",
@@ -182,8 +194,12 @@ def _install_expected_failure_message():
         "_key_value_match_key",
         "_redact_overlapping_sensitive_key_values",
     )
-    callable_witnesses = tuple(
-        (name, getattr(redaction_module, name), getattr(redaction_module, name).__code__)
+    callable_witnesses = exact_tuple(
+        (
+            name,
+            exact_getattr(redaction_module, name),
+            exact_getattr(redaction_module, name).__code__,
+        )
         for name in callable_names
     )
     object_names = (
@@ -204,10 +220,12 @@ def _install_expected_failure_message():
         "_KEY_SIMPLE_ESCAPE_RE",
         "_KEY_OCTAL_ESCAPE_RE",
     )
-    object_witnesses = tuple(
-        (name, getattr(redaction_module, name)) for name in object_names
+    object_witnesses = exact_tuple(
+        (name, exact_getattr(redaction_module, name)) for name in object_names
     )
-    simple_escape_items = tuple(sorted(redaction_module._KEY_SIMPLE_ESCAPES.items()))
+    simple_escape_items = exact_tuple(
+        exact_sorted(redaction_module._KEY_SIMPLE_ESCAPES.items())
+    )
     canonical_redactor_code = canonical_redactor.__code__
 
     def builtin_dispatch_is_canonical() -> bool:
@@ -224,7 +242,7 @@ def _install_expected_failure_message():
             if module_builtins_is_dict:
                 if canonical_module_builtins.get(name) is not expected:
                     return False
-            elif getattr(canonical_module_builtins, name, None) is not expected:
+            elif exact_getattr(canonical_module_builtins, name, None) is not expected:
                 return False
         return True
 
@@ -232,7 +250,8 @@ def _install_expected_failure_message():
         if (
             _secret_redaction is not redaction_module
             or safe_exception_detail is not canonical_redactor
-            or getattr(canonical_redactor, "__code__", None) is not canonical_redactor_code
+            or exact_getattr(canonical_redactor, "__code__", None)
+            is not canonical_redactor_code
             or redaction_module.os is not canonical_os
             or canonical_os.environ is not canonical_environ
             or redaction_module.re is not canonical_re
@@ -242,18 +261,23 @@ def _install_expected_failure_message():
         ):
             return False
         for name, expected, expected_code in callable_witnesses:
-            current = getattr(redaction_module, name, None)
-            if current is not expected or getattr(expected, "__code__", None) is not expected_code:
+            current = exact_getattr(redaction_module, name, None)
+            if (
+                current is not expected
+                or exact_getattr(expected, "__code__", None) is not expected_code
+            ):
                 return False
         for name, expected in object_witnesses:
-            if getattr(redaction_module, name, None) is not expected:
+            if exact_getattr(redaction_module, name, None) is not expected:
                 return False
-        return tuple(sorted(redaction_module._KEY_SIMPLE_ESCAPES.items())) == simple_escape_items
+        return exact_tuple(
+            exact_sorted(redaction_module._KEY_SIMPLE_ESCAPES.items())
+        ) == simple_escape_items
 
     def expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-        if isinstance(exc, canonical_value_error):
+        if exact_isinstance(exc, canonical_value_error):
             error_label = "ValueError"
-        elif isinstance(exc, canonical_file_not_found_error):
+        elif exact_isinstance(exc, canonical_file_not_found_error):
             error_label = "FileNotFoundError"
         else:
             error_label = "OSError"
@@ -287,6 +311,7 @@ def _install_main():
     canonical_failure_renderer = _expected_failure_message
     canonical_failure_renderer_code = canonical_failure_renderer.__code__
     canonical_expected_failure_types = _EXPECTED_FAILURE_TYPES
+    exact_getattr = getattr
 
     def main(argv: list[str] | None = None) -> int:
         args = list(sys.argv[1:] if argv is None else argv)
@@ -303,7 +328,7 @@ def _install_main():
             # errors or bypass the redaction fences.
             if (
                 _expected_failure_message is canonical_failure_renderer
-                and getattr(canonical_failure_renderer, "__code__", None)
+                and exact_getattr(canonical_failure_renderer, "__code__", None)
                 is canonical_failure_renderer_code
             ):
                 message = canonical_failure_renderer(command, exc)

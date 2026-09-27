@@ -89,26 +89,28 @@ def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
     )
 
 
-def _attempt(*, side: str = "BACK"):
+def _attempt(*, side: str = "BACK", **overrides):
     action = _action()
-    return SimpleNamespace(
-        action_id=action.action_id,
-        attempt_id="side-attempt",
-        run_id="side-run",
-        outcome=PaperAttemptOutcome.ACCEPTED,
-        event_id=action.event_id,
-        market_id=action.market_id,
-        selection_id=action.selection_id,
-        bookmaker_id=action.bookmaker_id,
-        account_id=action.account_id,
-        side=side,
-        execution_odds=Decimal("2.25"),
-        execution_stake=Decimal("10.00"),
-        execution_observed_at=_STARTED_AT,
-        decision_quote_id=action.quote_id,
-        decision_odds=action.requested_odds,
-        requested_stake=action.requested_stake,
-    )
+    values = {
+        "action_id": action.action_id,
+        "attempt_id": "side-attempt",
+        "run_id": "side-run",
+        "outcome": PaperAttemptOutcome.ACCEPTED,
+        "event_id": action.event_id,
+        "market_id": action.market_id,
+        "selection_id": action.selection_id,
+        "bookmaker_id": action.bookmaker_id,
+        "account_id": action.account_id,
+        "side": side,
+        "execution_odds": Decimal("2.25"),
+        "execution_stake": Decimal("10.00"),
+        "execution_observed_at": _STARTED_AT,
+        "decision_quote_id": action.quote_id,
+        "decision_odds": action.requested_odds,
+        "requested_stake": action.requested_stake,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def _runtime(tmp_path: Path, book: PaperBook | None = None):
@@ -166,6 +168,41 @@ def test_attempt_side_must_match_back_action_before_book_mutation(tmp_path: Path
     balance_before = runtime.book.balance
 
     with pytest.raises(PaperExecutionAdoptionError, match="side|BACK"):
+        runtime._materialize_attempt(
+            attempt=attempt,
+            action=action,
+            binding=binding,
+            decision_id="side-decision",
+        )
+
+    assert runtime.book.balance == balance_before
+    assert runtime.book.tickets == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "hostile"),
+    (
+        ("bookmaker_id", "other-venue"),
+        ("account_id", "other-account"),
+        ("event_id", "other-event"),
+        ("market_id", "other-market"),
+        ("selection_id", "other-selection"),
+    ),
+)
+def test_attempt_execution_identity_must_match_prepared_action_before_book_mutation(
+    tmp_path: Path,
+    field: str,
+    hostile: str,
+) -> None:
+    """An action_id alone cannot authorize a different venue/account/selection exposure."""
+
+    _ledger, runtime = _runtime(tmp_path)
+    attempt = _attempt(**{field: hostile})
+    action = _action()
+    binding = _binding()
+    balance_before = runtime.book.balance
+
+    with pytest.raises(PaperExecutionAdoptionError, match="attempt|action|identity"):
         runtime._materialize_attempt(
             attempt=attempt,
             action=action,

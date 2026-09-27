@@ -500,6 +500,122 @@ def _verify_snapshot_witness(snapshot_path: Path, payload: bytes) -> None:
         )
 
 
+def _promote_verified_snapshot(
+    staged_path: str | Path,
+    target_path: str | Path,
+    *,
+    expected_base_sha256: str,
+    expected_new_sha256: str,
+) -> None:
+    """Promote one independently witnessed staged snapshot into canonical authority.
+
+    The target remains on its existing committed generation until PREPARE is durable.
+    Recovery can therefore ABORT before replacement or COMMIT after replacement.
+    """
+
+    staged = _PATH(staged_path)
+    target = _PATH(target_path)
+    expected_base = _require_sha256(expected_base_sha256, "promotion base sha256")
+    expected_new = _require_sha256(expected_new_sha256, "promotion new sha256")
+    if _snapshot_identity(staged) == _snapshot_identity(target):
+        raise ValueError("PaperBook staged and canonical promotion paths must differ")
+
+    target_witness = _witness_path(target)
+    staged_witness = _witness_path(staged)
+    ordered_witnesses = sorted(
+        (target_witness, staged_witness),
+        key=lambda path: os.path.normcase(os.path.abspath(os.fspath(path))),
+    )
+    locks: list[object] = []
+    temporary: Path | None = None
+    try:
+        for witness in ordered_witnesses:
+            locks.append(_acquire_snapshot_publication_lock(witness))
+
+        current_sha = _file_sha256(target)
+        target_records, committed = _recover_pending(
+            target,
+            current_sha256=current_sha,
+        )
+        current_sha = _file_sha256(target)
+
+        if current_sha == expected_new:
+            if committed is None or committed[1] != expected_new:
+                raise ValueError(
+                    "PaperBook canonical NEW bytes lack matching durable authority"
+                )
+            return
+
+        if current_sha != expected_base:
+            raise ValueError("PaperBook canonical promotion source is neither BASE nor NEW")
+        if committed is None or committed[1] != expected_base:
+            raise ValueError("PaperBook canonical BASE lacks matching durable authority")
+
+        try:
+            staged_payload = staged.read_bytes()
+        except OSError as exc:
+            raise ValueError("PaperBook staged promotion snapshot is unreadable") from exc
+        if _sha256(staged_payload) != expected_new:
+            raise ValueError("PaperBook staged promotion snapshot hash mismatch")
+        _verify_snapshot_witness(staged, staged_payload)
+
+        records_now, committed_now, pending_now = _read_witnesses(target)
+        if pending_now is not None:
+            raise ValueError("PaperBook canonical witness changed during promotion")
+        if committed_now != committed or _LEN(records_now) != _LEN(target_records):
+            raise ValueError("PaperBook canonical witness changed during promotion")
+        if _file_sha256(target) != expected_base:
+            raise ValueError("PaperBook canonical BASE changed during promotion")
+        if _file_sha256(staged) != expected_new:
+            raise ValueError("PaperBook staged snapshot changed during promotion")
+
+        fd, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.promote-authority-",
+            suffix=".tmp",
+        )
+        os.close(fd)
+        temporary = _PATH(temporary_name)
+        with temporary.open("wb") as handle:
+            handle.write(staged_payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if _file_sha256(temporary) != expected_new:
+            raise ValueError("PaperBook promotion copy hash mismatch")
+        if _file_sha256(staged) != expected_new:
+            raise ValueError("PaperBook staged snapshot changed before promotion")
+
+        generation = _INT_TYPE(target_records[-1]["generation"]) + 1
+        _append_witness(
+            target,
+            event=_PREPARE,
+            generation=generation,
+            snapshot_sha256=expected_new,
+        )
+        _OS_REPLACE(temporary, target)
+        temporary = None
+        if os.name != "nt":
+            _sync_authority_directory(target.parent)
+        _append_witness(
+            target,
+            event=_COMMIT,
+            generation=generation,
+            snapshot_sha256=expected_new,
+        )
+        if _file_sha256(target) != expected_new:
+            raise ValueError("PaperBook canonical promotion bytes changed after COMMIT")
+        _verify_snapshot_witness(target, target.read_bytes())
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        for lock in reversed(locks):
+            _release_snapshot_publication_lock(lock)
+
+
 def _trusted_path_load(cls, path: str | Path):
     """Load only bytes admitted by the independent durable snapshot witness."""
 

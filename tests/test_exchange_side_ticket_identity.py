@@ -244,9 +244,16 @@ def test_paperbook_save_and_load_fail_closed_on_lay_materialization(tmp_path) ->
 
     payload = json.loads(durable_before.decode("utf-8"))
     payload["tickets"][0]["legs"][0]["exchange_side"] = "lay"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="LAY economic materialization"):
+    forged = json.dumps(payload).encode("utf-8")
+    path.write_bytes(forged)
+
+    # Trusted path admission rejects the changed byte image before it can become
+    # authority. Structural parsing independently retains the domain-specific LAY
+    # rejection, so the witness does not mask parser correctness.
+    with pytest.raises(ValueError, match="independent durable opening witness"):
         PaperBook.load(path)
+    with pytest.raises(ValueError, match="LAY economic materialization"):
+        PaperBook.load_bytes(forged)
 
 
 def test_schema6_snapshot_keeps_sport_and_upgrades_legacy_no_side_to_none(tmp_path) -> None:
@@ -259,9 +266,10 @@ def test_schema6_snapshot_keeps_sport_and_upgrades_legacy_no_side_to_none(tmp_pa
     payload["schema_version"] = 6
     for item in payload["tickets"][0]["legs"]:
         item.pop("exchange_side")
-    path.write_text(json.dumps(payload), encoding="utf-8")
 
-    restored = PaperBook.load(path)
+    # Schema migration compatibility is a structural-parser contract. Manually
+    # rewritten bytes are intentionally not trusted path authority.
+    restored = PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
     restored_leg = next(iter(restored.tickets.values())).legs[0]
     assert restored_leg.sport == "soccer"
     assert restored_leg.exchange_side is None
@@ -275,10 +283,9 @@ def test_schema7_requires_explicit_exchange_side_field_even_when_none(tmp_path) 
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["tickets"][0]["legs"][0].pop("exchange_side")
-    path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="exchange_side"):
-        PaperBook.load(path)
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
 
 
 @pytest.mark.parametrize("side", ["BACK", "Lay", "back ", "", "buy"])

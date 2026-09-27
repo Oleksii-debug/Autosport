@@ -143,6 +143,11 @@ _install()
 # PAPER execution durability composition rather than inventing a parallel runtime.
 from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: E402,F401
 
+# Freeze mutable stdlib member dispatch used inside the owning witness protocol before
+# its Python function graph is cloned. This prevents later json/hash/os/tempfile member
+# rebinding from retargeting the otherwise-frozen positive persistence path.
+from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: E402,F401
+
 # Freeze the owning guard's positive load and durable-save dispatch graph after the
 # witness protocol is installed. This preserves one parser/serializer/authority while
 # making later guard-module or PaperBook helper retargeting non-authoritative.

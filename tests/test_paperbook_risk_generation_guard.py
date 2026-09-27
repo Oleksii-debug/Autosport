@@ -152,6 +152,26 @@ def test_owner_facing_evaluate_holds_one_generation_and_denies_writer_conflict(
     assert blocked.reason == "virtual bankroll generation authority is invalid"
 
 
+def test_allocation_shadow_reinstalls_private_paperbook_authority() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg("existing")], "10", placed_at=_TS)
+
+    shadow = PaperRiskPolicy._shadow_book_for_allocation(book)
+
+    assert shadow is not None
+    assert shadow is not book
+    assert shadow.committed_stake == Decimal("10")
+    shadow.open_ticket(
+        [_leg("shadow-only")],
+        "5",
+        placed_at="2026-09-27T19:40:02+00:00",
+    )
+    assert shadow.committed_stake == Decimal("15")
+    assert book.committed_stake == Decimal("10")
+    assert len(book.tickets) == 1
+    assert len(shadow.tickets) == 2
+
+
 def test_concentration_generation_guard_is_reentrant_and_authority_failure_is_denial(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

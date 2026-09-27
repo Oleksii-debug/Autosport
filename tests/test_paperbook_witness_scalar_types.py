@@ -89,3 +89,38 @@ def test_witness_sequence_rejects_json_float_integer_alias(
 
     with pytest.raises(ValueError, match="sequence"):
         PaperBook.load(path)
+
+
+def test_witness_schema_exact_type_ignores_self_restoring_builtin_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path, witness = _saved_book(tmp_path)
+    _rewrite_valid_chain(
+        witness,
+        lambda _index, record: record.__setitem__("witness_schema_version", True),
+    )
+
+    load_descriptor = vars(PaperBook)["load"]
+    assert type(load_descriptor) is classmethod
+    guarded_load = load_descriptor.__func__
+    builtins_map = guarded_load.__builtins__
+    original_type = builtins_map["type"]
+    bypass_attempted = False
+
+    def hostile_type(value):
+        nonlocal bypass_attempted
+        if value is True:
+            bypass_attempted = True
+            builtins_map["type"] = original_type
+            return int
+        return original_type(value)
+
+    builtins_map["type"] = hostile_type
+    try:
+        with pytest.raises(ValueError, match="schema"):
+            PaperBook.load(path)
+    finally:
+        builtins_map["type"] = original_type
+
+    assert bypass_attempted is False

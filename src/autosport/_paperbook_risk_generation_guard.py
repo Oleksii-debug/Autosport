@@ -35,9 +35,9 @@ def _descriptor_function(descriptor: object, expected_type: type) -> FunctionTyp
 def _guarded_risk_call(book, delegate, args, kwargs):
     """Run one risk derivation against a generation-stable canonical PaperBook."""
 
-    snapshot_path = _FROZEN_BOUND_SNAPSHOT_PATH(book)
     publication_lock = None
     try:
+        snapshot_path = _FROZEN_BOUND_SNAPSHOT_PATH(book)
         if snapshot_path is not None:
             publication_lock = _FROZEN_ACQUIRE_LOCK(_FROZEN_WITNESS_PATH(snapshot_path))
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)

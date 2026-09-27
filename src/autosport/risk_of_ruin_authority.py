@@ -291,14 +291,22 @@ def _product_result_matches_evidence(
     return False
 
 
-def _verify_risk_of_ruin_authority_impl(
+def verify_risk_of_ruin_authority(
     registry_path: str | Path | None,
     evidence: object,
     *,
     kind: str,
     available_by: str,
-    product_evaluator_resolver,
 ) -> tuple[bool, str]:
+    """Validate durable evidence but never mint missing positive product authority.
+
+    The product evaluator bridge is intentionally not an executable capability of
+    this public verifier.  Until a separate product-owned issuer is implemented,
+    durable scientific rows remain assertion-only and the authority boundary must
+    end fail-closed.  Keeping this function closure-free also prevents callers from
+    replacing a captured resolver through writable Python closure cells.
+    """
+
     prefix = "portfolio" if kind == "single" else "portfolio vector"
     if registry_path is None:
         return False, f"{prefix} risk-of-ruin evidence lacks product-issued durable authority"
@@ -384,69 +392,4 @@ def _verify_risk_of_ruin_authority_impl(
     ):
         return False, f"{prefix} risk-of-ruin durable authority is invalid"
 
-    try:
-        product_result = product_evaluator_resolver(
-            resolved_registry_path.parent,
-            getattr(evidence, "evidence_id"),
-        )
-    except (AttributeError, OSError, TypeError, ValueError, RiskOfRuinIssuanceError):
-        return False, f"{prefix} risk-of-ruin evidence lacks canonical product-issued evaluator authority"
-
-    try:
-        matches = _product_result_matches_evidence(
-            product_result,
-            evidence,
-            kind=kind,
-            available_by=available_by,
-            evaluation_available_at=entry.available_at,
-            dataset_snapshot_id=dataset_id,
-            dataset_manifest_sha256=manifest_sha256,
-            evaluator_source_sha256=evaluator_source_sha256,
-            effective_sample_size=effective_sample_size,
-        )
-    except (AttributeError, ArithmeticError, TypeError, ValueError):
-        matches = False
-    if not matches:
-        return False, f"{prefix} risk-of-ruin product evaluator result does not match exact policy evidence"
-    return True, f"{prefix} risk-of-ruin product evaluator authority verified"
-
-
-def _bind_public_verifier(verifier_impl, product_evaluator_resolver):
-    verifier_impl_code = verifier_impl.__code__
-    resolver_code = product_evaluator_resolver.__code__
-
-    def verify_risk_of_ruin_authority(
-        registry_path: str | Path | None,
-        evidence: object,
-        *,
-        kind: str,
-        available_by: str,
-    ) -> tuple[bool, str]:
-        prefix = "portfolio" if kind == "single" else "portfolio vector"
-        if (
-            verifier_impl.__code__ is not verifier_impl_code
-            or product_evaluator_resolver.__code__ is not resolver_code
-        ):
-            return False, f"{prefix} risk-of-ruin product evaluator executable authority changed"
-        result = verifier_impl(
-            registry_path,
-            evidence,
-            kind=kind,
-            available_by=available_by,
-            product_evaluator_resolver=product_evaluator_resolver,
-        )
-        if (
-            verifier_impl.__code__ is not verifier_impl_code
-            or product_evaluator_resolver.__code__ is not resolver_code
-        ):
-            return False, f"{prefix} risk-of-ruin product evaluator executable authority changed"
-        return result
-
-    return verify_risk_of_ruin_authority
-
-
-verify_risk_of_ruin_authority = _bind_public_verifier(
-    _verify_risk_of_ruin_authority_impl,
-    _resolve_product_evaluator_result,
-)
-del _bind_public_verifier
+    return False, f"{prefix} risk-of-ruin evidence lacks canonical product-issued evaluator authority"

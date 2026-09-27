@@ -1,11 +1,12 @@
-"""Freeze the existing PaperBook positive-load guard dispatch graph.
+"""Freeze the existing PaperBook positive persistence dispatch graph.
 
 The owning preload authority guard remains the only witness protocol and the canonical
-PaperBook parser remains the only structural parser. This composition step snapshots
-that guard's local function graph into one closure-private globals mapping before any
-positive path load can be used. Later module-global rebinding therefore cannot redirect
-witness verification, recovery, authority installation, or path binding while keeping
-the same public ``PaperBook.load`` surface.
+PaperBook parser/serializer remains the only structural persistence authority. This
+composition step snapshots that guard's local function graph into one closure-private
+globals mapping before positive path load or durable save can be used. Later
+module-global rebinding therefore cannot redirect witness verification, recovery,
+authority installation, path binding, candidate hashing, witness publication, or
+atomic replacement while keeping the same public ``PaperBook`` surfaces.
 """
 
 from __future__ import annotations
@@ -80,10 +81,10 @@ def _clone_module_function_graph(function: FunctionType) -> FunctionType:
 
 
 def _capture_delegate_graph(delegate: object) -> tuple[object, ...]:
-    """Capture the semantic closure/global edges used by one positive-load delegate."""
+    """Capture the semantic closure/global edges used by one persistence delegate."""
 
     if type(delegate) is not FunctionType:
-        raise RuntimeError("canonical PaperBook preload delegate is not a Python function")
+        raise RuntimeError("canonical PaperBook persistence delegate is not a Python function")
     closure = delegate.__closure__
     closure_values = () if closure is None else tuple(cell.cell_contents for cell in closure)
     global_witnesses: list[tuple[str, object, object | None]] = []
@@ -104,7 +105,7 @@ def _capture_delegate_graph(delegate: object) -> tuple[object, ...]:
 
 
 def _require_delegate_graph_witnesses(witnesses: tuple[tuple[object, ...], ...]) -> None:
-    """Reject retargeting before any positive parser/registry dispatch can execute."""
+    """Reject retargeting before any positive persistence delegate can execute."""
 
     for witness in witnesses:
         delegate, code, globals_mapping, closure, closure_values, globals_witnesses = witness
@@ -114,30 +115,30 @@ def _require_delegate_graph_witnesses(witnesses: tuple[tuple[object, ...], ...])
             or delegate.__globals__ is not globals_mapping
             or delegate.__closure__ != closure
         ):
-            raise ValueError("PaperBook positive-load delegate executable authority changed")
+            raise ValueError("PaperBook persistence delegate executable authority changed")
         current_closure = delegate.__closure__
         if current_closure is None:
             if closure_values:
-                raise ValueError("PaperBook positive-load delegate closure authority changed")
+                raise ValueError("PaperBook persistence delegate closure authority changed")
         else:
             if len(current_closure) != len(closure_values):
-                raise ValueError("PaperBook positive-load delegate closure authority changed")
+                raise ValueError("PaperBook persistence delegate closure authority changed")
             for cell, expected in zip(current_closure, closure_values):
                 try:
                     current = cell.cell_contents
                 except ValueError as exc:
                     raise ValueError(
-                        "PaperBook positive-load delegate closure authority changed"
+                        "PaperBook persistence delegate closure authority changed"
                     ) from exc
                 if current is not expected:
-                    raise ValueError("PaperBook positive-load delegate closure authority changed")
+                    raise ValueError("PaperBook persistence delegate closure authority changed")
         for name, expected, expected_code in globals_witnesses:
             if globals_mapping.get(name) is not expected:
-                raise ValueError("PaperBook positive-load delegate global authority changed")
+                raise ValueError("PaperBook persistence delegate global authority changed")
             if expected_code is not None and (
                 type(expected) is not FunctionType or expected.__code__ is not expected_code
             ):
-                raise ValueError("PaperBook positive-load delegate global executable changed")
+                raise ValueError("PaperBook persistence delegate global executable changed")
 
 
 def _descriptor_function(descriptor: object) -> FunctionType | None:
@@ -179,22 +180,13 @@ def _capture_class_callable_graph(
     owner: type,
     roots: tuple[FunctionType, ...],
 ) -> tuple[tuple[object, ...], ...]:
-    """Capture class-dispatched callables reachable from trusted parser roots.
-
-    ``PaperBook.load_bytes`` is itself witnessed, but its bytecode deliberately calls
-    ``cls._from_raw_snapshot``. Without witnessing that descriptor (and the class
-    helpers it dispatches to), an attacker can retarget the parser after the direct
-    delegate witness was captured while leaving ``load_bytes`` itself byte-identical.
-    """
+    """Capture class-dispatched callables reachable from trusted parser roots."""
 
     namespace = vars(owner)
     root_set = set(roots)
     seen: set[FunctionType] = set()
     pending: list[FunctionType] = []
     witnesses: list[tuple[object, ...]] = []
-
-    # Roots include ``load_bytes`` and ``__init__``. The latter is invoked through
-    # ``cls(...)`` rather than a co_name, so it must be an explicit graph root.
     for name, descriptor in namespace.items():
         function = _descriptor_function(descriptor)
         if function is None or function not in root_set or function in seen:
@@ -202,10 +194,31 @@ def _capture_class_callable_graph(
         seen.add(function)
         pending.append(function)
         witnesses.append(_capture_class_callable_witness(name, descriptor, function))
-
     if not root_set.issubset(seen):
         raise RuntimeError("canonical PaperBook parser graph root is unavailable")
+    while pending:
+        function = pending.pop()
+        for name in function.__code__.co_names:
+            descriptor = namespace.get(name, _EMPTY_CELL)
+            nested = _descriptor_function(descriptor)
+            if nested is None or nested in seen:
+                continue
+            seen.add(nested)
+            pending.append(nested)
+            witnesses.append(_capture_class_callable_witness(name, descriptor, nested))
+    return tuple(witnesses)
 
+
+def _capture_class_dispatch_graph(
+    owner: type,
+    roots: tuple[FunctionType, ...],
+) -> tuple[tuple[object, ...], ...]:
+    """Capture live class descriptors reached by detached canonical delegates."""
+
+    namespace = vars(owner)
+    seen: set[FunctionType] = set(roots)
+    pending: list[FunctionType] = list(roots)
+    witnesses: list[tuple[object, ...]] = []
     while pending:
         function = pending.pop()
         for name in function.__code__.co_names:
@@ -222,7 +235,7 @@ def _capture_class_callable_graph(
 def _capture_value_type_callable_witnesses(
     owner: type,
 ) -> tuple[tuple[object, ...], ...]:
-    """Capture every executable descriptor on one parser-constructed value type."""
+    """Capture every executable descriptor on one persistence-constructed value type."""
 
     witnesses: list[tuple[object, ...]] = []
     for name, descriptor in vars(owner).items():
@@ -250,7 +263,7 @@ def _require_class_callable_graph_witnesses(
             global_witnesses,
         ) = witness
         if namespace.get(name, _EMPTY_CELL) is not descriptor:
-            raise ValueError("PaperBook positive-load class dispatch authority changed")
+            raise ValueError("PaperBook persistence class dispatch authority changed")
         current_function = _descriptor_function(descriptor)
         if (
             current_function is not function
@@ -258,15 +271,15 @@ def _require_class_callable_graph_witnesses(
             or function.__globals__ is not globals_mapping
             or not _same_identity_values(_closure_values(function), closure_values)
         ):
-            raise ValueError("PaperBook positive-load class executable authority changed")
+            raise ValueError("PaperBook persistence class executable authority changed")
         for global_name, expected, expected_code, expected_closure in global_witnesses:
             if globals_mapping.get(global_name, _EMPTY_CELL) is not expected:
-                raise ValueError("PaperBook positive-load class global authority changed")
+                raise ValueError("PaperBook persistence class global authority changed")
             if expected_code is not None:
                 if type(expected) is not FunctionType or expected.__code__ is not expected_code:
-                    raise ValueError("PaperBook positive-load class global executable changed")
+                    raise ValueError("PaperBook persistence class global executable changed")
                 if not _same_identity_values(_closure_values(expected), expected_closure):
-                    raise ValueError("PaperBook positive-load class global closure authority changed")
+                    raise ValueError("PaperBook persistence class global closure authority changed")
 
 
 def _require_value_type_callable_witnesses(
@@ -277,19 +290,36 @@ def _require_value_type_callable_witnesses(
 
 
 def _guarded_load_template(cls, path):
-    _require_delegate_graph_witnesses(_DELEGATE_GRAPH_WITNESSES)
+    _require_delegate_graph_witnesses(_LOAD_DELEGATE_GRAPH_WITNESSES)
     _require_class_callable_graph_witnesses(
         _CANONICAL_PAPER_BOOK,
-        _CLASS_CALLABLE_GRAPH_WITNESSES,
+        _LOAD_CLASS_CALLABLE_GRAPH_WITNESSES,
     )
     _require_value_type_callable_witnesses(_VALUE_TYPE_CALLABLE_WITNESSES)
     result = _FROZEN_LOAD(cls, path)
     _require_value_type_callable_witnesses(_VALUE_TYPE_CALLABLE_WITNESSES)
     _require_class_callable_graph_witnesses(
         _CANONICAL_PAPER_BOOK,
-        _CLASS_CALLABLE_GRAPH_WITNESSES,
+        _LOAD_CLASS_CALLABLE_GRAPH_WITNESSES,
     )
-    _require_delegate_graph_witnesses(_DELEGATE_GRAPH_WITNESSES)
+    _require_delegate_graph_witnesses(_LOAD_DELEGATE_GRAPH_WITNESSES)
+    return result
+
+
+def _guarded_save_template(self, path):
+    _require_delegate_graph_witnesses(_SAVE_DELEGATE_GRAPH_WITNESSES)
+    _require_class_callable_graph_witnesses(
+        _CANONICAL_PAPER_BOOK,
+        _SAVE_CLASS_CALLABLE_GRAPH_WITNESSES,
+    )
+    _require_value_type_callable_witnesses(_VALUE_TYPE_CALLABLE_WITNESSES)
+    result = _FROZEN_SAVE(self, path)
+    _require_value_type_callable_witnesses(_VALUE_TYPE_CALLABLE_WITNESSES)
+    _require_class_callable_graph_witnesses(
+        _CANONICAL_PAPER_BOOK,
+        _SAVE_CLASS_CALLABLE_GRAPH_WITNESSES,
+    )
+    _require_delegate_graph_witnesses(_SAVE_DELEGATE_GRAPH_WITNESSES)
     return result
 
 
@@ -297,31 +327,26 @@ def _install() -> None:
     paper_book = _paper.PaperBook
     class_namespace = vars(paper_book)
     load_descriptor = class_namespace.get("load")
+    save_descriptor = class_namespace.get("save")
     if type(load_descriptor) is not classmethod:
         raise RuntimeError("canonical PaperBook positive path load must remain a classmethod")
+    if type(save_descriptor) is not FunctionType:
+        raise RuntimeError("canonical PaperBook durable save must remain a Python function")
 
     original_load = load_descriptor.__func__
     guard_namespace = _guard.__dict__
     if original_load is not guard_namespace.get("_trusted_path_load"):
         raise RuntimeError("canonical PaperBook positive path load authority changed")
+    if save_descriptor is not guard_namespace.get("_trusted_save"):
+        raise RuntimeError("canonical PaperBook durable save authority changed")
     if type(original_load) is not FunctionType:
         raise RuntimeError("canonical PaperBook positive path load must be a Python function")
 
-    # `_paper_authority_root` is imported into the owning guard from the canonical
-    # anti-rollback module. Copying that function object alone would still allow an
-    # in-place `__code__` replacement to redirect witness lookup while preserving
-    # identity. Freeze its module-local executable graph first, preserving the same
-    # canonical root policy without creating another root selector or store.
     root_selector = guard_namespace.get("_paper_authority_root")
     if type(root_selector) is not FunctionType:
         raise RuntimeError("canonical independent PaperBook authority root changed")
     frozen_root_selector = _clone_module_function_graph(root_selector)
 
-    # Copy the owning guard namespace once, substitute the sealed external root
-    # selector, then replace every function defined by the preload guard with an
-    # exact-code clone whose globals point back to this private mapping. The graph
-    # remains the same implementation and state objects, but local helper dispatch
-    # no longer consults caller-mutable module dictionaries/function objects.
     trusted_globals: dict[str, object] = dict(guard_namespace)
     trusted_globals["_paper_authority_root"] = frozen_root_selector
     clones: dict[str, FunctionType] = {}
@@ -331,44 +356,52 @@ def _install() -> None:
     trusted_globals.update(clones)
 
     frozen_load = clones.get("_trusted_path_load")
-    if frozen_load is None:
-        raise RuntimeError("canonical PaperBook positive path load clone is unavailable")
+    frozen_save = clones.get("_trusted_save")
+    if frozen_load is None or frozen_save is None:
+        raise RuntimeError("canonical PaperBook persistence clone is unavailable")
 
-    # Capture semantic edges of each direct delegate used after witness verification.
-    delegate_names = (
+    load_delegate_names = (
         "_LOAD_BYTES",
         "_REGISTER_OPENING",
         "_REGISTER_CAUSAL",
         "_INSTALL_OPENING",
         "_INSTALL_CAUSAL",
     )
-    delegate_witnesses: list[tuple[object, ...]] = []
-    for name in delegate_names:
-        delegate_witnesses.append(_capture_delegate_graph(guard_namespace.get(name)))
+    load_delegate_witnesses = tuple(
+        _capture_delegate_graph(guard_namespace.get(name)) for name in load_delegate_names
+    )
+    original_save = guard_namespace.get("_ORIGINAL_SAVE")
+    if type(original_save) is not FunctionType:
+        raise RuntimeError("canonical PaperBook serializer authority changed")
+    save_delegate_witnesses = (_capture_delegate_graph(original_save),)
 
     load_bytes = guard_namespace.get("_LOAD_BYTES")
     init_descriptor = class_namespace.get("__init__")
     init_function = _descriptor_function(init_descriptor)
     if type(load_bytes) is not FunctionType or init_function is None:
         raise RuntimeError("canonical PaperBook parser class graph is unavailable")
-    class_callable_witnesses = _capture_class_callable_graph(
+    load_class_callable_witnesses = _capture_class_callable_graph(
         paper_book,
         (load_bytes, init_function),
     )
+    save_class_callable_witnesses = _capture_class_dispatch_graph(
+        paper_book,
+        (original_save,),
+    )
     value_type_callable_witnesses = tuple(
-        (
-            owner,
-            _capture_value_type_callable_witnesses(owner),
-        )
+        (owner, _capture_value_type_callable_witnesses(owner))
         for owner in (_paper.TicketLeg, _paper.PaperTicket)
     )
 
     wrapper_globals: dict[str, object] = dict(globals())
-    wrapper_globals["_DELEGATE_GRAPH_WITNESSES"] = tuple(delegate_witnesses)
-    wrapper_globals["_CLASS_CALLABLE_GRAPH_WITNESSES"] = class_callable_witnesses
+    wrapper_globals["_LOAD_DELEGATE_GRAPH_WITNESSES"] = load_delegate_witnesses
+    wrapper_globals["_SAVE_DELEGATE_GRAPH_WITNESSES"] = save_delegate_witnesses
+    wrapper_globals["_LOAD_CLASS_CALLABLE_GRAPH_WITNESSES"] = load_class_callable_witnesses
+    wrapper_globals["_SAVE_CLASS_CALLABLE_GRAPH_WITNESSES"] = save_class_callable_witnesses
     wrapper_globals["_VALUE_TYPE_CALLABLE_WITNESSES"] = value_type_callable_witnesses
     wrapper_globals["_CANONICAL_PAPER_BOOK"] = paper_book
     wrapper_globals["_FROZEN_LOAD"] = frozen_load
+    wrapper_globals["_FROZEN_SAVE"] = frozen_save
     wrapper_globals["_require_delegate_graph_witnesses"] = _clone_local_function(
         _require_delegate_graph_witnesses,
         trusted_globals=wrapper_globals,
@@ -387,19 +420,25 @@ def _install() -> None:
     )
     guarded_load.__name__ = "load"
     guarded_load.__qualname__ = "PaperBook.load"
+    guarded_save = _clone_local_function(
+        _guarded_save_template,
+        trusted_globals=wrapper_globals,
+    )
+    guarded_save.__name__ = "save"
+    guarded_save.__qualname__ = "PaperBook.save"
 
-    # This replaces only dispatch of the already-defined positive path-load authority.
-    # Save/publication continues to use the owning preload guard unchanged, including
-    # its existing crash-injection tests and PREPARE/COMMIT/ABORT witness protocol.
     paper_book.load = classmethod(guarded_load)
+    paper_book.save = guarded_save
 
 
 _install()
 del _install
+del _guarded_save_template
 del _guarded_load_template
 del _require_value_type_callable_witnesses
 del _require_class_callable_graph_witnesses
 del _capture_value_type_callable_witnesses
+del _capture_class_dispatch_graph
 del _capture_class_callable_graph
 del _capture_class_callable_witness
 del _descriptor_function

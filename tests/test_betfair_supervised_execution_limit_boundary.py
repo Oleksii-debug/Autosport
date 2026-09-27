@@ -119,3 +119,17 @@ def test_matched_back_limit_at_requested_odds_remains_exactly_parseable() -> Non
     )
     assert report.instruction.average_price_matched == Decimal("2.00")
     assert report.instruction.size_matched == Decimal("10.00")
+
+
+def test_matched_back_limit_better_than_requested_odds_remains_parseable() -> None:
+    action = _action()
+    report = _parse_place_orders_response(
+        _response(action, average="2.04"),
+        request_id=1,
+        request_sha256="a" * 64,
+        action=action,
+        provider_order_ref="0123",
+        observed_at=OBSERVED_AT,
+    )
+    assert report.instruction.average_price_matched == Decimal("2.04")
+    assert report.instruction.size_matched == Decimal("10.00")

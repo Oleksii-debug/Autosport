@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -9,28 +8,18 @@ import pytest
 import autosport.provider_sport_mapping as mapping
 
 
-def _evidence(provider_sport_id: str = "1") -> bytes:
-    return json.dumps(
-        {
-            "schema": "autosport.provider_sport_mapping_evidence",
-            "schema_version": 1,
-            "provider_namespace": "betfair",
-            "provider_sport_id": provider_sport_id,
-            "canonical_sport": "football",
-            "valid_from": "2026-01-01T00:00:00Z",
-            "valid_until": None,
-            "evidence_available_at": "2026-01-02T00:00:00Z",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+def _publish_curated(registry: mapping.ProviderSportMappingRegistry) -> None:
+    registry.register_curated(
+        provider_namespace="betfair",
+        provider_sport_id="1",
+    )
 
 
 def test_resolve_rejects_rebound_persisted_binding_decoder(monkeypatch):
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "sport-map.json"
         registry = mapping.ProviderSportMappingRegistry.initialize_pristine(path)
-        registry.register_evidence(_evidence("legitimate"))
+        _publish_curated(registry)
 
         original_descriptor = vars(mapping.ProviderSportBinding)["from_payload"]
 
@@ -66,7 +55,7 @@ def test_resolve_rejects_in_place_registry_load_code_swap(monkeypatch):
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "sport-map.json"
         registry = mapping.ProviderSportMappingRegistry.initialize_pristine(path)
-        registry.register_evidence(_evidence("legitimate"))
+        _publish_curated(registry)
         canonical_load = mapping.ProviderSportMappingRegistry._load
 
         def forged_load(self) -> None:

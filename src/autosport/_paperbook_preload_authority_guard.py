@@ -599,7 +599,7 @@ def _trusted_save(self, path: str | Path) -> None:
             if _file_sha256(destination) != current_sha:
                 raise ValueError("PaperBook snapshot changed during save")
 
-            generation = 1 if not records_now else int(records_now[-1]["generation"]) + 1
+            generation = 1 if not records_now else _INT_TYPE(records_now[-1]["generation"]) + 1
             # Bind only once the canonical candidate exists and the target lineage is
             # stable. A root/path change on later saves is then mechanically rejected.
             _bind_book(self, destination)

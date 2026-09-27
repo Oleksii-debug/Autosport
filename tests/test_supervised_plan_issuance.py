@@ -267,9 +267,14 @@ def test_product_verifier_reloads_issuance_instead_of_accepting_caller_bound(
 
     assert verified is not evidence
     assert verified.evidence_id == evidence.evidence_id
-    assert verified.status is BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY
-    assert verified.matchme_applicability_proven is False
-    assert verified.zero_adverse_price_deterioration is False
+    assert (
+        verified.status
+        is BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
+    )
+    assert verified.matchme_applicability_proven is True
+    assert verified.zero_adverse_price_deterioration is True
+    assert verified.execution_feasibility_proven is False
+    assert verified.realized_price_exact is False
 
 
 def test_product_verifier_rejects_unissued_plan_identity(

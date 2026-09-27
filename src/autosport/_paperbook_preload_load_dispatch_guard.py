@@ -219,6 +219,21 @@ def _capture_class_callable_graph(
     return tuple(witnesses)
 
 
+def _capture_value_type_callable_witnesses(
+    owner: type,
+) -> tuple[tuple[object, ...], ...]:
+    """Capture every executable descriptor on one parser-constructed value type."""
+
+    witnesses: list[tuple[object, ...]] = []
+    for name, descriptor in vars(owner).items():
+        function = _descriptor_function(descriptor)
+        if function is not None:
+            witnesses.append(_capture_class_callable_witness(name, descriptor, function))
+    if not witnesses:
+        raise RuntimeError("canonical PaperBook value type has no executable surface")
+    return tuple(witnesses)
+
+
 def _require_class_callable_graph_witnesses(
     owner: type,
     witnesses: tuple[tuple[object, ...], ...],
@@ -254,13 +269,22 @@ def _require_class_callable_graph_witnesses(
                     raise ValueError("PaperBook positive-load class global closure authority changed")
 
 
+def _require_value_type_callable_witnesses(
+    witnesses: tuple[tuple[type, tuple[tuple[object, ...], ...]], ...],
+) -> None:
+    for owner, callable_witnesses in witnesses:
+        _require_class_callable_graph_witnesses(owner, callable_witnesses)
+
+
 def _guarded_load_template(cls, path):
     _require_delegate_graph_witnesses(_DELEGATE_GRAPH_WITNESSES)
     _require_class_callable_graph_witnesses(
         _CANONICAL_PAPER_BOOK,
         _CLASS_CALLABLE_GRAPH_WITNESSES,
     )
+    _require_value_type_callable_witnesses(_VALUE_TYPE_CALLABLE_WITNESSES)
     result = _FROZEN_LOAD(cls, path)
+    _require_value_type_callable_witnesses(_VALUE_TYPE_CALLABLE_WITNESSES)
     _require_class_callable_graph_witnesses(
         _CANONICAL_PAPER_BOOK,
         _CLASS_CALLABLE_GRAPH_WITNESSES,
@@ -331,10 +355,18 @@ def _install() -> None:
         paper_book,
         (load_bytes, init_function),
     )
+    value_type_callable_witnesses = tuple(
+        (
+            owner,
+            _capture_value_type_callable_witnesses(owner),
+        )
+        for owner in (_paper.TicketLeg, _paper.PaperTicket)
+    )
 
     wrapper_globals: dict[str, object] = dict(globals())
     wrapper_globals["_DELEGATE_GRAPH_WITNESSES"] = tuple(delegate_witnesses)
     wrapper_globals["_CLASS_CALLABLE_GRAPH_WITNESSES"] = class_callable_witnesses
+    wrapper_globals["_VALUE_TYPE_CALLABLE_WITNESSES"] = value_type_callable_witnesses
     wrapper_globals["_CANONICAL_PAPER_BOOK"] = paper_book
     wrapper_globals["_FROZEN_LOAD"] = frozen_load
     wrapper_globals["_require_delegate_graph_witnesses"] = _clone_local_function(
@@ -343,6 +375,10 @@ def _install() -> None:
     )
     wrapper_globals["_require_class_callable_graph_witnesses"] = _clone_local_function(
         _require_class_callable_graph_witnesses,
+        trusted_globals=wrapper_globals,
+    )
+    wrapper_globals["_require_value_type_callable_witnesses"] = _clone_local_function(
+        _require_value_type_callable_witnesses,
         trusted_globals=wrapper_globals,
     )
     guarded_load = _clone_local_function(
@@ -361,7 +397,9 @@ def _install() -> None:
 _install()
 del _install
 del _guarded_load_template
+del _require_value_type_callable_witnesses
 del _require_class_callable_graph_witnesses
+del _capture_value_type_callable_witnesses
 del _capture_class_callable_graph
 del _capture_class_callable_witness
 del _descriptor_function

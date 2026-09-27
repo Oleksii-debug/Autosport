@@ -7,7 +7,7 @@ import pytest
 import autosport._paperbook_preload_authority_guard as guard
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
 _TS = "2026-09-27T19:40:00+00:00"
@@ -124,6 +124,50 @@ def test_generation_stable_risk_read_fails_closed_while_publication_lock_is_held
         guard._release_snapshot_publication_lock(publication_lock)
 
     _assert_risk_admitted(loaded)
+
+
+def test_concentration_generation_guard_is_reentrant_and_authority_failure_is_denial(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.open_ticket([_leg("open")], "10", placed_at=_TS)
+    initial.save(path)
+    loaded = PaperBook.load(path)
+    context = ProposedTicketRiskContext(legs=(_leg("candidate"),))
+
+    # The outer concentration read holds the publication lock while its original
+    # implementation calls the wrapped _book_state. Read-side reentrancy must keep
+    # that nested validation inside the same critical section rather than self-deny.
+    decision = PaperRiskPolicy._identity_concentration_decision(
+        loaded,
+        Decimal("1"),
+        context,
+        dimension="event",
+        limit=Decimal("0.90"),
+    )
+    assert decision is not None
+    assert decision.allowed is False
+    assert decision.reason == "owner event concentration limit exceeded"
+
+    publication_lock = guard._acquire_snapshot_publication_lock(guard._witness_path(path))
+    try:
+        blocked = PaperRiskPolicy._identity_concentration_decision(
+            loaded,
+            Decimal("1"),
+            context,
+            dimension="event",
+            limit=Decimal("0.90"),
+        )
+    finally:
+        guard._release_snapshot_publication_lock(publication_lock)
+
+    assert blocked is not None
+    assert blocked.allowed is False
+    assert blocked.reason == "owner event concentration evidence is invalid"
 
 
 def test_frozen_risk_validator_rejects_local_economic_mutation_after_live_rebind(

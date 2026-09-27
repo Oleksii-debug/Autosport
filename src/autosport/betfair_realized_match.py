@@ -466,6 +466,49 @@ def _check_common_row_identity(
         )
 
 
+def _validate_current_order_economics(
+    row: BetfairCurrentOrderObservation,
+    *,
+    action: ExecutionAction,
+) -> None:
+    if row.status not in {"EXECUTABLE", "EXECUTION_COMPLETE"}:
+        raise RealizedMatchEvidenceError(
+            "current order has unsupported provider status"
+        )
+    if row.status == "EXECUTION_COMPLETE" and row.size_remaining != 0:
+        raise RealizedMatchEvidenceError(
+            "execution-complete current order has remaining executable size"
+        )
+    if row.price is not None and row.price != action.requested_odds:
+        raise RealizedMatchEvidenceError(
+            "current order requested price differs from execution action"
+        )
+    if row.requested_size is not None and row.requested_size != action.requested_stake:
+        raise RealizedMatchEvidenceError(
+            "current order requested size differs from execution action"
+        )
+    if row.size_matched > action.requested_stake:
+        raise RealizedMatchEvidenceError(
+            "current order matched size exceeds requested stake"
+        )
+    if row.size_remaining > action.requested_stake:
+        raise RealizedMatchEvidenceError(
+            "current order remaining size exceeds requested stake"
+        )
+    if row.size_matched + row.size_remaining > action.requested_stake:
+        raise RealizedMatchEvidenceError(
+            "current order matched plus remaining size exceeds requested stake"
+        )
+    if row.size_matched > 0 and row.average_price_matched <= 0:
+        raise RealizedMatchEvidenceError(
+            "current matched stake lacks a positive average matched price"
+        )
+    if row.size_matched == 0 and row.average_price_matched != 0:
+        raise RealizedMatchEvidenceError(
+            "current zero matched size has a non-zero average matched price"
+        )
+
+
 def _flatten_rows(
     readback: BetfairExecutionReadbackEnvelope,
 ) -> tuple[
@@ -687,55 +730,14 @@ def _resolve_betfair_realized_match(
             "provider readback maps one durable order reference to multiple bet ids"
         )
 
-    if cleared and current:
+    current_row: BetfairCurrentOrderObservation | None = None
+    if current:
         if len(current) != 1:
             raise RealizedMatchEvidenceError(
                 "provider readback contains multiple current BET rows"
             )
         current_row = current[0]
-        if (
-            current_row.price is not None
-            and current_row.price != action.requested_odds
-        ):
-            raise RealizedMatchEvidenceError(
-                "current order requested price differs from execution action"
-            )
-        if (
-            current_row.requested_size is not None
-            and current_row.requested_size != action.requested_stake
-        ):
-            raise RealizedMatchEvidenceError(
-                "current order requested size differs from execution action"
-            )
-        if current_row.size_matched > action.requested_stake:
-            raise RealizedMatchEvidenceError(
-                "current order matched size exceeds requested stake"
-            )
-        if current_row.size_remaining > action.requested_stake:
-            raise RealizedMatchEvidenceError(
-                "current order remaining size exceeds requested stake"
-            )
-        if (
-            current_row.size_matched + current_row.size_remaining
-            > action.requested_stake
-        ):
-            raise RealizedMatchEvidenceError(
-                "current order matched plus remaining size exceeds requested stake"
-            )
-        if (
-            current_row.size_matched > 0
-            and current_row.average_price_matched <= 0
-        ):
-            raise RealizedMatchEvidenceError(
-                "current matched stake lacks a positive average matched price"
-            )
-        if (
-            current_row.size_matched == 0
-            and current_row.average_price_matched != 0
-        ):
-            raise RealizedMatchEvidenceError(
-                "current zero matched size has a non-zero average matched price"
-            )
+        _validate_current_order_economics(current_row, action=action)
 
     if cleared:
         (
@@ -746,7 +748,7 @@ def _resolve_betfair_realized_match(
             provider_observed_at,
             provider_settled_at,
         ) = _resolve_cleared_economics(cleared, action=action)
-        if current and matched_stake < current[0].size_matched:
+        if current_row is not None and matched_stake < current_row.size_matched:
             raise RealizedMatchEvidenceError(
                 "cleared BET settled size regresses current matched size"
             )
@@ -766,58 +768,24 @@ def _resolve_betfair_realized_match(
             finalized=True,
         )
 
-    if current:
-        if len(current) != 1:
-            raise RealizedMatchEvidenceError(
-                "provider readback contains multiple current BET rows"
-            )
-        row = current[0]
-        if row.price is not None and row.price != action.requested_odds:
-            raise RealizedMatchEvidenceError(
-                "current order requested price differs from execution action"
-            )
-        if (
-            row.requested_size is not None
-            and row.requested_size != action.requested_stake
-        ):
-            raise RealizedMatchEvidenceError(
-                "current order requested size differs from execution action"
-            )
-        if row.size_matched > action.requested_stake:
-            raise RealizedMatchEvidenceError(
-                "current order matched size exceeds requested stake"
-            )
-        if row.size_remaining > action.requested_stake:
-            raise RealizedMatchEvidenceError(
-                "current order remaining size exceeds requested stake"
-            )
-        if row.size_matched + row.size_remaining > action.requested_stake:
-            raise RealizedMatchEvidenceError(
-                "current order matched plus remaining size exceeds requested stake"
-            )
-        if row.size_matched > 0 and row.average_price_matched <= 0:
-            raise RealizedMatchEvidenceError(
-                "current matched stake lacks a positive average matched price"
-            )
-        if row.size_matched == 0 and row.average_price_matched != 0:
-            raise RealizedMatchEvidenceError(
-                "current zero matched size has a non-zero average matched price"
-            )
+    if current_row is not None:
         return _make_evidence(
             source=RealizedMatchSource.CURRENT_ORDER,
             plan=plan,
             binding=binding,
             attempt_id=attempt_id,
             readback=readback,
-            bet_id=row.bet_id,
+            bet_id=current_row.bet_id,
             provider_matched_odds=(
-                row.average_price_matched if row.size_matched > 0 else None
+                current_row.average_price_matched
+                if current_row.size_matched > 0
+                else None
             ),
-            provider_matched_stake=row.size_matched,
-            provider_status=row.status,
-            provider_observed_at=row.evidence.observed_at,
+            provider_matched_stake=current_row.size_matched,
+            provider_status=current_row.status,
+            provider_observed_at=current_row.evidence.observed_at,
             provider_settled_at=None,
-            source_payload_sha256=row.evidence.source_payload_sha256,
+            source_payload_sha256=current_row.evidence.source_payload_sha256,
             finalized=False,
         )
 
@@ -970,6 +938,12 @@ def _install_realized_match_authority() -> None:
             "_check_common_row_identity",
             _check_common_row_identity,
             _check_common_row_identity.__code__,
+        ),
+        (
+            "current order economics",
+            "_validate_current_order_economics",
+            _validate_current_order_economics,
+            _validate_current_order_economics.__code__,
         ),
         ("flatten rows", "_flatten_rows", _flatten_rows, _flatten_rows.__code__),
         (

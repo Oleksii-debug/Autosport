@@ -194,6 +194,11 @@ def test_snapshot_publication_lock_fails_closed_for_competing_writer_and_reader(
     path = tmp_path / "paper-book.json"
 
     initial = PaperBook("100")
+    initial.open_ticket(
+        [_leg("locked-read-selection")],
+        "10",
+        placed_at=_BASE_TS,
+    )
     initial.save(path)
     competing = PaperBook.load(path)
 
@@ -211,9 +216,15 @@ def test_snapshot_publication_lock_fails_closed_for_competing_writer_and_reader(
             match="snapshot publication lock is held by another writer",
         ):
             PaperBook.load(path)
+
+        with pytest.raises(
+            ValueError,
+            match="snapshot publication lock is held by another writer",
+        ):
+            _ = competing.committed_stake
     finally:
         guard._release_snapshot_publication_lock(publication_lock)
 
     restored = PaperBook.load(path)
-    assert restored.balance == Decimal("100")
-    assert restored.tickets == {}
+    assert restored.balance == Decimal("90")
+    assert restored.committed_stake == Decimal("10")

@@ -36,6 +36,12 @@ def _descriptor_function(descriptor: object, expected_type: type) -> FunctionTyp
     return function
 
 
+def _plain_function(value: object) -> FunctionType:
+    if type(value) is not FunctionType:
+        raise _InvalidRiskSurface("canonical PaperRiskPolicy method is not a Python function")
+    return value
+
+
 def _clone_module_function_graph(function: FunctionType) -> FunctionType:
     """Detach one verifier and its same-module Python helper graph."""
 
@@ -175,6 +181,55 @@ def _identity_concentration_template(
     )
 
 
+def _derive_goal_stake_template(self, book, signal_strength, *, context=None):
+    return _guarded_risk_call(
+        book,
+        _ORIGINAL_DERIVE_GOAL_STAKE,
+        (self, book, signal_strength),
+        {"context": context},
+    )
+
+
+def _evaluate_template(self, book, stake, *, context=None):
+    failure = _RISK_DECISION(
+        False,
+        "virtual bankroll generation authority is invalid",
+    )
+    return _guarded_risk_call(
+        book,
+        _ORIGINAL_EVALUATE,
+        (self, book, stake),
+        {"context": context},
+        failure,
+    )
+
+
+def _derive_goal_stake_vector_template(
+    self,
+    book,
+    signal_strengths,
+    *,
+    contexts,
+    risk_of_ruin_vector_evidence=None,
+):
+    context_count = len(contexts) if type(contexts) is tuple else 0
+    failure = _STAKE_VECTOR_DECISION(
+        "WAIT",
+        (_ZERO_DECIMAL,) * context_count,
+        "virtual bankroll generation authority is invalid",
+    )
+    return _guarded_risk_call(
+        book,
+        _ORIGINAL_DERIVE_GOAL_STAKE_VECTOR,
+        (self, book, signal_strengths),
+        {
+            "contexts": contexts,
+            "risk_of_ruin_vector_evidence": risk_of_ruin_vector_evidence,
+        },
+        failure,
+    )
+
+
 def _clone_template(template: FunctionType, private_globals: dict[str, object]) -> FunctionType:
     clone = FunctionType(
         template.__code__,
@@ -194,9 +249,6 @@ def _install() -> None:
     paper_book = _paper.PaperBook
     policy = _risk.PaperRiskPolicy
 
-    # wrapper_helper_guard replaces the load-dispatch wrapper with a closure-sealed
-    # public function. Its trusted globals snapshot contains the detached persistence
-    # graph and the class-callable witness captured before that final seal.
     load_descriptor = vars(paper_book).get("load")
     if type(load_descriptor) is not classmethod or type(load_descriptor.__func__) is not FunctionType:
         raise RuntimeError("canonical sealed PaperBook load wrapper is unavailable")
@@ -248,6 +300,9 @@ def _install() -> None:
     identity_concentration = _descriptor_function(
         namespace.get("_identity_concentration_decision"), classmethod
     )
+    derive_goal_stake = _plain_function(namespace.get("derive_goal_stake"))
+    derive_goal_stake_vector = _plain_function(namespace.get("derive_goal_stake_vector"))
+    evaluate = _plain_function(namespace.get("evaluate"))
 
     private_globals: dict[str, object] = dict(globals())
     private_globals.update(
@@ -262,11 +317,16 @@ def _install() -> None:
             "_FROZEN_VALIDATE_LOADED_STATE": validate_loaded_state,
             "_RISK_READ_LOCAL": threading.local(),
             "_RISK_DECISION": _risk.RiskDecision,
+            "_STAKE_VECTOR_DECISION": _risk.StakeVectorDecision,
+            "_ZERO_DECIMAL": _risk.Decimal("0"),
             "_ORIGINAL_BOOK_STATE": book_state,
             "_ORIGINAL_PORTFOLIO_HASH": portfolio_hash,
             "_ORIGINAL_HISTORICAL_METRICS": historical_metrics,
             "_ORIGINAL_SHADOW_BOOK": shadow_book,
             "_ORIGINAL_IDENTITY_CONCENTRATION": identity_concentration,
+            "_ORIGINAL_DERIVE_GOAL_STAKE": derive_goal_stake,
+            "_ORIGINAL_DERIVE_GOAL_STAKE_VECTOR": derive_goal_stake_vector,
+            "_ORIGINAL_EVALUATE": evaluate,
         }
     )
     private_globals["_guarded_risk_call"] = _clone_template(
@@ -282,6 +342,13 @@ def _install() -> None:
     guarded_identity_concentration = _clone_template(
         _identity_concentration_template, private_globals
     )
+    guarded_derive_goal_stake = _clone_template(
+        _derive_goal_stake_template, private_globals
+    )
+    guarded_derive_goal_stake_vector = _clone_template(
+        _derive_goal_stake_vector_template, private_globals
+    )
+    guarded_evaluate = _clone_template(_evaluate_template, private_globals)
 
     guarded_book_state.__name__ = "_book_state"
     guarded_book_state.__qualname__ = "PaperRiskPolicy._book_state"
@@ -295,12 +362,21 @@ def _install() -> None:
     guarded_identity_concentration.__qualname__ = (
         "PaperRiskPolicy._identity_concentration_decision"
     )
+    guarded_derive_goal_stake.__name__ = "derive_goal_stake"
+    guarded_derive_goal_stake.__qualname__ = "PaperRiskPolicy.derive_goal_stake"
+    guarded_derive_goal_stake_vector.__name__ = "derive_goal_stake_vector"
+    guarded_derive_goal_stake_vector.__qualname__ = "PaperRiskPolicy.derive_goal_stake_vector"
+    guarded_evaluate.__name__ = "evaluate"
+    guarded_evaluate.__qualname__ = "PaperRiskPolicy.evaluate"
 
     policy._book_state = classmethod(guarded_book_state)
     policy.risk_of_ruin_portfolio_sha256 = classmethod(guarded_portfolio_hash)
     policy._historical_risk_metrics = classmethod(guarded_historical_metrics)
     policy._shadow_book_for_allocation = staticmethod(guarded_shadow_book)
     policy._identity_concentration_decision = classmethod(guarded_identity_concentration)
+    policy.derive_goal_stake = guarded_derive_goal_stake
+    policy.derive_goal_stake_vector = guarded_derive_goal_stake_vector
+    policy.evaluate = guarded_evaluate
 
 
 _install()

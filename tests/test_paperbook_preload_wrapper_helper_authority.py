@@ -275,3 +275,38 @@ def test_save_rejects_in_place_mutation_of_reachable_inner_wrapper(
 
     assert path.read_bytes() == snapshot_before
     assert witness.read_bytes() == witness_before
+
+
+def test_direct_extracted_inner_load_cannot_bypass_outer_verifier_seal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inspectable inner positive-load callable must not bypass the public seal."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-direct-inner-load")], "10", placed_at=_TS)
+    book.save(path)
+    witness = guard._witness_path(path)
+    snapshot_before = path.read_bytes()
+    witness_before = witness.read_bytes()
+
+    load_descriptor = vars(PaperBook)["load"]
+    assert type(load_descriptor) is classmethod
+    inner_load = _inner_persistence_wrapper(load_descriptor.__func__)
+    verifier = inner_load.__globals__["_require_class_callable_graph_witnesses"]
+    assert type(verifier) is FunctionType
+
+    parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
+    assert type(parser_descriptor) is classmethod
+    parser = parser_descriptor.__func__
+
+    monkeypatch.setattr(verifier, "__code__", _no_two_arg_check.__code__)
+    monkeypatch.setattr(parser, "__code__", _forged_from_raw_snapshot.__code__)
+
+    with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
+        inner_load(PaperBook, path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before

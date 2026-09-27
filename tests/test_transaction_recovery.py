@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport._paperbook_preload_authority_guard as paper_guard
 from autosport.dataset import load_dataset
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.integrity import sha256_file
@@ -170,9 +171,22 @@ class TransactionRecoveryTests(unittest.TestCase):
             registry, key, item = self._in_progress(root)
             tx = RunTransaction(root, str(item["run_id"]))
 
-            # Simulate a process dying after the first os.replace: PaperBook is NEW,
-            # Decision Ledger and summary are still BASE/absent.
-            os.replace(tx.staged_book_path, root / "paper_book.json")
+            # Simulate process death after the canonical PaperBook PREPARE + replace
+            # but before COMMIT. Path-bound authority recovery must complete that exact
+            # generation before the remaining transaction artifacts are reconciled.
+            canonical_book_path = root / "paper_book.json"
+            staged_sha = sha256_file(tx.staged_book_path)
+            _records, committed, pending = paper_guard._read_witnesses(canonical_book_path)
+            self.assertIsNotNone(committed)
+            self.assertIsNone(pending)
+            generation = committed[0] + 1
+            paper_guard._append_witness(
+                canonical_book_path,
+                event=paper_guard._PREPARE,
+                generation=generation,
+                snapshot_sha256=staged_sha,
+            )
+            os.replace(tx.staged_book_path, canonical_book_path)
             session.close()
 
             report = reconcile_late_crashes(root)

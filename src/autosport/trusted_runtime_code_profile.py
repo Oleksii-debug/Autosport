@@ -154,7 +154,7 @@ def _canonical_runtime_is_running(runtime: object) -> bool:
     """
 
     if type(runtime) is not _CANONICAL_RUNTIME_TYPE:
-        return True
+        return False
     try:
         status = _CANONICAL_RUNTIME_STATUS(runtime)
     except BaseException:
@@ -200,7 +200,7 @@ def _register_started_product_runtime_origin(
 ) -> None:
     """Record canonical closed-registry origin only after runtime.start() succeeds."""
 
-    if type(runtime) is not AutonomousProductRuntime:
+    if type(runtime) is not _CANONICAL_RUNTIME_TYPE:
         raise TrustedRuntimeCodeProfileError(
             "trusted runtime origin requires exact AutonomousProductRuntime"
         )
@@ -246,7 +246,7 @@ def issue_trusted_runtime_code_profile(
 ) -> TrustedRuntimeCodeProfile:
     """Issue only from a current canonical STARTED-origin record."""
 
-    if type(runtime) is not AutonomousProductRuntime:
+    if type(runtime) is not _CANONICAL_RUNTIME_TYPE:
         raise TrustedRuntimeCodeProfileError(
             "trusted runtime profile requires exact AutonomousProductRuntime"
         )
@@ -336,7 +336,7 @@ def is_authoritative_trusted_runtime_code_profile(
         if record is None or record.profile is not value:
             return False
         runtime = record.runtime
-        if type(runtime) is not AutonomousProductRuntime:
+        if type(runtime) is not _CANONICAL_RUNTIME_TYPE:
             return False
         if not _canonical_runtime_is_running(runtime):
             return False

@@ -12,7 +12,9 @@ import autosport.product_entrypoint as product_entrypoint_module
 import autosport.product_gui_worker as worker_module
 import autosport.product_source as product_source_module
 import autosport.trusted_runtime_code_profile as profile_module
+from autosport.continuous_session import SessionState
 from autosport.product_entrypoint import ProductEntrypointError
+from autosport.product_runtime import AutonomousProductRuntime
 from autosport.product_gui_worker import ProductGuiWorker
 from autosport.trusted_runtime_code_profile import (
     TrustedRuntimeCodeProfileError,
@@ -71,15 +73,45 @@ class _BlockingStartRuntime(_BlockingRuntime):
         return self._status
 
 
-def _patch_profile_runtime(monkeypatch) -> None:
-    monkeypatch.setattr(
-        profile_module,
-        "AutonomousProductRuntime",
-        _ProfileRuntime,
-    )
+class _RuntimeLeaseStub:
+    authority_active = True
 
 
-def _register_profile_runtime(runtime: _ProfileRuntime) -> None:
+class _StartTransitionStoreStub:
+    @staticmethod
+    def pending() -> None:
+        return None
+
+
+class _RunningCoordinator:
+    @staticmethod
+    def status() -> SimpleNamespace:
+        return SimpleNamespace(state=SessionState.RUNNING)
+
+
+class _RunningCollector:
+    @staticmethod
+    def status() -> dict[str, object | None]:
+        return {"stopped_at": None, "stop_reason": None}
+
+
+def _canonical_profile_runtime(
+    workspace: Path,
+    source_id: str = _PROVIDER_SOURCE_ID,
+) -> AutonomousProductRuntime:
+    runtime = object.__new__(AutonomousProductRuntime)
+    runtime.workspace = workspace
+    runtime.manifest = SimpleNamespace(source_id=source_id)
+    runtime.coordinator = _RunningCoordinator()
+    runtime.collector = _RunningCollector()
+    runtime._runtime_lease = _RuntimeLeaseStub()
+    runtime._start_transition_store = _StartTransitionStoreStub()
+    runtime._closed = False
+    runtime._operation_fence = threading.RLock()
+    return runtime
+
+
+def _register_profile_runtime(runtime: AutonomousProductRuntime) -> None:
     _register_started_product_runtime_origin(
         runtime,
         source_factory=_FACTORY_SPEC,
@@ -91,8 +123,7 @@ def test_profile_requires_canonical_started_origin_and_is_not_write_authority(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _patch_profile_runtime(monkeypatch)
-    runtime = _ProfileRuntime(tmp_path)
+    runtime = _canonical_profile_runtime(tmp_path)
 
     with pytest.raises(
         TrustedRuntimeCodeProfileError,
@@ -127,8 +158,7 @@ def test_started_origin_requires_exact_closed_registry_binding(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _patch_profile_runtime(monkeypatch)
-    runtime = _ProfileRuntime(tmp_path)
+    runtime = _canonical_profile_runtime(tmp_path)
 
     with pytest.raises(
         TrustedRuntimeCodeProfileError,
@@ -145,7 +175,7 @@ def test_started_origin_requires_exact_closed_registry_binding(
         match="runtime manifest source_id does not match",
     ):
         _register_started_product_runtime_origin(
-            _ProfileRuntime(tmp_path, source_id="different:provider"),
+            _canonical_profile_runtime(tmp_path, source_id="different:provider"),
             source_factory=_FACTORY_SPEC,
             expected_provider_source_id=_PROVIDER_SOURCE_ID,
         )
@@ -155,8 +185,7 @@ def test_registered_symbol_drift_fails_before_started_origin(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _patch_profile_runtime(monkeypatch)
-    runtime = _ProfileRuntime(tmp_path)
+    runtime = _canonical_profile_runtime(tmp_path)
     monkeypatch.setattr(
         product_source_module,
         "create_parlay_product_source",
@@ -212,13 +241,45 @@ def test_runtime_builder_rechecks_factory_identity_after_source_construction(
     assert built is False
 
 
+def test_runtime_type_alias_rebinding_cannot_redirect_profile_authority(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    canonical_runtime = _canonical_profile_runtime(tmp_path)
+    attacker_runtime = _ProfileRuntime(tmp_path)
+
+    monkeypatch.setattr(
+        profile_module,
+        "AutonomousProductRuntime",
+        _ProfileRuntime,
+    )
+
+    with pytest.raises(
+        TrustedRuntimeCodeProfileError,
+        match="requires exact AutonomousProductRuntime",
+    ):
+        _register_profile_runtime(attacker_runtime)  # type: ignore[arg-type]
+
+    with pytest.raises(
+        TrustedRuntimeCodeProfileError,
+        match="requires exact AutonomousProductRuntime",
+    ):
+        issue_trusted_runtime_code_profile(attacker_runtime)  # type: ignore[arg-type]
+
+    _register_profile_runtime(canonical_runtime)
+    profile = issue_trusted_runtime_code_profile(canonical_runtime)
+    assert is_authoritative_trusted_runtime_code_profile(profile) is True
+
+    assert revoke_trusted_runtime_code_profile(profile) is True
+    _clear_started_product_runtime_origin(canonical_runtime)
+
+
 def test_profile_serializes_one_active_runtime_per_workspace(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _patch_profile_runtime(monkeypatch)
-    first = _ProfileRuntime(tmp_path)
-    second = _ProfileRuntime(tmp_path)
+    first = _canonical_profile_runtime(tmp_path)
+    second = _canonical_profile_runtime(tmp_path)
     _register_profile_runtime(first)
     _register_profile_runtime(second)
 
@@ -241,8 +302,7 @@ def test_runtime_drift_revokes_positive_profile_resolution(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _patch_profile_runtime(monkeypatch)
-    runtime = _ProfileRuntime(tmp_path)
+    runtime = _canonical_profile_runtime(tmp_path)
     _register_profile_runtime(runtime)
     profile = issue_trusted_runtime_code_profile(runtime)
 

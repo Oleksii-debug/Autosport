@@ -78,8 +78,3 @@ from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_gua
 # match the product-issued private opening/causal registries. Compose that existing
 # authority around the finalized generation-stable risk surface.
 from . import _paperbook_risk_private_authority_guard as _paperbook_risk_private_authority_guard  # noqa: E402,F401
-
-# Publish the already-composed policy through one zero-state sealed facade so callers
-# cannot replace/delete the owner-facing sizing/decision roots after import. Internal
-# helpers deliberately remain mutable for adversarial fail-closed verification.
-from . import _paperbook_risk_root_surface_seal as _paperbook_risk_root_surface_seal  # noqa: E402,F401

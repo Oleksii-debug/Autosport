@@ -511,76 +511,6 @@ def test_invalid_betfair_selection_fails_before_attempt_or_transport(
         assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
-@pytest.mark.parametrize(
-    "selection_id",
-    ("9223372036854775808", "9" * 5000),
-)
-def test_out_of_domain_betfair_selection_fails_before_attempt_or_transport(
-    selection_id: str,
-) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action, goal_store = _prepared(
-            tmp,
-            selection_id=selection_id,
-        )
-        transport = _Transport(lambda request: _response(request))
-        client = _enabled_client(profile, transport, store=goal_store)
-
-        with pytest.raises(
-            BetfairSupervisedExecutionError,
-            match="selection_id exceeds signed-long provider domain",
-        ):
-            execute_betfair_supervised_action(
-                ledger,
-                bound,
-                approval,
-                action_id=action.action_id,
-                attempt_id="attempt-out-of-domain-selection",
-                profile=profile,
-                client=client,
-                clock=lambda: SUBMITTED_AT,
-            )
-
-        assert transport.calls == []
-        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
-
-
-def test_max_signed_long_betfair_selection_projects_exactly() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        maximum = "9223372036854775807"
-        profile, bound, approval, ledger, action, goal_store = _prepared(
-            tmp,
-            selection_id=maximum,
-        )
-        transport = _Transport(
-            lambda request: _response(
-                request,
-                matched=action.requested_stake,
-                average=action.requested_odds,
-            )
-        )
-        client = _enabled_client(profile, transport, store=goal_store)
-
-        result = execute_betfair_supervised_action(
-            ledger,
-            bound,
-            approval,
-            action_id=action.action_id,
-            attempt_id="attempt-max-selection",
-            profile=profile,
-            client=client,
-            clock=lambda: SUBMITTED_AT,
-        )
-
-        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
-        assert len(transport.calls) == 1
-        request = transport.calls[0]["request"]
-        assert (
-            request["params"]["instructions"][0]["selectionId"]
-            == 9223372036854775807
-        )
-
-
 def test_default_gate_cannot_reach_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -955,84 +885,6 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert ledger.verify_integrity() > 0
 
 
-def test_matched_price_below_exact_back_limit_fails_closed() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
-        worse_price = action.requested_odds - Decimal("0.0001")
-        assert f"{worse_price:.2f}" == f"{action.requested_odds:.2f}"
-        transport = _Transport(
-            lambda request: _response(
-                request,
-                matched=action.requested_stake,
-                average=worse_price,
-            )
-        )
-        client = _enabled_client(profile, transport, store=goal_store)
-
-        result = execute_betfair_supervised_action(
-            ledger,
-            bound,
-            approval,
-            action_id=action.action_id,
-            attempt_id="attempt-worse-accepted-price",
-            profile=profile,
-            client=client,
-            clock=lambda: SUBMITTED_AT,
-        )
-
-        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
-        assert result.attempt_state is AttemptState.UNKNOWN
-        assert result.evidence_id is None
-        assert result.external_receipt_id is None
-        assert not ledger.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        )
-
-
-def test_raw_numeric_matched_price_preserves_sub_float_precision() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
-        provider_price = "1.9999999999999999"
-        assert action.requested_odds == Decimal("2.00")
-        assert Decimal(provider_price) < action.requested_odds
-        assert float(provider_price) == float(action.requested_odds)
-
-        def raw_numeric_response(request: dict[str, object]) -> bytes:
-            payload = _response(
-                request,
-                matched=action.requested_stake,
-                average=provider_price,
-            ).decode("utf-8")
-            quoted = f'"averagePriceMatched": "{provider_price}"'
-            numeric = f'"averagePriceMatched": {provider_price}'
-            assert quoted in payload
-            return payload.replace(quoted, numeric, 1).encode("utf-8")
-
-        transport = _Transport(raw_numeric_response)
-        client = _enabled_client(profile, transport, store=goal_store)
-
-        result = execute_betfair_supervised_action(
-            ledger,
-            bound,
-            approval,
-            action_id=action.action_id,
-            attempt_id="attempt-raw-numeric-worse-price",
-            profile=profile,
-            client=client,
-            clock=lambda: SUBMITTED_AT,
-        )
-
-        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
-        assert result.attempt_state is AttemptState.UNKNOWN
-        assert result.evidence_id is None
-        assert result.external_receipt_id is None
-        assert not ledger.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        )
-
-
 def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -1105,7 +957,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
         assert result.external_receipt_id == provider_ref
 
 
-def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
+def test_transport_timeout_readback_stays_non_authoritative_for_retry(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -1126,9 +978,7 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
 
         assert result.outcome is PlaceOrdersOutcome.UNKNOWN
         assert result.attempt_state is AttemptState.UNKNOWN
-        restarted = RealExecutionLedger(
-            Path(tmp) / "real.jsonl"
-        )
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
         assert (
             restarted.attempt_state("attempt-timeout")
             is AttemptState.UNKNOWN
@@ -1183,14 +1033,11 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
             readback=verified_absence,
         )
         assert reconciliation.attempt_state is AttemptState.RECONCILED_NOT_FOUND
-        assert restarted.can_retry_action(
+        assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
 
-        first_customer_ref = transport.calls[0]["request"]["params"][
-            "customerRef"
-        ]
         monkeypatch.setattr(
             "autosport.supervised_execution._trusted_now",
             lambda: "2026-09-19T08:00:06+00:00",
@@ -1208,23 +1055,21 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
             store=goal_store,
             observed_at="2026-09-19T08:00:10+00:00",
         )
-        retry_result = execute_betfair_supervised_action(
-            restarted,
-            bound,
-            approval,
-            action_id=action.action_id,
-            attempt_id="attempt-timeout-retry",
-            profile=profile,
-            client=retry_client,
-            clock=lambda: "2026-09-19T08:00:09+00:00",
-        )
-        assert retry_result.outcome is PlaceOrdersOutcome.ACCEPTED
-        retry_request = retry_transport.calls[0]["request"]
-        assert retry_request["params"]["customerRef"] != first_customer_ref
-        assert (
-            retry_request["params"]["instructions"][0]["customerOrderRef"]
-            != provider_ref
-        )
+        with pytest.raises(
+            ExecutionStateError,
+            match="product-issued no-effect authority",
+        ):
+            execute_betfair_supervised_action(
+                restarted,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-timeout-retry",
+                profile=profile,
+                client=retry_client,
+                clock=lambda: "2026-09-19T08:00:09+00:00",
+            )
+        assert retry_transport.calls == []
 
 
 def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:

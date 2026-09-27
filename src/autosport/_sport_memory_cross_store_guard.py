@@ -168,13 +168,22 @@ def _transaction_paths(runtime: BoundSportMemoryRuntime) -> tuple[Path, ...]:
 
 
 def _reload_runtime_under_transaction(self: BoundSportMemoryRuntime) -> None:
-    """Replace stale in-memory dictionaries with the exact locked durable image."""
+    """Replace stale mutable state with the exact locked durable image.
+
+    A bound runtime seals its authority-bearing bindings after construction.
+    Re-running the base initializer on that sealed instance would route the
+    initializer's normal path/opponent-authority writes through the caller-facing
+    rebinding fence. Reload into an exact temporary base runtime instead and copy
+    back only mutable checkpoint projections.
+    """
 
     destination = Path(self.path)
     if not destination.exists():
         raise SportMemoryError("sport memory durable checkpoint disappeared")
+
+    reloaded = object.__new__(SportMemoryRuntime)
     _ORIGINAL_RUNTIME_INIT(
-        self,
+        reloaded,
         destination,
         self.opponent_authority,
         authority_generation_sha256=self.authority_generation_sha256,
@@ -182,7 +191,19 @@ def _reload_runtime_under_transaction(self: BoundSportMemoryRuntime) -> None:
     committed = _runtime_durable_root(destination)
     if committed is None:
         raise SportMemoryError("sport memory durable checkpoint disappeared")
-    setattr(self, _RUNTIME_ROOT_ATTR, committed)
+
+    # The temporary base runtime parsed and validated the exact locked durable
+    # image. Transfer only mutable state; never replay binding assignments onto
+    # the sealed product runtime.
+    object.__setattr__(self, "_artifacts", reloaded._artifacts)
+    object.__setattr__(self, "_consumptions", reloaded._consumptions)
+    object.__setattr__(
+        self,
+        "_decision_consumptions",
+        reloaded._decision_consumptions,
+    )
+    object.__setattr__(self, _RUNTIME_ROOT_ATTR, committed)
+    self._assert_binding_seal()
 
 
 def _enter_transaction(runtime: BoundSportMemoryRuntime) -> ExitStack:

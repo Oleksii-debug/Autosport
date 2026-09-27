@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.paper as paper_module
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
@@ -31,6 +32,18 @@ def _assert_risk_rejected(book: PaperBook) -> None:
     decision = PaperRiskPolicy().evaluate(book, Decimal("1"))
     assert decision.allowed is False
     assert decision.reason == "virtual bankroll private economic authority is invalid"
+
+
+def _two_cell_noop_checker():
+    first = object()
+    second = object()
+
+    def checker(book: object) -> None:
+        del book
+        if first is second:  # preserve two closure cells without observable behavior
+            raise AssertionError("unreachable")
+
+    return checker
 
 
 def test_risk_rejects_structurally_coherent_opening_economic_rewrite() -> None:
@@ -69,5 +82,22 @@ def test_risk_rejects_structurally_coherent_causal_settlement_rewrite() -> None:
 
     with pytest.raises(ValueError, match="causal history changed"):
         _ = book.committed_stake
+
+    _assert_risk_rejected(book)
+
+
+def test_risk_rejects_in_place_private_authority_checker_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg("checker-code")], "10", placed_at=_TS)
+
+    checker = paper_module._require_ticket_opening_authority
+    replacement = _two_cell_noop_checker()
+    assert checker.__closure__ is not None
+    assert replacement.__closure__ is not None
+    assert len(checker.__closure__) == len(replacement.__closure__) == 2
+    assert checker.__code__ is not replacement.__code__
+    monkeypatch.setattr(checker, "__code__", replacement.__code__)
 
     _assert_risk_rejected(book)

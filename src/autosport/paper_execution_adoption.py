@@ -164,14 +164,7 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
-        # Serialize every canonical execution on this runtime. The PaperValue
-        # authority holds this same re-entrant lock across risk admission and
-        # execution so a second canonical allocation cannot change PaperBook
-        # between the bound risk witness and materialization.
         self._execution_lock = RLock()
-        # In-process capability registry. Object identity is intentional: serialized,
-        # copied, reconstructed, or caller-authored PreparedPaperExecution values do
-        # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
         self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
@@ -313,8 +306,6 @@ class PaperExecutionAdoptionRuntime:
                     event_id=event.event_id,
                     market_id=event.market_id,
                     selection_id=event.selection_id,
-                    # PaperBook currently represents positive-selection BACK exposure
-                    # only; no lay-side authority exists in this contract.
                     side="BACK",
                     requested_odds=event.decimal_odds,
                     requested_stake=stake,
@@ -384,13 +375,6 @@ class PaperExecutionAdoptionRuntime:
         bankroll_id: str | None,
         currency: str | None,
     ) -> PreparedPaperExecution:
-        """Bind one legacy paper-value decision to canonical #623 execution truth.
-
-        The legacy strategy may still decide that a value opportunity exists, but
-        it no longer owns fill semantics. This bridge carries its already-risk-
-        authorized single-leg stake into the same immutable execution plan/run
-        authority used by the persistent live loop.
-        """
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be MarketEvent")
         if not isinstance(stake, Decimal) or not stake.is_finite() or stake <= 0:
@@ -523,14 +507,6 @@ class PaperExecutionAdoptionRuntime:
         prepared: PreparedPaperExecution,
         run_id: str,
     ) -> None:
-        """Persist the already-minted #646 scope into the canonical #623 ledger.
-
-        This is not a second scope authority. The in-process minted capability is
-        checked first, then the exact immutable binding is copied into the same
-        hash-chained execution ledger before any attempt can be recorded. A restart
-        re-mints from canonical inputs and can only reproduce the same event payload;
-        any substituted sport/bankroll/currency conflicts on the stable event key.
-        """
         self._require_minted(prepared)
         self.ledger._append_event(
             event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
@@ -548,7 +524,6 @@ class PaperExecutionAdoptionRuntime:
         started_at: str,
         materialize_exposure: bool,
     ) -> None:
-        """Reject restart state not explained by the exact durable #623 run."""
         if not isinstance(pre_action_book, PaperBook):
             raise TypeError("pre_action_book must be PaperBook")
         if not isinstance(prepared, PreparedPaperExecution):
@@ -597,6 +572,10 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "durable attempt is not bound to prepared execution action"
                 )
+            if action.side != "BACK":
+                raise PaperExecutionAdoptionError(
+                    "PaperBook recovery materialization supports BACK execution only"
+                )
             if attempt.execution_odds is None or attempt.execution_stake is None:
                 raise PaperExecutionAdoptionError(
                     "accepted-equivalent durable attempt lacks execution truth"
@@ -609,6 +588,7 @@ class PaperExecutionAdoptionRuntime:
                         selection_id=attempt.selection_id,
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
+                        exchange_side="back",
                     )
                 ],
                 attempt.execution_stake,
@@ -670,10 +650,7 @@ class PaperExecutionAdoptionRuntime:
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
         expected_run_id = self.expected_run_id(prepared, trigger_id)
-        self._publish_exposure_scope(
-            prepared=prepared,
-            run_id=expected_run_id,
-        )
+        self._publish_exposure_scope(prepared=prepared, run_id=expected_run_id)
         run = execute_paper_plan(
             plan=prepared.execution_plan,
             trigger_id=trigger_id,
@@ -717,8 +694,6 @@ class PaperExecutionAdoptionRuntime:
             accepted_attempts.append((attempt, action, binding))
 
         if accepted_attempts:
-            # COMMITTED live progress is not permitted until the exposure is a
-            # canonical PaperBook snapshot, not merely an in-memory mutation.
             self.book.save(self.paper_book_path)
             durable_book = PaperBook.load(self.paper_book_path)
             self._assert_same_book_state(
@@ -812,6 +787,7 @@ class PaperExecutionAdoptionRuntime:
                     selection_id=attempt.selection_id,
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
+                    exchange_side="back",
                 )
             ],
             attempt.execution_stake,
@@ -836,7 +812,8 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
     ) -> bool:
         if (
-            ticket.stake != attempt.execution_stake
+            action.side != "BACK"
+            or ticket.stake != attempt.execution_stake
             or ticket.placed_at != attempt.execution_observed_at
             or len(ticket.legs) != 1
             or ticket.provider_source_ids != (attempt.bookmaker_id,)
@@ -856,4 +833,5 @@ class PaperExecutionAdoptionRuntime:
             and leg.selection_id == attempt.selection_id
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
+            and leg.exchange_side == "back"
         )

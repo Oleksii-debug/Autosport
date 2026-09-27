@@ -22,27 +22,26 @@ from . import _paperbook_preload_authority_guard as _guard
 
 
 class _FrozenSurface(tuple):
-    """Immutable persistence-member facade, including its backing-map binding.
+    """Structurally immutable persistence-member facade.
 
-    A slotted mutable instance can still have its slot reassigned through an explicit
-    ``object.__setattr__`` call even when ``__setattr__`` rejects ordinary writes. Keep
-    the read-only member map in tuple payload storage instead: tuple payload identity
-    cannot be rebound through ``object.__setattr__`` or ``object.__delattr__``.
+    Keep authority-bearing bindings directly in tuple payload storage. This avoids both
+    explicit ``object.__setattr__`` slot replacement and reliance on a mutable dict hidden
+    behind ``MappingProxyType``. ``_values`` is only a detached diagnostic projection;
+    mutating any object reachable from that projection cannot retarget this facade.
     """
 
     __slots__ = ()
 
     def __new__(cls, **values: object):
-        return tuple.__new__(cls, (MappingProxyType(dict(values)),))
+        return tuple.__new__(cls, tuple(values.items()))
 
     def __getattr__(self, name: str) -> object:
-        values = tuple.__getitem__(self, 0)
         if name == "_values":
-            return values
-        try:
-            return values[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
+            return MappingProxyType(dict(tuple.__iter__(self)))
+        for member_name, member_value in tuple.__iter__(self):
+            if member_name == name:
+                return member_value
+        raise AttributeError(name)
 
     def __setattr__(self, name: str, value: object) -> None:
         del name, value

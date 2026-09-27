@@ -79,6 +79,31 @@ def test_stale_risk_read_rejects_even_if_live_validator_descriptor_is_rebound(
     _assert_risk_rejected(stale)
 
 
+def test_risk_read_rejects_nested_paperbook_validator_rebind(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.open_ticket([_leg("nested-validator")], "10", placed_at=_TS)
+    initial.save(path)
+    loaded = PaperBook.load(path)
+    _assert_risk_admitted(loaded)
+
+    def bypass_lifecycle_reachability(cls, book) -> None:
+        del cls, book
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_validate_lifecycle_reachability",
+        classmethod(bypass_lifecycle_reachability),
+    )
+
+    _assert_risk_rejected(loaded)
+
+
 def test_generation_stable_risk_read_fails_closed_while_publication_lock_is_held(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

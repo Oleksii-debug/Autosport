@@ -5,7 +5,7 @@ Cloning its Python function graph is not sufficient when those functions reach t
 mutable module objects such as ``json.loads`` or ``hashlib.sha256``: rebinding a member
 on the shared module object would otherwise also retarget the cloned positive path.
 
-Install immutable, minimal facades before the graph clone is taken.  The existing
+Install immutable, minimal facades before the graph clone is taken. The existing
 witness protocol remains the only persistence authority; this module only freezes the
 module-member call targets that protocol already uses.
 """
@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import tempfile
+from types import MappingProxyType
 
 from . import _paperbook_preload_authority_guard as _guard
 
@@ -24,7 +25,7 @@ class _FrozenSurface:
     __slots__ = ("_values",)
 
     def __init__(self, **values: object) -> None:
-        object.__setattr__(self, "_values", values)
+        object.__setattr__(self, "_values", MappingProxyType(dict(values)))
 
     def __getattr__(self, name: str) -> object:
         try:
@@ -42,7 +43,7 @@ class _FrozenSurface:
 
 
 def _install() -> None:
-    # Refuse to bless a pre-retargeted owning graph.  This composition runs
+    # Refuse to bless a pre-retargeted owning graph. This composition runs
     # immediately after the guard import and before its positive graph is cloned.
     if _guard.json is not json:
         raise RuntimeError("canonical PaperBook JSON module authority changed")

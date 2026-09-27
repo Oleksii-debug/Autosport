@@ -150,10 +150,6 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.
 from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
 
-# The public Betfair placeOrders method must never expose the private deterministic
-# transport/parser/clock seams needed by the canonical high-level ledger boundary.
-from . import _betfair_supervised_public_transport_boundary as _betfair_supervised_public_transport_boundary  # noqa: F401,E402
-
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
@@ -171,6 +167,13 @@ from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_sel
 # store resolver cannot be replaced after package import. Freeze that dispatch and
 # MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
 from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
+
+# The public Betfair placeOrders method must never expose the private deterministic
+# transport/parser/clock seams needed by the canonical high-level ledger boundary.
+# Import this only after the monotonic-root guards have completed composition: the
+# STOP authority freezes that transitive dependency graph when the Betfair boundary
+# imports the execution implementation.
+from . import _betfair_supervised_public_transport_boundary as _betfair_supervised_public_transport_boundary  # noqa: F401,E402
 
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so

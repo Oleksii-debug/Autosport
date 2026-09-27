@@ -230,7 +230,16 @@ def _private_place_action(
 ):
     """Unit-test the pre-composition STOP primitive, never the public product API."""
 
-    return write_boundary._PRIVATE_PLACE_ACTION(
+    wrapper = write_boundary._TRUSTED_PRIVATE_PLACE_ACTION
+    closure = wrapper.__closure__
+    assert closure is not None
+    assert "private_place_action" in wrapper.__code__.co_freevars
+    private_place_action = closure[
+        wrapper.__code__.co_freevars.index("private_place_action")
+    ].cell_contents
+    assert callable(private_place_action)
+    assert "_PRIVATE_PLACE_ACTION" not in vars(write_boundary)
+    return private_place_action(
         client,
         _action(),
         profile=profile,

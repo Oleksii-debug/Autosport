@@ -279,6 +279,14 @@ def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
     if module_name not in _RECOMPOSED_BETFAIR_PROVIDER_MODULES:
         return
 
+    # These restored provider suites use a frozen 2026-09-19 approval timeline.
+    # Their original module-local autouse clock does not follow helpers imported by
+    # sibling test modules, so bind the same reserve instant at this shared bridge.
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: "2026-09-19T08:00:03+00:00",
+    )
+
     original_prepared = getattr(module, "_prepared", None)
     if not callable(original_prepared):
         return

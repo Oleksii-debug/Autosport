@@ -10,6 +10,9 @@ import pytest
 import autosport.provider_sport_mapping as mapping
 
 
+FUTURE = "2099-01-01T00:00:00Z"
+
+
 def _digest(payload: object) -> str:
     raw = json.dumps(
         payload,
@@ -74,11 +77,11 @@ def test_restart_does_not_grandfather_legacy_caller_authored_mapping() -> None:
             registry.resolve(
                 provider_namespace="betfair",
                 provider_sport_id="caller-chosen-id",
-                as_of="2026-01-03T00:00:00Z",
+                as_of=FUTURE,
             )
 
 
-def test_restart_preserves_source_reviewed_curated_mapping() -> None:
+def test_restart_does_not_grandfather_matching_tuple_with_wrong_provenance() -> None:
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "sport-map.json"
         _write_legacy_registry(
@@ -88,11 +91,34 @@ def test_restart_preserves_source_reviewed_curated_mapping() -> None:
         )
 
         registry = mapping.ProviderSportMappingRegistry(path)
-        resolution = registry.resolve(
+        with pytest.raises(
+            mapping.ProviderSportMappingError,
+            match="curation|authority|origin|provenance",
+        ):
+            registry.resolve(
+                provider_namespace="betfair",
+                provider_sport_id="1",
+                as_of=FUTURE,
+            )
+
+
+def test_restart_preserves_product_published_curated_mapping() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "sport-map.json"
+        registry = mapping.ProviderSportMappingRegistry.initialize_pristine(path)
+        binding = registry.register_curated(
             provider_namespace="betfair",
             provider_sport_id="1",
-            as_of="2026-01-03T00:00:00Z",
+        )
+
+        reopened = mapping.ProviderSportMappingRegistry(path)
+        resolution = reopened.resolve(
+            provider_namespace="betfair",
+            provider_sport_id="1",
+            as_of=FUTURE,
         )
 
         assert resolution.provider_sport_id == "1"
         assert resolution.canonical_sport == "football"
+        assert resolution.binding_id == binding.binding_id
+        assert resolution.source_snapshot_sha256 == binding.source_snapshot_sha256

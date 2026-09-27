@@ -307,6 +307,8 @@ def _guarded_load_template(cls, path):
 
 
 def _guarded_save_template(self, path):
+    if _EXACT_TYPE(self) is not _CANONICAL_PAPER_BOOK:
+        raise TypeError("PaperBook.save requires the canonical PaperBook class")
     _require_delegate_graph_witnesses(_SAVE_DELEGATE_GRAPH_WITNESSES)
     _require_class_callable_graph_witnesses(
         _CANONICAL_PAPER_BOOK,
@@ -324,6 +326,7 @@ def _guarded_save_template(self, path):
 
 
 def _install() -> None:
+    exact_type = type
     paper_book = _paper.PaperBook
     class_namespace = vars(paper_book)
     load_descriptor = class_namespace.get("load")
@@ -400,6 +403,7 @@ def _install() -> None:
     wrapper_globals["_SAVE_CLASS_CALLABLE_GRAPH_WITNESSES"] = save_class_callable_witnesses
     wrapper_globals["_VALUE_TYPE_CALLABLE_WITNESSES"] = value_type_callable_witnesses
     wrapper_globals["_CANONICAL_PAPER_BOOK"] = paper_book
+    wrapper_globals["_EXACT_TYPE"] = exact_type
     wrapper_globals["_FROZEN_LOAD"] = frozen_load
     wrapper_globals["_FROZEN_SAVE"] = frozen_save
     wrapper_globals["_require_delegate_graph_witnesses"] = _clone_local_function(

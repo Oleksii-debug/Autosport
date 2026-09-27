@@ -250,6 +250,19 @@ def _require_bound_book(book: object, snapshot_path: Path) -> None:
             )
 
 
+def _finalize_fresh_binding(
+    book: object,
+    snapshot_path: Path,
+    expected_snapshot_sha256: str,
+) -> None:
+    """Bind a just-published fresh destination only to the exact serialized book state."""
+
+    actual_sha = _file_sha256(snapshot_path)
+    if actual_sha != expected_snapshot_sha256:
+        raise ValueError("PaperBook fresh snapshot changed before authority binding")
+    _bind_book(book, snapshot_path)
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -597,7 +610,9 @@ def _trusted_save(self, path: str | Path) -> None:
                 raise ValueError("PaperBook snapshot changed during save")
 
             generation = 1 if not records_now else _INT_TYPE(records_now[-1]["generation"]) + 1
-            _bind_book(self, destination)
+            fresh_destination = committed is None and current_sha is None
+            if not fresh_destination:
+                _bind_book(self, destination)
             _append_witness(
                 destination,
                 event=_PREPARE,
@@ -614,6 +629,8 @@ def _trusted_save(self, path: str | Path) -> None:
                 generation=generation,
                 snapshot_sha256=candidate_sha,
             )
+            if fresh_destination:
+                _finalize_fresh_binding(self, destination, candidate_sha)
         finally:
             if temporary is not None:
                 try:

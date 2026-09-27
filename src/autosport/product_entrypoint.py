@@ -18,48 +18,92 @@ from .secret_redaction import _safe_exception_type_label
 
 
 def _build_canonical_exception_type_label_renderer():
-    """Bind the exact secret-safe renderer and its built-in type authority."""
+    """Bind the exact secret-safe renderer and every authority it dispatches through."""
 
     canonical = _safe_exception_type_label
     canonical_code = canonical.__code__
     canonical_globals = canonical.__globals__
     canonical_builtins = canonical_globals.get("builtins")
+    canonical_module_builtins = canonical_globals.get("__builtins__")
+    product_globals = globals()
+
+    # Capture the exact interpreter-owned helpers used by both the authority snapshot
+    # and the canonical secret-redaction helper. Module-global shadowing must not be
+    # able to present a split view of the builtins namespace to the two checks.
+    exact_all = all
+    exact_base_exception = BaseException
+    exact_dict = dict
+    exact_getattr = getattr
+    exact_isinstance = isinstance
+    exact_issubclass = issubclass
+    exact_len = len
+    exact_sorted = sorted
+    exact_str = str
+    exact_tuple = tuple
+    exact_type = type
+    exact_vars = vars
+    exact_zip = zip
+
+    helper_builtin_witnesses = (
+        ("BaseException", exact_base_exception),
+        ("isinstance", exact_isinstance),
+        ("issubclass", exact_issubclass),
+        ("str", exact_str),
+        ("type", exact_type),
+        ("vars", exact_vars),
+    )
+    module_builtins_is_dict = exact_type(canonical_module_builtins) is exact_dict
+
+    def helper_builtin_dispatch_is_intact() -> bool:
+        if (
+            canonical_globals.get("builtins") is not canonical_builtins
+            or canonical_globals.get("__builtins__") is not canonical_module_builtins
+        ):
+            return False
+        for name, expected in helper_builtin_witnesses:
+            # A module global shadows Python's builtin fallback without changing the
+            # canonical function object or its code object, so reject it explicitly.
+            if canonical_globals.get(name, expected) is not expected:
+                return False
+            if module_builtins_is_dict:
+                if canonical_module_builtins.get(name) is not expected:
+                    return False
+            elif exact_getattr(canonical_module_builtins, name, None) is not expected:
+                return False
+        return True
 
     def exception_type_authority_snapshot() -> tuple[tuple[str, type], ...] | None:
         try:
-            namespace = vars(canonical_builtins)
-            return tuple(
-                sorted(
+            namespace = exact_vars(canonical_builtins)
+            return exact_tuple(
+                exact_sorted(
                     (name, value)
                     for name, value in namespace.items()
-                    if type(name) is str
-                    and isinstance(value, type)
-                    and issubclass(value, BaseException)
+                    if exact_type(name) is exact_str
+                    and exact_isinstance(value, exact_type)
+                    and exact_issubclass(value, exact_base_exception)
                 )
             )
-        except BaseException:
+        except exact_base_exception:
             return None
 
     canonical_exception_types = exception_type_authority_snapshot()
 
     def authority_is_intact() -> bool:
-        if (
-            canonical_exception_types is None
-            or canonical_globals.get("builtins") is not canonical_builtins
-        ):
+        if canonical_exception_types is None or not helper_builtin_dispatch_is_intact():
             return False
         current = exception_type_authority_snapshot()
-        if current is None or len(current) != len(canonical_exception_types):
+        if current is None or exact_len(current) != exact_len(canonical_exception_types):
             return False
-        return all(
+        return exact_all(
             current_name == expected_name and current_type is expected_type
-            for (current_name, current_type), (expected_name, expected_type) in zip(
+            for (current_name, current_type), (expected_name, expected_type) in exact_zip(
                 current, canonical_exception_types
             )
         )
 
     def render(exc: BaseException) -> str:
-        exposed = globals().get("_SAFE_EXCEPTION_TYPE_LABEL")
+        exposed = product_globals.get("_SAFE_EXCEPTION_TYPE_LABEL")
         if (
             exposed is not canonical
             or canonical.__code__ is not canonical_code
@@ -68,7 +112,7 @@ def _build_canonical_exception_type_label_renderer():
             return "Exception"
         try:
             rendered = canonical(exc)
-        except BaseException:
+        except exact_base_exception:
             return "Exception"
         if not authority_is_intact():
             return "Exception"

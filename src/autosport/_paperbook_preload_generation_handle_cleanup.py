@@ -65,3 +65,9 @@ def _install() -> None:
 
 _install()
 del _install
+
+# Risk policy derives portfolio/equity evidence from direct PaperBook fields. Install
+# its generation-stable read wrapper only after the canonical persistence graph has
+# been sealed, so the wrapper can reuse that detached authority rather than mutable
+# guard-module helpers.
+from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_guard  # noqa: E402,F401

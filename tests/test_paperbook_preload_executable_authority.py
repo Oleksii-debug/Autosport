@@ -85,3 +85,34 @@ def test_save_rejects_in_place_canonical_serializer_code_mutation_before_witness
 
     assert path.read_bytes() == snapshot_before
     assert witness.read_bytes() == witness_before
+
+
+def test_path_load_rejects_rebound_guard_witness_before_unwitnessed_copy_is_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rebinding the outer witness helper must not turn copied bytes into positive restart truth."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    authoritative_path = tmp_path / "paper-book.json"
+    source = PaperBook("100")
+    source.open_ticket([_leg("selection-guard-global")], "10", placed_at=_TS)
+    source.save(authoritative_path)
+
+    copied_path = tmp_path / "copied-paper-book.json"
+    copied_path.write_bytes(authoritative_path.read_bytes())
+    assert not guard._witness_path(copied_path).exists()
+
+    hostile_calls = 0
+
+    def hostile_verify(_snapshot_path: Path, _payload: bytes) -> None:
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return None
+
+    monkeypatch.setattr(guard, "_verify_snapshot_witness", hostile_verify)
+
+    with pytest.raises(ValueError, match="authority|witness|executable"):
+        PaperBook.load(copied_path)
+
+    assert hostile_calls == 0
+    assert not guard._witness_path(copied_path).exists()

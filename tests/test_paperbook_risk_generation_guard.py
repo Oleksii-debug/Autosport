@@ -126,6 +126,32 @@ def test_generation_stable_risk_read_fails_closed_while_publication_lock_is_held
     _assert_risk_admitted(loaded)
 
 
+def test_owner_facing_evaluate_holds_one_generation_and_denies_writer_conflict(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.open_ticket([_leg("evaluate")], "10", placed_at=_TS)
+    initial.save(path)
+    loaded = PaperBook.load(path)
+    policy = PaperRiskPolicy()
+
+    admitted = policy.evaluate(loaded, Decimal("1"))
+    assert admitted.allowed is True
+
+    publication_lock = guard._acquire_snapshot_publication_lock(guard._witness_path(path))
+    try:
+        blocked = policy.evaluate(loaded, Decimal("1"))
+    finally:
+        guard._release_snapshot_publication_lock(publication_lock)
+
+    assert blocked.allowed is False
+    assert blocked.reason == "virtual bankroll generation authority is invalid"
+
+
 def test_concentration_generation_guard_is_reentrant_and_authority_failure_is_denial(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

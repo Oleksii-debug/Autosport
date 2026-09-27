@@ -410,6 +410,14 @@ def _install() -> None:
         _require_delegate_graph_witnesses,
         trusted_globals=wrapper_globals,
     )
+    # The risk-generation composition consumes this capture helper later through the
+    # sealed load wrapper's private globals.  Publish a detached clone here rather
+    # than the module-global function: module cleanup below intentionally deletes
+    # _descriptor_function, which the original helper resolves dynamically.
+    wrapper_globals["_capture_class_dispatch_graph"] = _clone_local_function(
+        _capture_class_dispatch_graph,
+        trusted_globals=wrapper_globals,
+    )
     wrapper_globals["_require_class_callable_graph_witnesses"] = _clone_local_function(
         _require_class_callable_graph_witnesses,
         trusted_globals=wrapper_globals,

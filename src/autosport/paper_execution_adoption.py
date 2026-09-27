@@ -597,9 +597,9 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "durable attempt is not bound to prepared execution action"
                 )
-            if action.side != "BACK":
+            if action.side != "BACK" or attempt.side != action.side:
                 raise PaperExecutionAdoptionError(
-                    "PaperBook recovery materialization supports BACK execution only"
+                    "PaperBook recovery materialization requires matching BACK attempt side"
                 )
             if attempt.execution_odds is None or attempt.execution_stake is None:
                 raise PaperExecutionAdoptionError(
@@ -778,9 +778,9 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
         decision_id: str,
     ) -> PaperTicket:
-        if action.side != "BACK":
+        if action.side != "BACK" or attempt.side != action.side:
             raise PaperExecutionAdoptionError(
-                "PaperBook materialization supports BACK execution only"
+                "PaperBook materialization requires matching BACK attempt side"
             )
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
@@ -843,6 +843,7 @@ class PaperExecutionAdoptionRuntime:
     ) -> bool:
         if (
             action.side != "BACK"
+            or attempt.side != action.side
             or ticket.stake != attempt.execution_stake
             or ticket.placed_at != attempt.execution_observed_at
             or len(ticket.legs) != 1

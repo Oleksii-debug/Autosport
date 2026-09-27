@@ -39,6 +39,7 @@ _TYPE = type
 _INT_TYPE = int
 _STR_TYPE = str
 _DICT_TYPE = dict
+_LEN = len
 
 _WITNESS_SCHEMA_VERSION = 1
 _WITNESS_SUFFIX = ".paper-book-snapshot-witness.jsonl"
@@ -120,7 +121,7 @@ def _require_delegate_witness(
             raise ValueError(f"PaperBook {label} closure authority changed")
     elif (
         current_closure_contents is None
-        or len(current_closure_contents) != len(closure_contents)
+        or _LEN(current_closure_contents) != _LEN(closure_contents)
         or any(
             current is not expected
             for current, expected in zip(current_closure_contents, closure_contents)
@@ -275,7 +276,7 @@ def _digest_record(payload: dict[str, object]) -> str:
 def _require_sha256(value: object, label: str) -> str:
     if (
         _TYPE(value) is not _STR_TYPE
-        or len(value) != 64
+        or _LEN(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
         raise ValueError(f"PaperBook {label} must be lowercase SHA-256 hex")
@@ -590,7 +591,7 @@ def _trusted_save(self, path: str | Path) -> None:
             records_now, committed_now, pending_now = _read_witnesses(destination)
             if pending_now is not None:
                 raise ValueError("PaperBook snapshot witness changed during save")
-            if committed_now != committed or len(records_now) != len(records):
+            if committed_now != committed or _LEN(records_now) != _LEN(records):
                 raise ValueError("PaperBook snapshot witness changed during save")
             if _file_sha256(destination) != current_sha:
                 raise ValueError("PaperBook snapshot changed during save")

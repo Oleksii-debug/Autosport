@@ -6,6 +6,7 @@ from itertools import count
 import os
 import sys
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 
 import pytest
@@ -63,8 +64,10 @@ from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,
 )
 
+from autosport.continuous_session import SessionState
 from autosport.domain import MarketEvent
 from autosport.execution_stop_authority import ExecutionStopAuthority
+from autosport.product_runtime import AutonomousProductRuntime
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -315,10 +318,39 @@ _PROFILE_FACTORY_SPEC = "autosport.product_source:create_parlay_product_source"
 _PROFILE_PROVIDER_SOURCE_ID = "parlayapi:table_tennis"
 
 
-class _BetfairFixtureRuntime:
-    def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
-        self.manifest = SimpleNamespace(source_id=_PROFILE_PROVIDER_SOURCE_ID)
+class _BetfairRuntimeLeaseStub:
+    authority_active = True
+
+
+class _BetfairStartTransitionStoreStub:
+    @staticmethod
+    def pending() -> None:
+        return None
+
+
+class _BetfairRunningCoordinator:
+    @staticmethod
+    def status() -> SimpleNamespace:
+        return SimpleNamespace(state=SessionState.RUNNING)
+
+
+class _BetfairRunningCollector:
+    @staticmethod
+    def status() -> dict[str, object | None]:
+        return {"stopped_at": None, "stop_reason": None}
+
+
+def _betfair_fixture_runtime(workspace: Path) -> AutonomousProductRuntime:
+    runtime = object.__new__(AutonomousProductRuntime)
+    runtime.workspace = workspace
+    runtime.manifest = SimpleNamespace(source_id=_PROFILE_PROVIDER_SOURCE_ID)
+    runtime.coordinator = _BetfairRunningCoordinator()
+    runtime.collector = _BetfairRunningCollector()
+    runtime._runtime_lease = _BetfairRuntimeLeaseStub()
+    runtime._start_transition_store = _BetfairStartTransitionStoreStub()
+    runtime._closed = False
+    runtime._operation_fence = RLock()
+    return runtime
 
 
 @pytest.fixture(autouse=True)
@@ -338,19 +370,14 @@ def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
     if prepared_owner is None or not callable(original_prepared):
         return
 
-    monkeypatch.setattr(
-        trusted_runtime_profile,
-        "AutonomousProductRuntime",
-        _BetfairFixtureRuntime,
-    )
-    issued_by_workspace: dict[str, tuple[_BetfairFixtureRuntime, object]] = {}
+    issued_by_workspace: dict[str, tuple[AutonomousProductRuntime, object]] = {}
 
     def ensure_profile(tmp: str | Path) -> None:
         workspace = Path(tmp).resolve()
         key = str(workspace)
         if key in issued_by_workspace:
             return
-        runtime = _BetfairFixtureRuntime(workspace)
+        runtime = _betfair_fixture_runtime(workspace)
         trusted_runtime_profile._register_started_product_runtime_origin(
             runtime,
             source_factory=_PROFILE_FACTORY_SPEC,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import http.client
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Event, RLock
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +14,9 @@ from autosport.betfair_supervised_execution import (
     BetfairSupervisedExecutionError,
     execute_betfair_supervised_action,
 )
+from autosport.continuous_session import SessionState
 from autosport.execution_stop_authority import ExecutionStopAuthority
+from autosport.product_runtime import AutonomousProductRuntime
 from autosport.real_execution_ledger import AttemptState
 
 
@@ -32,10 +34,39 @@ def _fixed_supervised_decision_clock(monkeypatch) -> None:
     )
 
 
-class _ProfileRuntime:
-    def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
-        self.manifest = SimpleNamespace(source_id=_PROVIDER_SOURCE_ID)
+class _RuntimeLeaseStub:
+    authority_active = True
+
+
+class _StartTransitionStoreStub:
+    @staticmethod
+    def pending() -> None:
+        return None
+
+
+class _RunningCoordinator:
+    @staticmethod
+    def status() -> SimpleNamespace:
+        return SimpleNamespace(state=SessionState.RUNNING)
+
+
+class _RunningCollector:
+    @staticmethod
+    def status() -> dict[str, object | None]:
+        return {"stopped_at": None, "stop_reason": None}
+
+
+def _canonical_profile_runtime(workspace: Path) -> AutonomousProductRuntime:
+    runtime = object.__new__(AutonomousProductRuntime)
+    runtime.workspace = workspace
+    runtime.manifest = SimpleNamespace(source_id=_PROVIDER_SOURCE_ID)
+    runtime.coordinator = _RunningCoordinator()
+    runtime.collector = _RunningCollector()
+    runtime._runtime_lease = _RuntimeLeaseStub()
+    runtime._start_transition_store = _StartTransitionStoreStub()
+    runtime._closed = False
+    runtime._operation_fence = RLock()
+    return runtime
 
 
 class _BlockingTransport(provider_tests._Transport):
@@ -72,9 +103,8 @@ def _arm_stop(workspace: Path) -> None:
     )
 
 
-def _issue_profile(monkeypatch, workspace: Path):
-    monkeypatch.setattr(runtime_profile, "AutonomousProductRuntime", _ProfileRuntime)
-    runtime = _ProfileRuntime(workspace.resolve())
+def _issue_profile(_monkeypatch, workspace: Path):
+    runtime = _canonical_profile_runtime(workspace.resolve())
     runtime_profile._register_started_product_runtime_origin(
         runtime,
         source_factory=_FACTORY_SPEC,

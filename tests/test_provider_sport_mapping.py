@@ -16,7 +16,7 @@ from autosport.provider_sport_mapping import (
 )
 
 
-CURATION_TIME = "2026-09-27T12:10:00Z"
+CURATION_TIME = "2026-09-27T12:21:13Z"
 FUTURE = "2099-01-01T00:00:00Z"
 
 
@@ -236,21 +236,21 @@ def test_invalid_curated_identity_selection_fails_closed(field, value):
 def test_parser_rejects_invalid_temporal_order_and_naive_timestamp():
     payload = json.loads(curated_bytes().decode("utf-8"))
 
-    payload["valid_until"] = "2026-09-27T12:09:59Z"
+    payload["valid_until"] = "2026-09-27T12:21:12Z"
     with pytest.raises(ProviderSportMappingError, match="after valid_from"):
         ProviderSportEvidence.from_exact_bytes(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
 
     payload = json.loads(curated_bytes().decode("utf-8"))
-    payload["evidence_available_at"] = "2026-09-27T12:09:59Z"
+    payload["evidence_available_at"] = "2026-09-27T12:21:12Z"
     with pytest.raises(ProviderSportMappingError, match="available before"):
         ProviderSportEvidence.from_exact_bytes(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
 
     payload = json.loads(curated_bytes().decode("utf-8"))
-    payload["valid_from"] = "2026-09-27T12:10:00"
+    payload["valid_from"] = "2026-09-27T12:21:13"
     with pytest.raises(ProviderSportMappingError, match="timezone"):
         ProviderSportEvidence.from_exact_bytes(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

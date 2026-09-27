@@ -48,43 +48,53 @@ def _replacement_verifier(verifier_name: str) -> FunctionType:
     return _no_one_arg_check
 
 
-def _forged_from_raw_snapshot(cls, _raw: object):
-    return cls("999")
-
-
-def _forged_inner_load(cls, _path):
-    return cls("999")
-
-
-def _forged_inner_save(_self, _path) -> None:
-    return None
-
-
-def _inner_persistence_wrapper(public_wrapper: FunctionType) -> FunctionType:
-    closure = public_wrapper.__closure__
-    assert closure is not None
-    for cell in closure:
-        value = cell.cell_contents
-        if (
-            type(value) is FunctionType
-            and "_require_class_callable_graph_witnesses" in value.__globals__
-        ):
-            return value
-    raise AssertionError("sealed inner PaperBook persistence wrapper is unavailable")
-
-
 def _replacement_code(verifier_name: str):
     return _replacement_verifier(verifier_name).__code__
 
 
+def _forged_from_raw_snapshot(cls, _raw: object):
+    return cls("999")
+
+
+def _captured_wrapper_globals(public_wrapper: FunctionType) -> dict[str, object]:
+    closure = public_wrapper.__closure__
+    assert closure is not None
+    for cell in closure:
+        value = cell.cell_contents
+        if type(value) is dict and all(name in value for name in _VERIFIER_NAMES):
+            return value
+    raise AssertionError("captured PaperBook persistence globals are unavailable")
+
+
+def _assert_no_preseal_callable(public_wrapper: FunctionType) -> None:
+    closure = public_wrapper.__closure__
+    assert closure is not None
+    for cell in closure:
+        value = cell.cell_contents
+        assert not (
+            type(value) is FunctionType
+            and all(name in value.__globals__ for name in _VERIFIER_NAMES)
+        ), "public persistence wrapper exposes an independently callable pre-seal authority"
+
+
+def test_public_persistence_wrappers_do_not_expose_preseal_callable() -> None:
+    load_descriptor = vars(PaperBook)["load"]
+    assert type(load_descriptor) is classmethod
+    public_load = load_descriptor.__func__
+    public_save = vars(PaperBook)["save"]
+    assert type(public_load) is FunctionType
+    assert type(public_save) is FunctionType
+
+    _assert_no_preseal_callable(public_load)
+    _assert_no_preseal_callable(public_save)
+
+
 @pytest.mark.parametrize("verifier_name", _VERIFIER_NAMES)
-def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
+def test_path_load_rejects_in_place_mutation_of_captured_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     verifier_name: str,
 ) -> None:
-    """The outer seal must reject mutation of every reachable inner verifier executable."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
@@ -97,17 +107,15 @@ def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     load_descriptor = vars(PaperBook)["load"]
     assert type(load_descriptor) is classmethod
     public_load = load_descriptor.__func__
-    inner_load = _inner_persistence_wrapper(public_load)
-    verifier = inner_load.__globals__[verifier_name]
+    captured_globals = _captured_wrapper_globals(public_load)
+    verifier = captured_globals[verifier_name]
     assert type(verifier) is FunctionType
 
     parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
     assert type(parser_descriptor) is classmethod
     parser = parser_descriptor.__func__
-
     replacement_code = _replacement_code(verifier_name)
     assert verifier.__code__ is not replacement_code
-    assert parser.__code__ is not _forged_from_raw_snapshot.__code__
     monkeypatch.setattr(verifier, "__code__", replacement_code)
     monkeypatch.setattr(parser, "__code__", _forged_from_raw_snapshot.__code__)
 
@@ -119,7 +127,7 @@ def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
 
 
 @pytest.mark.parametrize("verifier_name", _VERIFIER_NAMES)
-def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
+def test_save_rejects_in_place_mutation_of_captured_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     verifier_name: str,
@@ -136,8 +144,8 @@ def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
 
     public_save = vars(PaperBook)["save"]
     assert type(public_save) is FunctionType
-    inner_save = _inner_persistence_wrapper(public_save)
-    verifier = inner_save.__globals__[verifier_name]
+    captured_globals = _captured_wrapper_globals(public_save)
+    verifier = captured_globals[verifier_name]
     assert type(verifier) is FunctionType
     replacement_code = _replacement_code(verifier_name)
     assert verifier.__code__ is not replacement_code
@@ -151,13 +159,11 @@ def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
 
 
 @pytest.mark.parametrize("verifier_name", _VERIFIER_NAMES)
-def test_path_load_rejects_rebound_reachable_wrapper_verifier(
+def test_path_load_rejects_rebound_captured_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     verifier_name: str,
 ) -> None:
-    """Replacing a private verifier global must not disable positive-load checks."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
@@ -169,16 +175,12 @@ def test_path_load_rejects_rebound_reachable_wrapper_verifier(
 
     load_descriptor = vars(PaperBook)["load"]
     assert type(load_descriptor) is classmethod
-    inner_load = _inner_persistence_wrapper(load_descriptor.__func__)
-    original_verifier = inner_load.__globals__[verifier_name]
+    public_load = load_descriptor.__func__
+    captured_globals = _captured_wrapper_globals(public_load)
+    original_verifier = captured_globals[verifier_name]
     replacement = _replacement_verifier(verifier_name)
     assert original_verifier is not replacement
-    monkeypatch.setitem(inner_load.__globals__, verifier_name, replacement)
-
-    parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
-    assert type(parser_descriptor) is classmethod
-    parser = parser_descriptor.__func__
-    monkeypatch.setattr(parser, "__code__", _forged_from_raw_snapshot.__code__)
+    monkeypatch.setitem(captured_globals, verifier_name, replacement)
 
     with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
         PaperBook.load(path)
@@ -188,13 +190,11 @@ def test_path_load_rejects_rebound_reachable_wrapper_verifier(
 
 
 @pytest.mark.parametrize("verifier_name", _VERIFIER_NAMES)
-def test_save_rejects_rebound_reachable_wrapper_verifier(
+def test_save_rejects_rebound_captured_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     verifier_name: str,
 ) -> None:
-    """Replacing a private verifier global must fail before durable publication."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
     book = PaperBook("100")
@@ -207,106 +207,14 @@ def test_save_rejects_rebound_reachable_wrapper_verifier(
 
     public_save = vars(PaperBook)["save"]
     assert type(public_save) is FunctionType
-    inner_save = _inner_persistence_wrapper(public_save)
-    original_verifier = inner_save.__globals__[verifier_name]
+    captured_globals = _captured_wrapper_globals(public_save)
+    original_verifier = captured_globals[verifier_name]
     replacement = _replacement_verifier(verifier_name)
     assert original_verifier is not replacement
-    monkeypatch.setitem(inner_save.__globals__, verifier_name, replacement)
+    monkeypatch.setitem(captured_globals, verifier_name, replacement)
 
     with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
         book.save(path)
-
-    assert path.read_bytes() == snapshot_before
-    assert witness.read_bytes() == witness_before
-
-
-def test_path_load_rejects_in_place_mutation_of_reachable_inner_wrapper(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Closure access must not permit replacing the complete guarded load executable."""
-
-    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
-    path = tmp_path / "paper-book.json"
-    book = PaperBook("100")
-    book.open_ticket([_leg("selection-inner-load")], "10", placed_at=_TS)
-    book.save(path)
-    witness = guard._witness_path(path)
-    snapshot_before = path.read_bytes()
-    witness_before = witness.read_bytes()
-
-    load_descriptor = vars(PaperBook)["load"]
-    assert type(load_descriptor) is classmethod
-    inner_load = _inner_persistence_wrapper(load_descriptor.__func__)
-    assert inner_load.__code__ is not _forged_inner_load.__code__
-    monkeypatch.setattr(inner_load, "__code__", _forged_inner_load.__code__)
-
-    with pytest.raises(ValueError, match="inner wrapper executable authority"):
-        PaperBook.load(path)
-
-    assert path.read_bytes() == snapshot_before
-    assert witness.read_bytes() == witness_before
-
-
-def test_save_rejects_in_place_mutation_of_reachable_inner_wrapper(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Closure access must not turn the complete guarded save wrapper into a no-op."""
-
-    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
-    path = tmp_path / "paper-book.json"
-    book = PaperBook("100")
-    book.open_ticket([_leg("selection-inner-save-1")], "10", placed_at=_TS)
-    book.save(path)
-    witness = guard._witness_path(path)
-    snapshot_before = path.read_bytes()
-    witness_before = witness.read_bytes()
-    book.open_ticket([_leg("selection-inner-save-2")], "5", placed_at=_TS)
-
-    public_save = vars(PaperBook)["save"]
-    assert type(public_save) is FunctionType
-    inner_save = _inner_persistence_wrapper(public_save)
-    assert inner_save.__code__ is not _forged_inner_save.__code__
-    monkeypatch.setattr(inner_save, "__code__", _forged_inner_save.__code__)
-
-    with pytest.raises(ValueError, match="inner wrapper executable authority"):
-        book.save(path)
-
-    assert path.read_bytes() == snapshot_before
-    assert witness.read_bytes() == witness_before
-
-
-def test_direct_extracted_inner_load_cannot_bypass_outer_verifier_seal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An inspectable inner positive-load callable must not bypass the public seal."""
-
-    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
-    path = tmp_path / "paper-book.json"
-    book = PaperBook("100")
-    book.open_ticket([_leg("selection-direct-inner-load")], "10", placed_at=_TS)
-    book.save(path)
-    witness = guard._witness_path(path)
-    snapshot_before = path.read_bytes()
-    witness_before = witness.read_bytes()
-
-    load_descriptor = vars(PaperBook)["load"]
-    assert type(load_descriptor) is classmethod
-    inner_load = _inner_persistence_wrapper(load_descriptor.__func__)
-    verifier = inner_load.__globals__["_require_class_callable_graph_witnesses"]
-    assert type(verifier) is FunctionType
-
-    parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
-    assert type(parser_descriptor) is classmethod
-    parser = parser_descriptor.__func__
-
-    monkeypatch.setattr(verifier, "__code__", _no_two_arg_check.__code__)
-    monkeypatch.setattr(parser, "__code__", _forged_from_raw_snapshot.__code__)
-
-    with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
-        inner_load(PaperBook, path)
 
     assert path.read_bytes() == snapshot_before
     assert witness.read_bytes() == witness_before

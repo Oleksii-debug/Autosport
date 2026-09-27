@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 import autosport._paperbook_preload_authority_guard as guard
 import autosport.paper as paper
 
@@ -61,7 +63,7 @@ def test_path_load_ignores_self_restoring_hashlib_sha256_substitution(tmp_path: 
 
 
 def test_path_load_cannot_retarget_frozen_json_surface_storage(tmp_path: Path) -> None:
-    """The facade's own backing container must not be a mutable authority edge."""
+    """The facade's backing container is read-only and cannot become an authority edge."""
 
     path = tmp_path / "paper-book.json"
     book = paper.PaperBook("100")
@@ -70,18 +72,13 @@ def test_path_load_cannot_retarget_frozen_json_surface_storage(tmp_path: Path) -
     frozen_json = guard.json
     values = frozen_json._values
     original_loads = values["loads"]
-    bypass_attempted = False
 
     def hostile_loads(*args, **kwargs):
-        nonlocal bypass_attempted
-        bypass_attempted = True
         return original_loads(*args, **kwargs)
 
-    values["loads"] = hostile_loads
-    try:
-        loaded = paper.PaperBook.load(path)
-    finally:
-        values["loads"] = original_loads
+    with pytest.raises(TypeError):
+        values["loads"] = hostile_loads
 
-    assert bypass_attempted is False
+    assert values["loads"] is original_loads
+    loaded = paper.PaperBook.load(path)
     assert loaded.balance == book.balance

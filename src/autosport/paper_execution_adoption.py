@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
+from types import FunctionType
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
-from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .opportunity import QuoteRef
 from .paper import PaperBook
@@ -188,7 +188,15 @@ class PaperExecutionAdoptionRuntime:
             # minting a no-op PREPARE/COMMIT generation. A merely structurally-equal
             # caller is rejected rather than gaining path authority through save().
             try:
-                _paperbook_authority._require_bound_book(
+                if (
+                    type(_FROZEN_REQUIRE_BOUND_BOOK) is not FunctionType
+                    or _FROZEN_REQUIRE_BOUND_BOOK.__code__
+                    is not _FROZEN_REQUIRE_BOUND_BOOK_CODE
+                ):
+                    raise ValueError(
+                        "PaperBook current-binding verifier executable authority changed"
+                    )
+                _FROZEN_REQUIRE_BOUND_BOOK(
                     self.book,
                     self.paper_book_path,
                 )
@@ -907,3 +915,16 @@ class PaperExecutionAdoptionRuntime:
             and leg.sport == binding.sport
             and leg.exchange_side == "back"
         )
+
+
+# Bind existing-path admission to the verifier already frozen inside the canonical
+# PaperBook persistence graph. The installed __init__ receives a detached globals
+# snapshot, so later module-global rebinding cannot retarget current-binding checks.
+from ._paperbook_current_binding_verifier import (
+    bind_current_binding_verifier as _bind_current_binding_verifier,
+)
+
+PaperExecutionAdoptionRuntime.__init__ = _bind_current_binding_verifier(
+    PaperExecutionAdoptionRuntime.__init__
+)
+del _bind_current_binding_verifier

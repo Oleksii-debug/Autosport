@@ -7,6 +7,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import FunctionType
 from typing import Any
 
 from .decision_ledger import (
@@ -178,7 +179,15 @@ class RunTransaction:
             with _paperbook_authority._WITNESS_LOCK:
                 # There is no unbound fallback: transaction NEW must descend from the
                 # exact currently-authoritative canonical generation.
-                _paperbook_authority._require_bound_book(book, canonical)
+                if (
+                    type(_FROZEN_REQUIRE_BOUND_BOOK) is not FunctionType
+                    or _FROZEN_REQUIRE_BOUND_BOOK.__code__
+                    is not _FROZEN_REQUIRE_BOUND_BOOK_CODE
+                ):
+                    raise ValueError(
+                        "PaperBook current-binding verifier executable authority changed"
+                    )
+                _FROZEN_REQUIRE_BOUND_BOOK(book, canonical)
                 _paperbook_authority._call_witnessed_delegate(
                     _paperbook_authority._ORIGINAL_SAVE,
                     _paperbook_authority._ORIGINAL_SAVE_WITNESS,
@@ -190,7 +199,15 @@ class RunTransaction:
                     raise RunTransactionError(
                         "transaction staging unexpectedly minted PaperBook path authority"
                     )
-                _paperbook_authority._require_bound_book(book, canonical)
+                if (
+                    type(_FROZEN_REQUIRE_BOUND_BOOK) is not FunctionType
+                    or _FROZEN_REQUIRE_BOUND_BOOK.__code__
+                    is not _FROZEN_REQUIRE_BOUND_BOOK_CODE
+                ):
+                    raise ValueError(
+                        "PaperBook current-binding verifier executable authority changed"
+                    )
+                _FROZEN_REQUIRE_BOUND_BOOK(book, canonical)
         except RunTransactionError:
             raise
         except (OSError, TypeError, ValueError) as exc:
@@ -1429,3 +1446,15 @@ class RunTransaction:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, destination)
+
+# RunTransaction staging consumes the same sealed current-binding verifier as the
+# canonical PaperBook persistence graph. Only this method needs the capability;
+# keep it in detached function globals rather than a mutable module dispatch slot.
+from ._paperbook_current_binding_verifier import (
+    bind_current_binding_verifier as _bind_current_binding_verifier,
+)
+
+RunTransaction._stage_paper_book_snapshot = _bind_current_binding_verifier(
+    RunTransaction._stage_paper_book_snapshot
+)
+del _bind_current_binding_verifier

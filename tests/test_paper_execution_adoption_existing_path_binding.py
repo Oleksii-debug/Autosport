@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport._paperbook_preload_authority_guard as paper_guard
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -97,3 +98,51 @@ def test_existing_snapshot_rejects_unbound_structurally_equal_caller(tmp_path) -
     current = PaperBook.load(book_path)
     assert current.balance == Decimal("100")
     assert current.committed_stake == Decimal("0")
+
+
+def test_existing_snapshot_binding_ignores_rebound_guard_validator(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    book_path = tmp_path / "paper-book.json"
+    PaperBook("100").save(book_path)
+    unbound = PaperBook("100")
+    snapshot_before = book_path.read_bytes()
+    witness_path = paper_guard._witness_path(book_path)
+    witness_before = witness_path.read_bytes()
+    hostile_calls: list[tuple[object, object]] = []
+
+    def hostile(book: object, path: object) -> None:
+        hostile_calls.append((book, path))
+        return None
+
+    monkeypatch.setattr(paper_guard, "_require_bound_book", hostile)
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="lacks current durable snapshot authority",
+    ):
+        _runtime(tmp_path, book=unbound, book_path=book_path)
+
+    assert hostile_calls == []
+    assert book_path.read_bytes() == snapshot_before
+    assert witness_path.read_bytes() == witness_before
+
+
+def test_existing_snapshot_bound_caller_survives_rebound_guard_validator(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    book_path = tmp_path / "paper-book.json"
+    PaperBook("100").save(book_path)
+    caller = PaperBook.load(book_path)
+    hostile_calls: list[tuple[object, object]] = []
+
+    def hostile(book: object, path: object) -> None:
+        hostile_calls.append((book, path))
+        raise AssertionError("rebound mutable binding validator was dispatched")
+
+    monkeypatch.setattr(paper_guard, "_require_bound_book", hostile)
+
+    runtime = _runtime(tmp_path, book=caller, book_path=book_path)
+
+    assert runtime.book is caller
+    assert hostile_calls == []

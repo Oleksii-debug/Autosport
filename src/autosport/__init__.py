@@ -181,3 +181,7 @@ from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_id
 # through an explicit product-owned curation table while reusing the canonical
 # registry for parsing, chronology, locking, persistence and overlap semantics.
 from . import _provider_sport_mapping_curation_guard as _provider_sport_mapping_curation_guard  # noqa: F401,E402
+
+# Extend the same Wave N authority fence through the stdlib JSON dispatch graph so a
+# self-restoring decoder cannot split curation from the registry's durable parse.
+from . import _provider_sport_mapping_json_dispatch_guard as _provider_sport_mapping_json_dispatch_guard  # noqa: F401,E402

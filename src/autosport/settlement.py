@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from weakref import ReferenceType, ref
 
-from .domain import TicketStatus
-from .paper import PaperBook
+from .domain import TicketLeg, TicketStatus
+from .paper import PaperBook, PaperTicket
 
 
 VALID_OUTCOMES = {"win", "loss", "void"}
@@ -333,8 +333,12 @@ def _build_serialized_settlement_operations():
     # PaperBook's imported domain DTO classes are mutable class objects too.
     # Seal the exact field/property descriptors consumed by validation and
     # settlement so class-level retargeting cannot reinterpret an exact ticket.
-    paper_ticket_type = paper_module_globals["PaperTicket"]
-    ticket_leg_type = paper_module_globals["TicketLeg"]
+    # PaperBook.settle may be a composed guard whose private globals intentionally
+    # no longer mirror paper.py. Capture DTO class authority from the canonical
+    # defining modules while keeping the current settle-wrapper dependency graph
+    # sealed independently above.
+    paper_ticket_type = PaperTicket
+    ticket_leg_type = TicketLeg
     domain_dto_descriptor_names = (
         (
             paper_ticket_type,

@@ -266,14 +266,11 @@ class ProposedTicketRiskContext:
     market deny-list, and provider deny-list enforcement. Canonical sport identity
     is deliberately absent until the upstream #339 identity authority exists, so
     any non-empty owner sport deny-list must fail closed instead of being guessed.
-    Session/day loss, drawdown and turnover are conservatively bounded from the
-    validated PaperBook lifecycle: all-history gross realized loss upper-bounds
-    any bounded loss window, stake-basis equity preserves open stake at cost until
-    settlement, and turnover counts every durable ticket stake. A probabilistic
-    risk-of-ruin ceiling requires an explicit canonical upper-bound witness in this
-    context; it is never inferred from PaperBook balances. Event/market concentration
-    is derived exactly from canonical open PaperBook stake plus the proposed stake.
-    Provider concentration additionally requires source-scoped bookmaker account
+    Session/day loss, drawdown and turnover are enforced conservatively from the
+    canonical PaperBook lifecycle and therefore survive snapshot restart without a
+    second state authority. Risk-of-ruin remains evidence-gated because a balance
+    history is not a probability model. Event/market concentration is enforced
+    against the whole open stake set. Provider concentration additionally requires source-scoped bookmaker account
     identity for every relevant proposal/open ticket; provider-only history is not
     sufficient account-scoped exposure proof. Sport concentration remains fail-closed
     until canonical sport identity has a durable authority.
@@ -488,8 +485,12 @@ class _HistoricalRiskMetrics:
     turnover: Decimal
 
 
+class _PaperRiskPolicyMeta(type):
+    """Composition point for final owner-facing risk-root data descriptors."""
+
+
 @dataclass(frozen=True, slots=True)
-class PaperRiskPolicy:
+class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
 
     ``economic_goal`` can only tighten the locally proven executable limits in

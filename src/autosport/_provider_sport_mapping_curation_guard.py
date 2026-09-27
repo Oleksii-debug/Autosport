@@ -220,6 +220,30 @@ def _install_guard() -> None:
     canonical_digest_code = canonical_digest.__code__
     canonical_atomic_write_json = mapping_module.atomic_write_json
     canonical_atomic_write_json_code = exact_getattr(canonical_atomic_write_json, "__code__", None)
+    canonical_atomic_write_globals = exact_getattr(canonical_atomic_write_json, "__globals__", None)
+    if exact_type(canonical_atomic_write_globals) is not dict:
+        raise exact_runtime_error("provider sport atomic writer namespace is unavailable")
+    canonical_atomic_os = canonical_atomic_write_globals.get("os")
+    canonical_atomic_json = canonical_atomic_write_globals.get("json")
+    canonical_atomic_tempfile = canonical_atomic_write_globals.get("tempfile")
+    canonical_atomic_os_replace = exact_getattr(canonical_atomic_os, "replace", None)
+    canonical_atomic_os_fsync = exact_getattr(canonical_atomic_os, "fsync", None)
+    canonical_atomic_json_dump = exact_getattr(canonical_atomic_json, "dump", None)
+    canonical_atomic_named_temporary_file = exact_getattr(
+        canonical_atomic_tempfile,
+        "NamedTemporaryFile",
+        None,
+    )
+    if not all(
+        exact_callable(value)
+        for value in (
+            canonical_atomic_os_replace,
+            canonical_atomic_os_fsync,
+            canonical_atomic_json_dump,
+            canonical_atomic_named_temporary_file,
+        )
+    ):
+        raise exact_runtime_error("provider sport atomic writer dependencies are unavailable")
     canonical_durable_path_lock = mapping_module.durable_path_lock
     canonical_durable_path_lock_code = exact_getattr(canonical_durable_path_lock, "__code__", None)
     canonical_schema = mapping_module._SCHEMA
@@ -380,7 +404,7 @@ def _install_guard() -> None:
             if canonical_parser_globals.get(name) is not helper:
                 raise canonical_error("canonical evidence parser helper authority changed")
             if expected_code is not None and exact_getattr(helper, "__code__", None) is not expected_code:
-                raise canonical_error("canonical evidence parser executable authority changed")
+                raise canonical_error("canonical evidence parser helper executable authority changed")
         if (
             canonical_parser_globals.get("hashlib") is not canonical_hashlib
             or canonical_hashlib.sha256 is not canonical_sha256
@@ -530,6 +554,16 @@ def _install_guard() -> None:
             or mapping_module.atomic_write_json is not canonical_atomic_write_json
             or exact_getattr(canonical_atomic_write_json, "__code__", None)
             is not canonical_atomic_write_json_code
+            or exact_getattr(canonical_atomic_write_json, "__globals__", None)
+            is not canonical_atomic_write_globals
+            or canonical_atomic_write_globals.get("os") is not canonical_atomic_os
+            or canonical_atomic_write_globals.get("json") is not canonical_atomic_json
+            or canonical_atomic_write_globals.get("tempfile") is not canonical_atomic_tempfile
+            or exact_getattr(canonical_atomic_os, "replace", None) is not canonical_atomic_os_replace
+            or exact_getattr(canonical_atomic_os, "fsync", None) is not canonical_atomic_os_fsync
+            or exact_getattr(canonical_atomic_json, "dump", None) is not canonical_atomic_json_dump
+            or exact_getattr(canonical_atomic_tempfile, "NamedTemporaryFile", None)
+            is not canonical_atomic_named_temporary_file
             or mapping_module.durable_path_lock is not canonical_durable_path_lock
             or exact_getattr(canonical_durable_path_lock, "__code__", None)
             is not canonical_durable_path_lock_code

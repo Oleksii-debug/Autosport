@@ -19,27 +19,27 @@ from . import provider_sport_mapping as mapping
 
 
 # These are product-curation assertions, not provider-origin claims. The validity
-# boundary is intentionally the curation admission instant: this code does not claim
-# that the mapping was product-authoritative before that point.
+# boundary is the exact durable commit instant that first admitted this fixed product
+# authority; this code does not claim product authority before that point.
 _PRODUCT_CURATED_PROVIDER_SPORTS = MappingProxyType(
     {
         ("betfair", "1"): (
             "football",
-            b'{"canonical_sport":"football","evidence_available_at":"2026-09-27T12:10:00Z",'
+            b'{"canonical_sport":"football","evidence_available_at":"2026-09-27T12:21:13Z",'
             b'"provider_namespace":"betfair","provider_sport_id":"1",'
             b'"schema":"autosport.provider_sport_mapping_evidence","schema_version":1,'
-            b'"valid_from":"2026-09-27T12:10:00Z","valid_until":null}',
-            "8f9e2045ac58183711bff88d9fb7df5661c2d5e3dc3ba56c4cbf3253b96d7e5d",
-            "58b7388a83ba7153f49692bf9085e13b3c44a9a74fae2392c854b1d2e8723ba7",
+            b'"valid_from":"2026-09-27T12:21:13Z","valid_until":null}',
+            "ac6c986666014a7b0f9da74384216baae421d9a07556454d5cd384eaf8c5a3f7",
+            "f54566089d0ec407b4f1fc9c09286bd85147aab37d4e865baf4aa96fa5c5635c",
         ),
         ("betfair", "2"): (
             "tennis",
-            b'{"canonical_sport":"tennis","evidence_available_at":"2026-09-27T12:10:00Z",'
+            b'{"canonical_sport":"tennis","evidence_available_at":"2026-09-27T12:21:13Z",'
             b'"provider_namespace":"betfair","provider_sport_id":"2",'
             b'"schema":"autosport.provider_sport_mapping_evidence","schema_version":1,'
-            b'"valid_from":"2026-09-27T12:10:00Z","valid_until":null}',
-            "8670f58946a8c99266f784c0a1f331bfacaa00bff301b801216f0967d469fbc8",
-            "e041f447af18a78da612622087a7b3b779228477588da33f444df5f95766b01d",
+            b'"valid_from":"2026-09-27T12:21:13Z","valid_until":null}',
+            "57bf4b1ca3decf42fcc361d511db401db1ef464397028b5aa26baac34c76bef4",
+            "c6c3794645619337fe0d616b7ac3f9e14ca126d7eac47e6bcd591a9085753a58",
         ),
     }
 )
@@ -175,6 +175,10 @@ def _install_guard() -> None:
     canonical_version = mapping_module._VERSION
 
     def _curated_record(provider_namespace: str, provider_sport_id: str):
+        # Do not invoke caller-defined hash/equality code while selecting product
+        # authority. Only exact built-in strings may address the frozen table.
+        if exact_type(provider_namespace) is not str or exact_type(provider_sport_id) is not str:
+            raise canonical_error("provider sport mapping lacks product-owned curation authority")
         record = curated.get((provider_namespace, provider_sport_id))
         if record is None:
             raise canonical_error("provider sport mapping lacks product-owned curation authority")
@@ -340,7 +344,6 @@ def _install_guard() -> None:
             raise canonical_error("provider sport durable writer dependency authority changed")
 
     def register_evidence(self, source_snapshot_bytes: bytes):
-        del source_snapshot_bytes
         _assert_guard_authority(self)
         raise canonical_error(
             "caller-authored exact bytes are not positive provider sport mapping authority; "

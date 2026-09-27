@@ -154,6 +154,11 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
+# A still-live account snapshot is an ephemeral remote-provider capability. Reusing
+# its idempotency identity from another canonical acquirer is allowed only when the
+# exact in-memory Betfair credentials match the origin that issued the live object.
+from . import _account_snapshot_acquisition_origin_binding as _account_snapshot_acquisition_origin_binding  # noqa: F401,E402
+
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.

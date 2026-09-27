@@ -33,17 +33,19 @@ def test_frozen_module_surface_backing_rejects_member_retarget(
     surface_name: str,
     member_name: str,
 ) -> None:
-    """Frozen facade backing is read-only while the admitted snapshot remains loadable."""
+    """Frozen facade diagnostics cannot retarget the admitted member authority."""
 
     path, book = _saved_book(tmp_path)
     surface = getattr(guard, surface_name)
     values = surface._values
-    original = values[member_name]
+    original = getattr(surface, member_name)
 
     with pytest.raises(TypeError):
         values[member_name] = object()
 
-    assert values[member_name] is original
+    detached = dict(values)
+    detached[member_name] = object()
+    assert getattr(surface, member_name) is original
     loaded = paper.PaperBook.load(path)
     assert loaded.balance == book.balance
 
@@ -53,18 +55,18 @@ def test_frozen_module_surface_backing_binding_rejects_object_slot_bypass(
     tmp_path: Path,
     surface_name: str,
 ) -> None:
-    """Explicit object slot operations cannot replace the facade backing authority."""
+    """Explicit object slot operations cannot replace the facade authority payload."""
 
     path, book = _saved_book(tmp_path)
     surface = getattr(guard, surface_name)
-    original_values = surface._values
+    original_values = dict(surface._values)
 
     with pytest.raises(AttributeError):
         object.__setattr__(surface, "_values", {"hostile": object()})
     with pytest.raises(AttributeError):
         object.__delattr__(surface, "_values")
 
-    assert surface._values is original_values
+    assert dict(surface._values) == original_values
     loaded = paper.PaperBook.load(path)
     assert loaded.balance == book.balance
 

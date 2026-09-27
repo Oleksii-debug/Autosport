@@ -46,6 +46,14 @@ def _forged_from_raw_snapshot(cls, _raw: object):
     return cls("999")
 
 
+def _forged_inner_load(cls, _path):
+    return cls("999")
+
+
+def _forged_inner_save(_self, _path) -> None:
+    return None
+
+
 def _inner_persistence_wrapper(public_wrapper: FunctionType) -> FunctionType:
     closure = public_wrapper.__closure__
     assert closure is not None
@@ -132,6 +140,63 @@ def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     monkeypatch.setattr(verifier, "__code__", replacement_code)
 
     with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
+        book.save(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
+def test_path_load_rejects_in_place_mutation_of_reachable_inner_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closure access must not permit replacing the complete guarded load executable."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-inner-load")], "10", placed_at=_TS)
+    book.save(path)
+    witness = guard._witness_path(path)
+    snapshot_before = path.read_bytes()
+    witness_before = witness.read_bytes()
+
+    load_descriptor = vars(PaperBook)["load"]
+    assert type(load_descriptor) is classmethod
+    inner_load = _inner_persistence_wrapper(load_descriptor.__func__)
+    assert inner_load.__code__ is not _forged_inner_load.__code__
+    monkeypatch.setattr(inner_load, "__code__", _forged_inner_load.__code__)
+
+    with pytest.raises(ValueError, match="inner wrapper executable authority"):
+        PaperBook.load(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
+def test_save_rejects_in_place_mutation_of_reachable_inner_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closure access must not turn the complete guarded save wrapper into a no-op."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-inner-save-1")], "10", placed_at=_TS)
+    book.save(path)
+    witness = guard._witness_path(path)
+    snapshot_before = path.read_bytes()
+    witness_before = witness.read_bytes()
+    book.open_ticket([_leg("selection-inner-save-2")], "5", placed_at=_TS)
+
+    public_save = vars(PaperBook)["save"]
+    assert type(public_save) is FunctionType
+    inner_save = _inner_persistence_wrapper(public_save)
+    assert inner_save.__code__ is not _forged_inner_save.__code__
+    monkeypatch.setattr(inner_save, "__code__", _forged_inner_save.__code__)
+
+    with pytest.raises(ValueError, match="inner wrapper executable authority"):
         book.save(path)
 
     assert path.read_bytes() == snapshot_before

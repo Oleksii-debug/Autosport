@@ -50,17 +50,20 @@ def _hostile_authority_root(_ledger_path: Path) -> Path:
     raise AssertionError("mutated independent authority-root executable was dispatched")
 
 
+def _saved_book(tmp_path: Path, selection_id: str) -> tuple[Path, Path, bytes, bytes]:
+    path = tmp_path / "paper-book.json"
+    source = PaperBook("100")
+    source.open_ticket([_leg(selection_id)], "10", placed_at=_TS)
+    source.save(path)
+    witness = guard._witness_path(path)
+    return path, witness, path.read_bytes(), witness.read_bytes()
+
+
 def test_path_load_rejects_in_place_canonical_decoder_code_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
-    path = tmp_path / "paper-book.json"
-    source = PaperBook("100")
-    source.open_ticket([_leg()], "10", placed_at=_TS)
-    source.save(path)
-    snapshot_before = path.read_bytes()
-    witness = guard._witness_path(path)
-    witness_before = witness.read_bytes()
+    path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-decoder")
 
     decoder = guard._LOAD_BYTES
     assert decoder.__code__ is not _hostile_load_bytes.__code__
@@ -79,13 +82,7 @@ def test_path_load_rejects_transitive_class_parser_code_mutation(
     """Witness the parser reached dynamically through ``cls`` after load_bytes."""
 
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
-    path = tmp_path / "paper-book.json"
-    source = PaperBook("100")
-    source.open_ticket([_leg("selection-class-parser")], "10", placed_at=_TS)
-    source.save(path)
-    snapshot_before = path.read_bytes()
-    witness = guard._witness_path(path)
-    witness_before = witness.read_bytes()
+    path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-class-parser")
 
     parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
     assert type(parser_descriptor) is classmethod
@@ -94,6 +91,27 @@ def test_path_load_rejects_transitive_class_parser_code_mutation(
     monkeypatch.setattr(parser, "__code__", _hostile_from_raw_snapshot.__code__)
 
     with pytest.raises(ValueError, match="class|executable|authority"):
+        PaperBook.load(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
+def test_path_load_rejects_transitive_class_parser_descriptor_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing the classmethod descriptor cannot redirect positive restart."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-class-rebind")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_from_raw_snapshot",
+        classmethod(_hostile_from_raw_snapshot),
+    )
+
+    with pytest.raises(ValueError, match="class|dispatch|authority"):
         PaperBook.load(path)
 
     assert path.read_bytes() == snapshot_before
@@ -161,13 +179,7 @@ def test_path_load_uses_frozen_independent_root_after_original_code_mutation(
     """Later mutation of the imported root selector cannot redirect positive load."""
 
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
-    path = tmp_path / "paper-book.json"
-    source = PaperBook("100")
-    source.open_ticket([_leg("selection-root-code")], "10", placed_at=_TS)
-    source.save(path)
-    snapshot_before = path.read_bytes()
-    witness = guard._witness_path(path)
-    witness_before = witness.read_bytes()
+    path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-root-code")
 
     root_selector = guard._paper_authority_root
     original_code = root_selector.__code__

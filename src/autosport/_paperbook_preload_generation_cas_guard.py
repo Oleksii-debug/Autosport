@@ -217,6 +217,18 @@ def _generation_guarded_save(self, path):
         _release_snapshot_publication_lock(publication_lock)
 
 
+def _generation_guarded_committed_stake(self):
+    snapshot_path = _bound_snapshot_path(self)
+    if snapshot_path is None:
+        return _GENERATION_ORIGINAL_COMMITTED_STAKE(self)
+    publication_lock = _acquire_snapshot_publication_lock(_witness_path(snapshot_path))
+    try:
+        _require_bound_book(self, snapshot_path)
+        return _GENERATION_ORIGINAL_COMMITTED_STAKE(self)
+    finally:
+        _release_snapshot_publication_lock(publication_lock)
+
+
 def _generation_guarded_open_ticket(self, *args, **kwargs):
     snapshot_path = _bound_snapshot_path(self)
     if snapshot_path is None:
@@ -248,10 +260,17 @@ def _install() -> None:
 
     trusted_load = guard_namespace.get("_trusted_path_load")
     trusted_save = guard_namespace.get("_trusted_save")
+    committed_stake_descriptor = paper_namespace.get("committed_stake")
     open_ticket = paper_namespace.get("open_ticket")
     settle = paper_namespace.get("settle")
     if any(type(value) is not FunctionType for value in (trusted_load, trusted_save, open_ticket, settle)):
         raise RuntimeError("canonical PaperBook generation-CAS composition surface changed")
+    if (
+        type(committed_stake_descriptor) is not property
+        or type(committed_stake_descriptor.fget) is not FunctionType
+    ):
+        raise RuntimeError("canonical PaperBook committed_stake authority surface changed")
+    committed_stake_getter = committed_stake_descriptor.fget
 
     guard_namespace["_LOCK_NORMCASE"] = os.path.normcase
     guard_namespace["_LOCK_ABSPATH"] = os.path.abspath
@@ -284,6 +303,7 @@ def _install() -> None:
     guard_namespace["_SNAPSHOT_AUTHORITY_STALE_ERROR"] = _STALE_ERROR
     guard_namespace["_GENERATION_ORIGINAL_TRUSTED_LOAD"] = trusted_load
     guard_namespace["_GENERATION_ORIGINAL_TRUSTED_SAVE"] = trusted_save
+    guard_namespace["_GENERATION_ORIGINAL_COMMITTED_STAKE"] = committed_stake_getter
     guard_namespace["_GENERATION_ORIGINAL_OPEN_TICKET"] = open_ticket
     guard_namespace["_GENERATION_ORIGINAL_SETTLE"] = settle
 
@@ -300,6 +320,7 @@ def _install() -> None:
         _bound_snapshot_path,
         _generation_guarded_load,
         _generation_guarded_save,
+        _generation_guarded_committed_stake,
         _generation_guarded_open_ticket,
         _generation_guarded_settle,
     ):
@@ -307,6 +328,7 @@ def _install() -> None:
 
     guarded_load = guard_namespace["_generation_guarded_load"]
     guarded_save = guard_namespace["_generation_guarded_save"]
+    guarded_committed_stake = guard_namespace["_generation_guarded_committed_stake"]
     guarded_open = guard_namespace["_generation_guarded_open_ticket"]
     guarded_settle = guard_namespace["_generation_guarded_settle"]
 
@@ -314,6 +336,8 @@ def _install() -> None:
     guarded_load.__qualname__ = "PaperBook.load"
     guarded_save.__name__ = "save"
     guarded_save.__qualname__ = "PaperBook.save"
+    guarded_committed_stake.__name__ = "committed_stake"
+    guarded_committed_stake.__qualname__ = "PaperBook.committed_stake"
     guarded_open.__name__ = "open_ticket"
     guarded_open.__qualname__ = "PaperBook.open_ticket"
     guarded_settle.__name__ = "settle"
@@ -323,6 +347,7 @@ def _install() -> None:
     guard_namespace["_trusted_save"] = guarded_save
     paper_book.load = classmethod(guarded_load)
     paper_book.save = guarded_save
+    paper_book.committed_stake = property(guarded_committed_stake)
     paper_book.open_ticket = guarded_open
     paper_book.settle = guarded_settle
 

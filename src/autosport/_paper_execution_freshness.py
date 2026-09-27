@@ -147,3 +147,8 @@ from . import _paperbook_preload_authority_guard as _paperbook_preload_authority
 # witness protocol is installed. This preserves one parser/serializer/authority while
 # making later guard-module or PaperBook helper retargeting non-authoritative.
 from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: E402,F401
+
+# The installed wrappers themselves retain verifier function objects in a private
+# globals mapping. Seal those verifier executables against in-place code mutation so
+# disabling the graph check cannot authorize a later parser/serializer retarget.
+from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: E402,F401

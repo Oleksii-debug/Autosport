@@ -6,14 +6,14 @@ writer could otherwise publish a newer durable generation between validation and
 reads, or a later class-descriptor rebind could bypass the live validator dispatch.
 
 Reuse the already-sealed persistence graph: acquire the same publication lock for the
-entire risk derivation, require the existing frozen PaperBook class-callable graph, and
-run the frozen canonical loaded-state validator before and after the original risk
-calculation. Nested risk helpers reuse the same thread-local read critical section so
-higher-level whole-portfolio checks can remain atomic without making the canonical
-writer lock reentrant. Pre-guard PaperRiskPolicy callables are retained only as inert
-executable specs and reconstructed after admission, so public wrappers expose no
-callable pre-guard bypass. This module creates no risk store, parser, serializer,
-journal, or generation authority.
+entire risk derivation, require the existing frozen PaperBook and PaperRiskPolicy
+class-callable graphs, and run the frozen canonical loaded-state validator before and
+after the original risk calculation. Nested risk helpers reuse the same thread-local
+read critical section so higher-level whole-portfolio checks can remain atomic without
+making the canonical writer lock reentrant. Pre-guard PaperRiskPolicy callables are
+retained only as inert executable specs and reconstructed after admission, so public
+wrappers expose no callable pre-guard bypass. This module creates no risk store,
+parser, serializer, journal, or generation authority.
 """
 
 from __future__ import annotations
@@ -116,6 +116,10 @@ def _guarded_risk_call(book, delegate_spec, args, kwargs, failure_result=None):
             _CANONICAL_PAPER_BOOK,
             _PAPERBOOK_CLASS_WITNESSES,
         )
+        _FROZEN_REQUIRE_CLASS_GRAPH(
+            _CANONICAL_RISK_POLICY,
+            _RISK_POLICY_CLASS_WITNESSES,
+        )
         snapshot_path = _FROZEN_BOUND_SNAPSHOT_PATH(book)
         if snapshot_path is not None:
             held_reads = getattr(_RISK_READ_LOCAL, "held", None)
@@ -145,6 +149,10 @@ def _guarded_risk_call(book, delegate_spec, args, kwargs, failure_result=None):
         result = delegate(*args, **kwargs)
 
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
+        _FROZEN_REQUIRE_CLASS_GRAPH(
+            _CANONICAL_RISK_POLICY,
+            _RISK_POLICY_CLASS_WITNESSES,
+        )
         _FROZEN_REQUIRE_CLASS_GRAPH(
             _CANONICAL_PAPER_BOOK,
             _PAPERBOOK_CLASS_WITNESSES,
@@ -335,11 +343,16 @@ def _install() -> None:
     class_graph_verifier = load_trusted_globals.get(
         "_require_class_callable_graph_witnesses"
     )
+    class_graph_capture = load_trusted_globals.get("_capture_class_dispatch_graph")
     class_witnesses = load_trusted_globals.get(
         "_LOAD_CLASS_CALLABLE_GRAPH_WITNESSES"
     )
-    if type(class_graph_verifier) is not FunctionType or type(class_witnesses) is not tuple:
-        raise RuntimeError("canonical PaperBook class-callable witness is unavailable")
+    if (
+        type(class_graph_verifier) is not FunctionType
+        or type(class_graph_capture) is not FunctionType
+        or type(class_witnesses) is not tuple
+    ):
+        raise RuntimeError("canonical class-callable witness machinery is unavailable")
     frozen_class_graph_verifier = _clone_module_function_graph(class_graph_verifier)
 
     namespace = vars(policy)
@@ -360,11 +373,25 @@ def _install() -> None:
     derive_goal_stake_vector = _plain_function(namespace.get("derive_goal_stake_vector"))
     evaluate = _plain_function(namespace.get("evaluate"))
 
+    risk_roots = (
+        book_state,
+        portfolio_hash,
+        historical_metrics,
+        shadow_book,
+        identity_concentration,
+        derive_goal_stake,
+        derive_goal_stake_vector,
+        evaluate,
+    )
+    risk_class_witnesses = class_graph_capture(policy, risk_roots)
+
     private_globals: dict[str, object] = dict(globals())
     private_globals.update(
         {
             "_CANONICAL_PAPER_BOOK": paper_book,
             "_PAPERBOOK_CLASS_WITNESSES": class_witnesses,
+            "_CANONICAL_RISK_POLICY": policy,
+            "_RISK_POLICY_CLASS_WITNESSES": risk_class_witnesses,
             "_FROZEN_REQUIRE_CLASS_GRAPH": frozen_class_graph_verifier,
             "_FROZEN_BOUND_SNAPSHOT_PATH": bound_snapshot_path,
             "_FROZEN_ACQUIRE_LOCK": acquire_lock,

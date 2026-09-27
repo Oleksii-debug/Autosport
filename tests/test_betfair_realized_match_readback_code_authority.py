@@ -137,7 +137,8 @@ def test_readback_authority_code_swap_fails_before_dispatch(
         del args, kwargs
         raise AssertionError("forged readback authority executed")
 
-    monkeypatch.setattr(canonical, "__code__", forged.__code__)
+    forged_code = forged.__code__.replace(co_freevars=canonical.__code__.co_freevars)
+    monkeypatch.setattr(canonical, "__code__", forged_code)
 
     with pytest.raises(
         RealizedMatchEvidenceError,

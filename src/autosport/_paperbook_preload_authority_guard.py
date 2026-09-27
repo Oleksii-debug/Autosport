@@ -16,6 +16,7 @@ import os
 import tempfile
 import threading
 from pathlib import Path
+from types import FunctionType
 from weakref import WeakKeyDictionary
 
 from . import paper as _paper
@@ -43,6 +44,84 @@ _ABORT = "ABORT"
 _WITNESS_LOCK = threading.RLock()
 _BOOK_BINDINGS: WeakKeyDictionary[object, tuple[str, str]] = WeakKeyDictionary()
 _BINDING_LOCK = threading.RLock()
+
+
+def _capture_delegate_witness(delegate: object, label: str) -> tuple[object, ...]:
+    if type(delegate) is not FunctionType:
+        raise RuntimeError(f"PaperBook {label} delegate is not a canonical Python function")
+    kwdefaults = delegate.__kwdefaults__
+    return (
+        delegate.__code__,
+        delegate.__globals__,
+        delegate.__name__,
+        delegate.__defaults__,
+        None if kwdefaults is None else dict(kwdefaults),
+        delegate.__closure__,
+    )
+
+
+def _require_delegate_witness(
+    delegate: object,
+    witness: tuple[object, ...],
+    label: str,
+) -> None:
+    if type(delegate) is not FunctionType:
+        raise ValueError(f"PaperBook {label} executable authority changed")
+    code, globals_mapping, _name, defaults, kwdefaults, closure = witness
+    if (
+        delegate.__code__ is not code
+        or delegate.__globals__ is not globals_mapping
+        or delegate.__defaults__ != defaults
+        or delegate.__kwdefaults__ != kwdefaults
+        or delegate.__closure__ != closure
+    ):
+        raise ValueError(f"PaperBook {label} executable authority changed")
+
+
+def _call_witnessed_delegate(
+    delegate: object,
+    witness: tuple[object, ...],
+    label: str,
+    *args: object,
+):
+    """Execute the exact captured implementation, not the mutable function object.
+
+    Checking the original function before/after rejects persistent substitution. The
+    fresh FunctionType instance executes the captured immutable code object, so even
+    an in-call race that swaps the original function's ``__code__`` cannot redirect
+    the authority-bearing call that is currently in flight.
+    """
+
+    _require_delegate_witness(delegate, witness, label)
+    code, globals_mapping, name, defaults, kwdefaults, closure = witness
+    trusted = FunctionType(
+        code,
+        globals_mapping,
+        name=name,
+        argdefs=defaults,
+        closure=closure,
+    )
+    if kwdefaults is not None:
+        trusted.__kwdefaults__ = dict(kwdefaults)
+    result = trusted(*args)
+    _require_delegate_witness(delegate, witness, label)
+    return result
+
+
+_LOAD_BYTES_WITNESS = _capture_delegate_witness(_LOAD_BYTES, "canonical load_bytes")
+_ORIGINAL_SAVE_WITNESS = _capture_delegate_witness(_ORIGINAL_SAVE, "canonical save")
+_REGISTER_OPENING_WITNESS = _capture_delegate_witness(
+    _REGISTER_OPENING, "opening-authority registration"
+)
+_REGISTER_CAUSAL_WITNESS = _capture_delegate_witness(
+    _REGISTER_CAUSAL, "causal-authority registration"
+)
+_INSTALL_OPENING_WITNESS = _capture_delegate_witness(
+    _INSTALL_OPENING, "opening-authority installation"
+)
+_INSTALL_CAUSAL_WITNESS = _capture_delegate_witness(
+    _INSTALL_CAUSAL, "causal-authority installation"
+)
 
 
 def _sha256(payload: bytes) -> str:
@@ -325,13 +404,39 @@ def _trusted_path_load(cls, path: str | Path):
     with _WITNESS_LOCK:
         payload = source.read_bytes()
         _verify_snapshot_witness(source, payload)
-        book = _LOAD_BYTES(cls, payload)
+        book = _call_witnessed_delegate(
+            _LOAD_BYTES,
+            _LOAD_BYTES_WITNESS,
+            "canonical load_bytes",
+            cls,
+            payload,
+        )
         # load_bytes intentionally revokes both registries. Re-register only after
         # the independent witness has authenticated the exact immutable byte image.
-        _REGISTER_OPENING(book)
-        _REGISTER_CAUSAL(book)
-        _INSTALL_OPENING(book)
-        _INSTALL_CAUSAL(book)
+        _call_witnessed_delegate(
+            _REGISTER_OPENING,
+            _REGISTER_OPENING_WITNESS,
+            "opening-authority registration",
+            book,
+        )
+        _call_witnessed_delegate(
+            _REGISTER_CAUSAL,
+            _REGISTER_CAUSAL_WITNESS,
+            "causal-authority registration",
+            book,
+        )
+        _call_witnessed_delegate(
+            _INSTALL_OPENING,
+            _INSTALL_OPENING_WITNESS,
+            "opening-authority installation",
+            book,
+        )
+        _call_witnessed_delegate(
+            _INSTALL_CAUSAL,
+            _INSTALL_CAUSAL_WITNESS,
+            "causal-authority installation",
+            book,
+        )
         _bind_book(book, source)
         return book
 
@@ -374,7 +479,13 @@ def _trusted_save(self, path: str | Path) -> None:
 
             # Reuse the current canonical serializer and all of its private opening
             # / causal candidate validation; only the publication boundary is new.
-            _ORIGINAL_SAVE(self, temporary)
+            _call_witnessed_delegate(
+                _ORIGINAL_SAVE,
+                _ORIGINAL_SAVE_WITNESS,
+                "canonical save",
+                self,
+                temporary,
+            )
             candidate_sha = _file_sha256(temporary)
             if candidate_sha is None:
                 raise ValueError("PaperBook canonical serializer produced no snapshot")

@@ -85,7 +85,7 @@ def _sealed_load_trusted_globals(load_wrapper: FunctionType) -> dict[str, object
     raise RuntimeError("canonical sealed PaperBook load trusted globals are unavailable")
 
 
-def _guarded_risk_call(book, delegate, args, kwargs):
+def _guarded_risk_call(book, delegate, args, kwargs, failure_result=None):
     """Run one risk derivation against a generation-stable canonical PaperBook."""
 
     snapshot_path = None
@@ -118,9 +118,7 @@ def _guarded_risk_call(book, delegate, args, kwargs):
         )
         return result
     except (ArithmeticError, AttributeError, TypeError, ValueError):
-        # Canonical risk helpers already use None as their fail-closed invalid-state
-        # result. Preserve that contract for generation/lock/validator failures.
-        return None
+        return failure_result
     finally:
         if snapshot_path is not None and held_reads is not None:
             entry = held_reads.get(snapshot_path)
@@ -164,11 +162,16 @@ def _identity_concentration_template(
     dimension,
     limit,
 ):
+    failure = _RISK_DECISION(
+        False,
+        f"owner {dimension} concentration evidence is invalid",
+    )
     return _guarded_risk_call(
         book,
         _ORIGINAL_IDENTITY_CONCENTRATION,
         (cls, book, amount, context),
         {"dimension": dimension, "limit": limit},
+        failure,
     )
 
 
@@ -258,6 +261,7 @@ def _install() -> None:
             "_FROZEN_WITNESS_PATH": witness_path,
             "_FROZEN_VALIDATE_LOADED_STATE": validate_loaded_state,
             "_RISK_READ_LOCAL": threading.local(),
+            "_RISK_DECISION": _risk.RiskDecision,
             "_ORIGINAL_BOOK_STATE": book_state,
             "_ORIGINAL_PORTFOLIO_HASH": portfolio_hash,
             "_ORIGINAL_HISTORICAL_METRICS": historical_metrics,

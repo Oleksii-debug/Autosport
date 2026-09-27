@@ -44,19 +44,44 @@ _ABORT = "ABORT"
 _WITNESS_LOCK = threading.RLock()
 _BOOK_BINDINGS: WeakKeyDictionary[object, tuple[str, str]] = WeakKeyDictionary()
 _BINDING_LOCK = threading.RLock()
+_EMPTY_CLOSURE_CELL = object()
+
+
+def _closure_contents(closure: tuple[object, ...] | None) -> tuple[object, ...] | None:
+    if closure is None:
+        return None
+    contents: list[object] = []
+    for cell in closure:
+        try:
+            contents.append(cell.cell_contents)
+        except ValueError:
+            contents.append(_EMPTY_CLOSURE_CELL)
+    return tuple(contents)
+
+
+def _global_bindings(delegate: FunctionType) -> tuple[tuple[str, object], ...]:
+    mapping = delegate.__globals__
+    return tuple(
+        (name, mapping[name])
+        for name in delegate.__code__.co_names
+        if name in mapping
+    )
 
 
 def _capture_delegate_witness(delegate: object, label: str) -> tuple[object, ...]:
     if type(delegate) is not FunctionType:
         raise RuntimeError(f"PaperBook {label} delegate is not a canonical Python function")
     kwdefaults = delegate.__kwdefaults__
+    closure = delegate.__closure__
     return (
         delegate.__code__,
         delegate.__globals__,
         delegate.__name__,
         delegate.__defaults__,
         None if kwdefaults is None else dict(kwdefaults),
-        delegate.__closure__,
+        closure,
+        _closure_contents(closure),
+        _global_bindings(delegate),
     )
 
 
@@ -67,7 +92,16 @@ def _require_delegate_witness(
 ) -> None:
     if type(delegate) is not FunctionType:
         raise ValueError(f"PaperBook {label} executable authority changed")
-    code, globals_mapping, _name, defaults, kwdefaults, closure = witness
+    (
+        code,
+        globals_mapping,
+        _name,
+        defaults,
+        kwdefaults,
+        closure,
+        closure_contents,
+        global_bindings,
+    ) = witness
     if (
         delegate.__code__ is not code
         or delegate.__globals__ is not globals_mapping
@@ -76,6 +110,32 @@ def _require_delegate_witness(
         or delegate.__closure__ != closure
     ):
         raise ValueError(f"PaperBook {label} executable authority changed")
+    current_closure_contents = _closure_contents(delegate.__closure__)
+    if closure_contents is None:
+        if current_closure_contents is not None:
+            raise ValueError(f"PaperBook {label} closure authority changed")
+    elif (
+        current_closure_contents is None
+        or len(current_closure_contents) != len(closure_contents)
+        or any(
+            current is not expected
+            for current, expected in zip(current_closure_contents, closure_contents)
+        )
+    ):
+        raise ValueError(f"PaperBook {label} closure authority changed")
+    for name, expected in global_bindings:
+        if globals_mapping.get(name, _EMPTY_CLOSURE_CELL) is not expected:
+            raise ValueError(f"PaperBook {label} global authority changed: {name}")
+
+
+def _fresh_cell(value: object):
+    def capture():
+        return value
+
+    closure = capture.__closure__
+    if closure is None:
+        raise RuntimeError("PaperBook delegate closure capture failed")
+    return closure[0]
 
 
 def _call_witnessed_delegate(
@@ -84,22 +144,40 @@ def _call_witnessed_delegate(
     label: str,
     *args: object,
 ):
-    """Execute the exact captured implementation, not the mutable function object.
+    """Execute the exact captured implementation, not mutable delegate state.
 
-    Checking the original function before/after rejects persistent substitution. The
-    fresh FunctionType instance executes the captured immutable code object, so even
-    an in-call race that swaps the original function's ``__code__`` cannot redirect
-    the authority-bearing call that is currently in flight.
+    The call uses the captured code, captured global bindings and fresh closure cells
+    containing the captured authority objects. Persistent mutation of the original
+    delegate is checked both before and after execution; in-flight mutation therefore
+    cannot retarget this authority-bearing invocation through the live function object,
+    its private registry cells, or a rebound module-global helper.
     """
 
     _require_delegate_witness(delegate, witness, label)
-    code, globals_mapping, name, defaults, kwdefaults, closure = witness
-    trusted = FunctionType(
+    (
         code,
         globals_mapping,
+        name,
+        defaults,
+        kwdefaults,
+        _closure,
+        closure_contents,
+        global_bindings,
+    ) = witness
+    trusted_globals = dict(globals_mapping)
+    for global_name, expected in global_bindings:
+        trusted_globals[global_name] = expected
+    trusted_closure = (
+        None
+        if closure_contents is None
+        else tuple(_fresh_cell(value) for value in closure_contents)
+    )
+    trusted = FunctionType(
+        code,
+        trusted_globals,
         name=name,
         argdefs=defaults,
-        closure=closure,
+        closure=trusted_closure,
     )
     if kwdefaults is not None:
         trusted.__kwdefaults__ = dict(kwdefaults)

@@ -14,10 +14,9 @@ def test_public_risk_authority_does_not_expose_product_resolver_injection() -> N
     assert "product_evaluator_resolver" not in signature.parameters
 
 
-def test_public_risk_authority_does_not_late_resolve_module_product_resolver() -> None:
-    """The public verifier must dispatch through its closure-captured resolver."""
+def test_public_risk_authority_has_no_writable_resolver_closure() -> None:
+    """Positive authority must not depend on caller-writable closure state."""
 
+    assert verify_risk_of_ruin_authority.__closure__ is None
+    assert verify_risk_of_ruin_authority.__code__.co_freevars == ()
     assert "_resolve_product_evaluator_result" not in verify_risk_of_ruin_authority.__code__.co_names
-    closure = verify_risk_of_ruin_authority.__closure__
-    assert closure is not None
-    assert any(callable(cell.cell_contents) for cell in closure)

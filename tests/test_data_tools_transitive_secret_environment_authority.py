@@ -139,3 +139,56 @@ def test_transitive_builtin_len_shadow_cannot_hide_configured_secret() -> None:
         output = _render_with_configured_secret(secret)
 
     _assert_fail_closed(output, secret)
+
+
+def test_transitive_builtin_enumerate_shadow_cannot_skip_configured_secret_redaction() -> None:
+    """The redaction loop's builtin enumerate dispatch is presentation authority."""
+
+    secret = "AS-DATATOOLS-TRANSITIVE-BUILTIN-ENUMERATE-SENTINEL-7b42"
+    detail = f"provider rejected credential value {secret}"
+    with patch.dict(
+        os.environ,
+        {"AUTOSPORT_TEST_API_KEY": secret},
+        clear=False,
+    ), patch.object(
+        secret_redaction,
+        "enumerate",
+        lambda _items: (),
+        create=True,
+    ):
+        # Prove the attack is non-vacuous: bypassing the configured-secret replacement
+        # loop would expose this bare secret if the Data Tools boundary trusted it.
+        assert secret in secret_redaction.redact_operator_text(detail)
+        output = _render_with_configured_secret(secret)
+
+    _assert_fail_closed(output, secret)
+
+
+def test_guard_getattr_shadow_cannot_hide_text_redactor_rebinding() -> None:
+    """The guard must not late-resolve its own getattr through module globals."""
+
+    secret = "AS-DATATOOLS-GUARD-GETATTR-SENTINEL-bbe7"
+    canonical_text_redactor = secret_redaction.redact_operator_text
+    exact_getattr = getattr
+
+    def stale_getattr(value, name: str, default=None):
+        if value is secret_redaction and name == "redact_operator_text":
+            return canonical_text_redactor
+        return exact_getattr(value, name, default)
+
+    with patch.object(
+        secret_redaction,
+        "redact_operator_text",
+        lambda text, **_kwargs: text,
+    ), patch.object(
+        data_tools_entry,
+        "getattr",
+        stale_getattr,
+        create=True,
+    ):
+        output = data_tools_entry._expected_failure_message(
+            "verify-dataset",
+            ValueError(f"Authorization: Bearer {secret}"),
+        )
+
+    _assert_fail_closed(output, secret)

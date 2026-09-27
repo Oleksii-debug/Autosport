@@ -5,16 +5,25 @@ from pathlib import Path
 import pytest
 
 import autosport._paperbook_preload_authority_guard as guard
+import autosport._paperbook_preload_module_member_freeze as freeze
 import autosport.paper as paper
 
 
 _HOSTILE_GETATTR_CALLS: list[str] = []
+_HOSTILE_TUPLE_ITER_CALLS: list[object] = []
 
 
 def _hostile_surface_getattr(self, name: str):
     del self
     _HOSTILE_GETATTR_CALLS.append(name)
     return object()
+
+
+class _HostileTupleAuthority:
+    @staticmethod
+    def __iter__(surface: object):
+        _HOSTILE_TUPLE_ITER_CALLS.append(surface)
+        return iter((("loads", lambda _raw: {"balance": "999999"}),))
 
 
 def _saved_book(tmp_path: Path) -> tuple[Path, paper.PaperBook]:
@@ -69,6 +78,22 @@ def test_frozen_module_surface_backing_binding_rejects_object_slot_bypass(
     assert dict(surface._values) == original_values
     loaded = paper.PaperBook.load(path)
     assert loaded.balance == book.balance
+
+
+def test_late_tuple_global_injection_cannot_retarget_frozen_surface_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent-at-capture module global cannot become a later dispatch authority."""
+
+    path, book = _saved_book(tmp_path)
+    _HOSTILE_TUPLE_ITER_CALLS.clear()
+    monkeypatch.setattr(freeze, "tuple", _HostileTupleAuthority, raising=False)
+
+    loaded = paper.PaperBook.load(path)
+
+    assert loaded.balance == book.balance
+    assert _HOSTILE_TUPLE_ITER_CALLS == []
 
 
 def test_frozen_module_surface_getattr_code_substitution_fails_before_dispatch(

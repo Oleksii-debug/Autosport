@@ -1,13 +1,13 @@
 """Bind canonical PaperRiskPolicy reads to one current PaperBook generation.
 
 PaperBook generation CAS prevents stale mutation/persistence, but risk policy derives
-portfolio/equity evidence from several direct PaperBook fields after validation.  A
+portfolio/equity evidence from several direct PaperBook fields after validation. A
 writer could otherwise publish a newer durable generation between validation and those
 reads, or a later class-descriptor rebind could bypass the live validator dispatch.
 
 Reuse the already-sealed persistence graph: acquire the same publication lock for the
 entire risk derivation and run the frozen canonical loaded-state validator before and
-after the original risk calculation.  This module creates no risk store, parser,
+after the original risk calculation. This module creates no risk store, parser,
 serializer, journal, or generation authority.
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from types import FunctionType
 
-from . import _paperbook_preload_authority_guard as _authority_guard
 from . import paper as _paper
 from . import risk as _risk
 
@@ -135,8 +134,9 @@ def _install() -> None:
     historical_metrics = _descriptor_function(
         namespace.get("_historical_risk_metrics"), classmethod
     )
-    shadow_descriptor = namespace.get("_shadow_book_for_allocation")
-    shadow_book = _descriptor_function(shadow_descriptor, staticmethod)
+    shadow_book = _descriptor_function(
+        namespace.get("_shadow_book_for_allocation"), staticmethod
+    )
 
     private_globals: dict[str, object] = dict(globals())
     private_globals.update(

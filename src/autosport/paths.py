@@ -41,3 +41,31 @@ def default_workspace() -> Path:
             "does not depend on the process working directory"
         )
     return home / ".autosport" / "workspace"
+
+
+def default_webview_storage_path() -> Path:
+    """Return Autosport-owned per-user browser storage independent of CWD/install path."""
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        local_app_data_path = Path(local_app_data)
+        if not local_app_data_path.is_absolute():
+            raise ValueError(
+                "LOCALAPPDATA must be an absolute path so WebView storage identity "
+                "does not depend on the process working directory"
+            )
+        return local_app_data_path / "Autosport" / "webview2"
+
+    try:
+        home = Path.home()
+    except RuntimeError as exc:
+        raise ValueError(
+            "home directory could not be resolved for WebView storage"
+        ) from exc
+    if not home.is_absolute():
+        raise ValueError(
+            "home directory must be an absolute path so WebView storage identity "
+            "does not depend on the process working directory"
+        )
+    return home / ".autosport" / "webview2"
+

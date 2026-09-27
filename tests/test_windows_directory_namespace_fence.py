@@ -53,7 +53,7 @@ def test_windows_build_holds_directory_namespace_fence_through_both_consumers() 
     )
     gui_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork "
         "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     data_build = (

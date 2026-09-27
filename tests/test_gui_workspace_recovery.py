@@ -94,7 +94,8 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
 
     def test_packaged_windows_entry_uses_responsive_gui(self) -> None:
         source = inspect.getsource(windows_entry._run_interactive_gui)
-        self.assertIn("from autosport.windows_gui import main as gui_main", source)
+        self.assertIn("from autosport.windows_webview_shell", source)
+        self.assertNotIn("from autosport.windows_gui import main as gui_main", source)
         self.assertEqual(AUTOMATION_IDS["repair_workspace"], 108)
 
     def test_recovery_worker_is_non_daemon_and_runs_off_caller_thread(self) -> None:

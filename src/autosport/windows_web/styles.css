@@ -1,0 +1,32 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+  color-scheme: light dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 0 1rem 3rem; max-width: 90rem; }
+.skip-link { position: absolute; left: -9999px; top: 0; padding: .6rem; }
+.skip-link:focus { left: .5rem; z-index: 1000; }
+.app-header, nav, main section { max-width: 78rem; margin: 0 auto; }
+nav, main section { border-block-end: 1px solid; padding: 1rem 0; }
+label { display: block; font-weight: 600; margin-top: .75rem; }
+input[type="text"], select, textarea, button { font: inherit; }
+input[type="text"], select, textarea { width: 100%; max-width: 70rem; padding: .45rem; }
+textarea { resize: vertical; }
+button { margin: .6rem .45rem .4rem 0; padding: .55rem .75rem; min-height: 2.5rem; }
+button:focus, input:focus, select:focus, textarea:focus, [tabindex]:focus {
+  outline: 3px solid currentColor;
+  outline-offset: 2px;
+}
+.readback-list { min-height: 2.4rem; padding: .4rem 1.5rem; }
+.readback-list:empty::before { content: "Немає даних."; }
+.button-row { display: flex; flex-wrap: wrap; gap: .35rem; }
+.checkbox-label { font-weight: 400; display: flex; gap: .5rem; align-items: center; }
+.checkbox-label input { width: auto; }
+[hidden] { display: none !important; }
+#error-status { border: 2px solid currentColor; padding: .6rem; }
+#truth-boundary { font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; }
+}

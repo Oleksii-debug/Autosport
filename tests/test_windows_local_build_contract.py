@@ -94,8 +94,8 @@ def test_local_windows_build_uses_trusted_snapshot_immediately_before_pyinstalle
     )
     first_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
+        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
 
     dataset_index = script.index(dataset_smoke)
@@ -120,8 +120,8 @@ def test_local_windows_build_phase_separates_later_release_outputs() -> None:
     release_gate = strict_gate + " --allow-release-outputs"
     first_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
+        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     second_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "
@@ -147,8 +147,8 @@ def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> N
 
     first_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
+        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     first_bind = (
         "python $sourceVerifier --bind-artifact $builtAutosportExe "
@@ -186,7 +186,7 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
             'if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }',
         ),
         (
-            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry",
+            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry",
             'if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }',
         ),
         (

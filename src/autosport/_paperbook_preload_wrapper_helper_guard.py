@@ -1,13 +1,13 @@
-"""Seal the executable helpers used by the installed PaperBook persistence wrappers.
+"""Seal executable helpers without retaining a callable pre-seal bypass.
 
-The preload dispatch guard freezes the canonical persistence graph, but its public
-``PaperBook.load`` / ``save`` wrappers still reference verifier function objects from
-their private globals mapping.  A reachable verifier can be changed either by
-replacing its ``__code__`` in place or by rebinding the corresponding globals entry.
-This final composition layer witnesses the installed inner wrapper, its exact globals
-mapping, each verifier binding, and each verifier executable before and after use.
+The preload dispatch guard remains the canonical PaperBook persistence composition
+surface.  This final seal captures only the installed wrapper's executable state and a
+private globals snapshot; it deliberately does *not* retain the installed wrapper
+FunctionType in the public wrapper closure.  A short-lived delegate is reconstructed
+only after the captured verifier bindings/executables are validated for that call.
 
-No parser, serializer, witness protocol, store, root, or economic authority is added.
+This closes the direct closure-extracted ``inner`` bypass while preserving the same
+parser, serializer, witness protocol, store, root and economic authority.
 """
 
 from __future__ import annotations
@@ -42,33 +42,37 @@ def _make_guarded_load(
 ):
     exact_type = type
     function_type = FunctionType
-    expected_inner_code = inner.__code__
-    expected_inner_globals = inner.__globals__
+    inner_code = inner.__code__
+    inner_name = inner.__name__
+    inner_defaults = inner.__defaults__
+    inner_kwdefaults = None if inner.__kwdefaults__ is None else dict(inner.__kwdefaults__)
+    inner_closure = inner.__closure__
+    trusted_globals = dict(inner.__globals__)
 
     def load(cls, path):
-        if (
-            exact_type(inner) is not function_type
-            or inner.__code__ is not expected_inner_code
-            or inner.__globals__ is not expected_inner_globals
-        ):
-            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
         for name, verifier, expected_code in witnesses:
             if (
-                expected_inner_globals.get(name) is not verifier
+                trusted_globals.get(name) is not verifier
                 or exact_type(verifier) is not function_type
                 or verifier.__code__ is not expected_code
             ):
                 raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
-        result = inner(cls, path)
-        if (
-            exact_type(inner) is not function_type
-            or inner.__code__ is not expected_inner_code
-            or inner.__globals__ is not expected_inner_globals
-        ):
-            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+        call_globals = dict(trusted_globals)
+        for name, verifier, _expected_code in witnesses:
+            call_globals[name] = verifier
+        delegate = function_type(
+            inner_code,
+            call_globals,
+            name=inner_name,
+            argdefs=inner_defaults,
+            closure=inner_closure,
+        )
+        if inner_kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(inner_kwdefaults)
+        result = delegate(cls, path)
         for name, verifier, expected_code in witnesses:
             if (
-                expected_inner_globals.get(name) is not verifier
+                trusted_globals.get(name) is not verifier
                 or exact_type(verifier) is not function_type
                 or verifier.__code__ is not expected_code
             ):
@@ -86,33 +90,37 @@ def _make_guarded_save(
 ):
     exact_type = type
     function_type = FunctionType
-    expected_inner_code = inner.__code__
-    expected_inner_globals = inner.__globals__
+    inner_code = inner.__code__
+    inner_name = inner.__name__
+    inner_defaults = inner.__defaults__
+    inner_kwdefaults = None if inner.__kwdefaults__ is None else dict(inner.__kwdefaults__)
+    inner_closure = inner.__closure__
+    trusted_globals = dict(inner.__globals__)
 
     def save(self, path) -> None:
-        if (
-            exact_type(inner) is not function_type
-            or inner.__code__ is not expected_inner_code
-            or inner.__globals__ is not expected_inner_globals
-        ):
-            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
         for name, verifier, expected_code in witnesses:
             if (
-                expected_inner_globals.get(name) is not verifier
+                trusted_globals.get(name) is not verifier
                 or exact_type(verifier) is not function_type
                 or verifier.__code__ is not expected_code
             ):
                 raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
-        inner(self, path)
-        if (
-            exact_type(inner) is not function_type
-            or inner.__code__ is not expected_inner_code
-            or inner.__globals__ is not expected_inner_globals
-        ):
-            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+        call_globals = dict(trusted_globals)
+        for name, verifier, _expected_code in witnesses:
+            call_globals[name] = verifier
+        delegate = function_type(
+            inner_code,
+            call_globals,
+            name=inner_name,
+            argdefs=inner_defaults,
+            closure=inner_closure,
+        )
+        if inner_kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(inner_kwdefaults)
+        delegate(self, path)
         for name, verifier, expected_code in witnesses:
             if (
-                expected_inner_globals.get(name) is not verifier
+                trusted_globals.get(name) is not verifier
                 or exact_type(verifier) is not function_type
                 or verifier.__code__ is not expected_code
             ):

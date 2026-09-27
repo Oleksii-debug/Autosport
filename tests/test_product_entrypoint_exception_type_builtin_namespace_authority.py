@@ -58,3 +58,58 @@ def test_exception_type_label_rejects_in_place_builtin_exception_authority_mutat
     assert canonical is entry._SAFE_EXCEPTION_TYPE_LABEL
     assert rendered == "Exception"
     assert "AUTOSPORT_PROVIDER_API_KEY" not in rendered
+
+
+def test_exception_type_label_rejects_helper_global_vars_shadow(monkeypatch) -> None:
+    """The canonical helper's builtin lookup path must itself be authoritative."""
+
+    canonical = entry._SAFE_EXCEPTION_TYPE_LABEL
+    globals_dict = canonical.__globals__
+    exact_vars = vars
+
+    def hostile_vars(value):
+        namespace = dict(exact_vars(value))
+        if value is builtins:
+            namespace[AUTOSPORT_PROVIDER_API_KEY_leaked.__name__] = (
+                AUTOSPORT_PROVIDER_API_KEY_leaked
+            )
+        return namespace
+
+    monkeypatch.setitem(globals_dict, "vars", hostile_vars)
+
+    rendered = entry._canonical_exception_type_label(
+        AUTOSPORT_PROVIDER_API_KEY_leaked("ordinary failure")
+    )
+
+    assert canonical is entry._SAFE_EXCEPTION_TYPE_LABEL
+    assert rendered == "Exception"
+    assert "AUTOSPORT_PROVIDER_API_KEY" not in rendered
+
+
+def test_exception_type_label_snapshot_ignores_product_global_vars_shadow(
+    monkeypatch,
+) -> None:
+    """A split-view snapshot cannot hide in-place builtins authority mutation."""
+
+    exact_vars = vars
+    canonical_snapshot = dict(exact_vars(builtins))
+    monkeypatch.setattr(
+        builtins,
+        AUTOSPORT_PROVIDER_API_KEY_leaked.__name__,
+        AUTOSPORT_PROVIDER_API_KEY_leaked,
+        raising=False,
+    )
+
+    def stale_vars(value):
+        if value is builtins:
+            return dict(canonical_snapshot)
+        return exact_vars(value)
+
+    monkeypatch.setattr(entry, "vars", stale_vars, raising=False)
+
+    rendered = entry._canonical_exception_type_label(
+        AUTOSPORT_PROVIDER_API_KEY_leaked("ordinary failure")
+    )
+
+    assert rendered == "Exception"
+    assert "AUTOSPORT_PROVIDER_API_KEY" not in rendered

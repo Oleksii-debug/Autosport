@@ -156,7 +156,26 @@ def _historical_metrics_template(cls, book, *, realized_loss_window=None, causal
 
 
 def _shadow_book_template(book):
-    return _guarded_risk_call(book, _ORIGINAL_SHADOW_BOOK, (book,), {})
+    shadow = _guarded_risk_call(book, _ORIGINAL_SHADOW_BOOK, (book,), {})
+    if type(shadow) is not _CANONICAL_PAPER_BOOK:
+        return None
+    try:
+        _FROZEN_CALL_WITNESSED(
+            _FROZEN_INSTALL_OPENING,
+            _FROZEN_INSTALL_OPENING_WITNESS,
+            "opening-authority installation",
+            shadow,
+        )
+        _FROZEN_CALL_WITNESSED(
+            _FROZEN_INSTALL_CAUSAL,
+            _FROZEN_INSTALL_CAUSAL_WITNESS,
+            "causal-authority installation",
+            shadow,
+        )
+        _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, shadow)
+    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        return None
+    return shadow
 
 
 def _identity_concentration_template(
@@ -264,6 +283,9 @@ def _install() -> None:
         "_release_snapshot_publication_lock",
         "_witness_path",
         "_generation_guarded_validate_loaded_state",
+        "_call_witnessed_delegate",
+        "_INSTALL_OPENING",
+        "_INSTALL_CAUSAL",
     )
     helpers = tuple(sealed_globals.get(name) for name in helper_names)
     if any(type(value) is not FunctionType for value in helpers):
@@ -274,7 +296,14 @@ def _install() -> None:
         release_lock,
         witness_path,
         validate_loaded_state,
+        call_witnessed_delegate,
+        install_opening,
+        install_causal,
     ) = helpers
+    install_opening_witness = sealed_globals.get("_INSTALL_OPENING_WITNESS")
+    install_causal_witness = sealed_globals.get("_INSTALL_CAUSAL_WITNESS")
+    if type(install_opening_witness) is not tuple or type(install_causal_witness) is not tuple:
+        raise RuntimeError("canonical PaperBook private authority installer witness is unavailable")
 
     class_graph_verifier = load_trusted_globals.get(
         "_require_class_callable_graph_witnesses"
@@ -315,6 +344,11 @@ def _install() -> None:
             "_FROZEN_RELEASE_LOCK": release_lock,
             "_FROZEN_WITNESS_PATH": witness_path,
             "_FROZEN_VALIDATE_LOADED_STATE": validate_loaded_state,
+            "_FROZEN_CALL_WITNESSED": call_witnessed_delegate,
+            "_FROZEN_INSTALL_OPENING": install_opening,
+            "_FROZEN_INSTALL_OPENING_WITNESS": install_opening_witness,
+            "_FROZEN_INSTALL_CAUSAL": install_causal,
+            "_FROZEN_INSTALL_CAUSAL_WITNESS": install_causal_witness,
             "_RISK_READ_LOCAL": threading.local(),
             "_RISK_DECISION": _risk.RiskDecision,
             "_STAKE_VECTOR_DECISION": _risk.StakeVectorDecision,

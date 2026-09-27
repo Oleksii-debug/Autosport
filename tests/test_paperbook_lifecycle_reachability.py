@@ -95,10 +95,9 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 },
             ],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "inconsistent with lifecycle settlement witness"):
-            PaperBook.load(self.path)
+            PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
 
     def test_schema2_rejects_ticket_that_could_not_be_afforded_when_opened(self) -> None:
         payload = {
@@ -133,10 +132,9 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 },
             ],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "was not affordable"):
-            PaperBook.load(self.path)
+            PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
 
     def test_settlement_rejects_unknown_resolution_key_before_mutation(self) -> None:
         book = PaperBook("100")
@@ -249,7 +247,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
 
         self.assertFalse(self.path.exists())
 
-    def test_legacy_open_only_snapshot_remains_loadable_and_upgrades_on_save(self) -> None:
+    def test_legacy_open_only_snapshot_is_forensic_only_without_independent_witness(self) -> None:
         payload = {
             "initial_bankroll": "100",
             "balance": "90",
@@ -274,15 +272,20 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         }
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
-        book = PaperBook.load(self.path)
-        book.save(self.path)
-        upgraded = json.loads(self.path.read_text(encoding="utf-8"))
+        book = PaperBook.load_bytes(self.path.read_bytes())
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(tuple(book.tickets), ("ticket-1",))
 
-        self.assertEqual(upgraded["schema_version"], 7)
-        self.assertEqual(
-            upgraded["lifecycle"],
-            [{"action": "open", "ticket_id": "ticket-1"}],
-        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing independent durable opening witness",
+        ):
+            PaperBook.load(self.path)
+        with self.assertRaisesRegex(
+            ValueError,
+            "byte-loaded snapshot lacks product-issued opening authority",
+        ):
+            book.save(Path(self._tmp.name) / "upgrade.json")
 
     def test_legacy_settled_snapshot_fails_closed_without_lifecycle_provenance(self) -> None:
         payload = {
@@ -307,11 +310,9 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 }
             ],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "missing lifecycle provenance"):
-            PaperBook.load(self.path)
-
+            PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
 
     def test_private_causal_history_rejects_coherent_winner_to_loss_rewrite(self) -> None:
         book = PaperBook("100")
@@ -425,7 +426,6 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("90"))
         self.assertIs(ticket.status, TicketStatus.OPEN)
         self.assertEqual(ticket.payout, Decimal("0"))
-
 
     def test_committed_stake_rejects_status_rewrite_inconsistent_with_causal_history(self) -> None:
         book = PaperBook("100")

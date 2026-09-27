@@ -274,6 +274,46 @@ def test_runtime_type_alias_rebinding_cannot_redirect_profile_authority(
     _clear_started_product_runtime_origin(canonical_runtime)
 
 
+def test_runtime_authority_helper_rebinding_cannot_redirect_positive_dispatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _canonical_profile_runtime(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("executed")
+        raise AssertionError("mutable module helper must not enter authority dispatch")
+
+    monkeypatch.setattr(profile_module, "_canonical_runtime_is_running", hostile)
+    monkeypatch.setattr(profile_module, "_workspace_text", hostile)
+    monkeypatch.setattr(
+        profile_module,
+        "require_product_owned_source_factory_identity",
+        hostile,
+    )
+    monkeypatch.setattr(
+        profile_module,
+        "is_authoritative_trusted_runtime_code_profile",
+        hostile,
+    )
+    monkeypatch.setattr(profile_module, "_CANONICAL_SOURCE_BINDINGS", ())
+    monkeypatch.setattr(profile_module, "_CANONICAL_RUNTIME_TYPE", _ProfileRuntime)
+
+    _register_profile_runtime(runtime)
+    profile = issue_trusted_runtime_code_profile(runtime)
+    try:
+        assert is_authoritative_trusted_runtime_code_profile(profile) is True
+        assert require_authoritative_trusted_runtime_code_profile(
+            profile,
+            workspace=tmp_path,
+        ) is profile
+        assert hostile_calls == []
+    finally:
+        assert revoke_trusted_runtime_code_profile(profile) is True
+        _clear_started_product_runtime_origin(runtime)
+
+
 def test_profile_serializes_one_active_runtime_per_workspace(
     tmp_path: Path,
     monkeypatch,

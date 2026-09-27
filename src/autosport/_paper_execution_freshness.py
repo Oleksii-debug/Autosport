@@ -143,6 +143,10 @@ _install()
 # PAPER execution durability composition rather than inventing a parallel runtime.
 from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: E402,F401
 
+# Restore the accepted object-generation CAS and one cross-process publication lock
+# inside that same witness authority before later composition freezes its dispatch.
+from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_generation_cas_guard  # noqa: E402,F401
+
 # Freeze mutable stdlib member dispatch used inside the owning witness protocol before
 # its Python function graph is cloned. This prevents later json/hash/os/tempfile member
 # rebinding from retargeting the otherwise-frozen positive persistence path.

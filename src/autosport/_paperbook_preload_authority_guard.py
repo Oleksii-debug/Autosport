@@ -1,9 +1,9 @@
 """Bind PaperBook persistence to the existing independent PAPER authority root.
 
-PaperBook JSON is a mutable workspace snapshot.  Structural validation proves only
+PaperBook JSON is a mutable workspace snapshot. Structural validation proves only
 internal coherence; positive restart authority therefore comes from a separate,
 append-only PREPARE/COMMIT/ABORT witness stored under the already-canonical PAPER
-execution anti-rollback root.  This module adapts the earlier same-lineage witness
+execution anti-rollback root. This module adapts the earlier same-lineage witness
 protocol to the current PaperBook implementation without replacing its parser,
 serializer, opening-economics registry, causal-history registry, or settlement logic.
 """
@@ -352,15 +352,11 @@ def _trusted_save(self, path: str | Path) -> None:
         )
         current_sha = _file_sha256(destination)
 
-        if committed is not None:
-            if current_sha != committed[1]:
-                raise ValueError(
-                    "PaperBook current snapshot differs from independent durable witness"
-                )
-            # Only a book obtained from the verified load of this exact lineage may
-            # extend an existing durable history. Fresh objects cannot overwrite it.
-            _require_bound_book(self, destination)
-        elif current_sha is not None:
+        if committed is not None and current_sha != committed[1]:
+            raise ValueError(
+                "PaperBook current snapshot differs from independent durable witness"
+            )
+        if committed is None and current_sha is not None:
             raise ValueError(
                 "existing PaperBook snapshot lacks independent durable authority"
             )
@@ -382,6 +378,21 @@ def _trusted_save(self, path: str | Path) -> None:
             candidate_sha = _file_sha256(temporary)
             if candidate_sha is None:
                 raise ValueError("PaperBook canonical serializer produced no snapshot")
+
+            if committed is not None:
+                try:
+                    _require_bound_book(self, destination)
+                except ValueError:
+                    # Canonical product restart may reconstruct an independently
+                    # authoritative in-memory book, compare it to the durable copy,
+                    # then continue using that object. Exact canonical-byte equality
+                    # is the only safe generic rebind: structural load_bytes objects
+                    # cannot reach this point because _ORIGINAL_SAVE rejects them.
+                    if candidate_sha != current_sha:
+                        raise ValueError(
+                            "existing PaperBook snapshot lineage requires verified path-bound authority"
+                        )
+                    _bind_book(self, destination)
 
             # Re-read the authority immediately before PREPARE so in-process
             # concurrent publication cannot silently fork the witness generation.

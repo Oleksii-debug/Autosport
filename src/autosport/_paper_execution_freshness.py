@@ -137,3 +137,8 @@ def _install() -> None:
 
 
 _install()
+
+# PAPER path persistence is structural evidence unless an independent durable
+# authority re-admits it. Install that fail-closed boundary as part of the existing
+# PAPER execution durability composition rather than inventing a parallel runtime.
+from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: E402,F401

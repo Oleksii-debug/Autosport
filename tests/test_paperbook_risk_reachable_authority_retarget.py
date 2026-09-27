@@ -6,7 +6,7 @@ from types import FunctionType
 import pytest
 
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, RiskDecision
 
 
 def _noop_validator(cls, book) -> None:
@@ -77,3 +77,30 @@ def test_public_risk_wrapper_cannot_retarget_reachable_generation_authority(
     # Retargeting helpers reachable from a public risk callable must never turn
     # structurally impossible caller-authored economics into a positive risk state.
     assert PaperRiskPolicy._book_state(book) is None
+
+
+def test_sealed_owner_root_cannot_retarget_wrapper_global_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Class-level sealing must also protect the executable helper dispatch beneath it."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy()
+    root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(root) is FunctionType
+    hostile_executed = False
+
+    def hostile_private_guard(*args, **kwargs):
+        nonlocal hostile_executed
+        del args, kwargs
+        hostile_executed = True
+        return RiskDecision(True, "hostile wrapper-global bypass")
+
+    # Adding/replacing a global is deliberately used rather than replacing the sealed
+    # class attribute. A real root seal must not leave its positive decision dispatch
+    # controlled by the mutable __globals__ dictionary of the exported Python function.
+    monkeypatch.setitem(root.__globals__, "_guarded_private_call", hostile_private_guard)
+
+    decision = policy.evaluate(book, Decimal("99"))
+    assert hostile_executed is False
+    assert decision.allowed is False

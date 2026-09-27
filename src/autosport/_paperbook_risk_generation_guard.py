@@ -8,12 +8,15 @@ reads, or a later class-descriptor rebind could bypass the live validator dispat
 Reuse the already-sealed persistence graph: acquire the same publication lock for the
 entire risk derivation, require the existing frozen PaperBook class-callable graph, and
 run the frozen canonical loaded-state validator before and after the original risk
-calculation. This module creates no risk store, parser, serializer, journal, or
-generation authority.
+calculation. Nested risk helpers reuse the same thread-local read critical section so
+higher-level whole-portfolio checks can remain atomic without making the canonical
+writer lock reentrant. This module creates no risk store, parser, serializer, journal,
+or generation authority.
 """
 
 from __future__ import annotations
 
+import threading
 from types import FunctionType
 
 from . import paper as _paper
@@ -85,7 +88,8 @@ def _sealed_load_trusted_globals(load_wrapper: FunctionType) -> dict[str, object
 def _guarded_risk_call(book, delegate, args, kwargs):
     """Run one risk derivation against a generation-stable canonical PaperBook."""
 
-    publication_lock = None
+    snapshot_path = None
+    held_reads = None
     try:
         _FROZEN_REQUIRE_CLASS_GRAPH(
             _CANONICAL_PAPER_BOOK,
@@ -93,7 +97,18 @@ def _guarded_risk_call(book, delegate, args, kwargs):
         )
         snapshot_path = _FROZEN_BOUND_SNAPSHOT_PATH(book)
         if snapshot_path is not None:
-            publication_lock = _FROZEN_ACQUIRE_LOCK(_FROZEN_WITNESS_PATH(snapshot_path))
+            held_reads = getattr(_RISK_READ_LOCAL, "held", None)
+            if held_reads is None:
+                held_reads = {}
+                _RISK_READ_LOCAL.held = held_reads
+            entry = held_reads.get(snapshot_path)
+            if entry is None:
+                publication_lock = _FROZEN_ACQUIRE_LOCK(
+                    _FROZEN_WITNESS_PATH(snapshot_path)
+                )
+                held_reads[snapshot_path] = [1, publication_lock]
+            else:
+                entry[0] += 1
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
         result = delegate(*args, **kwargs)
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
@@ -107,8 +122,13 @@ def _guarded_risk_call(book, delegate, args, kwargs):
         # result. Preserve that contract for generation/lock/validator failures.
         return None
     finally:
-        if publication_lock is not None:
-            _FROZEN_RELEASE_LOCK(publication_lock)
+        if snapshot_path is not None and held_reads is not None:
+            entry = held_reads.get(snapshot_path)
+            if entry is not None:
+                entry[0] -= 1
+                if entry[0] == 0:
+                    _count, publication_lock = held_reads.pop(snapshot_path)
+                    _FROZEN_RELEASE_LOCK(publication_lock)
 
 
 def _book_state_template(cls, book):
@@ -133,6 +153,23 @@ def _historical_metrics_template(cls, book, *, realized_loss_window=None, causal
 
 def _shadow_book_template(book):
     return _guarded_risk_call(book, _ORIGINAL_SHADOW_BOOK, (book,), {})
+
+
+def _identity_concentration_template(
+    cls,
+    book,
+    amount,
+    context,
+    *,
+    dimension,
+    limit,
+):
+    return _guarded_risk_call(
+        book,
+        _ORIGINAL_IDENTITY_CONCENTRATION,
+        (cls, book, amount, context),
+        {"dimension": dimension, "limit": limit},
+    )
 
 
 def _clone_template(template: FunctionType, private_globals: dict[str, object]) -> FunctionType:
@@ -205,6 +242,9 @@ def _install() -> None:
     shadow_book = _descriptor_function(
         namespace.get("_shadow_book_for_allocation"), staticmethod
     )
+    identity_concentration = _descriptor_function(
+        namespace.get("_identity_concentration_decision"), classmethod
+    )
 
     private_globals: dict[str, object] = dict(globals())
     private_globals.update(
@@ -217,10 +257,12 @@ def _install() -> None:
             "_FROZEN_RELEASE_LOCK": release_lock,
             "_FROZEN_WITNESS_PATH": witness_path,
             "_FROZEN_VALIDATE_LOADED_STATE": validate_loaded_state,
+            "_RISK_READ_LOCAL": threading.local(),
             "_ORIGINAL_BOOK_STATE": book_state,
             "_ORIGINAL_PORTFOLIO_HASH": portfolio_hash,
             "_ORIGINAL_HISTORICAL_METRICS": historical_metrics,
             "_ORIGINAL_SHADOW_BOOK": shadow_book,
+            "_ORIGINAL_IDENTITY_CONCENTRATION": identity_concentration,
         }
     )
     private_globals["_guarded_risk_call"] = _clone_template(
@@ -233,6 +275,9 @@ def _install() -> None:
         _historical_metrics_template, private_globals
     )
     guarded_shadow_book = _clone_template(_shadow_book_template, private_globals)
+    guarded_identity_concentration = _clone_template(
+        _identity_concentration_template, private_globals
+    )
 
     guarded_book_state.__name__ = "_book_state"
     guarded_book_state.__qualname__ = "PaperRiskPolicy._book_state"
@@ -242,11 +287,16 @@ def _install() -> None:
     guarded_historical_metrics.__qualname__ = "PaperRiskPolicy._historical_risk_metrics"
     guarded_shadow_book.__name__ = "_shadow_book_for_allocation"
     guarded_shadow_book.__qualname__ = "PaperRiskPolicy._shadow_book_for_allocation"
+    guarded_identity_concentration.__name__ = "_identity_concentration_decision"
+    guarded_identity_concentration.__qualname__ = (
+        "PaperRiskPolicy._identity_concentration_decision"
+    )
 
     policy._book_state = classmethod(guarded_book_state)
     policy.risk_of_ruin_portfolio_sha256 = classmethod(guarded_portfolio_hash)
     policy._historical_risk_metrics = classmethod(guarded_historical_metrics)
     policy._shadow_book_for_allocation = staticmethod(guarded_shadow_book)
+    policy._identity_concentration_decision = classmethod(guarded_identity_concentration)
 
 
 _install()

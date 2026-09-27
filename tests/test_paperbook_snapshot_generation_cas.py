@@ -107,6 +107,32 @@ def test_stale_bound_book_cannot_mutate_after_newer_generation(
     assert tuple(stale._lifecycle) == lifecycle_before
 
 
+def test_stale_bound_book_cannot_read_committed_stake_after_newer_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.save(path)
+
+    stale = PaperBook.load(path)
+    current = PaperBook.load(path)
+    current.open_ticket(
+        [_leg("current-selection")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    current.save(path)
+
+    with pytest.raises(
+        ValueError,
+        match="snapshot authority is stale; reload current durable snapshot",
+    ):
+        _ = stale.committed_stake
+
+
 def test_stale_bound_book_cannot_settle_after_newer_generation(
     tmp_path,
     monkeypatch,

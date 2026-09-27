@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 from autosport.paper import PaperBook
@@ -65,14 +66,11 @@ def test_owner_facing_derive_root_cannot_be_deleted() -> None:
 def test_root_dispatch_seal_preserves_canonical_policy_class_identity() -> None:
     """Authority sealing must not publish a facade subclass as a second policy class."""
 
-    # PaperRiskPolicy is defined as the product's canonical dataclass, directly over
-    # object. A post-composition subclass facade changes type identity for objects and
-    # modules that captured the original class even when it delegates all behavior.
     assert PaperRiskPolicy.__bases__ == (object,)
 
 
 def test_owner_facing_root_cannot_be_replaced_via_base_type_api() -> None:
-    """A metaclass override alone must not leave type.__setattr__ as an authority bypass."""
+    """Metaclass data descriptors must close explicit type.__setattr__ bypass."""
 
     book = PaperBook("100")
     policy = PaperRiskPolicy(
@@ -109,6 +107,24 @@ def test_owner_facing_root_cannot_be_replaced_via_base_type_api() -> None:
             type.__setattr__(PaperRiskPolicy, "evaluate", original)
 
 
+def test_owner_facing_root_cannot_be_deleted_via_base_type_api() -> None:
+    """Metaclass data descriptors must close explicit type.__delattr__ bypass."""
+
+    original = vars(PaperRiskPolicy)["derive_goal_stake_vector"]
+    deletion_rejected = False
+    try:
+        try:
+            type.__delattr__(PaperRiskPolicy, "derive_goal_stake_vector")
+        except TypeError:
+            deletion_rejected = True
+
+        if not deletion_rejected:
+            assert "derive_goal_stake_vector" in vars(PaperRiskPolicy)
+    finally:
+        if vars(PaperRiskPolicy).get("derive_goal_stake_vector") is not original:
+            type.__setattr__(PaperRiskPolicy, "derive_goal_stake_vector", original)
+
+
 def test_sealed_policy_cannot_be_subclassed_into_alternate_root_authority() -> None:
     """A subclass override must not become an alternate positive risk-policy authority."""
 
@@ -122,3 +138,20 @@ def test_sealed_policy_cannot_be_subclassed_into_alternate_root_authority() -> N
         subclass_rejected = True
 
     assert subclass_rejected is True
+
+
+def test_root_seal_preserves_dataclass_replace_and_instance_dispatch() -> None:
+    """Root sealing must not break canonical dataclass cloning used by vector allocation."""
+
+    original = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("0.10"),
+        max_committed_fraction=Decimal("0.50"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    cloned = replace(original, max_ticket_fraction=Decimal("0.20"))
+    book = PaperBook("100")
+
+    assert type(cloned) is PaperRiskPolicy
+    assert cloned.max_ticket_fraction == Decimal("0.20")
+    decision = cloned.evaluate(book, Decimal("1"))
+    assert decision.allowed is True

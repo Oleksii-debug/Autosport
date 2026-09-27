@@ -905,42 +905,34 @@ class RunTransaction:
         path: Path,
         label: str,
     ) -> None:
-        temporary: Path | None = None
+        """Validate exact bytes through their independently witnessed path authority."""
+
         try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=path.parent,
-                prefix=f".{path.name}.verify-",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(snapshot.payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            verification_copy = cls._read_file_snapshot(
-                temporary,
-                f"{label} verification copy",
+            verification_before = cls._read_file_snapshot(
+                path,
+                f"{label} authority path",
             )
-            if verification_copy.sha256 != snapshot.sha256:
-                raise RunTransactionError(f"{label} exact snapshot copy mismatch")
-            PaperBook.load(temporary)
+            if (
+                verification_before.sha256 != snapshot.sha256
+                or verification_before.payload != snapshot.payload
+            ):
+                raise RunTransactionError(f"{label} changed before semantic validation")
+
+            PaperBook.load(path)
+
             verification_after = cls._read_file_snapshot(
-                temporary,
-                f"{label} verification copy",
+                path,
+                f"{label} authority path",
             )
-            if verification_after.sha256 != snapshot.sha256:
+            if (
+                verification_after.sha256 != snapshot.sha256
+                or verification_after.payload != snapshot.payload
+            ):
                 raise RunTransactionError(f"{label} changed during semantic validation")
         except RunTransactionError:
             raise
         except Exception as exc:
             raise RunTransactionError(f"{label} semantic validation failed: {exc}") from exc
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
 
     @classmethod
     def _verified_paper_book_snapshot(

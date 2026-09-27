@@ -153,6 +153,11 @@ from . import _paperbook_preload_module_member_freeze as _paperbook_preload_modu
 # making later guard-module or PaperBook helper retargeting non-authoritative.
 from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: E402,F401
 
+# The frozen stdlib facades still dispatch attribute access through their Python class.
+# Extend the already-installed value-type witness before the final wrapper seal so
+# in-place facade-class executable mutation cannot retarget positive persistence.
+from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: E402,F401
+
 # The installed wrappers themselves retain verifier function objects in a private
 # globals mapping. Seal those verifier executables against in-place code mutation so
 # disabling the graph check cannot authorize a later parser/serializer retarget.

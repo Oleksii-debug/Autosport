@@ -2,10 +2,10 @@
 
 The preload dispatch guard freezes the canonical persistence graph, but its public
 ``PaperBook.load`` / ``save`` wrappers still reference verifier function objects from
-their private globals mapping. Function identity alone is insufficient because a
-reachable Python function object's ``__code__`` can be replaced in place. The final
-composition layer therefore witnesses both the already-installed wrapper executable
-itself and its verifier executables, rejecting mutation before or after persistence.
+their private globals mapping.  A reachable verifier can be changed either by
+replacing its ``__code__`` in place or by rebinding the corresponding globals entry.
+This final composition layer witnesses the installed inner wrapper, its exact globals
+mapping, each verifier binding, and each verifier executable before and after use.
 
 No parser, serializer, witness protocol, store, root, or economic authority is added.
 """
@@ -24,55 +24,55 @@ _VERIFIER_NAMES = (
 )
 
 
-def _verifier_witnesses(wrapper: FunctionType) -> tuple[tuple[FunctionType, object], ...]:
-    witnesses: list[tuple[FunctionType, object]] = []
+def _verifier_witnesses(
+    wrapper: FunctionType,
+) -> tuple[tuple[str, FunctionType, object], ...]:
+    witnesses: list[tuple[str, FunctionType, object]] = []
     for name in _VERIFIER_NAMES:
         verifier = wrapper.__globals__.get(name)
         if type(verifier) is not FunctionType:
             raise RuntimeError(f"PaperBook persistence wrapper verifier is unavailable: {name}")
-        witnesses.append((verifier, verifier.__code__))
+        witnesses.append((name, verifier, verifier.__code__))
     return tuple(witnesses)
-
-
-def _require_wrapper_authority(
-    inner: FunctionType,
-    expected_inner_code: object,
-    witnesses: tuple[tuple[FunctionType, object], ...],
-    *,
-    exact_type: type,
-    function_type: type[FunctionType],
-) -> None:
-    if exact_type(inner) is not function_type or inner.__code__ is not expected_inner_code:
-        raise ValueError("PaperBook persistence inner wrapper executable authority changed")
-    for verifier, expected_code in witnesses:
-        if exact_type(verifier) is not function_type or verifier.__code__ is not expected_code:
-            raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
 
 
 def _make_guarded_load(
     inner: FunctionType,
-    witnesses: tuple[tuple[FunctionType, object], ...],
+    witnesses: tuple[tuple[str, FunctionType, object], ...],
 ):
     exact_type = type
     function_type = FunctionType
     expected_inner_code = inner.__code__
+    expected_inner_globals = inner.__globals__
 
     def load(cls, path):
-        _require_wrapper_authority(
-            inner,
-            expected_inner_code,
-            witnesses,
-            exact_type=exact_type,
-            function_type=function_type,
-        )
+        if (
+            exact_type(inner) is not function_type
+            or inner.__code__ is not expected_inner_code
+            or inner.__globals__ is not expected_inner_globals
+        ):
+            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+        for name, verifier, expected_code in witnesses:
+            if (
+                expected_inner_globals.get(name) is not verifier
+                or exact_type(verifier) is not function_type
+                or verifier.__code__ is not expected_code
+            ):
+                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
         result = inner(cls, path)
-        _require_wrapper_authority(
-            inner,
-            expected_inner_code,
-            witnesses,
-            exact_type=exact_type,
-            function_type=function_type,
-        )
+        if (
+            exact_type(inner) is not function_type
+            or inner.__code__ is not expected_inner_code
+            or inner.__globals__ is not expected_inner_globals
+        ):
+            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+        for name, verifier, expected_code in witnesses:
+            if (
+                expected_inner_globals.get(name) is not verifier
+                or exact_type(verifier) is not function_type
+                or verifier.__code__ is not expected_code
+            ):
+                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
         return result
 
     load.__name__ = "load"
@@ -82,28 +82,41 @@ def _make_guarded_load(
 
 def _make_guarded_save(
     inner: FunctionType,
-    witnesses: tuple[tuple[FunctionType, object], ...],
+    witnesses: tuple[tuple[str, FunctionType, object], ...],
 ):
     exact_type = type
     function_type = FunctionType
     expected_inner_code = inner.__code__
+    expected_inner_globals = inner.__globals__
 
     def save(self, path) -> None:
-        _require_wrapper_authority(
-            inner,
-            expected_inner_code,
-            witnesses,
-            exact_type=exact_type,
-            function_type=function_type,
-        )
+        if (
+            exact_type(inner) is not function_type
+            or inner.__code__ is not expected_inner_code
+            or inner.__globals__ is not expected_inner_globals
+        ):
+            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+        for name, verifier, expected_code in witnesses:
+            if (
+                expected_inner_globals.get(name) is not verifier
+                or exact_type(verifier) is not function_type
+                or verifier.__code__ is not expected_code
+            ):
+                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
         inner(self, path)
-        _require_wrapper_authority(
-            inner,
-            expected_inner_code,
-            witnesses,
-            exact_type=exact_type,
-            function_type=function_type,
-        )
+        if (
+            exact_type(inner) is not function_type
+            or inner.__code__ is not expected_inner_code
+            or inner.__globals__ is not expected_inner_globals
+        ):
+            raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+        for name, verifier, expected_code in witnesses:
+            if (
+                expected_inner_globals.get(name) is not verifier
+                or exact_type(verifier) is not function_type
+                or verifier.__code__ is not expected_code
+            ):
+                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
 
     save.__name__ = "save"
     save.__qualname__ = "PaperBook.save"
@@ -122,6 +135,8 @@ def _install() -> None:
 
     inner_load = load_descriptor.__func__
     inner_save = save_descriptor
+    if type(inner_load) is not FunctionType:
+        raise RuntimeError("canonical PaperBook positive path load must remain a Python function")
     load_witnesses = _verifier_witnesses(inner_load)
     save_witnesses = _verifier_witnesses(inner_save)
 

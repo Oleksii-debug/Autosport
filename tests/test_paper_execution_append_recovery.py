@@ -159,6 +159,39 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
             self.assertEqual(len(restarted_book.tickets), 1)
             self.assertEqual(restarted_book.balance, Decimal("90.00"))
 
+    def test_live_retry_rejects_attempt_marker_prefix_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = _config()
+            book = PaperBook("100.00")
+            runtime = _runtime(root, book, model=model)
+            book.save(root / "live_decision_pre_action_book.json")
+            action = _action()
+
+            first = runtime.execute(
+                prepared=_prepared(runtime, action),
+                trigger_id="live-append-recovery-marker-boundary",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(first.run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+            ticket = book.tickets[first.ticket_ids[0]]
+            ticket.strategy_reason = f"{ticket.strategy_reason}-forged-suffix"
+            book.save(root / "paper_book.json")
+
+            restarted_book = PaperBook.load(root / "paper_book.json")
+            restarted = _runtime(root, restarted_book, model=model)
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "conflicts with durable execution attempt",
+            ):
+                restarted.execute(
+                    prepared=_prepared(restarted, action),
+                    trigger_id="live-append-recovery-marker-boundary",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
     def test_live_retry_rejects_unrelated_book_mutation_after_accepted_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

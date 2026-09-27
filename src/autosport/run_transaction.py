@@ -226,8 +226,7 @@ class RunTransaction:
         target = self.workspace / "paper_book.json"
         expected_base = self._hash_field(manifest, "base", "paper_book_sha256")
         expected_new = self._hash_field(manifest, "new", "paper_book_sha256")
-        if expected_base == expected_new:
-            raise RunTransactionError("PaperBook promotion BASE and NEW identities must differ")
+        same_identity = expected_base == expected_new
         if _paperbook_authority._snapshot_identity(staged) == _paperbook_authority._snapshot_identity(target):
             raise RunTransactionError("PaperBook staged and canonical promotion paths must differ")
         if _paperbook_authority._witness_path(staged).exists():
@@ -248,7 +247,7 @@ class RunTransaction:
                         "PaperBook canonical witness recovery left pending state"
                     )
 
-                if current_sha == expected_new:
+                if current_sha == expected_new and not same_identity:
                     if committed is None or committed[1] != expected_new:
                         raise RunTransactionError(
                             "PaperBook canonical NEW bytes lack matching durable authority"
@@ -296,6 +295,15 @@ class RunTransaction:
                     or _paperbook_authority._file_sha256(staged) != expected_new
                 ):
                     raise RunTransactionError("PaperBook staged snapshot changed during promotion")
+
+                # A valid observation/NO-BET transaction can advance durable ledger and
+                # summary evidence without changing PaperBook economics.  BASE==NEW is
+                # therefore an authenticated no-op only after both canonical witness
+                # state and the exact non-authoritative staged bytes have been rechecked
+                # under the canonical publication lock.  Do not mint a witness generation
+                # merely because another transaction artifact is committing.
+                if same_identity:
+                    return
 
                 fd, temporary_name = tempfile.mkstemp(
                     dir=target.parent,

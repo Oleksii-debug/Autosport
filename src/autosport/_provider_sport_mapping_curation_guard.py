@@ -53,6 +53,7 @@ def _install_guard() -> None:
         raise exact_runtime_error("ProviderSportEvidence.from_exact_bytes must remain a classmethod")
     canonical_parser = evidence_descriptor.__func__
     canonical_parser_code = canonical_parser.__code__
+    canonical_parser_globals = canonical_parser.__globals__
     canonical_registry_register = current_register
     canonical_registry_register_code = current_register.__code__
     canonical_registry_resolve = current_resolve
@@ -62,6 +63,35 @@ def _install_guard() -> None:
     canonical_resolution_type = mapping_module.CanonicalSportResolution
     canonical_error = mapping_module.ProviderSportMappingError
     curated = _PRODUCT_CURATED_PROVIDER_SPORTS
+
+    # The canonical parser intentionally late-resolves helpers from its owning module.
+    # Product curation must therefore witness that *real* namespace and the complete
+    # transitive parser graph, rather than trusting a replaceable module-level
+    # ``globals`` observer. This closes self-restoring helper/stale-view attacks between
+    # the curation parse and the canonical registry's parse of the same immutable bytes.
+    parser_helper_names = (
+        "_strict_json_object",
+        "_canonical_text",
+        "_opaque_provider_id",
+        "_canonical_sport",
+        "_time_text",
+        "_instant",
+    )
+    canonical_parser_helpers = tuple(
+        (name, exact_getattr(mapping_module, name)) for name in parser_helper_names
+    )
+    canonical_parser_helper_codes = tuple(
+        (name, helper, exact_getattr(helper, "__code__", None))
+        for name, helper in canonical_parser_helpers
+    )
+    canonical_hashlib = mapping_module.hashlib
+    canonical_json = mapping_module.json
+    canonical_unicodedata = mapping_module.unicodedata
+    canonical_datetime = mapping_module.datetime
+    canonical_timezone = mapping_module.timezone
+    canonical_evidence_schema = mapping_module._EVIDENCE_SCHEMA
+    canonical_evidence_version = mapping_module._EVIDENCE_VERSION
+    canonical_reserved_sports = mapping_module._RESERVED_SPORTS
 
     canonical_payload = exact_vars(registry_type).get("_payload")
     if not exact_callable(canonical_payload):
@@ -105,6 +135,33 @@ def _install_guard() -> None:
                 "provider sport mapping lacks product-owned curation authority"
             )
 
+    def _assert_parser_authority() -> None:
+        if canonical_parser.__globals__ is not canonical_parser_globals:
+            raise canonical_error("canonical evidence parser namespace authority changed")
+        # A module-global name called ``globals`` shadows the builtin used by the
+        # generated canonical register method. Reject it directly from the captured
+        # real namespace so a forged stale view cannot attest a hostile helper graph.
+        if "globals" in canonical_parser_globals:
+            raise canonical_error("canonical evidence parser namespace observer changed")
+        for name, helper, expected_code in canonical_parser_helper_codes:
+            if canonical_parser_globals.get(name) is not helper:
+                raise canonical_error("canonical evidence parser helper authority changed")
+            if expected_code is not None and exact_getattr(helper, "__code__", None) is not expected_code:
+                raise canonical_error("canonical evidence parser helper executable authority changed")
+        if (
+            canonical_parser_globals.get("hashlib") is not canonical_hashlib
+            or canonical_parser_globals.get("json") is not canonical_json
+            or canonical_parser_globals.get("unicodedata") is not canonical_unicodedata
+            or canonical_parser_globals.get("datetime") is not canonical_datetime
+            or canonical_parser_globals.get("timezone") is not canonical_timezone
+            or canonical_parser_globals.get("ProviderSportMappingError") is not canonical_error
+            or canonical_parser_globals.get("ProviderSportEvidence") is not canonical_evidence_type
+            or canonical_parser_globals.get("_EVIDENCE_SCHEMA") != canonical_evidence_schema
+            or canonical_parser_globals.get("_EVIDENCE_VERSION") != canonical_evidence_version
+            or canonical_parser_globals.get("_RESERVED_SPORTS") is not canonical_reserved_sports
+        ):
+            raise canonical_error("canonical evidence parser dependency authority changed")
+
     def _assert_guard_authority(registry=None) -> None:
         if (
             registry_type.register_evidence is not register_evidence
@@ -119,6 +176,7 @@ def _install_guard() -> None:
             or canonical_registry_resolve.__code__ is not canonical_registry_resolve_code
         ):
             raise canonical_error("provider sport curation authority changed")
+        _assert_parser_authority()
 
         if (
             exact_vars(registry_type).get("_payload") is not canonical_payload
@@ -160,6 +218,10 @@ def _install_guard() -> None:
         # Fail before durable mutation if any authority-bearing surface moved.
         _assert_guard_authority(self)
         evidence = canonical_parser(canonical_evidence_type, source_snapshot_bytes)
+        # A parser helper is allowed to execute no authority-changing callback. Recheck
+        # the exact transitive graph immediately after the one product-curation parse so
+        # a helper cannot mutate/restore a sibling dependency around this decision.
+        _assert_guard_authority(self)
         _require_curated(
             evidence.provider_namespace,
             evidence.provider_sport_id,
@@ -169,7 +231,21 @@ def _install_guard() -> None:
         # Re-check immediately before the irreversible canonical mutation. Reuse the
         # canonical registry for every durability and chronology invariant.
         _assert_guard_authority(self)
-        return canonical_registry_register(self, source_snapshot_bytes)
+        binding = canonical_registry_register(self, source_snapshot_bytes)
+        _assert_guard_authority(self)
+        if exact_type(binding) is not canonical_binding_type:
+            raise canonical_error("provider sport registration authority changed")
+        if (
+            binding.provider_namespace != evidence.provider_namespace
+            or binding.provider_sport_id != evidence.provider_sport_id
+            or binding.canonical_sport != evidence.canonical_sport
+            or binding.valid_from != evidence.valid_from
+            or binding.valid_until != evidence.valid_until
+            or binding.evidence_available_at != evidence.evidence_available_at
+            or binding.source_snapshot_sha256 != evidence.source_snapshot_sha256
+        ):
+            raise canonical_error("provider sport registration semantic interpretation changed")
+        return binding
 
     def resolve(self, *, provider_namespace: str, provider_sport_id: str, as_of: str):
         # A registry created by a pre-curation version can survive restart. Durable

@@ -2,9 +2,11 @@ import json
 import os
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.domain import TicketLeg
 from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
 from autosport.run_transaction import RunTransaction, RunTransactionError
@@ -42,7 +44,23 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
                 context_hash="c" * 64,
             )
         )
-        tx.stage_outputs(PaperBook("10001"), ledger.path)
+        staged_book = PaperBook.load(book_path)
+        staged_book.open_ticket(
+            [
+                TicketLeg(
+                    event_id="canonical-target-fixture:event",
+                    market_id="canonical-target-fixture:winner",
+                    selection_id="canonical-target-fixture:home",
+                    locked_odds=Decimal("2"),
+                    sport="motorsport",
+                    exchange_side="back",
+                )
+            ],
+            Decimal("1"),
+            reason="canonical-target-bound-new",
+            placed_at="2000-01-01T00:00:00+00:00",
+        )
+        tx.stage_outputs(staged_book, ledger.path)
         tx.precommit(
             {
                 "schema_version": 2,

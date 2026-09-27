@@ -4,6 +4,7 @@ from dataclasses import fields
 
 import pytest
 
+import autosport.betfair_standard_limit_price_bound_product_verifier as product_module
 import autosport.betfair_standard_limit_price_bound_verifier as verifier_module
 import autosport.supervised_plan_issuance as issuance_module
 from autosport.betfair_standard_limit_price_bound import (
@@ -41,9 +42,9 @@ def test_coordinated_preissuance_resolver_substitution_cannot_mint_provider_auth
         return _copy_with_instruction_sha(genuine, forged_sha)
 
     # Reproduce the common-mode defect: the hostile resolver is present before
-    # issuance and remains installed for durable reload.  The old verifier also
-    # late-dispatched through its own mutable alias, so coordinating both aliases
-    # made the same forged projection appear self-consistent end to end.
+    # issuance and remains installed for durable reload. The predecessor verifier
+    # also late-dispatched through its mutable alias, so coordinating both aliases
+    # made the forged projection appear self-consistent end to end.
     monkeypatch.setattr(
         issuance_module,
         "resolve_betfair_standard_limit_price_bound",
@@ -60,7 +61,7 @@ def test_coordinated_preissuance_resolver_substitution_cannot_mint_provider_auth
 
     # Demonstrate that the issuance store alone is intentionally provider-neutral:
     # with the same hostile dispatch still installed, byte continuity/reload is
-    # self-consistent.  Product provider authority must therefore come from the
+    # self-consistent. Product provider authority must therefore come from the
     # independently sealed verifier re-resolution below.
     reloaded = store.load(bound.execution_plan.plan_id)
     assert reloaded.provider_requests == issued.provider_requests
@@ -84,6 +85,69 @@ def test_coordinated_preissuance_resolver_substitution_cannot_mint_provider_auth
         match="durable issuance-time Betfair request identity changed",
     ):
         verifier_module.verify_betfair_standard_limit_price_bound(
+            evidence=candidate,
+            ledger=ledger,
+            issuance_store=store,
+            execution_plan_id=bound.execution_plan.plan_id,
+            action_id=bound.execution_plan.actions[0].action_id,
+        )
+
+
+def test_product_facade_cannot_reopen_coordinated_resolver_substitution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _goal = _bound(_profile())
+    store = _store(monkeypatch, tmp_path, bound)
+    canonical_resolver = issuance_module.resolve_betfair_standard_limit_price_bound
+    forged_sha = "e" * 64
+
+    def hostile_resolver(*, bound, action_id):
+        genuine = canonical_resolver(bound=bound, action_id=action_id)
+        return _copy_with_instruction_sha(genuine, forged_sha)
+
+    monkeypatch.setattr(
+        issuance_module,
+        "resolve_betfair_standard_limit_price_bound",
+        hostile_resolver,
+    )
+    monkeypatch.setattr(
+        verifier_module,
+        "resolve_betfair_standard_limit_price_bound",
+        hostile_resolver,
+    )
+    # The compatibility facade used to have a second mutable verifier dispatch.
+    # Rebind it too; the public product entrypoint must still delegate through the
+    # exact canonical verifier captured before these substitutions.
+    monkeypatch.setattr(
+        product_module,
+        "verify_betfair_standard_limit_price_bound",
+        lambda **_kwargs: hostile_resolver(
+            bound=bound,
+            action_id=bound.execution_plan.actions[0].action_id,
+        ),
+    )
+
+    store.issue(bound=bound, approval=approval)
+    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    candidate = hostile_resolver(
+        bound=bound,
+        action_id=bound.execution_plan.actions[0].action_id,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="durable issuance-time Betfair request identity changed",
+    ):
+        product_module.verify_product_betfair_standard_limit_price_bound(
             evidence=candidate,
             ledger=ledger,
             issuance_store=store,

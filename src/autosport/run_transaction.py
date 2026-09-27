@@ -18,6 +18,7 @@ from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from ._paperbook_preload_authority_guard import (
     _promote_verified_snapshot as _promote_verified_paper_book_snapshot,
+    _stage_transaction_snapshot as _stage_transaction_paper_book_snapshot,
 )
 
 
@@ -178,8 +179,12 @@ class RunTransaction:
             "Decision Ledger",
         )
         try:
-            book.save(self.staged_book_path)
-        except ValueError as exc:
+            _stage_transaction_paper_book_snapshot(
+                book,
+                self.workspace / "paper_book.json",
+                self.staged_book_path,
+            )
+        except (OSError, TypeError, ValueError) as exc:
             raise RunTransactionError(
                 f"staged PaperBook semantic validation failed: {exc}"
             ) from exc
@@ -329,12 +334,15 @@ class RunTransaction:
         self._validate_precommit_evidence(manifest)
         self._validate_paper_book_commit_state(manifest)
         self._validate_decision_ledger_commit_state(manifest)
-        _promote_verified_paper_book_snapshot(
-            self.staged_book_path,
-            self.workspace / "paper_book.json",
-            expected_base_sha256=self._hash_field(manifest, "base", "paper_book_sha256"),
-            expected_new_sha256=self._hash_field(manifest, "new", "paper_book_sha256"),
-        )
+        try:
+            _promote_verified_paper_book_snapshot(
+                self.staged_book_path,
+                self.workspace / "paper_book.json",
+                expected_base_sha256=self._hash_field(manifest, "base", "paper_book_sha256"),
+                expected_new_sha256=self._hash_field(manifest, "new", "paper_book_sha256"),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise RunTransactionError(f"PaperBook transaction promotion failed: {exc}") from exc
         self._promote_base_or_new(
             target=self.workspace / "decisions.jsonl",
             staged=self.staged_ledger_path,
@@ -905,32 +913,9 @@ class RunTransaction:
         path: Path,
         label: str,
     ) -> None:
-        """Validate exact bytes through their independently witnessed path authority."""
-
+        del cls, path
         try:
-            verification_before = cls._read_file_snapshot(
-                path,
-                f"{label} authority path",
-            )
-            if (
-                verification_before.sha256 != snapshot.sha256
-                or verification_before.payload != snapshot.payload
-            ):
-                raise RunTransactionError(f"{label} changed before semantic validation")
-
-            PaperBook.load(path)
-
-            verification_after = cls._read_file_snapshot(
-                path,
-                f"{label} authority path",
-            )
-            if (
-                verification_after.sha256 != snapshot.sha256
-                or verification_after.payload != snapshot.payload
-            ):
-                raise RunTransactionError(f"{label} changed during semantic validation")
-        except RunTransactionError:
-            raise
+            PaperBook.load_bytes(snapshot.payload)
         except Exception as exc:
             raise RunTransactionError(f"{label} semantic validation failed: {exc}") from exc
 
@@ -951,7 +936,15 @@ class RunTransaction:
         label: str,
     ) -> VerifiedFileSnapshot:
         snapshot = cls._read_canonical_file_snapshot(path, label)
-        cls._validate_paper_book_snapshot(snapshot, path, f"canonical {label}")
+        try:
+            PaperBook.load(path)
+        except Exception as exc:
+            raise RunTransactionError(
+                f"canonical {label} semantic validation failed: {exc}"
+            ) from exc
+        verification_after = cls._read_canonical_file_snapshot(path, label)
+        if verification_after.sha256 != snapshot.sha256 or verification_after.payload != snapshot.payload:
+            raise RunTransactionError(f"canonical {label} changed during semantic validation")
         return snapshot
 
     @staticmethod

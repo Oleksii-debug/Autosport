@@ -167,60 +167,6 @@ def _require_bound_book(book, snapshot_path):
         raise ValueError(_SNAPSHOT_AUTHORITY_STALE_ERROR)
 
 
-def _finalize_fresh_binding(book, snapshot_path, expected_snapshot_sha256):
-    """Adopt a new path only after proving its bytes are this exact trusted book."""
-
-    generation, snapshot_sha = _durable_binding_state(snapshot_path)
-    if generation <= 0 or snapshot_sha != expected_snapshot_sha256:
-        raise ValueError("PaperBook fresh snapshot authority does not match published bytes")
-
-    with _BINDING_LOCK:
-        existing = _BOOK_BINDINGS.get(book)
-
-    if existing is not None and existing[:3] != _binding(snapshot_path):
-        previous_path = _PATH(existing[1])
-        _require_bound_book(book, previous_path)
-
-    temporary = None
-    try:
-        fd, temporary_name = tempfile.mkstemp(
-            dir=snapshot_path.parent,
-            prefix=f".{snapshot_path.name}.rebind-check-",
-            suffix=".tmp",
-        )
-        os.close(fd)
-        temporary = _PATH(temporary_name)
-        temporary.unlink()
-        _call_witnessed_delegate(
-            _ORIGINAL_SAVE,
-            _ORIGINAL_SAVE_WITNESS,
-            "canonical save",
-            book,
-            temporary,
-        )
-        if _file_sha256(temporary) != snapshot_sha:
-            raise ValueError(
-                "PaperBook fresh snapshot bytes do not match the trusted in-memory state"
-            )
-        if existing is not None and existing[:3] != _binding(snapshot_path):
-            _require_bound_book(book, _PATH(existing[1]))
-        if _file_sha256(snapshot_path) != snapshot_sha:
-            raise ValueError("PaperBook fresh snapshot changed before authority adoption")
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-
-    target = _binding(snapshot_path)
-    with _BINDING_LOCK:
-        current = _BOOK_BINDINGS.get(book)
-        if current is not existing:
-            raise ValueError("PaperBook binding changed during fresh-path authority adoption")
-        _BOOK_BINDINGS[book] = (*target, generation, snapshot_sha)
-
-
 def _advance_book_binding(book, snapshot_path):
     target = _binding(snapshot_path)
     generation, snapshot_sha = _durable_binding_state(snapshot_path)
@@ -270,32 +216,12 @@ def _generation_guarded_save(self, path):
     witness = _witness_path(destination)
     publication_lock = _acquire_snapshot_publication_lock(witness)
     try:
-        target = _binding(destination)
         with _BINDING_LOCK:
-            existing = _BOOK_BINDINGS.get(self)
-
-        fresh_destination = False
-        if existing is not None:
-            if existing[:3] == target:
-                _require_bound_book(self, destination)
-            else:
-                previous_path = _PATH(existing[1])
-                _require_bound_book(self, previous_path)
-                generation, snapshot_sha = _durable_binding_state(destination)
-                if generation != 0 or snapshot_sha != "":
-                    raise ValueError(
-                        "existing PaperBook snapshot lineage requires verified path-bound authority"
-                    )
-                fresh_destination = True
-        else:
-            generation, snapshot_sha = _durable_binding_state(destination)
-            fresh_destination = generation == 0 and snapshot_sha == ""
-
-        _GENERATION_ORIGINAL_TRUSTED_SAVE(self, path)
-        if fresh_destination:
+            has_binding = _BOOK_BINDINGS.get(self) is not None
+        if has_binding:
             _require_bound_book(self, destination)
-        else:
-            _advance_book_binding(self, destination)
+        _GENERATION_ORIGINAL_TRUSTED_SAVE(self, path)
+        _advance_book_binding(self, destination)
     finally:
         _release_snapshot_publication_lock(publication_lock)
 
@@ -394,7 +320,6 @@ def _install() -> None:
     guard_namespace["_GENERATION_ORIGINAL_COMMITTED_STAKE"] = committed_stake_getter
     guard_namespace["_GENERATION_ORIGINAL_OPEN_TICKET"] = open_ticket
     guard_namespace["_GENERATION_ORIGINAL_SETTLE"] = settle
-    guard_namespace["_finalize_fresh_binding"] = _clone_into_guard(_finalize_fresh_binding)
 
     for function in (
         _canonical_lock_path_key,

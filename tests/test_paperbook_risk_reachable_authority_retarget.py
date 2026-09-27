@@ -5,6 +5,7 @@ from types import FunctionType
 
 import pytest
 
+from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, RiskDecision
 
@@ -104,3 +105,101 @@ def test_sealed_owner_root_cannot_retarget_wrapper_global_dispatch(
     decision = policy.evaluate(book, Decimal("99"))
     assert hostile_executed is False
     assert decision.allowed is False
+
+
+_TS = "2026-09-27T21:40:00+00:00"
+
+
+def _reconstruct_spec(spec: tuple[object, ...]) -> FunctionType:
+    code, name, defaults, kwdefaults, closure, global_bindings = spec
+    assert type(global_bindings) is tuple
+    function = FunctionType(
+        code,
+        dict(global_bindings),
+        name=name,
+        argdefs=defaults,
+        closure=closure,
+    )
+    if kwdefaults is not None:
+        function.__kwdefaults__ = dict(kwdefaults)
+    return function
+
+
+def _generation_race_leg() -> TicketLeg:
+    return TicketLeg(
+        "risk-reconstruct-event",
+        "risk-reconstruct-market",
+        "concurrent-writer",
+        Decimal("2"),
+        sport="soccer",
+        exchange_side="back",
+    )
+
+
+def test_reconstructible_nested_evaluate_spec_cannot_bypass_decision_generation_scope(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested exported spec must not reconstruct a pre-admission positive authority."""
+
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-risk-reconstruct-authority"),
+    )
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.save(path)
+    evaluated = PaperBook.load(path)
+    writer = PaperBook.load(path)
+
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+
+    public_root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(public_root) is FunctionType
+    private_spec = public_root.__globals__["_EVALUATE_SPEC"]
+    assert type(private_spec) is tuple and len(private_spec) == 6
+    generation_globals = dict(private_spec[5])
+    nested_spec = generation_globals["_EVALUATE_SPEC"]
+    assert type(nested_spec) is tuple and len(nested_spec) == 6
+    reconstructed = _reconstruct_spec(nested_spec)
+
+    original_derived = PaperRiskPolicy._derived_risk_values
+    writer_published = False
+
+    def interleave_publication(
+        self,
+        initial_bankroll,
+        balance,
+        committed_stake,
+        amount,
+    ):
+        nonlocal writer_published
+        writer.open_ticket(
+            [_generation_race_leg()],
+            "95",
+            placed_at=_TS,
+        )
+        writer.save(path)
+        writer_published = True
+        return original_derived(
+            self,
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+        )
+
+    monkeypatch.setattr(
+        PaperRiskPolicy,
+        "_derived_risk_values",
+        interleave_publication,
+    )
+
+    decision = reconstructed(policy, evaluated, Decimal("10"))
+
+    assert not (decision.allowed is True and writer_published is True)

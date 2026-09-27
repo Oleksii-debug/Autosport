@@ -40,6 +40,10 @@ def _hostile_save(_self, path: str | Path) -> None:
     Path(path).write_bytes(b"caller-forged-paperbook-bytes")
 
 
+def _hostile_authority_root(_ledger_path: Path) -> Path:
+    raise AssertionError("mutated independent authority-root executable was dispatched")
+
+
 def test_path_load_rejects_in_place_canonical_decoder_code_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -116,3 +120,28 @@ def test_path_load_rejects_rebound_guard_witness_before_unwitnessed_copy_is_admi
 
     assert hostile_calls == 0
     assert not guard._witness_path(copied_path).exists()
+
+
+def test_path_load_uses_frozen_independent_root_after_original_code_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Later mutation of the imported root selector cannot redirect positive load."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    source = PaperBook("100")
+    source.open_ticket([_leg("selection-root-code")], "10", placed_at=_TS)
+    source.save(path)
+    snapshot_before = path.read_bytes()
+    witness_before = guard._witness_path(path).read_bytes()
+
+    root_selector = guard._paper_authority_root
+    assert root_selector.__code__ is not _hostile_authority_root.__code__
+    monkeypatch.setattr(root_selector, "__code__", _hostile_authority_root.__code__)
+
+    loaded = PaperBook.load(path)
+
+    assert loaded.balance == Decimal("90")
+    assert path.read_bytes() == snapshot_before
+    monkeypatch.undo()
+    assert guard._witness_path(path).read_bytes() == witness_before

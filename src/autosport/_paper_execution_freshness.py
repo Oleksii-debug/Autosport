@@ -143,12 +143,7 @@ _install()
 # PAPER execution durability composition rather than inventing a parallel runtime.
 from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: E402,F401
 
-# Freeze the owning guard's save/publication graph before positive publication can
-# mint a new durable snapshot witness. This remains composition over the same
-# serializer and PREPARE/COMMIT/ABORT authority rather than a parallel save path.
-from . import _paperbook_preload_save_dispatch_guard as _paperbook_preload_save_dispatch_guard  # noqa: E402,F401
-
-# Freeze the owning guard's local positive-load dispatch graph after the witness
-# protocol is installed. This preserves the same parser/store/authority while making
-# later guard-module helper rebinding non-authoritative for PaperBook.load().
+# Freeze the owning guard's positive load and durable-save dispatch graph after the
+# witness protocol is installed. This preserves one parser/serializer/authority while
+# making later guard-module or PaperBook helper retargeting non-authoritative.
 from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: E402,F401

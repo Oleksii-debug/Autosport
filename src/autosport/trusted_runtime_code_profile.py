@@ -17,11 +17,13 @@ import json
 from pathlib import Path
 from secrets import token_hex
 from threading import RLock
+from types import FunctionType
 
 from .collector_service import _load_source_factory
 from .continuous_session import SessionState
 from .operator_source_registry import (
     OperatorSourceRegistryError,
+    list_product_source_entries,
     resolve_product_source_runtime_binding,
 )
 from .product_runtime import AutonomousProductRuntime
@@ -32,6 +34,16 @@ PROFILE_SCHEMA_VERSION = 1
 TRUST_BOUNDARY = "TRUSTED_PRODUCT_INTERPRETER"
 _CANONICAL_RUNTIME_TYPE = AutonomousProductRuntime
 _CANONICAL_RUNTIME_STATUS = AutonomousProductRuntime.status
+_CANONICAL_SOURCE_BINDINGS = tuple(
+    (
+        entry,
+        resolve_product_source_runtime_binding(
+            entry.factory_spec,
+            entry.expected_provider_source_id,
+        )[1],
+    )
+    for entry in list_product_source_entries()
+)
 
 
 class TrustedRuntimeCodeProfileError(RuntimeError):
@@ -169,10 +181,17 @@ def require_product_owned_source_factory_identity(
     """Require the dynamic loader to resolve the exact product-imported callable."""
 
     try:
-        entry, canonical_factory = resolve_product_source_runtime_binding(
-            source_factory,
-            expected_provider_source_id,
+        matches = tuple(
+            (entry, canonical_factory)
+            for entry, canonical_factory in _CANONICAL_SOURCE_BINDINGS
+            if entry.factory_spec == source_factory
+            and entry.expected_provider_source_id == expected_provider_source_id
         )
+        if len(matches) != 1:
+            raise OperatorSourceRegistryError(
+                "source binding is not registered by this product build"
+            )
+        entry, canonical_factory = matches[0]
         observed_factory = _load_source_factory(source_factory)
     except (
         OperatorSourceRegistryError,
@@ -406,3 +425,63 @@ def revoke_trusted_runtime_code_profile(value: object) -> bool:
         if _ACTIVE_BY_WORKSPACE.get(value.workspace) == id(value):
             _ACTIVE_BY_WORKSPACE.pop(value.workspace, None)
         return True
+
+
+_AUTHORITY_DISPATCH_NAMES = (
+    "_workspace_text",
+    "_canonical_runtime_is_running",
+    "require_product_owned_source_factory_identity",
+    "_register_started_product_runtime_origin",
+    "_clear_started_product_runtime_origin",
+    "issue_trusted_runtime_code_profile",
+    "is_authoritative_trusted_runtime_code_profile",
+    "require_authoritative_trusted_runtime_code_profile",
+    "revoke_trusted_runtime_code_profile",
+)
+
+
+def _clone_authority_function(
+    function: FunctionType,
+    *,
+    trusted_globals: dict[str, object],
+) -> FunctionType:
+    clone = FunctionType(
+        function.__code__,
+        trusted_globals,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+        closure=function.__closure__,
+    )
+    if function.__kwdefaults__ is not None:
+        clone.__kwdefaults__ = dict(function.__kwdefaults__)
+    clone.__annotations__ = dict(function.__annotations__)
+    clone.__doc__ = function.__doc__
+    clone.__qualname__ = function.__qualname__
+    return clone
+
+
+def _install_frozen_authority_dispatch() -> None:
+    """Freeze one shared positive profile-authority graph at package composition."""
+
+    module_globals = globals()
+    trusted_globals: dict[str, object] = dict(module_globals)
+    clones: dict[str, FunctionType] = {}
+    for name in _AUTHORITY_DISPATCH_NAMES:
+        function = module_globals.get(name)
+        if type(function) is not FunctionType:
+            raise RuntimeError(
+                f"trusted runtime authority function {name} is unavailable"
+            )
+        clones[name] = _clone_authority_function(
+            function,
+            trusted_globals=trusted_globals,
+        )
+    trusted_globals.update(clones)
+    for name, clone in clones.items():
+        module_globals[name] = clone
+
+
+_install_frozen_authority_dispatch()
+del _install_frozen_authority_dispatch
+del _clone_authority_function
+del _AUTHORITY_DISPATCH_NAMES

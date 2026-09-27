@@ -71,3 +71,9 @@ del _install
 # been sealed, so the wrapper can reuse that detached authority rather than mutable
 # guard-module helpers.
 from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_guard  # noqa: E402,F401
+
+# The guarded read roots reconstruct inert pre-guard specs under the publication lock.
+# Freeze their class-helper dispatch as a final composition step so later replacement
+# of PaperRiskPolicy arithmetic helpers cannot retarget committed exposure or
+# concentration evidence while preserving the same canonical risk implementation.
+from . import _paperbook_risk_helper_dispatch_seal as _paperbook_risk_helper_dispatch_seal  # noqa: E402,F401

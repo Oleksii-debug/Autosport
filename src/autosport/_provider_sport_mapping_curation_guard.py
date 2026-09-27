@@ -222,6 +222,26 @@ def _install_guard() -> None:
     canonical_schema = mapping_module._SCHEMA
     canonical_version = mapping_module._VERSION
 
+    canonical_path_class = mapping_module.Path
+    canonical_concrete_path_type = exact_type(canonical_path_class("."))
+    canonical_path_exists = canonical_path_class.exists
+    canonical_path_exists_code = exact_getattr(canonical_path_exists, "__code__", None)
+    canonical_path_read_text = canonical_path_class.read_text
+    canonical_path_read_text_code = exact_getattr(canonical_path_read_text, "__code__", None)
+    canonical_path_open = canonical_path_class.open
+    canonical_path_open_code = exact_getattr(canonical_path_open, "__code__", None)
+    canonical_path_open_globals = exact_getattr(canonical_path_open, "__globals__", None)
+    canonical_path_io = (
+        canonical_path_open_globals.get("io")
+        if exact_type(canonical_path_open_globals) is dict
+        else None
+    )
+    canonical_io_open = (
+        exact_getattr(canonical_path_io, "open", None)
+        if canonical_path_io is not None
+        else None
+    )
+
     def _assert_surface(cls, expected_surface, label: str) -> None:
         expected_getattribute, expected_init, expected_init_code, descriptors = expected_surface
         current_init = exact_vars(cls).get("__init__")
@@ -408,6 +428,37 @@ def _install_guard() -> None:
             for name in ("_load", "_persist", "_assert_no_overlap")
         ):
             raise canonical_error("provider sport canonical mutation instance authority changed")
+
+        if (
+            mapping_module.Path is not canonical_path_class
+            or canonical_path_class.exists is not canonical_path_exists
+            or (
+                canonical_path_exists_code is not None
+                and exact_getattr(canonical_path_exists, "__code__", None)
+                is not canonical_path_exists_code
+            )
+            or canonical_path_class.read_text is not canonical_path_read_text
+            or (
+                canonical_path_read_text_code is not None
+                and exact_getattr(canonical_path_read_text, "__code__", None)
+                is not canonical_path_read_text_code
+            )
+            or canonical_path_class.open is not canonical_path_open
+            or (
+                canonical_path_open_code is not None
+                and exact_getattr(canonical_path_open, "__code__", None)
+                is not canonical_path_open_code
+            )
+            or exact_getattr(canonical_path_open, "__globals__", None)
+            is not canonical_path_open_globals
+            or (
+                canonical_path_io is not None
+                and exact_getattr(canonical_path_io, "open", None) is not canonical_io_open
+            )
+        ):
+            raise canonical_error("provider sport durable path read authority changed")
+        if registry is not None and exact_type(registry.path) is not canonical_concrete_path_type:
+            raise canonical_error("provider sport durable path instance authority changed")
 
         if (
             exact_vars(registry_type).get("_payload") is not canonical_payload

@@ -29,14 +29,10 @@ def _leg(selection_id: str = "selection-executable-authority") -> TicketLeg:
 
 
 def _hostile_load_bytes(cls, _payload: bytes):
-    # The independent witness authenticates the original bytes, but a mutated
-    # decoder executable can currently return unrelated economics afterwards.
     return cls("999")
 
 
 def _hostile_from_raw_snapshot(cls, _raw: object):
-    # Keep the classmethod call shape compatible with the canonical parser while
-    # returning unrelated economics if dispatch reaches it.
     return cls("999")
 
 
@@ -45,9 +41,11 @@ def _hostile_value_init(_self, *_args: object, **_kwargs: object) -> None:
 
 
 def _hostile_save(_self, path: str | Path) -> None:
-    # A mutated canonical serializer executable can currently supply arbitrary
-    # bytes that the outer guard will then PREPARE/COMMIT as authoritative.
     Path(path).write_bytes(b"caller-forged-paperbook-bytes")
+
+
+def _hostile_lifecycle_to_json(_self) -> list[dict[str, object]]:
+    raise AssertionError("retargeted serializer class helper was dispatched")
 
 
 def _hostile_authority_root(_ledger_path: Path) -> Path:
@@ -83,8 +81,6 @@ def test_path_load_rejects_in_place_canonical_decoder_code_mutation(
 def test_path_load_rejects_transitive_class_parser_code_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Witness the parser reached dynamically through ``cls`` after load_bytes."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-class-parser")
 
@@ -104,8 +100,6 @@ def test_path_load_rejects_transitive_class_parser_code_mutation(
 def test_path_load_rejects_transitive_class_parser_descriptor_rebind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Replacing the classmethod descriptor cannot redirect positive restart."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-class-rebind")
 
@@ -128,8 +122,6 @@ def test_path_load_rejects_parser_value_constructor_retarget(
     monkeypatch: pytest.MonkeyPatch,
     value_type: type,
 ) -> None:
-    """Authenticated bytes cannot be reinterpreted by a mutated canonical value type."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path, witness, snapshot_before, witness_before = _saved_book(
         tmp_path,
@@ -171,11 +163,59 @@ def test_save_rejects_in_place_canonical_serializer_code_mutation_before_witness
     assert witness.read_bytes() == witness_before
 
 
+def test_save_uses_frozen_publication_helpers_after_guard_global_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-save-global-1")], "10", placed_at=_TS)
+    book.save(path)
+    book.open_ticket([_leg("selection-save-global-2")], "5", placed_at=_TS)
+
+    hostile_calls = 0
+
+    def hostile_append(*_args: object, **_kwargs: object) -> None:
+        nonlocal hostile_calls
+        hostile_calls += 1
+        raise AssertionError("rebound witness publisher was dispatched")
+
+    monkeypatch.setattr(guard, "_append_witness", hostile_append)
+    book.save(path)
+
+    assert hostile_calls == 0
+    loaded = PaperBook.load(path)
+    assert loaded.balance == Decimal("85")
+    assert len(loaded.tickets) == 2
+
+
+def test_save_rejects_transitive_serializer_class_helper_mutation_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-save-class-1")], "10", placed_at=_TS)
+    book.save(path)
+    snapshot_before = path.read_bytes()
+    witness = guard._witness_path(path)
+    witness_before = witness.read_bytes()
+    book.open_ticket([_leg("selection-save-class-2")], "5", placed_at=_TS)
+
+    serializer_helper = vars(PaperBook)["_lifecycle_to_json"]
+    assert serializer_helper.__code__ is not _hostile_lifecycle_to_json.__code__
+    monkeypatch.setattr(serializer_helper, "__code__", _hostile_lifecycle_to_json.__code__)
+
+    with pytest.raises(ValueError, match="class|executable|authority"):
+        book.save(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
 def test_path_load_rejects_rebound_guard_witness_before_unwitnessed_copy_is_admitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rebinding the outer witness helper must not turn copied bytes into positive restart truth."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     authoritative_path = tmp_path / "paper-book.json"
     source = PaperBook("100")
@@ -205,8 +245,6 @@ def test_path_load_rejects_rebound_guard_witness_before_unwitnessed_copy_is_admi
 def test_path_load_uses_frozen_independent_root_after_original_code_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Later mutation of the imported root selector cannot redirect positive load."""
-
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path, witness, snapshot_before, witness_before = _saved_book(tmp_path, "selection-root-code")
 

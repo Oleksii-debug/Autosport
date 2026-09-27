@@ -32,6 +32,17 @@ def _closure_values(function: FunctionType) -> tuple[object, ...] | None:
     return tuple(values)
 
 
+def _same_identity_values(
+    current: tuple[object, ...] | None,
+    expected: tuple[object, ...] | None,
+) -> bool:
+    if current is None or expected is None:
+        return current is expected
+    return len(current) == len(expected) and all(
+        actual is wanted for actual, wanted in zip(current, expected)
+    )
+
+
 def _clone_local_function(
     function: FunctionType,
     *,
@@ -138,6 +149,32 @@ def _descriptor_function(descriptor: object) -> FunctionType | None:
     return None
 
 
+def _capture_class_callable_witness(
+    name: str,
+    descriptor: object,
+    function: FunctionType,
+) -> tuple[object, ...]:
+    global_witnesses: list[
+        tuple[str, object, object | None, tuple[object, ...] | None]
+    ] = []
+    for global_name in function.__code__.co_names:
+        if global_name not in function.__globals__:
+            continue
+        value = function.__globals__[global_name]
+        expected_code = value.__code__ if type(value) is FunctionType else None
+        expected_closure = _closure_values(value) if type(value) is FunctionType else None
+        global_witnesses.append((global_name, value, expected_code, expected_closure))
+    return (
+        name,
+        descriptor,
+        function,
+        function.__code__,
+        function.__globals__,
+        _closure_values(function),
+        tuple(global_witnesses),
+    )
+
+
 def _capture_class_callable_graph(
     owner: type,
     roots: tuple[FunctionType, ...],
@@ -151,9 +188,24 @@ def _capture_class_callable_graph(
     """
 
     namespace = vars(owner)
-    pending = list(roots)
-    seen: set[FunctionType] = set(roots)
+    root_set = set(roots)
+    seen: set[FunctionType] = set()
+    pending: list[FunctionType] = []
     witnesses: list[tuple[object, ...]] = []
+
+    # Roots include ``load_bytes`` and ``__init__``. The latter is invoked through
+    # ``cls(...)`` rather than a co_name, so it must be an explicit graph root.
+    for name, descriptor in namespace.items():
+        function = _descriptor_function(descriptor)
+        if function is None or function not in root_set or function in seen:
+            continue
+        seen.add(function)
+        pending.append(function)
+        witnesses.append(_capture_class_callable_witness(name, descriptor, function))
+
+    if not root_set.issubset(seen):
+        raise RuntimeError("canonical PaperBook parser graph root is unavailable")
+
     while pending:
         function = pending.pop()
         for name in function.__code__.co_names:
@@ -162,28 +214,8 @@ def _capture_class_callable_graph(
             if nested is None or nested in seen:
                 continue
             seen.add(nested)
-            global_witnesses: list[tuple[str, object, object | None, tuple[object, ...] | None]] = []
-            for global_name in nested.__code__.co_names:
-                if global_name not in nested.__globals__:
-                    continue
-                value = nested.__globals__[global_name]
-                expected_code = value.__code__ if type(value) is FunctionType else None
-                expected_closure = _closure_values(value) if type(value) is FunctionType else None
-                global_witnesses.append(
-                    (global_name, value, expected_code, expected_closure)
-                )
-            witnesses.append(
-                (
-                    name,
-                    descriptor,
-                    nested,
-                    nested.__code__,
-                    nested.__globals__,
-                    _closure_values(nested),
-                    tuple(global_witnesses),
-                )
-            )
             pending.append(nested)
+            witnesses.append(_capture_class_callable_witness(name, descriptor, nested))
     return tuple(witnesses)
 
 
@@ -209,7 +241,7 @@ def _require_class_callable_graph_witnesses(
             current_function is not function
             or function.__code__ is not code
             or function.__globals__ is not globals_mapping
-            or _closure_values(function) != closure_values
+            or not _same_identity_values(_closure_values(function), closure_values)
         ):
             raise ValueError("PaperBook positive-load class executable authority changed")
         for global_name, expected, expected_code, expected_closure in global_witnesses:
@@ -218,15 +250,21 @@ def _require_class_callable_graph_witnesses(
             if expected_code is not None:
                 if type(expected) is not FunctionType or expected.__code__ is not expected_code:
                     raise ValueError("PaperBook positive-load class global executable changed")
-                if _closure_values(expected) != expected_closure:
+                if not _same_identity_values(_closure_values(expected), expected_closure):
                     raise ValueError("PaperBook positive-load class global closure authority changed")
 
 
 def _guarded_load_template(cls, path):
     _require_delegate_graph_witnesses(_DELEGATE_GRAPH_WITNESSES)
-    _require_class_callable_graph_witnesses(cls, _CLASS_CALLABLE_GRAPH_WITNESSES)
+    _require_class_callable_graph_witnesses(
+        _CANONICAL_PAPER_BOOK,
+        _CLASS_CALLABLE_GRAPH_WITNESSES,
+    )
     result = _FROZEN_LOAD(cls, path)
-    _require_class_callable_graph_witnesses(cls, _CLASS_CALLABLE_GRAPH_WITNESSES)
+    _require_class_callable_graph_witnesses(
+        _CANONICAL_PAPER_BOOK,
+        _CLASS_CALLABLE_GRAPH_WITNESSES,
+    )
     _require_delegate_graph_witnesses(_DELEGATE_GRAPH_WITNESSES)
     return result
 
@@ -297,6 +335,7 @@ def _install() -> None:
     wrapper_globals: dict[str, object] = dict(globals())
     wrapper_globals["_DELEGATE_GRAPH_WITNESSES"] = tuple(delegate_witnesses)
     wrapper_globals["_CLASS_CALLABLE_GRAPH_WITNESSES"] = class_callable_witnesses
+    wrapper_globals["_CANONICAL_PAPER_BOOK"] = paper_book
     wrapper_globals["_FROZEN_LOAD"] = frozen_load
     wrapper_globals["_require_delegate_graph_witnesses"] = _clone_local_function(
         _require_delegate_graph_witnesses,
@@ -324,6 +363,7 @@ del _install
 del _guarded_load_template
 del _require_class_callable_graph_witnesses
 del _capture_class_callable_graph
+del _capture_class_callable_witness
 del _descriptor_function
 del _require_delegate_graph_witnesses
 del _capture_delegate_graph

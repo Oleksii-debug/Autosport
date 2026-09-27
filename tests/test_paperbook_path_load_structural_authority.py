@@ -43,6 +43,20 @@ def test_normal_path_load_is_structural_not_positive_opening_authority(tmp_path)
     ):
         _ = loaded.committed_stake
 
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks product-issued opening authority",
+    ):
+        loaded.open_ticket([_leg()], "1", placed_at=_TS)
+
+    copied = tmp_path / "copied-paper-book.json"
+    with pytest.raises(
+        ValueError,
+        match="byte-loaded snapshot lacks product-issued opening authority",
+    ):
+        loaded.save(copied)
+    assert not copied.exists()
+
 
 def test_normal_path_load_cannot_settle_without_independent_restart_authority(tmp_path) -> None:
     path = tmp_path / "paper-book.json"

@@ -171,3 +171,8 @@ from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrap
 # load/save callables to remain reachable from the owning guard module. Retire those
 # obsolete capability handles only after every canonical wrapper has captured them.
 from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: E402,F401
+
+# Risk reads derive economic state from PaperBook after the persistence graph is fully
+# sealed. Install the generation-stable risk wrapper here so ordinary package import
+# actually composes the guard rather than leaving its module/tests as dead code.
+from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_guard  # noqa: E402,F401

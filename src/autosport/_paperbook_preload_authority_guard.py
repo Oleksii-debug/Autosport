@@ -35,6 +35,10 @@ _INSTALL_OPENING = _paper._install_validated_ticket_opening_authority
 _INSTALL_CAUSAL = _paper._install_validated_paperbook_causal_history_authority
 _PATH = Path
 _OS_REPLACE = os.replace
+_TYPE = type
+_INT_TYPE = int
+_STR_TYPE = str
+_DICT_TYPE = dict
 
 _WITNESS_SCHEMA_VERSION = 1
 _WITNESS_SUFFIX = ".paper-book-snapshot-witness.jsonl"
@@ -69,7 +73,7 @@ def _global_bindings(delegate: FunctionType) -> tuple[tuple[str, object], ...]:
 
 
 def _capture_delegate_witness(delegate: object, label: str) -> tuple[object, ...]:
-    if type(delegate) is not FunctionType:
+    if _TYPE(delegate) is not FunctionType:
         raise RuntimeError(f"PaperBook {label} delegate is not a canonical Python function")
     kwdefaults = delegate.__kwdefaults__
     closure = delegate.__closure__
@@ -90,7 +94,7 @@ def _require_delegate_witness(
     witness: tuple[object, ...],
     label: str,
 ) -> None:
-    if type(delegate) is not FunctionType:
+    if _TYPE(delegate) is not FunctionType:
         raise ValueError(f"PaperBook {label} executable authority changed")
     (
         code,
@@ -270,7 +274,7 @@ def _digest_record(payload: dict[str, object]) -> str:
 
 def _require_sha256(value: object, label: str) -> str:
     if (
-        type(value) is not str
+        _TYPE(value) is not _STR_TYPE
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
@@ -314,13 +318,13 @@ def _read_witnesses(
             record = json.loads(line, object_pairs_hook=_reject_duplicate_keys)
         except (json.JSONDecodeError, RecursionError) as exc:
             raise ValueError("PaperBook snapshot witness is unreadable") from exc
-        if type(record) is not dict or set(record) != expected_keys:
+        if _TYPE(record) is not _DICT_TYPE or set(record) != expected_keys:
             raise ValueError("PaperBook snapshot witness schema is invalid")
         schema_version = record["witness_schema_version"]
-        if type(schema_version) is not int or schema_version != _WITNESS_SCHEMA_VERSION:
+        if _TYPE(schema_version) is not _INT_TYPE or schema_version != _WITNESS_SCHEMA_VERSION:
             raise ValueError("unsupported PaperBook snapshot witness schema")
         record_sequence = record["sequence"]
-        if type(record_sequence) is not int or record_sequence != sequence:
+        if _TYPE(record_sequence) is not _INT_TYPE or record_sequence != sequence:
             raise ValueError("PaperBook snapshot witness sequence is not contiguous")
         if record["snapshot_identity"] != expected_identity:
             raise ValueError("PaperBook snapshot witness belongs to another path")
@@ -339,7 +343,7 @@ def _read_witnesses(
             raise ValueError("PaperBook snapshot witness digest mismatch")
 
         generation = record["generation"]
-        if type(generation) is not int or generation <= 0:
+        if _TYPE(generation) is not _INT_TYPE or generation <= 0:
             raise ValueError("PaperBook snapshot witness generation is invalid")
         event = record["event"]
         if event == _PREPARE:
@@ -524,7 +528,7 @@ def _trusted_path_load(cls, path: str | Path):
 def _trusted_save(self, path: str | Path) -> None:
     """Publish a PaperBook snapshot and its independent crash-recoverable witness."""
 
-    if type(self) is not _PAPER_BOOK:
+    if _TYPE(self) is not _PAPER_BOOK:
         raise TypeError("PaperBook.save requires the canonical PaperBook class")
     destination = _PATH(path)
     destination.parent.mkdir(parents=True, exist_ok=True)

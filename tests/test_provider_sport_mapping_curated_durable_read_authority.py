@@ -26,9 +26,14 @@ def _install_concrete_override(path: Path, name: str, replacement):
     concrete_dict = type.__getattribute__(concrete_type, "__dict__")
     missing = object()
     previous = concrete_dict.get(name, missing)
+    restored = False
     type.__setattr__(concrete_type, name, replacement)
 
     def restore() -> None:
+        nonlocal restored
+        if restored:
+            return
+        restored = True
         if previous is missing:
             type.__delattr__(concrete_type, name)
         else:

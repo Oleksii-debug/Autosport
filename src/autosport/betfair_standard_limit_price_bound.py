@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-"""Decision-time Betfair standard-LIMIT request-shape evidence.
+"""Decision-time Betfair standard-LIMIT adverse-price evidence.
 
 This module is deliberately narrower than realized execution/slippage truth. It
 re-resolves an exact canonical supervised execution action and captures the
 ordinary BACK LIMIT request emitted by the canonical Betfair supervised write
-adapter. Request shape alone is not enough to prove a prospective per-fragment
-price floor: Betfair MatchMe can match BACK bets at lower prices during initial
-placement, and the product currently has no product-owned authority proving
-MatchMe is disabled or inapplicable for the exact API execution account.
+adapter. For the current product-supported plain API path, the qualified Betfair
+standard-LIMIT contract makes the submitted BACK limit price the worst price at
+which an individual matched fragment may execute. Better execution is favorable.
 
-Accordingly the current resolver is explicitly fail-closed: it can prove the
-standard request projection, but the economic adverse-price conclusion remains
-UNKNOWN_MATCHME_APPLICABILITY. It does not predict fill, timing, acceptance, or
-realized price.
+This authority does not generalize consumer MatchMe/smart-order behavior onto the
+plain API instruction. Any future product-supported transformation, FOK/timeInForce,
+betTarget or other nonstandard instruction fails closed. Fill availability, full
+fill, timing, rejection, commission and realized profitability remain separate.
 """
 
 from dataclasses import dataclass
@@ -124,11 +123,12 @@ def _digest(payload: object) -> str:
 class BetfairStandardLimitPriceBoundEvidence:
     """Product-issued assessment for one canonical standard BACK LIMIT action.
 
-    The ordinary request shape and submitted odds are always preserved. A
-    positive per-fragment floor is authoritative only when MatchMe applicability
-    has also been proved by product-owned evidence. Until that authority exists,
-    status is UNKNOWN_MATCHME_APPLICABILITY and the submitted odds are merely the
-    candidate standard-LIMIT floor, not a guaranteed adverse-price bound.
+    Positive status is narrowly scoped to the exact current plain API standard
+    LIMIT path whose captured provider instruction contains no product-supported
+    MatchMe/smart-order transformation. The legacy ``matchme_applicability_proven``
+    field records that this narrow plain-order applicability check succeeded; it
+    is not an authenticated consumer-account MatchMe setting. Fill feasibility and
+    realized price remain explicitly outside this evidence.
     """
 
     execution_plan_id: str
@@ -242,7 +242,7 @@ class BetfairStandardLimitPriceBoundEvidence:
         ):
             if self.matchme_applicability_proven is not True:
                 raise BetfairStandardLimitPriceBoundError(
-                    "positive price-floor status requires MatchMe applicability proof"
+                    "positive price-floor status requires plain-order applicability proof"
                 )
             if self.zero_adverse_price_deterioration is not True:
                 raise BetfairStandardLimitPriceBoundError(
@@ -510,9 +510,9 @@ def _issue_evidence(
         "provider_contract_ref": _PROVIDER_CONTRACT_REF,
         "write_adapter_id": _WRITE_ADAPTER_ID,
         "write_adapter_version": _WRITE_ADAPTER_VERSION,
-        "status": BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY,
-        "matchme_applicability_proven": False,
-        "zero_adverse_price_deterioration": False,
+        "status": BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION,
+        "matchme_applicability_proven": True,
+        "zero_adverse_price_deterioration": True,
         "execution_feasibility_proven": False,
         "realized_price_exact": False,
     }
@@ -527,17 +527,19 @@ def resolve_betfair_standard_limit_price_bound(
     bound: BoundSupervisedExecutionPlan,
     action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
-    """Re-resolve one exact current standard BACK LIMIT request assessment.
+    """Re-resolve one exact current standard BACK LIMIT adverse-price bound.
 
     The caller supplies only the bound plan and an action identity. No caller
     instruction, price bound, zero/slippage flag, provider setting, accepted
     price, or fill assumption is accepted. The action and its quote are
     re-resolved from the immutable bound plan.
 
-    The current product has no authenticated product-owned MatchMe
-    applicability/state authority for the exact Betfair execution account.
-    Therefore an otherwise canonical ordinary LIMIT request remains
-    UNKNOWN_MATCHME_APPLICABILITY and cannot claim zero adverse deterioration.
+    Positive authority is emitted only after the real writer's fail-before-I/O
+    capture proves the exact current instruction is the plain standard BACK LIMIT
+    contract: LIMIT + LAPSE, no timeInForce/FOK, no betTarget/smart-order field,
+    and exact submitted price/size equal to the bound action values. This proves
+    adverse *price* deterioration is zero for any matched fragment. It does not
+    prove any fill, timing, acceptance, commission, or realized-profit outcome.
     """
 
     if type(bound) is not BoundSupervisedExecutionPlan:

@@ -17,6 +17,14 @@ def _noop_graph_check(*args, **kwargs) -> None:
     del args, kwargs
 
 
+def _descriptor_in_mro(owner: type, name: str) -> object:
+    for candidate in owner.__mro__:
+        namespace = vars(candidate)
+        if name in namespace:
+            return namespace[name]
+    raise AssertionError(f"missing canonical descriptor: {name}")
+
+
 def test_public_risk_wrapper_cannot_retarget_reachable_generation_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -34,7 +42,11 @@ def test_public_risk_wrapper_cannot_retarget_reachable_generation_authority(
         classmethod(_noop_validator),
     )
 
-    descriptor = vars(PaperRiskPolicy)["_book_state"]
+    # The owner-facing root seal intentionally publishes a zero-state subclass facade;
+    # private read roots remain inherited from the already-composed canonical base.
+    # Resolve the actual descriptor through the MRO so this falsifier cannot turn RED
+    # merely because the root facade moved the descriptor off vars(PaperRiskPolicy).
+    descriptor = _descriptor_in_mro(PaperRiskPolicy, "_book_state")
     assert type(descriptor) is classmethod
     public_wrapper = descriptor.__func__
     assert type(public_wrapper) is FunctionType

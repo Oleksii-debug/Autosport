@@ -16,10 +16,7 @@ from .decision_ledger import (
 )
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
-from ._paperbook_preload_authority_guard import (
-    _promote_verified_snapshot as _promote_verified_paper_book_snapshot,
-    _stage_transaction_snapshot as _stage_transaction_paper_book_snapshot,
-)
+from . import _paperbook_preload_authority_guard as _paperbook_authority
 
 
 _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
@@ -159,6 +156,198 @@ class RunTransaction:
         tx._require_complete_identity_anchor()
         return tx
 
+    def _stage_paper_book_snapshot(self, book: PaperBook) -> None:
+        """Write non-authoritative staging bytes from the exact current canonical book."""
+
+        if type(self) is not RunTransaction:
+            raise RunTransactionError("PaperBook staging requires the canonical RunTransaction class")
+        canonical = self.workspace / "paper_book.json"
+        staged = self.staged_book_path
+        if staged.exists():
+            raise RunTransactionError("transaction staged PaperBook artifact already exists")
+        staged_witness = _paperbook_authority._witness_path(staged)
+        if staged_witness.exists():
+            raise RunTransactionError(
+                "transaction staged PaperBook path unexpectedly carries restart authority"
+            )
+
+        publication_lock = _paperbook_authority._acquire_snapshot_publication_lock(
+            _paperbook_authority._witness_path(canonical)
+        )
+        try:
+            with _paperbook_authority._WITNESS_LOCK:
+                # There is no unbound fallback: transaction NEW must descend from the
+                # exact currently-authoritative canonical generation.
+                _paperbook_authority._require_bound_book(book, canonical)
+                _paperbook_authority._call_witnessed_delegate(
+                    _paperbook_authority._ORIGINAL_SAVE,
+                    _paperbook_authority._ORIGINAL_SAVE_WITNESS,
+                    "transaction PaperBook staging serializer",
+                    book,
+                    staged,
+                )
+                if staged_witness.exists():
+                    raise RunTransactionError(
+                        "transaction staging unexpectedly minted PaperBook path authority"
+                    )
+                _paperbook_authority._require_bound_book(book, canonical)
+        except RunTransactionError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+            raise RunTransactionError(
+                f"staged PaperBook semantic validation failed: {exc}"
+            ) from exc
+        finally:
+            _paperbook_authority._release_snapshot_publication_lock(publication_lock)
+
+    def _promote_paper_book_snapshot(self) -> None:
+        """Advance canonical PaperBook only for this durable precommitted transaction."""
+
+        if type(self) is not RunTransaction:
+            raise RunTransactionError("PaperBook promotion requires the canonical RunTransaction class")
+
+        # This method is intentionally safe even if called directly: unlike the retired
+        # path+hash helper, it first re-resolves the existing product RunRegistry truth
+        # and revalidates all durable precommit evidence.
+        self._ensure_commit_identity_anchor()
+        manifest = self._read_manifest()
+        if manifest["phase"] not in {"precommitted", "canonical_committed", "completed"}:
+            raise RunTransactionError("transaction lacks durable precommit evidence")
+        self._validate_manifest_paths(manifest)
+        self._validate_precommit_evidence(manifest)
+        self._validate_paper_book_commit_state(manifest)
+        self._validate_decision_ledger_commit_state(manifest)
+
+        staged = self.staged_book_path
+        target = self.workspace / "paper_book.json"
+        expected_base = self._hash_field(manifest, "base", "paper_book_sha256")
+        expected_new = self._hash_field(manifest, "new", "paper_book_sha256")
+        if expected_base == expected_new:
+            raise RunTransactionError("PaperBook promotion BASE and NEW identities must differ")
+        if _paperbook_authority._snapshot_identity(staged) == _paperbook_authority._snapshot_identity(target):
+            raise RunTransactionError("PaperBook staged and canonical promotion paths must differ")
+        if _paperbook_authority._witness_path(staged).exists():
+            raise RunTransactionError("PaperBook staged promotion path must remain non-authoritative")
+
+        publication_lock = _paperbook_authority._acquire_snapshot_publication_lock(
+            _paperbook_authority._witness_path(target)
+        )
+        temporary: Path | None = None
+        try:
+            with _paperbook_authority._WITNESS_LOCK:
+                current_sha = _paperbook_authority._file_sha256(target)
+                _paperbook_authority._recover_pending(target, current_sha256=current_sha)
+                current_sha = _paperbook_authority._file_sha256(target)
+                target_records, committed, pending = _paperbook_authority._read_witnesses(target)
+                if pending is not None:
+                    raise RunTransactionError(
+                        "PaperBook canonical witness recovery left pending state"
+                    )
+
+                if current_sha == expected_new:
+                    if committed is None or committed[1] != expected_new:
+                        raise RunTransactionError(
+                            "PaperBook canonical NEW bytes lack matching durable authority"
+                        )
+                    return
+                if current_sha != expected_base:
+                    raise RunTransactionError(
+                        "PaperBook canonical promotion source is neither BASE nor NEW"
+                    )
+                if committed is None or committed[1] != expected_base:
+                    raise RunTransactionError(
+                        "PaperBook canonical BASE lacks matching durable authority"
+                    )
+
+                try:
+                    staged_payload = staged.read_bytes()
+                except OSError as exc:
+                    raise RunTransactionError(
+                        "PaperBook staged promotion snapshot is unreadable"
+                    ) from exc
+                if hashlib.sha256(staged_payload).hexdigest() != expected_new:
+                    raise RunTransactionError("PaperBook staged promotion snapshot hash mismatch")
+                try:
+                    PaperBook.load_bytes(staged_payload)
+                except Exception as exc:
+                    raise RunTransactionError(
+                        f"PaperBook staged promotion semantic validation failed: {exc}"
+                    ) from exc
+
+                records_now, committed_now, pending_now = _paperbook_authority._read_witnesses(
+                    target
+                )
+                if (
+                    pending_now is not None
+                    or committed_now != committed
+                    or len(records_now) != len(target_records)
+                ):
+                    raise RunTransactionError(
+                        "PaperBook canonical witness changed during promotion"
+                    )
+                if _paperbook_authority._file_sha256(target) != expected_base:
+                    raise RunTransactionError("PaperBook canonical BASE changed during promotion")
+                if (
+                    _paperbook_authority._witness_path(staged).exists()
+                    or _paperbook_authority._file_sha256(staged) != expected_new
+                ):
+                    raise RunTransactionError("PaperBook staged snapshot changed during promotion")
+
+                fd, temporary_name = tempfile.mkstemp(
+                    dir=target.parent,
+                    prefix=f".{target.name}.promote-authority-",
+                    suffix=".tmp",
+                )
+                os.close(fd)
+                temporary = Path(temporary_name)
+                with temporary.open("wb") as handle:
+                    handle.write(staged_payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if _paperbook_authority._file_sha256(temporary) != expected_new:
+                    raise RunTransactionError("PaperBook promotion copy hash mismatch")
+                if _paperbook_authority._file_sha256(staged) != expected_new:
+                    raise RunTransactionError(
+                        "PaperBook staged snapshot changed before promotion"
+                    )
+
+                generation = int(records_now[-1]["generation"]) + 1
+                _paperbook_authority._append_witness(
+                    target,
+                    event=_paperbook_authority._PREPARE,
+                    generation=generation,
+                    snapshot_sha256=expected_new,
+                )
+                os.replace(temporary, target)
+                temporary = None
+                if os.name != "nt":
+                    _paperbook_authority._sync_authority_directory(target.parent)
+                _paperbook_authority._append_witness(
+                    target,
+                    event=_paperbook_authority._COMMIT,
+                    generation=generation,
+                    snapshot_sha256=expected_new,
+                )
+                if _paperbook_authority._file_sha256(target) != expected_new:
+                    raise RunTransactionError(
+                        "PaperBook canonical promotion bytes changed after COMMIT"
+                    )
+                _paperbook_authority._verify_snapshot_witness(
+                    target,
+                    target.read_bytes(),
+                )
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            _paperbook_authority._release_snapshot_publication_lock(publication_lock)
+
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
         self._require_complete_identity_anchor()
         manifest = self._read_manifest()
@@ -178,16 +367,7 @@ class RunTransaction:
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
-        try:
-            _stage_transaction_paper_book_snapshot(
-                book,
-                self.workspace / "paper_book.json",
-                self.staged_book_path,
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            raise RunTransactionError(
-                f"staged PaperBook semantic validation failed: {exc}"
-            ) from exc
+        self._stage_paper_book_snapshot(book)
         book_snapshot = self._verified_paper_book_snapshot(
             self.staged_book_path,
             "staged PaperBook",
@@ -334,15 +514,7 @@ class RunTransaction:
         self._validate_precommit_evidence(manifest)
         self._validate_paper_book_commit_state(manifest)
         self._validate_decision_ledger_commit_state(manifest)
-        try:
-            _promote_verified_paper_book_snapshot(
-                self.staged_book_path,
-                self.workspace / "paper_book.json",
-                expected_base_sha256=self._hash_field(manifest, "base", "paper_book_sha256"),
-                expected_new_sha256=self._hash_field(manifest, "new", "paper_book_sha256"),
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            raise RunTransactionError(f"PaperBook transaction promotion failed: {exc}") from exc
+        self._promote_paper_book_snapshot()
         self._promote_base_or_new(
             target=self.workspace / "decisions.jsonl",
             staged=self.staged_ledger_path,

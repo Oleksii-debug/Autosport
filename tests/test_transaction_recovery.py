@@ -413,6 +413,73 @@ class TransactionRecoveryTests(unittest.TestCase):
             self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
             self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
 
+    def test_stage_outputs_rejects_unbound_paper_book_before_staging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+            canonical_bytes = book_path.read_bytes()
+            witness_path = paper_guard._witness_path(book_path)
+            witness_bytes = witness_path.read_bytes()
+
+            tx = RunTransaction.start(
+                root,
+                run_id="reject-unbound-stage",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            arbitrary = PaperBook("25000")
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "verified path-bound authority",
+            ):
+                tx.stage_outputs(arbitrary, ledger_path)
+
+            self.assertFalse(tx.staged_book_path.exists())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            self.assertEqual(book_path.read_bytes(), canonical_bytes)
+            self.assertEqual(witness_path.read_bytes(), witness_bytes)
+
+    def test_stage_outputs_keeps_transaction_snapshot_non_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            initial = PaperBook("10000")
+            initial.save(book_path)
+            ledger_path.write_bytes(b"")
+            working = PaperBook.load(book_path)
+
+            tx = RunTransaction.start(
+                root,
+                run_id="bounded-stage",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            tx.stage_outputs(working, ledger_path)
+
+            self.assertTrue(tx.staged_book_path.is_file())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            structural = PaperBook.load_bytes(tx.staged_book_path.read_bytes())
+            self.assertEqual(structural.balance, 10000)
+            with self.assertRaisesRegex(
+                ValueError,
+                "missing independent durable opening witness",
+            ):
+                PaperBook.load(tx.staged_book_path)
+            self.assertEqual(PaperBook.load(book_path).balance, 10000)
+
     def test_precommit_rejects_nonfinite_summary_before_manifest_precommit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

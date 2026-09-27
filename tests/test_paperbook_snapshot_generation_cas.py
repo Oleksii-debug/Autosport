@@ -329,77 +329,24 @@ def test_load_recovers_replaced_snapshot_after_commit_publication_interruption(
     assert committed_final[0] > generation
 
 
-def test_transaction_stage_is_non_authoritative_and_promotes_canonical_lineage(
+def test_transaction_stage_and_promotion_are_not_module_global_capabilities() -> None:
+    assert "_stage_transaction_snapshot" not in vars(guard)
+    assert "_promote_verified_snapshot" not in vars(guard)
+
+
+def test_bound_book_cannot_mint_fresh_path_authority(
     tmp_path,
     monkeypatch,
 ) -> None:
     _bind_authority_root(tmp_path, monkeypatch)
     canonical = tmp_path / "paper_book.json"
-    staged = tmp_path / ".run-transactions" / "run-1" / "paper_book.next.json"
-    staged.parent.mkdir(parents=True)
-
-    initial = PaperBook("100")
-    initial.save(canonical)
-    base_sha = guard._file_sha256(canonical)
-    assert base_sha is not None
-    working = PaperBook.load(canonical)
-    ticket = working.open_ticket([_leg("staged-selection", "3")], "10", placed_at=_BASE_TS)
-
-    guard._stage_transaction_snapshot(working, canonical, staged)
-    new_sha = guard._file_sha256(staged)
-    assert new_sha is not None and new_sha != base_sha
-    assert not guard._witness_path(staged).exists()
-
     unrelated = tmp_path / "unrelated-fresh-path.json"
+    PaperBook("100").save(canonical)
+    working = PaperBook.load(canonical)
+
     with pytest.raises(ValueError, match="verified path-bound authority"):
         working.save(unrelated)
+
     assert not unrelated.exists()
     assert not guard._witness_path(unrelated).exists()
-
-    assert PaperBook.load(canonical).balance == Decimal("100")
-    structural = PaperBook.load_bytes(staged.read_bytes())
-    assert structural.balance == Decimal("90")
-    assert tuple(structural.tickets) == (ticket.ticket_id,)
-    with pytest.raises(ValueError, match="missing independent durable opening witness"):
-        PaperBook.load(staged)
-
-    guard._promote_verified_snapshot(
-        staged,
-        canonical,
-        expected_base_sha256=base_sha,
-        expected_new_sha256=new_sha,
-    )
-    promoted = PaperBook.load(canonical)
-    assert promoted.balance == Decimal("90")
-    assert tuple(promoted.tickets) == (ticket.ticket_id,)
-    assert not guard._witness_path(staged).exists()
-
-
-def test_canonical_promotion_rejects_tampered_non_authoritative_staged_bytes(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _bind_authority_root(tmp_path, monkeypatch)
-    canonical = tmp_path / "paper_book.json"
-    staged = tmp_path / ".run-transactions" / "run-2" / "paper_book.next.json"
-    staged.parent.mkdir(parents=True)
-    PaperBook("100").save(canonical)
-    base_sha = guard._file_sha256(canonical)
-    assert base_sha is not None
-    canonical_bytes = canonical.read_bytes()
-    working = PaperBook.load(canonical)
-    working.open_ticket([_leg("tamper-selection")], "10", placed_at=_BASE_TS)
-    guard._stage_transaction_snapshot(working, canonical, staged)
-    new_sha = guard._file_sha256(staged)
-    assert new_sha is not None
-    assert not guard._witness_path(staged).exists()
-    staged.write_bytes(staged.read_bytes() + b"\n")
-    with pytest.raises(ValueError, match="staged promotion snapshot hash mismatch"):
-        guard._promote_verified_snapshot(
-            staged,
-            canonical,
-            expected_base_sha256=base_sha,
-            expected_new_sha256=new_sha,
-        )
-    assert canonical.read_bytes() == canonical_bytes
     assert PaperBook.load(canonical).balance == Decimal("100")

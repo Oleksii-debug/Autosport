@@ -166,3 +166,8 @@ from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surfac
 # globals mapping. Seal those verifier executables against in-place code mutation so
 # disabling the graph check cannot authorize a later parser/serializer retarget.
 from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: E402,F401
+
+# The fully sealed public graph no longer needs the pre-generation trusted path
+# load/save callables to remain reachable from the owning guard module. Retire those
+# obsolete capability handles only after every canonical wrapper has captured them.
+from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: E402,F401

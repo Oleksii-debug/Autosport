@@ -10,8 +10,10 @@ entire risk derivation, require the existing frozen PaperBook class-callable gra
 run the frozen canonical loaded-state validator before and after the original risk
 calculation. Nested risk helpers reuse the same thread-local read critical section so
 higher-level whole-portfolio checks can remain atomic without making the canonical
-writer lock reentrant. This module creates no risk store, parser, serializer, journal,
-or generation authority.
+writer lock reentrant. Pre-guard PaperRiskPolicy callables are retained only as inert
+executable specs and reconstructed after admission, so public wrappers expose no
+callable pre-guard bypass. This module creates no risk store, parser, serializer,
+journal, or generation authority.
 """
 
 from __future__ import annotations
@@ -40,6 +42,19 @@ def _plain_function(value: object) -> FunctionType:
     if type(value) is not FunctionType:
         raise _InvalidRiskSurface("canonical PaperRiskPolicy method is not a Python function")
     return value
+
+
+def _delegate_spec(function: FunctionType) -> tuple[object, ...]:
+    """Capture executable state without retaining the callable itself."""
+
+    return (
+        function.__code__,
+        function.__name__,
+        function.__defaults__,
+        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__),
+        function.__closure__,
+        tuple(function.__globals__.items()),
+    )
 
 
 def _clone_module_function_graph(function: FunctionType) -> FunctionType:
@@ -91,7 +106,7 @@ def _sealed_load_trusted_globals(load_wrapper: FunctionType) -> dict[str, object
     raise RuntimeError("canonical sealed PaperBook load trusted globals are unavailable")
 
 
-def _guarded_risk_call(book, delegate, args, kwargs, failure_result=None):
+def _guarded_risk_call(book, delegate_spec, args, kwargs, failure_result=None):
     """Run one risk derivation against a generation-stable canonical PaperBook."""
 
     snapshot_path = None
@@ -116,7 +131,19 @@ def _guarded_risk_call(book, delegate, args, kwargs, failure_result=None):
             else:
                 entry[0] += 1
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
+
+        code, name, defaults, kwdefaults, closure, global_bindings = delegate_spec
+        delegate = _FUNCTION_TYPE(
+            code,
+            dict(global_bindings),
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(kwdefaults)
         result = delegate(*args, **kwargs)
+
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
         _FROZEN_REQUIRE_CLASS_GRAPH(
             _CANONICAL_PAPER_BOOK,
@@ -136,17 +163,17 @@ def _guarded_risk_call(book, delegate, args, kwargs, failure_result=None):
 
 
 def _book_state_template(cls, book):
-    return _guarded_risk_call(book, _ORIGINAL_BOOK_STATE, (cls, book), {})
+    return _guarded_risk_call(book, _BOOK_STATE_SPEC, (cls, book), {})
 
 
 def _portfolio_hash_template(cls, book):
-    return _guarded_risk_call(book, _ORIGINAL_PORTFOLIO_HASH, (cls, book), {})
+    return _guarded_risk_call(book, _PORTFOLIO_HASH_SPEC, (cls, book), {})
 
 
 def _historical_metrics_template(cls, book, *, realized_loss_window=None, causal_cutoff=None):
     return _guarded_risk_call(
         book,
-        _ORIGINAL_HISTORICAL_METRICS,
+        _HISTORICAL_METRICS_SPEC,
         (cls, book),
         {
             "realized_loss_window": realized_loss_window,
@@ -156,7 +183,7 @@ def _historical_metrics_template(cls, book, *, realized_loss_window=None, causal
 
 
 def _shadow_book_template(book):
-    shadow = _guarded_risk_call(book, _ORIGINAL_SHADOW_BOOK, (book,), {})
+    shadow = _guarded_risk_call(book, _SHADOW_BOOK_SPEC, (book,), {})
     if type(shadow) is not _CANONICAL_PAPER_BOOK:
         return None
     try:
@@ -193,7 +220,7 @@ def _identity_concentration_template(
     )
     return _guarded_risk_call(
         book,
-        _ORIGINAL_IDENTITY_CONCENTRATION,
+        _IDENTITY_CONCENTRATION_SPEC,
         (cls, book, amount, context),
         {"dimension": dimension, "limit": limit},
         failure,
@@ -203,7 +230,7 @@ def _identity_concentration_template(
 def _derive_goal_stake_template(self, book, signal_strength, *, context=None):
     return _guarded_risk_call(
         book,
-        _ORIGINAL_DERIVE_GOAL_STAKE,
+        _DERIVE_GOAL_STAKE_SPEC,
         (self, book, signal_strength),
         {"context": context},
     )
@@ -216,7 +243,7 @@ def _evaluate_template(self, book, stake, *, context=None):
     )
     return _guarded_risk_call(
         book,
-        _ORIGINAL_EVALUATE,
+        _EVALUATE_SPEC,
         (self, book, stake),
         {"context": context},
         failure,
@@ -239,7 +266,7 @@ def _derive_goal_stake_vector_template(
     )
     return _guarded_risk_call(
         book,
-        _ORIGINAL_DERIVE_GOAL_STAKE_VECTOR,
+        _DERIVE_GOAL_STAKE_VECTOR_SPEC,
         (self, book, signal_strengths),
         {
             "contexts": contexts,
@@ -349,18 +376,19 @@ def _install() -> None:
             "_FROZEN_INSTALL_OPENING_WITNESS": install_opening_witness,
             "_FROZEN_INSTALL_CAUSAL": install_causal,
             "_FROZEN_INSTALL_CAUSAL_WITNESS": install_causal_witness,
+            "_FUNCTION_TYPE": FunctionType,
             "_RISK_READ_LOCAL": threading.local(),
             "_RISK_DECISION": _risk.RiskDecision,
             "_STAKE_VECTOR_DECISION": _risk.StakeVectorDecision,
             "_ZERO_DECIMAL": _risk.Decimal("0"),
-            "_ORIGINAL_BOOK_STATE": book_state,
-            "_ORIGINAL_PORTFOLIO_HASH": portfolio_hash,
-            "_ORIGINAL_HISTORICAL_METRICS": historical_metrics,
-            "_ORIGINAL_SHADOW_BOOK": shadow_book,
-            "_ORIGINAL_IDENTITY_CONCENTRATION": identity_concentration,
-            "_ORIGINAL_DERIVE_GOAL_STAKE": derive_goal_stake,
-            "_ORIGINAL_DERIVE_GOAL_STAKE_VECTOR": derive_goal_stake_vector,
-            "_ORIGINAL_EVALUATE": evaluate,
+            "_BOOK_STATE_SPEC": _delegate_spec(book_state),
+            "_PORTFOLIO_HASH_SPEC": _delegate_spec(portfolio_hash),
+            "_HISTORICAL_METRICS_SPEC": _delegate_spec(historical_metrics),
+            "_SHADOW_BOOK_SPEC": _delegate_spec(shadow_book),
+            "_IDENTITY_CONCENTRATION_SPEC": _delegate_spec(identity_concentration),
+            "_DERIVE_GOAL_STAKE_SPEC": _delegate_spec(derive_goal_stake),
+            "_DERIVE_GOAL_STAKE_VECTOR_SPEC": _delegate_spec(derive_goal_stake_vector),
+            "_EVALUATE_SPEC": _delegate_spec(evaluate),
         }
     )
     private_globals["_guarded_risk_call"] = _clone_template(

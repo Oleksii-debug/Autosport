@@ -142,3 +142,8 @@ _install()
 # authority re-admits it. Install that fail-closed boundary as part of the existing
 # PAPER execution durability composition rather than inventing a parallel runtime.
 from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: E402,F401
+
+# Freeze the owning guard's local positive-load dispatch graph after the witness
+# protocol is installed. This preserves the same parser/store/authority while making
+# later guard-module helper rebinding non-authoritative for PaperBook.load().
+from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: E402,F401

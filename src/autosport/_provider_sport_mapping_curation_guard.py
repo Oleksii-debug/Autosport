@@ -4,14 +4,14 @@ from __future__ import annotations
 
 Exact caller-authored JSON bytes prove integrity only. They do not prove that a
 provider sport identity maps to an Autosport canonical sport. The generic durable
-registry therefore remains the storage/chronology authority, while this thin guard
-supplies the missing product curation authority for mappings that Autosport has
-explicitly admitted.
+registry remains the storage/chronology authority, while this thin guard supplies the
+missing product curation authority for mappings Autosport has explicitly admitted.
 
-The table is intentionally small and exact. Adding another provider sport is a
-source-reviewed product decision, not a runtime/caller capability. The wrapped
-registry still owns parsing, chronology, locking and persistence; this module creates
-no second store or provider transport.
+The guard deliberately parses each candidate exactly once. The resulting exact
+``ProviderSportEvidence`` object is then carried through the canonical registry's
+captured load/overlap/persist primitives. This avoids a second semantic interpretation
+between curation and durable publication without creating another parser, store, or
+registry.
 """
 
 from types import MappingProxyType
@@ -65,10 +65,8 @@ def _install_guard() -> None:
     curated = _PRODUCT_CURATED_PROVIDER_SPORTS
 
     # The canonical parser intentionally late-resolves helpers from its owning module.
-    # Product curation must therefore witness that *real* namespace and the complete
-    # direct parser graph, rather than trusting a replaceable module-level ``globals``
-    # observer. This closes self-restoring helper/stale-view attacks between the
-    # curation parse and the canonical registry's parse of the same immutable bytes.
+    # Product curation must therefore witness that real namespace and the complete
+    # direct parser graph rather than trust a replaceable module-level observer.
     parser_helper_names = (
         "_strict_json_object",
         "_canonical_text",
@@ -106,6 +104,24 @@ def _install_guard() -> None:
     canonical_evidence_schema = mapping_module._EVIDENCE_SCHEMA
     canonical_evidence_version = mapping_module._EVIDENCE_VERSION
     canonical_reserved_sports = mapping_module._RESERVED_SPORTS
+
+    # Capture the exact mutation primitives once. The wrapper consumes one parsed
+    # evidence object but does not invent a second durability/overlap authority.
+    canonical_clock = mapping_module._utc_now
+    canonical_clock_code = canonical_clock.__code__
+    canonical_instant = mapping_module._instant
+    canonical_instant_code = canonical_instant.__code__
+    canonical_load = exact_vars(registry_type).get("_load")
+    canonical_persist = exact_vars(registry_type).get("_persist")
+    overlap_descriptor = exact_vars(registry_type).get("_assert_no_overlap")
+    if not exact_callable(canonical_load) or not exact_callable(canonical_persist):
+        raise exact_runtime_error("provider sport registry load/persist must remain callable")
+    if exact_type(overlap_descriptor) is not staticmethod:
+        raise exact_runtime_error("ProviderSportMappingRegistry._assert_no_overlap must remain static")
+    canonical_load_code = canonical_load.__code__
+    canonical_persist_code = canonical_persist.__code__
+    canonical_overlap = overlap_descriptor.__func__
+    canonical_overlap_code = canonical_overlap.__code__
 
     canonical_payload = exact_vars(registry_type).get("_payload")
     if not exact_callable(canonical_payload):
@@ -152,9 +168,6 @@ def _install_guard() -> None:
     def _assert_parser_authority() -> None:
         if canonical_parser.__globals__ is not canonical_parser_globals:
             raise canonical_error("canonical evidence parser namespace authority changed")
-        # A module-global name called ``globals`` shadows the builtin used by the
-        # generated canonical register method. Reject it directly from the captured
-        # real namespace so a forged stale view cannot attest a hostile helper graph.
         if "globals" in canonical_parser_globals:
             raise canonical_error("canonical evidence parser namespace observer changed")
         for name, helper, expected_code in canonical_parser_helper_codes:
@@ -175,11 +188,6 @@ def _install_guard() -> None:
             or canonical_parser_globals.get("_RESERVED_SPORTS") is not canonical_reserved_sports
         ):
             raise canonical_error("canonical evidence parser dependency authority changed")
-        # ``_strict_json_object`` calls into the mutable stdlib ``json`` module. Merely
-        # witnessing the module object is insufficient: callers can replace
-        # ``json.loads`` in-place, self-restore during the first curation parse, and let
-        # the registry's later parse observe different bytes. Pin the exact decoder
-        # entry and its direct executable graph before any parser code is allowed to run.
         if (
             canonical_json.loads is not canonical_json_loads
             or exact_getattr(canonical_json_loads, "__code__", None) is not canonical_json_loads_code
@@ -210,6 +218,25 @@ def _install_guard() -> None:
         _assert_parser_authority()
 
         if (
+            mapping_module._utc_now is not canonical_clock
+            or canonical_clock.__code__ is not canonical_clock_code
+            or mapping_module._instant is not canonical_instant
+            or canonical_instant.__code__ is not canonical_instant_code
+            or exact_vars(registry_type).get("_load") is not canonical_load
+            or canonical_load.__code__ is not canonical_load_code
+            or exact_vars(registry_type).get("_persist") is not canonical_persist
+            or canonical_persist.__code__ is not canonical_persist_code
+            or exact_vars(registry_type).get("_assert_no_overlap") is not overlap_descriptor
+            or canonical_overlap.__code__ is not canonical_overlap_code
+        ):
+            raise canonical_error("provider sport canonical mutation authority changed")
+        if registry is not None and any(
+            name in exact_vars(registry)
+            for name in ("_load", "_persist", "_assert_no_overlap")
+        ):
+            raise canonical_error("provider sport canonical mutation instance authority changed")
+
+        if (
             exact_vars(registry_type).get("_payload") is not canonical_payload
             or canonical_payload.__code__ is not canonical_payload_code
             or exact_vars(registry_type).get("_unsigned_payload") is not unsigned_descriptor
@@ -228,6 +255,7 @@ def _install_guard() -> None:
             or canonical_binding_payload.__code__ is not canonical_binding_payload_code
             or exact_vars(canonical_binding_type).get("binding_id") is not canonical_binding_id_descriptor
             or canonical_binding_id_getter.__code__ is not canonical_binding_id_code
+            or mapping_module.ProviderSportBinding is not canonical_binding_type
         ):
             raise canonical_error("provider sport durable binding serialization authority changed")
 
@@ -246,12 +274,9 @@ def _install_guard() -> None:
             raise canonical_error("provider sport durable writer dependency authority changed")
 
     def register_evidence(self, source_snapshot_bytes: bytes):
-        # Fail before durable mutation if any authority-bearing surface moved.
+        # One and only one semantic parse occurs on the positive curation path.
         _assert_guard_authority(self)
         evidence = canonical_parser(canonical_evidence_type, source_snapshot_bytes)
-        # A parser helper is allowed to execute no authority-changing callback. Recheck
-        # the exact transitive graph immediately after the one product-curation parse so
-        # a helper cannot mutate/restore a sibling dependency around this decision.
         _assert_guard_authority(self)
         _require_curated(
             evidence.provider_namespace,
@@ -259,24 +284,59 @@ def _install_guard() -> None:
             evidence.canonical_sport,
         )
 
-        # Re-check immediately before the irreversible canonical mutation. Reuse the
-        # canonical registry for every durability and chronology invariant.
-        _assert_guard_authority(self)
-        binding = canonical_registry_register(self, source_snapshot_bytes)
-        _assert_guard_authority(self)
-        if exact_type(binding) is not canonical_binding_type:
-            raise canonical_error("provider sport registration authority changed")
-        if (
-            binding.provider_namespace != evidence.provider_namespace
-            or binding.provider_sport_id != evidence.provider_sport_id
-            or binding.canonical_sport != evidence.canonical_sport
-            or binding.valid_from != evidence.valid_from
-            or binding.valid_until != evidence.valid_until
-            or binding.evidence_available_at != evidence.evidence_available_at
-            or binding.source_snapshot_sha256 != evidence.source_snapshot_sha256
-        ):
-            raise canonical_error("provider sport registration semantic interpretation changed")
-        return binding
+        # Carry that exact parsed object through the canonical registry mutation
+        # primitives. Calling the old public register_evidence here would parse the
+        # same bytes a second time and reopen a TOCTOU interpretation interval.
+        with canonical_durable_path_lock(self.path):
+            _assert_guard_authority(self)
+            if not self.path.exists():
+                raise canonical_error(
+                    "durable provider sport mapping registry is missing; initialize it first"
+                )
+            canonical_load(self)
+            _assert_guard_authority(self)
+
+            recorded_at = canonical_clock()
+            _assert_guard_authority(self)
+            if canonical_instant("recorded_at", recorded_at) < canonical_instant(
+                "evidence_available_at", evidence.evidence_available_at
+            ):
+                raise canonical_error(
+                    "mapping evidence availability cannot be in the future of product recording time"
+                )
+
+            candidate = canonical_binding_type(
+                provider_namespace=evidence.provider_namespace,
+                provider_sport_id=evidence.provider_sport_id,
+                canonical_sport=evidence.canonical_sport,
+                valid_from=evidence.valid_from,
+                valid_until=evidence.valid_until,
+                evidence_available_at=evidence.evidence_available_at,
+                source_snapshot_sha256=evidence.source_snapshot_sha256,
+                recorded_at=recorded_at,
+            )
+            _assert_guard_authority(self)
+            for existing in self._bindings:
+                if existing.binding_id == candidate.binding_id:
+                    return existing
+
+            canonical_overlap(candidate, self._bindings)
+            updated = sorted(
+                [*self._bindings, candidate],
+                key=lambda value: (
+                    value.provider_namespace,
+                    value.provider_sport_id,
+                    value.valid_from,
+                    value.valid_until is None,
+                    value.valid_until or "",
+                    value.binding_id,
+                ),
+            )
+            _assert_guard_authority(self)
+            canonical_persist(self, updated)
+            self._bindings = updated
+            _assert_guard_authority(self)
+            return candidate
 
     def resolve(self, *, provider_namespace: str, provider_sport_id: str, as_of: str):
         # A registry created by a pre-curation version can survive restart. Durable

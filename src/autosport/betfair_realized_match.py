@@ -679,6 +679,56 @@ def _resolve_betfair_realized_match(
             "provider readback maps one durable order reference to multiple bet ids"
         )
 
+    if cleared and current:
+        if len(current) != 1:
+            raise RealizedMatchEvidenceError(
+                "provider readback contains multiple current BET rows"
+            )
+        current_row = current[0]
+        if (
+            current_row.price is not None
+            and current_row.price != action.requested_odds
+        ):
+            raise RealizedMatchEvidenceError(
+                "current order requested price differs from execution action"
+            )
+        if (
+            current_row.requested_size is not None
+            and current_row.requested_size != action.requested_stake
+        ):
+            raise RealizedMatchEvidenceError(
+                "current order requested size differs from execution action"
+            )
+        if current_row.size_matched > action.requested_stake:
+            raise RealizedMatchEvidenceError(
+                "current order matched size exceeds requested stake"
+            )
+        if current_row.size_remaining > action.requested_stake:
+            raise RealizedMatchEvidenceError(
+                "current order remaining size exceeds requested stake"
+            )
+        if (
+            current_row.size_matched + current_row.size_remaining
+            > action.requested_stake
+        ):
+            raise RealizedMatchEvidenceError(
+                "current order matched plus remaining size exceeds requested stake"
+            )
+        if (
+            current_row.size_matched > 0
+            and current_row.average_price_matched <= 0
+        ):
+            raise RealizedMatchEvidenceError(
+                "current matched stake lacks a positive average matched price"
+            )
+        if (
+            current_row.size_matched == 0
+            and current_row.average_price_matched != 0
+        ):
+            raise RealizedMatchEvidenceError(
+                "current zero matched size has a non-zero average matched price"
+            )
+
     if cleared:
         (
             bet_id,
@@ -688,6 +738,10 @@ def _resolve_betfair_realized_match(
             provider_observed_at,
             provider_settled_at,
         ) = _resolve_cleared_economics(cleared, action=action)
+        if current and matched_stake < current[0].size_matched:
+            raise RealizedMatchEvidenceError(
+                "cleared BET settled size regresses current matched size"
+            )
         return _make_evidence(
             source=RealizedMatchSource.CLEARED_BET,
             plan=plan,

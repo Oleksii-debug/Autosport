@@ -36,6 +36,22 @@ def _clone_local_function(
     return clone
 
 
+def _clone_module_function_graph(function: FunctionType) -> FunctionType:
+    """Freeze one external module-local function graph at its current executable state."""
+
+    module_globals = function.__globals__
+    trusted_globals: dict[str, object] = dict(module_globals)
+    clones: dict[str, FunctionType] = {}
+    for name, value in tuple(module_globals.items()):
+        if type(value) is FunctionType and value.__globals__ is module_globals:
+            clones[name] = _clone_local_function(value, trusted_globals=trusted_globals)
+    trusted_globals.update(clones)
+    frozen = clones.get(function.__name__)
+    if frozen is None:
+        raise RuntimeError("canonical independent authority-root clone is unavailable")
+    return frozen
+
+
 def _install() -> None:
     paper_book = _paper.PaperBook
     class_namespace = vars(paper_book)
@@ -50,11 +66,23 @@ def _install() -> None:
     if type(original_load) is not FunctionType:
         raise RuntimeError("canonical PaperBook positive path load must be a Python function")
 
-    # Copy the module namespace once, then replace every function defined by the
-    # preload guard with an exact-code clone whose globals point back to this private
-    # mapping.  The graph remains the same implementation and state objects, but local
-    # helper dispatch no longer consults the caller-mutable module dictionary.
+    # `_paper_authority_root` is imported into the owning guard from the canonical
+    # anti-rollback module. Copying that function object alone would still allow an
+    # in-place `__code__` replacement to redirect witness lookup while preserving
+    # identity. Freeze its module-local executable graph first, preserving the same
+    # canonical root policy without creating another root selector or store.
+    root_selector = guard_namespace.get("_paper_authority_root")
+    if type(root_selector) is not FunctionType:
+        raise RuntimeError("canonical independent PaperBook authority root changed")
+    frozen_root_selector = _clone_module_function_graph(root_selector)
+
+    # Copy the owning guard namespace once, substitute the sealed external root
+    # selector, then replace every function defined by the preload guard with an
+    # exact-code clone whose globals point back to this private mapping. The graph
+    # remains the same implementation and state objects, but local helper dispatch
+    # no longer consults caller-mutable module dictionaries/function objects.
     trusted_globals: dict[str, object] = dict(guard_namespace)
+    trusted_globals["_paper_authority_root"] = frozen_root_selector
     clones: dict[str, FunctionType] = {}
     for name, value in tuple(guard_namespace.items()):
         if type(value) is FunctionType and value.__globals__ is guard_namespace:
@@ -73,4 +101,5 @@ def _install() -> None:
 
 _install()
 del _install
+del _clone_module_function_graph
 del _clone_local_function

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -11,71 +12,145 @@ from autosport.paper import PaperBook
 _TS = "2026-09-27T00:45:00+00:00"
 
 
-def _leg() -> TicketLeg:
+def _leg(selection_id: str = "selection-structural-load") -> TicketLeg:
     return TicketLeg(
         "event-structural-load",
         "market-structural-load",
-        "selection-structural-load",
+        selection_id,
         Decimal("2.5"),
         sport="soccer",
         exchange_side="back",
     )
 
 
-def test_normal_path_load_is_structural_not_positive_opening_authority(tmp_path) -> None:
+def _authority_root(tmp_path) -> str:
+    return str(tmp_path.parent / f"{tmp_path.name}-paper-authority")
+
+
+def test_witnessed_path_roundtrip_restores_positive_opening_authority(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
     source = PaperBook("100")
     ticket = source.open_ticket([_leg()], "10", placed_at=_TS)
     source.save(path)
 
     loaded = PaperBook.load(path)
-
-    # Structural facts remain inspectable for reconciliation/recovery decisions.
     assert loaded.balance == Decimal("90")
+    assert loaded.committed_stake == Decimal("10")
     assert loaded.tickets[ticket.ticket_id].stake == Decimal("10")
 
-    # But caller-editable persisted bytes cannot authorize bankroll/exposure use by
-    # merely surviving the parser. Positive authority must come from an independent
-    # product-owned durable source.
-    with pytest.raises(
-        ValueError,
-        match="byte-loaded snapshot lacks product-issued opening authority",
-    ):
-        _ = loaded.committed_stake
-
-    with pytest.raises(
-        ValueError,
-        match="byte-loaded snapshot lacks product-issued opening authority",
-    ):
-        loaded.open_ticket([_leg()], "1", placed_at=_TS)
-
-    copied = tmp_path / "copied-paper-book.json"
-    with pytest.raises(
-        ValueError,
-        match="byte-loaded snapshot lacks product-issued opening authority",
-    ):
-        loaded.save(copied)
-    assert not copied.exists()
+    loaded.open_ticket([_leg("selection-2")], "5", placed_at=_TS)
+    loaded.save(path)
+    restored = PaperBook.load(path)
+    assert restored.balance == Decimal("85")
+    assert restored.committed_stake == Decimal("15")
 
 
-def test_normal_path_load_cannot_settle_without_independent_restart_authority(tmp_path) -> None:
+def test_unwitnessed_copy_cannot_mint_positive_restart_authority(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
+    copied = tmp_path / "copied-paper-book.json"
     source = PaperBook("100")
-    ticket = source.open_ticket([_leg()], "10", placed_at=_TS)
+    source.open_ticket([_leg()], "10", placed_at=_TS)
     source.save(path)
+    copied.write_bytes(path.read_bytes())
 
-    loaded = PaperBook.load(path)
-    loaded_ticket = loaded.tickets[ticket.ticket_id]
+    with pytest.raises(ValueError, match="missing independent durable opening witness"):
+        PaperBook.load(copied)
+
+    structural = PaperBook.load_bytes(copied.read_bytes())
+    assert structural.balance == Decimal("90")
     with pytest.raises(
         ValueError,
         match="byte-loaded snapshot lacks product-issued opening authority",
     ):
-        loaded.settle(
-            ticket.ticket_id,
-            {loaded_ticket.legs[0].quote_key},
-            settled_at=_TS,
-        )
+        _ = structural.committed_stake
 
-    assert loaded.balance == Decimal("90")
-    assert loaded_ticket.status.value == "open"
-    assert loaded_ticket.payout == Decimal("0")
+
+def test_path_load_rejects_whole_snapshot_rollback(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-1")], "10", placed_at=_TS)
+    book.save(path)
+    first_generation = path.read_bytes()
+
+    book.open_ticket([_leg("selection-2")], "5", placed_at=_TS)
+    book.save(path)
+    path.write_bytes(first_generation)
+
+    with pytest.raises(ValueError, match="independent durable opening witness"):
+        PaperBook.load(path)
+
+
+def test_failed_final_replace_recovers_last_committed_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    first = book.open_ticket([_leg("selection-1")], "10", placed_at=_TS)
+    book.save(path)
+    last_good = path.read_bytes()
+
+    book.open_ticket([_leg("selection-2")], "5", placed_at=_TS)
+
+    import autosport._paperbook_preload_authority_guard as guard
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("injected final replace failure")
+
+    monkeypatch.setattr(guard, "_OS_REPLACE", fail_replace)
+    with pytest.raises(OSError, match="injected final replace failure"):
+        book.save(path)
+    monkeypatch.undo()
+
+    assert path.read_bytes() == last_good
+    restored = PaperBook.load(path)
+    assert tuple(restored.tickets) == (first.ticket_id,)
+    assert restored.balance == Decimal("90")
+    assert restored.committed_stake == Decimal("10")
+
+
+def test_empty_snapshot_is_still_bound_to_independent_witness(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book-empty.json"
+    book = PaperBook("100")
+    book.save(path)
+    assert PaperBook.load(path).balance == Decimal("100")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["tickets"] == []
+    payload["initial_bankroll"] = "1000"
+    payload["balance"] = "1000"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="independent durable opening witness"):
+        PaperBook.load(path)
+
+
+def test_bound_book_rejects_authority_root_drift_and_fresh_overwrite(
+    tmp_path, monkeypatch
+) -> None:
+    first_root = tmp_path.parent / f"{tmp_path.name}-paper-authority-a"
+    second_root = tmp_path.parent / f"{tmp_path.name}-paper-authority-b"
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(first_root))
+    path = tmp_path / "paper-book.json"
+    original = PaperBook("100")
+    original.open_ticket([_leg()], "10", placed_at=_TS)
+    original.save(path)
+    loaded = PaperBook.load(path)
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(second_root))
+    with pytest.raises(ValueError, match="path or authority root|lacks independent durable authority"):
+        loaded.save(path)
+
+    fresh = PaperBook("100")
+    with pytest.raises(ValueError, match="lacks independent durable authority"):
+        fresh.save(path)

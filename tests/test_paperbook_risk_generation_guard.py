@@ -28,7 +28,7 @@ def _authority_root(tmp_path) -> str:
     return str(tmp_path.parent / f"{tmp_path.name}-risk-generation-authority")
 
 
-def _assert_risk_rejected(book: PaperBook) -> None:
+def _assert_risk_rejected(book: object) -> None:
     assert PaperRiskPolicy._book_state(book) is None
     assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) is None
     assert PaperRiskPolicy._historical_risk_metrics(book) is None
@@ -40,6 +40,11 @@ def _assert_risk_admitted(book: PaperBook) -> None:
     assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) is not None
     assert PaperRiskPolicy._historical_risk_metrics(book) is not None
     assert PaperRiskPolicy._shadow_book_for_allocation(book) is not None
+
+
+def test_risk_generation_guard_preserves_invalid_input_fail_closed_contract() -> None:
+    _assert_risk_rejected(object())
+    _assert_risk_rejected(None)
 
 
 def test_stale_risk_read_rejects_even_if_live_validator_descriptor_is_rebound(

@@ -327,3 +327,101 @@ def test_load_recovers_replaced_snapshot_after_commit_publication_interruption(
     assert pending_final is None
     assert committed_final is not None
     assert committed_final[0] > generation
+
+
+def test_authenticated_book_can_stage_to_fresh_path_and_promote_canonically(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """RunTransaction-style staging preserves one witnessed BASE -> NEW lineage."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    canonical = tmp_path / "paper_book.json"
+    staged = tmp_path / ".run-transactions" / "run-1" / "paper_book.next.json"
+    staged.parent.mkdir(parents=True)
+
+    initial = PaperBook("100")
+    initial.save(canonical)
+    base_sha = guard._file_sha256(canonical)
+    assert base_sha is not None
+
+    working = PaperBook.load(canonical)
+    ticket = working.open_ticket(
+        [_leg("staged-selection", "3")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    working.save(staged)
+    new_sha = guard._file_sha256(staged)
+    assert new_sha is not None
+    assert new_sha != base_sha
+
+    # Staging must not mutate canonical BASE authority.
+    canonical_before = PaperBook.load(canonical)
+    assert canonical_before.balance == Decimal("100")
+    assert not canonical_before.tickets
+
+    staged_before = PaperBook.load(staged)
+    assert staged_before.balance == Decimal("90")
+    assert tuple(staged_before.tickets) == (ticket.ticket_id,)
+
+    guard._promote_verified_snapshot(
+        staged,
+        canonical,
+        expected_base_sha256=base_sha,
+        expected_new_sha256=new_sha,
+    )
+
+    promoted = PaperBook.load(canonical)
+    assert promoted.balance == Decimal("90")
+    assert tuple(promoted.tickets) == (ticket.ticket_id,)
+    assert guard._file_sha256(canonical) == new_sha
+
+    _records, committed, pending = guard._read_witnesses(canonical)
+    assert pending is None
+    assert committed is not None
+    assert committed[1] == new_sha
+
+
+def test_canonical_promotion_rejects_tampered_staged_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    canonical = tmp_path / "paper_book.json"
+    staged = tmp_path / ".run-transactions" / "run-2" / "paper_book.next.json"
+    staged.parent.mkdir(parents=True)
+
+    initial = PaperBook("100")
+    initial.save(canonical)
+    base_sha = guard._file_sha256(canonical)
+    assert base_sha is not None
+    canonical_bytes = canonical.read_bytes()
+
+    working = PaperBook.load(canonical)
+    working.open_ticket(
+        [_leg("tamper-selection")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    working.save(staged)
+    new_sha = guard._file_sha256(staged)
+    assert new_sha is not None
+
+    staged.write_bytes(staged.read_bytes() + b"\n")
+
+    with pytest.raises(
+        ValueError,
+        match="staged promotion snapshot hash mismatch",
+    ):
+        guard._promote_verified_snapshot(
+            staged,
+            canonical,
+            expected_base_sha256=base_sha,
+            expected_new_sha256=new_sha,
+        )
+
+    assert canonical.read_bytes() == canonical_bytes
+    restored = PaperBook.load(canonical)
+    assert restored.balance == Decimal("100")
+    assert not restored.tickets

@@ -18,11 +18,11 @@ def _authority_root(tmp_path: Path) -> str:
     return str(tmp_path.parent / f"{tmp_path.name}-paper-authority")
 
 
-def _leg() -> TicketLeg:
+def _leg(selection_id: str = "selection-wrapper-helper-authority") -> TicketLeg:
     return TicketLeg(
         "event-wrapper-helper-authority",
         "market-wrapper-helper-authority",
-        "selection-wrapper-helper-authority",
+        selection_id,
         Decimal("2.5"),
         sport="soccer",
         exchange_side="back",
@@ -83,6 +83,35 @@ def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
 
     with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
         PaperBook.load(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
+def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-save-wrapper-helper-1")], "10", placed_at=_TS)
+    book.save(path)
+    witness = guard._witness_path(path)
+    snapshot_before = path.read_bytes()
+    witness_before = witness.read_bytes()
+    book.open_ticket([_leg("selection-save-wrapper-helper-2")], "5", placed_at=_TS)
+
+    public_save = vars(PaperBook)["save"]
+    assert type(public_save) is FunctionType
+    inner_save = _inner_persistence_wrapper(public_save)
+    verifier = inner_save.__globals__["_require_class_callable_graph_witnesses"]
+    assert type(verifier) is FunctionType
+    assert verifier.__code__ is not _no_class_graph_check.__code__
+    monkeypatch.setattr(verifier, "__code__", _no_class_graph_check.__code__)
+
+    with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
+        book.save(path)
 
     assert path.read_bytes() == snapshot_before
     assert witness.read_bytes() == witness_before

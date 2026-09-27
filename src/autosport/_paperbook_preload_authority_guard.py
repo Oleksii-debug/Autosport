@@ -316,9 +316,11 @@ def _read_witnesses(
             raise ValueError("PaperBook snapshot witness is unreadable") from exc
         if type(record) is not dict or set(record) != expected_keys:
             raise ValueError("PaperBook snapshot witness schema is invalid")
-        if record["witness_schema_version"] != _WITNESS_SCHEMA_VERSION:
+        schema_version = record["witness_schema_version"]
+        if type(schema_version) is not int or schema_version != _WITNESS_SCHEMA_VERSION:
             raise ValueError("unsupported PaperBook snapshot witness schema")
-        if record["sequence"] != sequence:
+        record_sequence = record["sequence"]
+        if type(record_sequence) is not int or record_sequence != sequence:
             raise ValueError("PaperBook snapshot witness sequence is not contiguous")
         if record["snapshot_identity"] != expected_identity:
             raise ValueError("PaperBook snapshot witness belongs to another path")

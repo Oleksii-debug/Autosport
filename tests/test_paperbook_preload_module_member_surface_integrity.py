@@ -48,6 +48,27 @@ def test_frozen_module_surface_backing_rejects_member_retarget(
     assert loaded.balance == book.balance
 
 
+@pytest.mark.parametrize("surface_name", ("json", "hashlib", "os", "tempfile"))
+def test_frozen_module_surface_backing_binding_rejects_object_slot_bypass(
+    tmp_path: Path,
+    surface_name: str,
+) -> None:
+    """Explicit object slot operations cannot replace the facade backing authority."""
+
+    path, book = _saved_book(tmp_path)
+    surface = getattr(guard, surface_name)
+    original_values = surface._values
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(surface, "_values", {"hostile": object()})
+    with pytest.raises(AttributeError):
+        object.__delattr__(surface, "_values")
+
+    assert surface._values is original_values
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+
+
 def test_frozen_module_surface_getattr_code_substitution_fails_before_dispatch(
     tmp_path: Path,
 ) -> None:

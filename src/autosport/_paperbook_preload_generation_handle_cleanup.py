@@ -34,10 +34,10 @@ def _install() -> None:
     if type(load_descriptor) is not classmethod or type(load_descriptor.__func__) is not FunctionType:
         raise RuntimeError("canonical PaperBook guarded load is unavailable")
     if type(save_descriptor) is not FunctionType:
-        raise RuntimeError("canonical PaperBook guarded save is unavailable")
+        raise RuntimeError("canonical PaperBook durable save is unavailable")
 
     # At this point the load-dispatch and wrapper-helper guards must already have
-    # detached the public path from the mutable owning module namespace.  Refuse to
+    # detached the public path from the mutable owning module namespace. Refuse to
     # delete anything if composition order drifted.
     if load_descriptor.__func__.__globals__ is namespace or save_descriptor.__globals__ is namespace:
         raise RuntimeError("PaperBook persistence graph is not sealed before handle cleanup")
@@ -56,7 +56,7 @@ def _install() -> None:
             raise RuntimeError("refusing to remove canonical generation-guarded persistence authority")
         obsolete_values.append(value)
 
-    # Delete only the obsolete pre-generation load/save callables.  The generation
+    # Delete only the obsolete pre-generation load/save callables. The generation
     # wrappers for committed_stake/open_ticket/settle still require their original
     # non-persistence delegates and are intentionally untouched.
     for name in _OBSOLETE_HANDLES:
@@ -69,16 +69,12 @@ del _install
 # Risk policy derives portfolio/equity evidence from direct PaperBook fields. Install
 # its generation-stable read wrapper only after the canonical persistence graph has
 # been sealed, so the wrapper can reuse that detached authority rather than mutable
-# guard-module helpers.
+# guard-module helpers. That guard already witnesses PaperRiskPolicy's reachable class
+# helper graph before and after each decision; do not add a second helper-dispatch
+# authority on top of it.
 from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_guard  # noqa: E402,F401
-
-# The guarded read roots reconstruct inert pre-guard specs under the publication lock.
-# Freeze their class-helper dispatch as a final composition step so later replacement
-# of PaperRiskPolicy arithmetic helpers cannot retarget committed exposure or
-# concentration evidence while preserving the same canonical risk implementation.
-from . import _paperbook_risk_helper_dispatch_seal as _paperbook_risk_helper_dispatch_seal  # noqa: E402,F401
 
 # Structural replay alone cannot prove that caller-visible ticket economics still
 # match the product-issued private opening/causal registries. Compose that existing
-# authority around the finalized generation/helper-sealed risk surface.
+# authority around the finalized generation-stable risk surface.
 from . import _paperbook_risk_private_authority_guard as _paperbook_risk_private_authority_guard  # noqa: E402,F401

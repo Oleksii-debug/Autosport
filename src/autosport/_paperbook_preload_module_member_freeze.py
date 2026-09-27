@@ -21,15 +21,26 @@ from types import MappingProxyType
 from . import _paperbook_preload_authority_guard as _guard
 
 
-class _FrozenSurface:
-    __slots__ = ("_values",)
+class _FrozenSurface(tuple):
+    """Immutable persistence-member facade, including its backing-map binding.
 
-    def __init__(self, **values: object) -> None:
-        object.__setattr__(self, "_values", MappingProxyType(dict(values)))
+    A slotted mutable instance can still have its slot reassigned through an explicit
+    ``object.__setattr__`` call even when ``__setattr__`` rejects ordinary writes. Keep
+    the read-only member map in tuple payload storage instead: tuple payload identity
+    cannot be rebound through ``object.__setattr__`` or ``object.__delattr__``.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, **values: object):
+        return tuple.__new__(cls, (MappingProxyType(dict(values)),))
 
     def __getattr__(self, name: str) -> object:
+        values = tuple.__getitem__(self, 0)
+        if name == "_values":
+            return values
         try:
-            return self._values[name]
+            return values[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
 

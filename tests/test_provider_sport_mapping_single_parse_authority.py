@@ -1,27 +1,9 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
 import autosport.provider_sport_mapping as mapping
-
-
-def _curated_evidence() -> bytes:
-    return json.dumps(
-        {
-            "schema": "autosport.provider_sport_mapping_evidence",
-            "schema_version": 1,
-            "provider_namespace": "betfair",
-            "provider_sport_id": "1",
-            "canonical_sport": "football",
-            "valid_from": "2026-01-01T00:00:00Z",
-            "valid_until": None,
-            "evidence_available_at": "2026-01-02T00:00:00Z",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
 
 
 def test_curated_registration_invokes_canonical_evidence_parser_exactly_once(
@@ -45,7 +27,10 @@ def test_curated_registration_invokes_canonical_evidence_parser_exactly_once(
 
     sys.setprofile(profile)
     try:
-        binding = registry.register_evidence(_curated_evidence())
+        binding = registry.register_curated(
+            provider_namespace="betfair",
+            provider_sport_id="1",
+        )
     finally:
         sys.setprofile(previous_profile)
 

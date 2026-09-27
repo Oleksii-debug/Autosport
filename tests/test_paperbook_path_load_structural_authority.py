@@ -118,6 +118,41 @@ def test_failed_final_replace_recovers_last_committed_snapshot(
     assert restored.committed_stake == Decimal("10")
 
 
+def test_published_candidate_with_interrupted_commit_recovers_forward(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg("selection-1")], "10", placed_at=_TS)
+    book.save(path)
+    book.open_ticket([_leg("selection-2")], "5", placed_at=_TS)
+
+    import autosport._paperbook_preload_authority_guard as guard
+
+    original_append = guard._append_witness
+
+    def interrupt_commit(snapshot_path, *, event, generation, snapshot_sha256):
+        if event == guard._COMMIT:
+            raise OSError("injected COMMIT interruption")
+        return original_append(
+            snapshot_path,
+            event=event,
+            generation=generation,
+            snapshot_sha256=snapshot_sha256,
+        )
+
+    monkeypatch.setattr(guard, "_append_witness", interrupt_commit)
+    with pytest.raises(OSError, match="injected COMMIT interruption"):
+        book.save(path)
+    monkeypatch.setattr(guard, "_append_witness", original_append)
+
+    restored = PaperBook.load(path)
+    assert restored.balance == Decimal("85")
+    assert restored.committed_stake == Decimal("15")
+    assert len(restored.tickets) == 2
+
+
 def test_empty_snapshot_is_still_bound_to_independent_witness(
     tmp_path, monkeypatch
 ) -> None:
@@ -137,6 +172,45 @@ def test_empty_snapshot_is_still_bound_to_independent_witness(
         PaperBook.load(path)
 
 
+def test_witness_journal_tamper_is_not_restart_authority(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    book = PaperBook("100")
+    book.save(path)
+
+    import autosport._paperbook_preload_authority_guard as guard
+
+    witness = guard._witness_path(path)
+    lines = witness.read_text(encoding="utf-8").splitlines()
+    final = json.loads(lines[-1])
+    final["snapshot_sha256"] = "0" * 64
+    lines[-1] = json.dumps(final, sort_keys=True, separators=(",", ":"))
+    witness.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="digest mismatch|matching PREPARE"):
+        PaperBook.load(path)
+
+
+def test_exact_fresh_book_can_rebind_only_unchanged_witnessed_state(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    first = PaperBook("100")
+    first.save(path)
+
+    # Existing adoption runtimes may reconstruct an independently authoritative
+    # empty PaperBook before comparing it with durable state. Exact canonical bytes
+    # are sufficient to bind that object to this lineage; changed economics are not.
+    equivalent = PaperBook("100")
+    equivalent.save(path)
+    assert PaperBook.load(path).balance == Decimal("100")
+
+    changed = PaperBook("200")
+    with pytest.raises(ValueError, match="verified path-bound authority"):
+        changed.save(path)
+
+
 def test_bound_book_rejects_authority_root_drift_and_fresh_overwrite(
     tmp_path, monkeypatch
 ) -> None:
@@ -150,7 +224,10 @@ def test_bound_book_rejects_authority_root_drift_and_fresh_overwrite(
     loaded = PaperBook.load(path)
 
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(second_root))
-    with pytest.raises(ValueError, match="path or authority root|lacks independent durable authority"):
+    with pytest.raises(
+        ValueError,
+        match="path or authority root|lacks independent durable authority",
+    ):
         loaded.save(path)
 
     fresh = PaperBook("100")

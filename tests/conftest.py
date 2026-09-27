@@ -357,9 +357,11 @@ def _betfair_fixture_runtime(workspace: Path) -> AutonomousProductRuntime:
 def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
     module = request.module
     if module is None:
+        yield
         return
     module_name = module.__name__.rsplit(".", 1)[-1]
     if module_name not in _BETFAIR_TRUSTED_PROFILE_MODULES:
+        yield
         return
 
     prepared_owner = module
@@ -368,6 +370,7 @@ def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
         prepared_owner = getattr(module, "provider_tests", None)
         original_prepared = getattr(prepared_owner, "_prepared", None)
     if prepared_owner is None or not callable(original_prepared):
+        yield
         return
 
     issued_by_workspace: dict[str, tuple[AutonomousProductRuntime, object]] = {}

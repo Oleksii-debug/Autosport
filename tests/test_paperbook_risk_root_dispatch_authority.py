@@ -41,7 +41,7 @@ def test_owner_facing_evaluate_root_cannot_be_replaced() -> None:
                 assert decision.allowed is False
     finally:
         if vars(PaperRiskPolicy).get("evaluate") is not original:
-            setattr(PaperRiskPolicy, "evaluate", original)
+            type.__setattr__(PaperRiskPolicy, "evaluate", original)
 
 
 def test_owner_facing_derive_root_cannot_be_deleted() -> None:
@@ -59,7 +59,7 @@ def test_owner_facing_derive_root_cannot_be_deleted() -> None:
             assert "derive_goal_stake" in vars(PaperRiskPolicy)
     finally:
         if vars(PaperRiskPolicy).get("derive_goal_stake") is not original:
-            setattr(PaperRiskPolicy, "derive_goal_stake", original)
+            type.__setattr__(PaperRiskPolicy, "derive_goal_stake", original)
 
 
 def test_root_dispatch_seal_preserves_canonical_policy_class_identity() -> None:
@@ -69,3 +69,41 @@ def test_root_dispatch_seal_preserves_canonical_policy_class_identity() -> None:
     # object. A post-composition subclass facade changes type identity for objects and
     # modules that captured the original class even when it delegates all behavior.
     assert PaperRiskPolicy.__bases__ == (object,)
+
+
+def test_owner_facing_root_cannot_be_replaced_via_base_type_api() -> None:
+    """A metaclass override alone must not leave type.__setattr__ as an authority bypass."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    original = vars(PaperRiskPolicy)["evaluate"]
+    hostile_executed = False
+
+    def hostile_evaluate(self, candidate_book, stake, *, context=None):
+        nonlocal hostile_executed
+        del self, candidate_book, stake, context
+        hostile_executed = True
+        raise AssertionError("base-metaclass root replacement must never execute")
+
+    try:
+        replacement_rejected = False
+        try:
+            type.__setattr__(PaperRiskPolicy, "evaluate", hostile_evaluate)
+        except TypeError:
+            replacement_rejected = True
+
+        if not replacement_rejected:
+            try:
+                decision = policy.evaluate(book, Decimal("10"))
+            except (TypeError, ValueError):
+                decision = None
+            assert hostile_executed is False
+            if decision is not None:
+                assert decision.allowed is False
+    finally:
+        if vars(PaperRiskPolicy).get("evaluate") is not original:
+            type.__setattr__(PaperRiskPolicy, "evaluate", original)

@@ -77,3 +77,8 @@ from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_gua
 # of PaperRiskPolicy arithmetic helpers cannot retarget committed exposure or
 # concentration evidence while preserving the same canonical risk implementation.
 from . import _paperbook_risk_helper_dispatch_seal as _paperbook_risk_helper_dispatch_seal  # noqa: E402,F401
+
+# Structural replay alone cannot prove that caller-visible ticket economics still
+# match the product-issued private opening/causal registries. Compose that existing
+# authority around the finalized generation/helper-sealed risk surface.
+from . import _paperbook_risk_private_authority_guard as _paperbook_risk_private_authority_guard  # noqa: E402,F401

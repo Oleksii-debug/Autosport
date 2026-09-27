@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import autosport._paperbook_preload_authority_guard as guard
-from autosport.domain import TicketLeg
+from autosport.domain import PaperTicket, TicketLeg
 from autosport.paper import PaperBook
 
 
@@ -35,9 +35,13 @@ def _hostile_load_bytes(cls, _payload: bytes):
 
 
 def _hostile_from_raw_snapshot(cls, _raw: object):
-    # Keep the classmethod call shape/free-variable shape compatible with the
-    # canonical parser while returning unrelated economics if dispatch reaches it.
+    # Keep the classmethod call shape compatible with the canonical parser while
+    # returning unrelated economics if dispatch reaches it.
     return cls("999")
+
+
+def _hostile_value_init(_self, *_args: object, **_kwargs: object) -> None:
+    raise AssertionError("retargeted canonical value constructor was dispatched")
 
 
 def _hostile_save(_self, path: str | Path) -> None:
@@ -112,6 +116,31 @@ def test_path_load_rejects_transitive_class_parser_descriptor_rebind(
     )
 
     with pytest.raises(ValueError, match="class|dispatch|authority"):
+        PaperBook.load(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
+@pytest.mark.parametrize("value_type", [TicketLeg, PaperTicket])
+def test_path_load_rejects_parser_value_constructor_retarget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value_type: type,
+) -> None:
+    """Authenticated bytes cannot be reinterpreted by a mutated canonical value type."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path, witness, snapshot_before, witness_before = _saved_book(
+        tmp_path,
+        f"selection-value-{value_type.__name__.lower()}",
+    )
+
+    original_init = vars(value_type)["__init__"]
+    assert original_init is not _hostile_value_init
+    monkeypatch.setattr(value_type, "__init__", _hostile_value_init)
+
+    with pytest.raises(ValueError, match="class|executable|authority"):
         PaperBook.load(path)
 
     assert path.read_bytes() == snapshot_before

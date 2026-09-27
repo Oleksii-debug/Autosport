@@ -2,10 +2,10 @@
 
 The preload dispatch guard freezes the canonical persistence graph, but its public
 ``PaperBook.load`` / ``save`` wrappers still reference verifier function objects from
-their private globals mapping.  Function identity alone is insufficient because a
-reachable Python function object's ``__code__`` can be replaced in place.  This final
-composition layer witnesses those already-installed verifier executables and rejects
-mutation before or after the existing persistence wrapper executes.
+their private globals mapping. Function identity alone is insufficient because a
+reachable Python function object's ``__code__`` can be replaced in place. The final
+composition layer therefore witnesses both the already-installed wrapper executable
+itself and its verifier executables, rejecting mutation before or after persistence.
 
 No parser, serializer, witness protocol, store, root, or economic authority is added.
 """
@@ -34,21 +34,45 @@ def _verifier_witnesses(wrapper: FunctionType) -> tuple[tuple[FunctionType, obje
     return tuple(witnesses)
 
 
+def _require_wrapper_authority(
+    inner: FunctionType,
+    expected_inner_code: object,
+    witnesses: tuple[tuple[FunctionType, object], ...],
+    *,
+    exact_type: type,
+    function_type: type[FunctionType],
+) -> None:
+    if exact_type(inner) is not function_type or inner.__code__ is not expected_inner_code:
+        raise ValueError("PaperBook persistence inner wrapper executable authority changed")
+    for verifier, expected_code in witnesses:
+        if exact_type(verifier) is not function_type or verifier.__code__ is not expected_code:
+            raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
+
+
 def _make_guarded_load(
     inner: FunctionType,
     witnesses: tuple[tuple[FunctionType, object], ...],
 ):
     exact_type = type
     function_type = FunctionType
+    expected_inner_code = inner.__code__
 
     def load(cls, path):
-        for verifier, expected_code in witnesses:
-            if exact_type(verifier) is not function_type or verifier.__code__ is not expected_code:
-                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
+        _require_wrapper_authority(
+            inner,
+            expected_inner_code,
+            witnesses,
+            exact_type=exact_type,
+            function_type=function_type,
+        )
         result = inner(cls, path)
-        for verifier, expected_code in witnesses:
-            if exact_type(verifier) is not function_type or verifier.__code__ is not expected_code:
-                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
+        _require_wrapper_authority(
+            inner,
+            expected_inner_code,
+            witnesses,
+            exact_type=exact_type,
+            function_type=function_type,
+        )
         return result
 
     load.__name__ = "load"
@@ -62,15 +86,24 @@ def _make_guarded_save(
 ):
     exact_type = type
     function_type = FunctionType
+    expected_inner_code = inner.__code__
 
     def save(self, path) -> None:
-        for verifier, expected_code in witnesses:
-            if exact_type(verifier) is not function_type or verifier.__code__ is not expected_code:
-                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
+        _require_wrapper_authority(
+            inner,
+            expected_inner_code,
+            witnesses,
+            exact_type=exact_type,
+            function_type=function_type,
+        )
         inner(self, path)
-        for verifier, expected_code in witnesses:
-            if exact_type(verifier) is not function_type or verifier.__code__ is not expected_code:
-                raise ValueError("PaperBook persistence wrapper verifier executable authority changed")
+        _require_wrapper_authority(
+            inner,
+            expected_inner_code,
+            witnesses,
+            exact_type=exact_type,
+            function_type=function_type,
+        )
 
     save.__name__ = "save"
     save.__qualname__ = "PaperBook.save"

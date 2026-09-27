@@ -18,19 +18,61 @@ from .secret_redaction import _safe_exception_type_label
 
 
 def _build_canonical_exception_type_label_renderer():
-    """Bind the exact secret-safe renderer and executable outside mutable dispatch."""
+    """Bind the exact secret-safe renderer and its built-in type authority."""
 
     canonical = _safe_exception_type_label
     canonical_code = canonical.__code__
+    canonical_globals = canonical.__globals__
+    canonical_builtins = canonical_globals.get("builtins")
+
+    def exception_type_authority_snapshot() -> tuple[tuple[str, type], ...] | None:
+        try:
+            namespace = vars(canonical_builtins)
+            return tuple(
+                sorted(
+                    (name, value)
+                    for name, value in namespace.items()
+                    if type(name) is str
+                    and isinstance(value, type)
+                    and issubclass(value, BaseException)
+                )
+            )
+        except BaseException:
+            return None
+
+    canonical_exception_types = exception_type_authority_snapshot()
+
+    def authority_is_intact() -> bool:
+        if (
+            canonical_exception_types is None
+            or canonical_globals.get("builtins") is not canonical_builtins
+        ):
+            return False
+        current = exception_type_authority_snapshot()
+        if current is None or len(current) != len(canonical_exception_types):
+            return False
+        return all(
+            current_name == expected_name and current_type is expected_type
+            for (current_name, current_type), (expected_name, expected_type) in zip(
+                current, canonical_exception_types
+            )
+        )
 
     def render(exc: BaseException) -> str:
         exposed = globals().get("_SAFE_EXCEPTION_TYPE_LABEL")
-        if exposed is not canonical or canonical.__code__ is not canonical_code:
+        if (
+            exposed is not canonical
+            or canonical.__code__ is not canonical_code
+            or not authority_is_intact()
+        ):
             return "Exception"
         try:
-            return canonical(exc)
+            rendered = canonical(exc)
         except BaseException:
             return "Exception"
+        if not authority_is_intact():
+            return "Exception"
+        return rendered
 
     return canonical, render
 

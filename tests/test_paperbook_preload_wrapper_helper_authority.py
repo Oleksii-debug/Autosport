@@ -37,11 +37,24 @@ def _forged_from_raw_snapshot(cls, _raw: object):
     return cls("999")
 
 
+def _inner_persistence_wrapper(public_wrapper: FunctionType) -> FunctionType:
+    closure = public_wrapper.__closure__
+    assert closure is not None
+    for cell in closure:
+        value = cell.cell_contents
+        if (
+            type(value) is FunctionType
+            and "_require_class_callable_graph_witnesses" in value.__globals__
+        ):
+            return value
+    raise AssertionError("sealed inner PaperBook persistence wrapper is unavailable")
+
+
 def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The public load wrapper must not trust a mutable reachable verifier executable."""
+    """The outer seal must reject mutation of the reachable inner verifier executable."""
 
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
@@ -55,7 +68,8 @@ def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     load_descriptor = vars(PaperBook)["load"]
     assert type(load_descriptor) is classmethod
     public_load = load_descriptor.__func__
-    verifier = public_load.__globals__["_require_class_callable_graph_witnesses"]
+    inner_load = _inner_persistence_wrapper(public_load)
+    verifier = inner_load.__globals__["_require_class_callable_graph_witnesses"]
     assert type(verifier) is FunctionType
 
     parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]

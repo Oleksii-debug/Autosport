@@ -66,9 +66,9 @@ def _install_guard() -> None:
 
     # The canonical parser intentionally late-resolves helpers from its owning module.
     # Product curation must therefore witness that *real* namespace and the complete
-    # transitive parser graph, rather than trusting a replaceable module-level
-    # ``globals`` observer. This closes self-restoring helper/stale-view attacks between
-    # the curation parse and the canonical registry's parse of the same immutable bytes.
+    # direct parser graph, rather than trusting a replaceable module-level ``globals``
+    # observer. This closes self-restoring helper/stale-view attacks between the
+    # curation parse and the canonical registry's parse of the same immutable bytes.
     parser_helper_names = (
         "_strict_json_object",
         "_canonical_text",
@@ -86,6 +86,20 @@ def _install_guard() -> None:
     )
     canonical_hashlib = mapping_module.hashlib
     canonical_json = mapping_module.json
+    canonical_json_loads = canonical_json.loads
+    canonical_json_loads_code = exact_getattr(canonical_json_loads, "__code__", None)
+    canonical_json_decoder = canonical_json.JSONDecoder
+    canonical_json_decoder_init = exact_vars(canonical_json_decoder).get("__init__")
+    canonical_json_decoder_decode = exact_vars(canonical_json_decoder).get("decode")
+    canonical_json_decoder_raw_decode = exact_vars(canonical_json_decoder).get("raw_decode")
+    canonical_json_decoder_codes = tuple(
+        (member, exact_getattr(member, "__code__", None))
+        for member in (
+            canonical_json_decoder_init,
+            canonical_json_decoder_decode,
+            canonical_json_decoder_raw_decode,
+        )
+    )
     canonical_unicodedata = mapping_module.unicodedata
     canonical_datetime = mapping_module.datetime
     canonical_timezone = mapping_module.timezone
@@ -161,6 +175,23 @@ def _install_guard() -> None:
             or canonical_parser_globals.get("_RESERVED_SPORTS") is not canonical_reserved_sports
         ):
             raise canonical_error("canonical evidence parser dependency authority changed")
+        # ``_strict_json_object`` calls into the mutable stdlib ``json`` module. Merely
+        # witnessing the module object is insufficient: callers can replace
+        # ``json.loads`` in-place, self-restore during the first curation parse, and let
+        # the registry's later parse observe different bytes. Pin the exact decoder
+        # entry and its direct executable graph before any parser code is allowed to run.
+        if (
+            canonical_json.loads is not canonical_json_loads
+            or exact_getattr(canonical_json_loads, "__code__", None) is not canonical_json_loads_code
+            or canonical_json.JSONDecoder is not canonical_json_decoder
+            or exact_vars(canonical_json_decoder).get("__init__") is not canonical_json_decoder_init
+            or exact_vars(canonical_json_decoder).get("decode") is not canonical_json_decoder_decode
+            or exact_vars(canonical_json_decoder).get("raw_decode") is not canonical_json_decoder_raw_decode
+        ):
+            raise canonical_error("canonical evidence parser transitive JSON authority changed")
+        for member, expected_code in canonical_json_decoder_codes:
+            if member is not None and expected_code is not None and exact_getattr(member, "__code__", None) is not expected_code:
+                raise canonical_error("canonical evidence parser transitive JSON executable authority changed")
 
     def _assert_guard_authority(registry=None) -> None:
         if (

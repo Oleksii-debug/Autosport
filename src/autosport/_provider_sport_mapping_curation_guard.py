@@ -25,6 +25,9 @@ _PRODUCT_CURATED_PROVIDER_SPORTS = MappingProxyType(
     {
         ("betfair", "1"): (
             "football",
+            "2026-09-27T12:21:13Z",
+            None,
+            "2026-09-27T12:21:13Z",
             b'{"canonical_sport":"football","evidence_available_at":"2026-09-27T12:21:13Z",'
             b'"provider_namespace":"betfair","provider_sport_id":"1",'
             b'"schema":"autosport.provider_sport_mapping_evidence","schema_version":1,'
@@ -34,6 +37,9 @@ _PRODUCT_CURATED_PROVIDER_SPORTS = MappingProxyType(
         ),
         ("betfair", "2"): (
             "tennis",
+            "2026-09-27T12:21:13Z",
+            None,
+            "2026-09-27T12:21:13Z",
             b'{"canonical_sport":"tennis","evidence_available_at":"2026-09-27T12:21:13Z",'
             b'"provider_namespace":"betfair","provider_sport_id":"2",'
             b'"schema":"autosport.provider_sport_mapping_evidence","schema_version":1,'
@@ -84,6 +90,44 @@ def _install_guard() -> None:
     canonical_error = mapping_module.ProviderSportMappingError
     curated = _PRODUCT_CURATED_PROVIDER_SPORTS
 
+    evidence_field_names = (
+        "provider_namespace",
+        "provider_sport_id",
+        "canonical_sport",
+        "valid_from",
+        "valid_until",
+        "evidence_available_at",
+        "source_snapshot_sha256",
+    )
+    binding_field_names = (
+        *evidence_field_names,
+        "recorded_at",
+    )
+    resolution_field_names = (
+        "provider_namespace",
+        "provider_sport_id",
+        "canonical_sport",
+        "as_of",
+        "binding_id",
+        "source_snapshot_sha256",
+        "registry_sha256",
+    )
+
+    def _capture_surface(cls, field_names):
+        initializer = exact_vars(cls).get("__init__")
+        if not exact_callable(initializer):
+            raise exact_runtime_error(f"{cls.__name__} initializer must remain callable")
+        return (
+            cls.__getattribute__,
+            initializer,
+            exact_getattr(initializer, "__code__", None),
+            tuple((name, exact_vars(cls).get(name)) for name in field_names),
+        )
+
+    evidence_surface = _capture_surface(canonical_evidence_type, evidence_field_names)
+    binding_surface = _capture_surface(canonical_binding_type, binding_field_names)
+    resolution_surface = _capture_surface(canonical_resolution_type, resolution_field_names)
+
     # The canonical parser intentionally late-resolves helpers from its owning module.
     # Product curation must therefore witness that real namespace and the complete
     # direct parser graph rather than trust a replaceable module-level observer.
@@ -103,9 +147,13 @@ def _install_guard() -> None:
         for name, helper in canonical_parser_helpers
     )
     canonical_hashlib = mapping_module.hashlib
+    canonical_sha256 = canonical_hashlib.sha256
+    canonical_sha256_code = exact_getattr(canonical_sha256, "__code__", None)
     canonical_json = mapping_module.json
     canonical_json_loads = canonical_json.loads
     canonical_json_loads_code = exact_getattr(canonical_json_loads, "__code__", None)
+    canonical_json_dumps = canonical_json.dumps
+    canonical_json_dumps_code = exact_getattr(canonical_json_dumps, "__code__", None)
     canonical_json_decoder = canonical_json.JSONDecoder
     canonical_json_decoder_init = exact_vars(canonical_json_decoder).get("__init__")
     canonical_json_decoder_decode = exact_vars(canonical_json_decoder).get("decode")
@@ -174,6 +222,22 @@ def _install_guard() -> None:
     canonical_schema = mapping_module._SCHEMA
     canonical_version = mapping_module._VERSION
 
+    def _assert_surface(cls, expected_surface, label: str) -> None:
+        expected_getattribute, expected_init, expected_init_code, descriptors = expected_surface
+        current_init = exact_vars(cls).get("__init__")
+        if (
+            cls.__getattribute__ is not expected_getattribute
+            or current_init is not expected_init
+            or (
+                expected_init_code is not None
+                and exact_getattr(expected_init, "__code__", None) is not expected_init_code
+            )
+        ):
+            raise canonical_error(f"provider sport {label} field surface authority changed")
+        for name, descriptor in descriptors:
+            if exact_vars(cls).get(name) is not descriptor:
+                raise canonical_error(f"provider sport {label} field surface authority changed")
+
     def _curated_record(provider_namespace: str, provider_sport_id: str):
         # Do not invoke caller-defined hash/equality code while selecting product
         # authority. Only exact built-in strings may address the frozen table.
@@ -191,48 +255,77 @@ def _install_guard() -> None:
         provider_sport_id: str,
         record,
     ) -> None:
-        expected_sport, _raw, expected_source_sha256, expected_binding_id = record
+        (
+            expected_sport,
+            expected_valid_from,
+            expected_valid_until,
+            expected_available,
+            _raw,
+            expected_source_sha256,
+            _expected_binding_id,
+        ) = record
         if (
-            evidence.provider_namespace != provider_namespace
+            exact_type(evidence) is not canonical_evidence_type
+            or evidence.provider_namespace != provider_namespace
             or evidence.provider_sport_id != provider_sport_id
             or evidence.canonical_sport != expected_sport
+            or evidence.valid_from != expected_valid_from
+            or evidence.valid_until != expected_valid_until
+            or evidence.evidence_available_at != expected_available
             or evidence.source_snapshot_sha256 != expected_source_sha256
         ):
             raise canonical_error("provider sport mapping lacks product-owned curation provenance")
 
-        semantic = {
-            "provider_namespace": evidence.provider_namespace,
-            "provider_sport_id": evidence.provider_sport_id,
-            "canonical_sport": evidence.canonical_sport,
-            "valid_from": evidence.valid_from,
-            "valid_until": evidence.valid_until,
-            "evidence_available_at": evidence.evidence_available_at,
-            "source_snapshot_sha256": evidence.source_snapshot_sha256,
-        }
-        if canonical_digest(semantic) != expected_binding_id:
-            raise canonical_error("product-curated provider sport binding identity changed")
-
     def _require_curated_binding(binding, record) -> None:
-        expected_sport, _raw, expected_source_sha256, expected_binding_id = record
+        (
+            expected_sport,
+            expected_valid_from,
+            expected_valid_until,
+            expected_available,
+            _raw,
+            expected_source_sha256,
+            expected_binding_id,
+        ) = record
         if (
-            binding.canonical_sport != expected_sport
+            exact_type(binding) is not canonical_binding_type
+            or binding.canonical_sport != expected_sport
+            or binding.valid_from != expected_valid_from
+            or binding.valid_until != expected_valid_until
+            or binding.evidence_available_at != expected_available
             or binding.source_snapshot_sha256 != expected_source_sha256
             or binding.binding_id != expected_binding_id
         ):
             raise canonical_error("provider sport mapping lacks product-owned curation provenance")
 
-    def _require_curated_resolution(resolution) -> None:
+    def _require_curated_resolution(registry, resolution) -> None:
         record = _curated_record(
             resolution.provider_namespace,
             resolution.provider_sport_id,
         )
-        expected_sport, _raw, expected_source_sha256, expected_binding_id = record
+        (
+            expected_sport,
+            _expected_valid_from,
+            _expected_valid_until,
+            _expected_available,
+            _raw,
+            expected_source_sha256,
+            expected_binding_id,
+        ) = record
         if (
-            resolution.canonical_sport != expected_sport
+            exact_type(resolution) is not canonical_resolution_type
+            or resolution.canonical_sport != expected_sport
             or resolution.source_snapshot_sha256 != expected_source_sha256
             or resolution.binding_id != expected_binding_id
+            or exact_type(registry._bindings) is not list
         ):
             raise canonical_error("provider sport mapping lacks product-owned curation provenance")
+        matches = [
+            binding for binding in registry._bindings
+            if binding.binding_id == expected_binding_id
+        ]
+        if len(matches) != 1:
+            raise canonical_error("provider sport mapping lacks product-owned curation provenance")
+        _require_curated_binding(matches[0], record)
 
     def _assert_parser_authority() -> None:
         if canonical_parser.__globals__ is not canonical_parser_globals:
@@ -246,6 +339,11 @@ def _install_guard() -> None:
                 raise canonical_error("canonical evidence parser helper executable authority changed")
         if (
             canonical_parser_globals.get("hashlib") is not canonical_hashlib
+            or canonical_hashlib.sha256 is not canonical_sha256
+            or (
+                canonical_sha256_code is not None
+                and exact_getattr(canonical_sha256, "__code__", None) is not canonical_sha256_code
+            )
             or canonical_parser_globals.get("json") is not canonical_json
             or canonical_parser_globals.get("unicodedata") is not canonical_unicodedata
             or canonical_parser_globals.get("datetime") is not canonical_datetime
@@ -260,6 +358,8 @@ def _install_guard() -> None:
         if (
             canonical_json.loads is not canonical_json_loads
             or exact_getattr(canonical_json_loads, "__code__", None) is not canonical_json_loads_code
+            or canonical_json.dumps is not canonical_json_dumps
+            or exact_getattr(canonical_json_dumps, "__code__", None) is not canonical_json_dumps_code
             or canonical_json.JSONDecoder is not canonical_json_decoder
             or exact_vars(canonical_json_decoder).get("__init__") is not canonical_json_decoder_init
             or exact_vars(canonical_json_decoder).get("decode") is not canonical_json_decoder_decode
@@ -285,6 +385,9 @@ def _install_guard() -> None:
             or canonical_registry_resolve.__code__ is not canonical_registry_resolve_code
         ):
             raise canonical_error("provider sport curation authority changed")
+        _assert_surface(canonical_evidence_type, evidence_surface, "evidence")
+        _assert_surface(canonical_binding_type, binding_surface, "binding")
+        _assert_surface(canonical_resolution_type, resolution_surface, "resolution")
         _assert_parser_authority()
 
         if (
@@ -358,7 +461,15 @@ def _install_guard() -> None:
     ):
         _assert_guard_authority(self)
         record = _curated_record(provider_namespace, provider_sport_id)
-        _expected_sport, source_snapshot_bytes, _expected_source_sha256, expected_binding_id = record
+        (
+            _expected_sport,
+            _expected_valid_from,
+            _expected_valid_until,
+            _expected_available,
+            source_snapshot_bytes,
+            _expected_source_sha256,
+            expected_binding_id,
+        ) = record
 
         # One and only one semantic parse occurs on the positive product-curation path.
         evidence = canonical_parser(canonical_evidence_type, source_snapshot_bytes)
@@ -401,6 +512,7 @@ def _install_guard() -> None:
                 recorded_at=recorded_at,
             )
             _assert_guard_authority(self)
+            _require_curated_binding(candidate, record)
             if candidate.binding_id != expected_binding_id:
                 raise canonical_error("product-curated provider sport binding identity changed")
             for existing in self._bindings:
@@ -424,6 +536,7 @@ def _install_guard() -> None:
             canonical_persist(self, updated)
             self._bindings = updated
             _assert_guard_authority(self)
+            _require_curated_binding(candidate, record)
             return candidate
 
     def resolve(self, *, provider_namespace: str, provider_sport_id: str, as_of: str):
@@ -438,9 +551,7 @@ def _install_guard() -> None:
             as_of=as_of,
         )
         _assert_guard_authority(self)
-        if exact_type(resolution) is not canonical_resolution_type:
-            raise canonical_error("provider sport resolution authority changed")
-        _require_curated_resolution(resolution)
+        _require_curated_resolution(self, resolution)
         return resolution
 
     setattr(register_evidence, "_product_curation_authority_guard", True)

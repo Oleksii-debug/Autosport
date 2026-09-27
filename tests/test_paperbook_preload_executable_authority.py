@@ -34,6 +34,12 @@ def _hostile_load_bytes(cls, _payload: bytes):
     return cls("999")
 
 
+def _hostile_from_raw_snapshot(cls, _raw: object):
+    # Keep the classmethod call shape/free-variable shape compatible with the
+    # canonical parser while returning unrelated economics if dispatch reaches it.
+    return cls("999")
+
+
 def _hostile_save(_self, path: str | Path) -> None:
     # A mutated canonical serializer executable can currently supply arbitrary
     # bytes that the outer guard will then PREPARE/COMMIT as authoritative.
@@ -61,6 +67,33 @@ def test_path_load_rejects_in_place_canonical_decoder_code_mutation(
     monkeypatch.setattr(decoder, "__code__", _hostile_load_bytes.__code__)
 
     with pytest.raises(ValueError, match="executable|authority"):
+        PaperBook.load(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness.read_bytes() == witness_before
+
+
+def test_path_load_rejects_transitive_class_parser_code_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Witness the parser reached dynamically through ``cls`` after load_bytes."""
+
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
+    path = tmp_path / "paper-book.json"
+    source = PaperBook("100")
+    source.open_ticket([_leg("selection-class-parser")], "10", placed_at=_TS)
+    source.save(path)
+    snapshot_before = path.read_bytes()
+    witness = guard._witness_path(path)
+    witness_before = witness.read_bytes()
+
+    parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
+    assert type(parser_descriptor) is classmethod
+    parser = parser_descriptor.__func__
+    assert parser.__code__ is not _hostile_from_raw_snapshot.__code__
+    monkeypatch.setattr(parser, "__code__", _hostile_from_raw_snapshot.__code__)
+
+    with pytest.raises(ValueError, match="class|executable|authority"):
         PaperBook.load(path)
 
     assert path.read_bytes() == snapshot_before

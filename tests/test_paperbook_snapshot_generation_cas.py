@@ -228,3 +228,57 @@ def test_snapshot_publication_lock_fails_closed_for_competing_writer_and_reader(
     restored = PaperBook.load(path)
     assert restored.balance == Decimal("90")
     assert restored.committed_stake == Decimal("10")
+
+
+def test_load_recovers_replaced_snapshot_after_commit_publication_interruption(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+    candidate_path = tmp_path / "candidate-paper-book.json"
+
+    initial = PaperBook("100")
+    initial.save(path)
+    current = PaperBook.load(path)
+    current_ticket = current.open_ticket(
+        [_leg("current-selection", "3")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+
+    # Stage the exact bytes that the canonical serializer would have replaced,
+    # bypassing only witness publication so the test can model process death in
+    # the narrow post-replace / pre-COMMIT crash window.
+    guard._ORIGINAL_SAVE(current, candidate_path)
+    candidate_bytes = candidate_path.read_bytes()
+    candidate_sha = guard._file_sha256(candidate_path)
+    assert candidate_sha is not None
+
+    _records, committed, pending = guard._read_witnesses(path)
+    assert committed is not None
+    assert pending is None
+    generation = committed[0] + 1
+    guard._append_witness(
+        path,
+        event=guard._PREPARE,
+        generation=generation,
+        snapshot_sha256=candidate_sha,
+    )
+    path.write_bytes(candidate_bytes)
+
+    recovered = PaperBook.load(path)
+    assert recovered.balance == Decimal("90")
+    assert tuple(recovered.tickets) == (current_ticket.ticket_id,)
+
+    _records, committed_after, pending_after = guard._read_witnesses(path)
+    assert pending_after is None
+    assert committed_after == (generation, candidate_sha)
+
+    # Recovery must bind that exact completed generation so ordinary continuation
+    # advances from it instead of silently re-baselining the durable authority.
+    recovered.save(path)
+    _records, committed_final, pending_final = guard._read_witnesses(path)
+    assert pending_final is None
+    assert committed_final is not None
+    assert committed_final[0] > generation

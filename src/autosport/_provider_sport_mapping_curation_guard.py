@@ -224,6 +224,27 @@ def _install_guard() -> None:
 
     canonical_path_class = mapping_module.Path
     canonical_concrete_path_type = exact_type(canonical_path_class("."))
+    canonical_concrete_path_mro = canonical_concrete_path_type.__mro__
+
+    def _resolve_concrete_path_callable(name: str):
+        for owner in canonical_concrete_path_mro:
+            slot = exact_vars(owner).get(name)
+            if slot is None:
+                continue
+            if not exact_callable(slot):
+                raise exact_runtime_error(
+                    f"provider sport durable path callable is unavailable: {name}"
+                )
+            return owner, slot, exact_getattr(slot, "__code__", None)
+        raise exact_runtime_error(
+            f"provider sport durable path callable is unavailable: {name}"
+        )
+
+    canonical_concrete_path_surface = tuple(
+        (name, *_resolve_concrete_path_callable(name))
+        for name in ("exists", "read_text", "open")
+    )
+
     canonical_path_exists = canonical_path_class.exists
     canonical_path_exists_code = exact_getattr(canonical_path_exists, "__code__", None)
     canonical_path_read_text = canonical_path_class.read_text
@@ -431,6 +452,20 @@ def _install_guard() -> None:
             for name in ("_load", "_persist", "_assert_no_overlap")
         ):
             raise canonical_error("provider sport canonical mutation instance authority changed")
+
+        for name, expected_owner, expected_slot, expected_code in canonical_concrete_path_surface:
+            current_owner, current_slot, _current_code = _resolve_concrete_path_callable(name)
+            if current_owner is not expected_owner or current_slot is not expected_slot:
+                raise canonical_error(
+                    "provider sport durable concrete path dispatch authority changed"
+                )
+            if (
+                expected_code is not None
+                and exact_getattr(expected_slot, "__code__", None) is not expected_code
+            ):
+                raise canonical_error(
+                    "provider sport durable concrete path executable authority changed"
+                )
 
         if (
             mapping_module.Path is not canonical_path_class

@@ -6,9 +6,10 @@ writer could otherwise publish a newer durable generation between validation and
 reads, or a later class-descriptor rebind could bypass the live validator dispatch.
 
 Reuse the already-sealed persistence graph: acquire the same publication lock for the
-entire risk derivation and run the frozen canonical loaded-state validator before and
-after the original risk calculation. This module creates no risk store, parser,
-serializer, journal, or generation authority.
+entire risk derivation, require the existing frozen PaperBook class-callable graph, and
+run the frozen canonical loaded-state validator before and after the original risk
+calculation. This module creates no risk store, parser, serializer, journal, or
+generation authority.
 """
 
 from __future__ import annotations
@@ -32,17 +33,74 @@ def _descriptor_function(descriptor: object, expected_type: type) -> FunctionTyp
     return function
 
 
+def _clone_module_function_graph(function: FunctionType) -> FunctionType:
+    """Detach one verifier and its same-module Python helper graph."""
+
+    module_globals = function.__globals__
+    trusted_globals: dict[str, object] = dict(module_globals)
+    clones: dict[str, FunctionType] = {}
+    for name, value in tuple(module_globals.items()):
+        if type(value) is FunctionType and value.__globals__ is module_globals:
+            clone = FunctionType(
+                value.__code__,
+                trusted_globals,
+                name=value.__name__,
+                argdefs=value.__defaults__,
+                closure=value.__closure__,
+            )
+            if value.__kwdefaults__ is not None:
+                clone.__kwdefaults__ = dict(value.__kwdefaults__)
+            clone.__annotations__ = dict(value.__annotations__)
+            clone.__doc__ = value.__doc__
+            clone.__qualname__ = value.__qualname__
+            clones[name] = clone
+    trusted_globals.update(clones)
+    frozen = clones.get(function.__name__)
+    if frozen is None:
+        raise RuntimeError("canonical PaperBook class-graph verifier clone is unavailable")
+    return frozen
+
+
+def _sealed_load_trusted_globals(load_wrapper: FunctionType) -> dict[str, object]:
+    """Recover the closure-private globals snapshot created by the final wrapper seal."""
+
+    closure = load_wrapper.__closure__
+    if closure is None:
+        raise RuntimeError("canonical sealed PaperBook load wrapper has no closure authority")
+    for cell in closure:
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(value) is dict
+            and type(value.get("_FROZEN_LOAD")) is FunctionType
+            and "_LOAD_CLASS_CALLABLE_GRAPH_WITNESSES" in value
+            and type(value.get("_require_class_callable_graph_witnesses")) is FunctionType
+        ):
+            return value
+    raise RuntimeError("canonical sealed PaperBook load trusted globals are unavailable")
+
+
 def _guarded_risk_call(book, delegate, args, kwargs):
     """Run one risk derivation against a generation-stable canonical PaperBook."""
 
     publication_lock = None
     try:
+        _FROZEN_REQUIRE_CLASS_GRAPH(
+            _CANONICAL_PAPER_BOOK,
+            _PAPERBOOK_CLASS_WITNESSES,
+        )
         snapshot_path = _FROZEN_BOUND_SNAPSHOT_PATH(book)
         if snapshot_path is not None:
             publication_lock = _FROZEN_ACQUIRE_LOCK(_FROZEN_WITNESS_PATH(snapshot_path))
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
         result = delegate(*args, **kwargs)
         _FROZEN_VALIDATE_LOADED_STATE(_CANONICAL_PAPER_BOOK, book)
+        _FROZEN_REQUIRE_CLASS_GRAPH(
+            _CANONICAL_PAPER_BOOK,
+            _PAPERBOOK_CLASS_WITNESSES,
+        )
         return result
     except (ArithmeticError, AttributeError, TypeError, ValueError):
         # Canonical risk helpers already use None as their fail-closed invalid-state
@@ -96,14 +154,14 @@ def _install() -> None:
     paper_book = _paper.PaperBook
     policy = _risk.PaperRiskPolicy
 
-    # The public load wrapper owns the detached, already-sealed generation helper
-    # graph. Reuse those exact helpers instead of reaching back through mutable
-    # authority-module globals.
+    # wrapper_helper_guard replaces the load-dispatch wrapper with a closure-sealed
+    # public function. Its trusted globals snapshot contains the detached persistence
+    # graph and the class-callable witness captured before that final seal.
     load_descriptor = vars(paper_book).get("load")
     if type(load_descriptor) is not classmethod or type(load_descriptor.__func__) is not FunctionType:
         raise RuntimeError("canonical sealed PaperBook load wrapper is unavailable")
-    load_wrapper_globals = load_descriptor.__func__.__globals__
-    frozen_load = load_wrapper_globals.get("_FROZEN_LOAD")
+    load_trusted_globals = _sealed_load_trusted_globals(load_descriptor.__func__)
+    frozen_load = load_trusted_globals.get("_FROZEN_LOAD")
     if type(frozen_load) is not FunctionType:
         raise RuntimeError("canonical frozen PaperBook load graph is unavailable")
     sealed_globals = frozen_load.__globals__
@@ -126,6 +184,16 @@ def _install() -> None:
         validate_loaded_state,
     ) = helpers
 
+    class_graph_verifier = load_trusted_globals.get(
+        "_require_class_callable_graph_witnesses"
+    )
+    class_witnesses = load_trusted_globals.get(
+        "_LOAD_CLASS_CALLABLE_GRAPH_WITNESSES"
+    )
+    if type(class_graph_verifier) is not FunctionType or type(class_witnesses) is not tuple:
+        raise RuntimeError("canonical PaperBook class-callable witness is unavailable")
+    frozen_class_graph_verifier = _clone_module_function_graph(class_graph_verifier)
+
     namespace = vars(policy)
     book_state = _descriptor_function(namespace.get("_book_state"), classmethod)
     portfolio_hash = _descriptor_function(
@@ -142,6 +210,8 @@ def _install() -> None:
     private_globals.update(
         {
             "_CANONICAL_PAPER_BOOK": paper_book,
+            "_PAPERBOOK_CLASS_WITNESSES": class_witnesses,
+            "_FROZEN_REQUIRE_CLASS_GRAPH": frozen_class_graph_verifier,
             "_FROZEN_BOUND_SNAPSHOT_PATH": bound_snapshot_path,
             "_FROZEN_ACQUIRE_LOCK": acquire_lock,
             "_FROZEN_RELEASE_LOCK": release_lock,

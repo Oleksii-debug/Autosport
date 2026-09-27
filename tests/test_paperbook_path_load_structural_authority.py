@@ -101,13 +101,15 @@ def test_failed_final_replace_recovers_last_committed_snapshot(
 
     import autosport._paperbook_preload_authority_guard as guard
 
+    original_replace = guard._OS_REPLACE
+
     def fail_replace(*_args, **_kwargs):
         raise OSError("injected final replace failure")
 
     monkeypatch.setattr(guard, "_OS_REPLACE", fail_replace)
     with pytest.raises(OSError, match="injected final replace failure"):
         book.save(path)
-    monkeypatch.undo()
+    monkeypatch.setattr(guard, "_OS_REPLACE", original_replace)
 
     assert path.read_bytes() == last_good
     restored = PaperBook.load(path)

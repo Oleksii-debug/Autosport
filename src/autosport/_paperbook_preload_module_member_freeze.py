@@ -37,8 +37,12 @@ class _FrozenSurface(tuple):
 
     def __getattr__(self, name: str) -> object:
         if name == "_values":
-            return MappingProxyType(dict(tuple.__iter__(self)))
-        for member_name, member_value in tuple.__iter__(self):
+            return MappingProxyType({member_name: member_value for member_name, member_value in self})
+        # Iterate through the immutable tuple payload directly. Do not resolve a
+        # module-global ``tuple`` name here: an absent global captured at witness time
+        # could otherwise be injected later and retarget positive persistence dispatch
+        # without changing this method's code object.
+        for member_name, member_value in self:
             if member_name == name:
                 return member_value
         raise AttributeError(name)

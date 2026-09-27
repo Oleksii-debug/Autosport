@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import (
     Context,
     Decimal,
@@ -15,10 +15,83 @@ from decimal import (
     localcontext,
 )
 
+from pathlib import Path
+
 from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
+
+
+def _verify_product_risk_of_ruin_authority(
+    registry_path: str | Path | None,
+    evidence: object,
+    *,
+    kind: str,
+    available_by: str,
+) -> tuple[bool, str]:
+    # Import only when the mature authority-bearing policy path is evaluated.
+    # Importing this module while autosport.risk itself is initializing creates
+    # a cycle through ScientificRegistry -> agents -> decision_ledger -> risk.
+    from . import risk_of_ruin_authority as authority_module
+    from ._scientific_registry_read_authority import (
+        ScientificRegistryReadAuthorityError,
+        _source_owned_function,
+    )
+
+    try:
+        verifier = _source_owned_function(
+            authority_module.verify_risk_of_ruin_authority,
+            module=authority_module,
+            qualname="verify_risk_of_ruin_authority",
+        )
+    except ScientificRegistryReadAuthorityError:
+        prefix = "portfolio" if kind == "single" else "portfolio vector"
+        return False, f"{prefix} risk-of-ruin product authority verifier changed"
+
+    return verifier(
+        registry_path,
+        evidence,
+        kind=kind,
+        available_by=available_by,
+    )
+
+
+def _build_product_risk_authority_dispatch(verifier):
+    """Pin the exact lazy authority helper executable used by the policy gate."""
+
+    verifier_code = verifier.__code__
+    dispatch_code = None
+
+    def dispatch(
+        registry_path: str | Path | None,
+        evidence: object,
+        *,
+        kind: str,
+        available_by: str,
+    ) -> tuple[bool, str]:
+        if (
+            dispatch.__code__ is not dispatch_code
+            or _verify_product_risk_of_ruin_authority is not verifier
+            or getattr(verifier, "__code__", None) is not verifier_code
+        ):
+            prefix = "portfolio" if kind == "single" else "portfolio vector"
+            return False, f"{prefix} risk-of-ruin product authority dispatch changed"
+        return verifier(
+            registry_path,
+            evidence,
+            kind=kind,
+            available_by=available_by,
+        )
+
+    dispatch_code = dispatch.__code__
+    return dispatch
+
+
+_PRODUCT_RISK_AUTHORITY_DISPATCH = _build_product_risk_authority_dispatch(
+    _verify_product_risk_of_ruin_authority
+)
+del _build_product_risk_authority_dispatch
 
 
 def _canonical_context_text(name: str, value: object) -> str:
@@ -672,6 +745,8 @@ class PaperRiskPolicy:
                                 "market_id": leg.market_id,
                                 "selection_id": leg.selection_id,
                                 "locked_odds": str(leg.locked_odds),
+                                "sport": leg.sport,
+                                "exchange_side": leg.exchange_side,
                             }
                             for leg in ticket.legs
                         ],
@@ -697,7 +772,7 @@ class PaperRiskPolicy:
                 )
             return _sha256_payload(
                 {
-                    "schema": "autosport.paper-risk-state.v3",
+                    "schema": "autosport.paper-risk-state.v4",
                     "initial_bankroll": str(book.initial_bankroll),
                     "balance": str(book.balance),
                     "tickets": tickets,
@@ -726,12 +801,14 @@ class PaperRiskPolicy:
                     "market_id": leg.market_id,
                     "selection_id": leg.selection_id,
                     "locked_odds": str(leg.locked_odds),
+                    "sport": leg.sport,
+                    "exchange_side": leg.exchange_side,
                 }
                 for leg in sorted(context.legs, key=lambda item: item.quote_key)
             ]
             return _sha256_payload(
                 {
-                    "schema": "autosport.risk-candidate.v2",
+                    "schema": "autosport.risk-candidate.v3",
                     "legs": legs,
                     "quotes": quotes,
                     "provider_accounts": [
@@ -1884,3 +1961,110 @@ class PaperRiskPolicy:
         if remaining_balance < reserve_limit:
             return RiskDecision(False, "minimum virtual cash reserve would be violated")
         return RiskDecision(True, "allowed")
+
+
+# Preserve the mature risk engine in this original public module and extend only
+# the canonical PaperRiskPolicy consumer with the product-issued ruin-authority
+# gate.  Keeping the base definitions here preserves historical module identity
+# for every other public risk type and helper.
+_PaperRiskPolicyCore = PaperRiskPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class PaperRiskPolicy(_PaperRiskPolicyCore):
+    """Canonical paper risk policy with durable risk-of-ruin result authority."""
+
+    risk_of_ruin_registry_path: str | Path | None = None
+
+    def __post_init__(self) -> None:
+        _PaperRiskPolicyCore.__post_init__(self)
+        raw_path = self.risk_of_ruin_registry_path
+        if raw_path is None:
+            return
+        if not isinstance(raw_path, (str, Path)):
+            raise TypeError("risk_of_ruin_registry_path must be str, Path or None")
+        canonical = str(raw_path)
+        if not canonical or canonical != canonical.strip():
+            raise ValueError("risk_of_ruin_registry_path must be a non-empty canonical path")
+        object.__setattr__(self, "risk_of_ruin_registry_path", canonical)
+
+    def provenance_payload(self) -> dict[str, object]:
+        payload = dict(_PaperRiskPolicyCore.provenance_payload(self))
+        if self.risk_of_ruin_registry_path is not None:
+            payload["schema_version"] = 2
+            payload["risk_of_ruin_authority"] = {
+                "kind": "scientific_registry_evaluation_bundle_v1",
+                "registry_path": str(self.risk_of_ruin_registry_path),
+            }
+        return payload
+
+    def _risk_of_ruin_evidence_decision(
+        self,
+        book: PaperBook,
+        amount: Decimal,
+        goal: EconomicGoalContract,
+        context: ProposedTicketRiskContext,
+        _authority_dispatch=_PRODUCT_RISK_AUTHORITY_DISPATCH,
+    ) -> RiskDecision | None:
+        base_decision = _PaperRiskPolicyCore._risk_of_ruin_evidence_decision(
+            book,
+            amount,
+            goal,
+            context,
+        )
+        if base_decision is not None or goal.max_risk_of_ruin >= Decimal("1"):
+            return base_decision
+        evidence = context.risk_of_ruin_evidence
+        assert evidence is not None
+        assert context.proposal_ts is not None
+        verified, reason = _authority_dispatch(
+            self.risk_of_ruin_registry_path,
+            evidence,
+            kind="single",
+            available_by=context.proposal_ts,
+        )
+        return None if verified else RiskDecision(False, reason)
+
+    def _risk_of_ruin_vector_evidence_decision(
+        self,
+        book: PaperBook,
+        goal: EconomicGoalContract,
+        contexts: tuple[ProposedTicketRiskContext, ...],
+        stakes: tuple[Decimal, ...],
+        evidence: RiskOfRuinVectorEvidence | None,
+        _authority_dispatch=_PRODUCT_RISK_AUTHORITY_DISPATCH,
+    ) -> RiskDecision | None:
+        base_decision = _PaperRiskPolicyCore._risk_of_ruin_vector_evidence_decision(
+            book,
+            goal,
+            contexts,
+            stakes,
+            evidence,
+        )
+        if base_decision is not None or goal.max_risk_of_ruin >= Decimal("1"):
+            return base_decision
+        assert evidence is not None
+        proposal_times = [
+            _canonical_context_timestamp("proposal_ts", context.proposal_ts)[1]
+            for context in contexts
+            if context.proposal_ts is not None
+        ]
+        if len(proposal_times) != len(contexts):
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin evidence lacks canonical proposal time",
+            )
+        available_by = min(proposal_times).astimezone(timezone.utc).isoformat()
+        verified, reason = _authority_dispatch(
+            self.risk_of_ruin_registry_path,
+            evidence,
+            kind="vector",
+            available_by=available_by,
+        )
+        return None if verified else RiskDecision(False, reason)
+
+
+# The policy methods retain the exact guarded dispatcher in their immutable
+# function defaults.  Do not leave a module-global callable that can be rebound
+# into positive financial authority.
+del _PRODUCT_RISK_AUTHORITY_DISPATCH

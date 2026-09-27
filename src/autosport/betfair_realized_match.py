@@ -452,6 +452,14 @@ def _check_common_row_identity(
         raise RealizedMatchEvidenceError(
             "provider order row has a different side"
         )
+    if (
+        type(row) is BetfairClearedOrderObservation
+        and row.event_id is not None
+        and row.event_id != action.event_id
+    ):
+        raise RealizedMatchEvidenceError(
+            "cleared provider order row belongs to a different event"
+        )
     if row.customer_order_ref != provider_order_ref:
         raise RealizedMatchEvidenceError(
             "provider order row lacks the exact durable customer order reference"

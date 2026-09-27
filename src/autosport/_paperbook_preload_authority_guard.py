@@ -376,10 +376,17 @@ def _append_witness(
     snapshot_sha256: str,
 ) -> None:
     records, _, _ = _read_witnesses(snapshot_path)
-    previous = None if not records else str(records[-1]["witness_sha256"])
+    if records:
+        previous = _require_sha256(
+            records[-1]["witness_sha256"], "snapshot witness predecessor"
+        )
+        sequence = _INT_TYPE(records[-1]["sequence"]) + 1
+    else:
+        previous = None
+        sequence = 1
     body: dict[str, object] = {
         "witness_schema_version": _WITNESS_SCHEMA_VERSION,
-        "sequence": len(records) + 1,
+        "sequence": sequence,
         "generation": generation,
         "event": event,
         "snapshot_identity": _snapshot_identity(snapshot_path),
@@ -495,8 +502,6 @@ def _trusted_path_load(cls, path: str | Path):
             cls,
             payload,
         )
-        # load_bytes intentionally revokes both registries. Re-register only after
-        # the independent witness has authenticated the exact immutable byte image.
         _call_witnessed_delegate(
             _REGISTER_OPENING,
             _REGISTER_OPENING_WITNESS,
@@ -561,8 +566,6 @@ def _trusted_save(self, path: str | Path) -> None:
             temporary = _PATH(temporary_name)
             temporary.unlink()
 
-            # Reuse the current canonical serializer and all of its private opening
-            # / causal candidate validation; only the publication boundary is new.
             _call_witnessed_delegate(
                 _ORIGINAL_SAVE,
                 _ORIGINAL_SAVE_WITNESS,
@@ -578,19 +581,12 @@ def _trusted_save(self, path: str | Path) -> None:
                 try:
                     _require_bound_book(self, destination)
                 except ValueError:
-                    # Canonical product restart may reconstruct an independently
-                    # authoritative in-memory book, compare it to the durable copy,
-                    # then continue using that object. Exact canonical-byte equality
-                    # is the only safe generic rebind: structural load_bytes objects
-                    # cannot reach this point because _ORIGINAL_SAVE rejects them.
                     if candidate_sha != current_sha:
                         raise ValueError(
                             "existing PaperBook snapshot lineage requires verified path-bound authority"
                         )
                     _bind_book(self, destination)
 
-            # Re-read the authority immediately before PREPARE so in-process
-            # concurrent publication cannot silently fork the witness generation.
             records_now, committed_now, pending_now = _read_witnesses(destination)
             if pending_now is not None:
                 raise ValueError("PaperBook snapshot witness changed during save")
@@ -600,8 +596,6 @@ def _trusted_save(self, path: str | Path) -> None:
                 raise ValueError("PaperBook snapshot changed during save")
 
             generation = 1 if not records_now else _INT_TYPE(records_now[-1]["generation"]) + 1
-            # Bind only once the canonical candidate exists and the target lineage is
-            # stable. A root/path change on later saves is then mechanically rejected.
             _bind_book(self, destination)
             _append_witness(
                 destination,
@@ -632,7 +626,5 @@ _trusted_path_load.__qualname__ = "PaperBook.load"
 _trusted_save.__name__ = "save"
 _trusted_save.__qualname__ = "PaperBook.save"
 
-# Preserve one canonical parser/serializer. The guard replaces only path publication
-# and positive restart admission, both composed with the existing authority root.
 _PAPER_BOOK.load = classmethod(_trusted_path_load)
 _PAPER_BOOK.save = _trusted_save

@@ -190,6 +190,15 @@ def _bound_snapshot_path(book):
     return _PATH(binding[1])
 
 
+def _generation_guarded_validate_loaded_state(cls, book):
+    """Reject stale path-bound economic state before canonical validation/readout."""
+
+    snapshot_path = _bound_snapshot_path(book)
+    if snapshot_path is not None:
+        _require_bound_book(book, snapshot_path)
+    return _GENERATION_ORIGINAL_VALIDATE_LOADED_STATE(cls, book)
+
+
 def _generation_guarded_load(cls, path):
     source = _PATH(path)
     witness = _witness_path(source)
@@ -260,11 +269,15 @@ def _install() -> None:
 
     trusted_load = guard_namespace.get("_trusted_path_load")
     trusted_save = guard_namespace.get("_trusted_save")
+    validate_descriptor = paper_namespace.get("_validate_loaded_state")
     committed_stake_descriptor = paper_namespace.get("committed_stake")
     open_ticket = paper_namespace.get("open_ticket")
     settle = paper_namespace.get("settle")
     if any(type(value) is not FunctionType for value in (trusted_load, trusted_save, open_ticket, settle)):
         raise RuntimeError("canonical PaperBook generation-CAS composition surface changed")
+    if type(validate_descriptor) is not classmethod or type(validate_descriptor.__func__) is not FunctionType:
+        raise RuntimeError("canonical PaperBook loaded-state validation authority changed")
+    validate_loaded_state = validate_descriptor.__func__
     if (
         type(committed_stake_descriptor) is not property
         or type(committed_stake_descriptor.fget) is not FunctionType
@@ -301,6 +314,7 @@ def _install() -> None:
     guard_namespace["_SNAPSHOT_PUBLICATION_PROCESS_LOCKS"] = set()
     guard_namespace["_SNAPSHOT_PUBLICATION_LOCKED_ERROR"] = _LOCKED_ERROR
     guard_namespace["_SNAPSHOT_AUTHORITY_STALE_ERROR"] = _STALE_ERROR
+    guard_namespace["_GENERATION_ORIGINAL_VALIDATE_LOADED_STATE"] = validate_loaded_state
     guard_namespace["_GENERATION_ORIGINAL_TRUSTED_LOAD"] = trusted_load
     guard_namespace["_GENERATION_ORIGINAL_TRUSTED_SAVE"] = trusted_save
     guard_namespace["_GENERATION_ORIGINAL_COMMITTED_STAKE"] = committed_stake_getter
@@ -318,6 +332,7 @@ def _install() -> None:
         _require_bound_book,
         _advance_book_binding,
         _bound_snapshot_path,
+        _generation_guarded_validate_loaded_state,
         _generation_guarded_load,
         _generation_guarded_save,
         _generation_guarded_committed_stake,
@@ -326,12 +341,15 @@ def _install() -> None:
     ):
         guard_namespace[function.__name__] = _clone_into_guard(function)
 
+    guarded_validate_loaded_state = guard_namespace["_generation_guarded_validate_loaded_state"]
     guarded_load = guard_namespace["_generation_guarded_load"]
     guarded_save = guard_namespace["_generation_guarded_save"]
     guarded_committed_stake = guard_namespace["_generation_guarded_committed_stake"]
     guarded_open = guard_namespace["_generation_guarded_open_ticket"]
     guarded_settle = guard_namespace["_generation_guarded_settle"]
 
+    guarded_validate_loaded_state.__name__ = "_validate_loaded_state"
+    guarded_validate_loaded_state.__qualname__ = "PaperBook._validate_loaded_state"
     guarded_load.__name__ = "load"
     guarded_load.__qualname__ = "PaperBook.load"
     guarded_save.__name__ = "save"
@@ -343,6 +361,7 @@ def _install() -> None:
     guarded_settle.__name__ = "settle"
     guarded_settle.__qualname__ = "PaperBook.settle"
 
+    paper_book._validate_loaded_state = classmethod(guarded_validate_loaded_state)
     guard_namespace["_trusted_path_load"] = guarded_load
     guard_namespace["_trusted_save"] = guarded_save
     paper_book.load = classmethod(guarded_load)

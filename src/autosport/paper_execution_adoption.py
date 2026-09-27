@@ -539,6 +539,24 @@ class PaperExecutionAdoptionRuntime:
             payload=self._exposure_scope_payload(prepared),
         )
 
+    @staticmethod
+    def _require_attempt_action_identity(attempt, action: ExecutionAction) -> None:
+        if (
+            attempt.action_id != action.action_id
+            or attempt.bookmaker_id != action.bookmaker_id
+            or attempt.account_id != action.account_id
+            or attempt.event_id != action.event_id
+            or attempt.market_id != action.market_id
+            or attempt.selection_id != action.selection_id
+            or attempt.side != action.side
+            or attempt.decision_quote_id != action.quote_id
+            or attempt.decision_odds != action.requested_odds
+            or attempt.requested_stake != action.requested_stake
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable execution attempt identity does not match prepared action"
+            )
+
     def assert_recoverable_book_state(
         self,
         *,
@@ -597,7 +615,8 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "durable attempt is not bound to prepared execution action"
                 )
-            if action.side != "BACK" or attempt.side != action.side:
+            self._require_attempt_action_identity(attempt, action)
+            if action.side != "BACK":
                 raise PaperExecutionAdoptionError(
                     "PaperBook recovery materialization requires matching BACK attempt side"
                 )
@@ -778,7 +797,8 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
         decision_id: str,
     ) -> PaperTicket:
-        if action.side != "BACK" or attempt.side != action.side:
+        self._require_attempt_action_identity(attempt, action)
+        if action.side != "BACK":
             raise PaperExecutionAdoptionError(
                 "PaperBook materialization requires matching BACK attempt side"
             )
@@ -842,8 +862,14 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
     ) -> bool:
         if (
-            action.side != "BACK"
+            attempt.action_id != action.action_id
+            or action.side != "BACK"
             or attempt.side != action.side
+            or attempt.bookmaker_id != action.bookmaker_id
+            or attempt.account_id != action.account_id
+            or attempt.event_id != action.event_id
+            or attempt.market_id != action.market_id
+            or attempt.selection_id != action.selection_id
             or ticket.stake != attempt.execution_stake
             or ticket.placed_at != attempt.execution_observed_at
             or len(ticket.legs) != 1

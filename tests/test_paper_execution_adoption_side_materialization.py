@@ -8,6 +8,7 @@ import pytest
 
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PaperExposureBinding,
     PreparedPaperExecution,
@@ -88,7 +89,7 @@ def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
     )
 
 
-def _attempt():
+def _attempt(*, side: str = "BACK"):
     action = _action()
     return SimpleNamespace(
         action_id=action.action_id,
@@ -100,6 +101,7 @@ def _attempt():
         selection_id=action.selection_id,
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,
+        side=side,
         execution_odds=Decimal("2.25"),
         execution_stake=Decimal("10.00"),
         execution_observed_at=_STARTED_AT,
@@ -154,6 +156,25 @@ def test_back_attempt_materialization_preserves_side_identity_durably(tmp_path: 
         action=action,
         binding=binding,
     )
+
+
+def test_attempt_side_must_match_back_action_before_book_mutation(tmp_path: Path) -> None:
+    _ledger, runtime = _runtime(tmp_path)
+    attempt = _attempt(side="LAY")
+    action = _action()
+    binding = _binding()
+    balance_before = runtime.book.balance
+
+    with pytest.raises(PaperExecutionAdoptionError, match="side|BACK"):
+        runtime._materialize_attempt(
+            attempt=attempt,
+            action=action,
+            binding=binding,
+            decision_id="side-decision",
+        )
+
+    assert runtime.book.balance == balance_before
+    assert runtime.book.tickets == {}
 
 
 def test_restart_recovery_reconstructs_back_side_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

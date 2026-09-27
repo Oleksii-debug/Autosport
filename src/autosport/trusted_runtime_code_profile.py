@@ -146,11 +146,10 @@ def _workspace_text(runtime: AutonomousProductRuntime) -> str:
 def _canonical_runtime_is_running(runtime: object) -> bool:
     """Fail closed when the real product runtime has already left RUNNING state.
 
-    Tests may replace the public ``AutonomousProductRuntime`` alias with a narrow
-    fake to exercise object-origin semantics.  The state proof is deliberately
-    bound to the import-captured product type and unbound status method so ordinary
-    module/global rebinding cannot turn a STOPPED canonical runtime back into an
-    active trusted-code prerequisite.
+    The state proof is deliberately bound to the import-captured product type and
+    unbound status method. Runtime objects of every other exact type fail closed, so
+    ordinary rebinding of the public module alias cannot substitute a fake runtime or
+    turn a STOPPED canonical runtime back into an active trusted-code prerequisite.
     """
 
     if type(runtime) is not _CANONICAL_RUNTIME_TYPE:

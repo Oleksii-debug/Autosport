@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
+from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .opportunity import QuoteRef
 from .paper import PaperBook
@@ -181,23 +182,20 @@ class PaperExecutionAdoptionRuntime:
                 self.book,
                 "configured PaperBook does not match durable snapshot",
             )
-            # State equality alone does not bind the caller-owned PaperBook to the
-            # durable generation. Re-publish the exact unchanged canonical bytes
-            # through the existing same-path authority before any later economic
-            # mutation. The persistence guard admits an unbound object here only
-            # when its canonical serialization exactly matches the witnessed bytes.
+            # Existing durable state must be read-only at construction. Requiring
+            # the canonical generation binding proves that this exact caller object
+            # was loaded/adopted through the existing PaperBook authority without
+            # minting a no-op PREPARE/COMMIT generation. A merely structurally-equal
+            # caller is rejected rather than gaining path authority through save().
             try:
-                self.book.save(self.paper_book_path)
+                _paperbook_authority._require_bound_book(
+                    self.book,
+                    self.paper_book_path,
+                )
             except (TypeError, ValueError) as exc:
                 raise PaperExecutionAdoptionError(
-                    "configured PaperBook cannot bind exact durable snapshot authority"
+                    "configured PaperBook lacks current durable snapshot authority"
                 ) from exc
-            rebound_book = PaperBook.load(self.paper_book_path)
-            self._assert_same_book_state(
-                rebound_book,
-                self.book,
-                "configured PaperBook changed while binding durable snapshot authority",
-            )
         else:
             self.book.save(self.paper_book_path)
             durable_book = PaperBook.load(self.paper_book_path)

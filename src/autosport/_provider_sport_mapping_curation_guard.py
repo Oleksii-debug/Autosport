@@ -391,8 +391,11 @@ def _install_guard() -> None:
                 raise canonical_error("canonical evidence parser transitive JSON executable authority changed")
 
     def _assert_guard_authority(registry=None) -> None:
+        if registry is not None and exact_type(registry) is not registry_type:
+            raise canonical_error("canonical provider sport registry type is required")
         if (
-            registry_type.register_evidence is not register_evidence
+            mapping_module.ProviderSportMappingRegistry is not registry_type
+            or registry_type.register_evidence is not register_evidence
             or registry_type.register_curated is not register_curated
             or registry_type.resolve is not resolve
         ):

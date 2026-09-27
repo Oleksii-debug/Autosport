@@ -133,15 +133,19 @@ def test_path_load_uses_frozen_independent_root_after_original_code_mutation(
     source.open_ticket([_leg("selection-root-code")], "10", placed_at=_TS)
     source.save(path)
     snapshot_before = path.read_bytes()
-    witness_before = guard._witness_path(path).read_bytes()
+    witness = guard._witness_path(path)
+    witness_before = witness.read_bytes()
 
     root_selector = guard._paper_authority_root
-    assert root_selector.__code__ is not _hostile_authority_root.__code__
+    original_code = root_selector.__code__
+    assert original_code is not _hostile_authority_root.__code__
     monkeypatch.setattr(root_selector, "__code__", _hostile_authority_root.__code__)
 
-    loaded = PaperBook.load(path)
+    try:
+        loaded = PaperBook.load(path)
+        assert loaded.balance == Decimal("90")
+        assert path.read_bytes() == snapshot_before
+    finally:
+        root_selector.__code__ = original_code
 
-    assert loaded.balance == Decimal("90")
-    assert path.read_bytes() == snapshot_before
-    monkeypatch.undo()
-    assert guard._witness_path(path).read_bytes() == witness_before
+    assert witness.read_bytes() == witness_before

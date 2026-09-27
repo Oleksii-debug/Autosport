@@ -60,3 +60,12 @@ def test_owner_facing_derive_root_cannot_be_deleted() -> None:
     finally:
         if vars(PaperRiskPolicy).get("derive_goal_stake") is not original:
             setattr(PaperRiskPolicy, "derive_goal_stake", original)
+
+
+def test_root_dispatch_seal_preserves_canonical_policy_class_identity() -> None:
+    """Authority sealing must not publish a facade subclass as a second policy class."""
+
+    # PaperRiskPolicy is defined as the product's canonical dataclass, directly over
+    # object. A post-composition subclass facade changes type identity for objects and
+    # modules that captured the original class even when it delegates all behavior.
+    assert PaperRiskPolicy.__bases__ == (object,)

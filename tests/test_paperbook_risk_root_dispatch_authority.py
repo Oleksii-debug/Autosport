@@ -107,3 +107,18 @@ def test_owner_facing_root_cannot_be_replaced_via_base_type_api() -> None:
     finally:
         if vars(PaperRiskPolicy).get("evaluate") is not original:
             type.__setattr__(PaperRiskPolicy, "evaluate", original)
+
+
+def test_sealed_policy_cannot_be_subclassed_into_alternate_root_authority() -> None:
+    """A subclass override must not become an alternate positive risk-policy authority."""
+
+    subclass_rejected = False
+    try:
+        class HostilePaperRiskPolicy(PaperRiskPolicy):
+            def evaluate(self, book, stake, *, context=None):
+                del self, book, stake, context
+                return None
+    except TypeError:
+        subclass_rejected = True
+
+    assert subclass_rejected is True

@@ -146,6 +146,10 @@ def _make_admission(
             delegate.__kwdefaults__ = dict(kwdefaults)
         return delegate(*args, **kwargs)
 
+    require_executables_code = require_executables.__code__
+    require_private_code = require_private.__code__
+    call_spec_code = call_spec.__code__
+
     def admitted_call(
         book: object,
         spec: tuple[object, ...],
@@ -156,6 +160,15 @@ def _make_admission(
         snapshot_path = None
         held_reads = None
         try:
+            if (
+                exact_type(require_executables) is not function_type
+                or require_executables.__code__ is not require_executables_code
+                or exact_type(require_private) is not function_type
+                or require_private.__code__ is not require_private_code
+                or exact_type(call_spec) is not function_type
+                or call_spec.__code__ is not call_spec_code
+            ):
+                raise ValueError("canonical risk admission closure authority changed")
             require_executables()
             frozen_require_class_graph(
                 canonical_paper_book,
@@ -194,6 +207,12 @@ def _make_admission(
                 paperbook_class_witnesses,
             )
             require_executables()
+            if (
+                require_executables.__code__ is not require_executables_code
+                or require_private.__code__ is not require_private_code
+                or call_spec.__code__ is not call_spec_code
+            ):
+                raise ValueError("canonical risk admission closure authority changed")
             return result
         except (ArithmeticError, AttributeError, TypeError, ValueError):
             return failure_result

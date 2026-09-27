@@ -7,10 +7,12 @@ import subprocess
 import sys
 import tempfile
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
+from .domain import TicketLeg
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .restart_recovery_audit import run_restart_recovery_audit
@@ -106,9 +108,27 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
             )
         )
         # Cross the durable PRECOMMIT boundary before the parent kills this process.
-        # A distinct bankroll value is an audit canary proving recovery promotes NEW
-        # rather than merely observing unchanged BASE state.
-        transaction.stage_outputs(PaperBook("101"), ledger_path)
+        # The staged PaperBook must come from the exact canonical witnessed BASE;
+        # caller-authored/unbound economic state is intentionally rejected by
+        # RunTransaction. Add one deterministic BACK paper ticket so recovery still
+        # has to promote a genuinely distinct NEW PaperBook generation.
+        staged_book = PaperBook.load(paper_path)
+        staged_book.open_ticket(
+            [
+                TicketLeg(
+                    event_id="process-recovery-audit:event",
+                    market_id="process-recovery-audit:winner",
+                    selection_id="process-recovery-audit:home",
+                    locked_odds=Decimal("2"),
+                    sport="motorsport",
+                    exchange_side="back",
+                )
+            ],
+            Decimal("1"),
+            reason="process-recovery-audit-canary",
+            placed_at="2000-01-01T00:00:00+00:00",
+        )
+        transaction.stage_outputs(staged_book, ledger_path)
         summary = transaction.precommit(
             {
                 "schema_version": 2,

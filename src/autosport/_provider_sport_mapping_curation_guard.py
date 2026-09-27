@@ -2,16 +2,15 @@ from __future__ import annotations
 
 """Install product-owned curation before provider-sport mappings become positive truth.
 
-Exact caller-authored JSON bytes prove integrity only. They do not prove that a
-provider sport identity maps to an Autosport canonical sport. The generic durable
-registry remains the storage/chronology authority, while this thin guard supplies the
-missing product curation authority for mappings Autosport has explicitly admitted.
+Caller-authored JSON bytes are structural evidence only. They cannot mint a positive
+provider-to-canonical sport mapping. Positive publication is limited to source-reviewed
+records frozen in product code; callers may select only an admitted provider identity,
+not the canonical sport, validity interval, evidence time, or source digest.
 
-The guard deliberately parses each candidate exactly once. The resulting exact
-``ProviderSportEvidence`` object is then carried through the canonical registry's
-captured load/overlap/persist primitives. This avoids a second semantic interpretation
-between curation and durable publication without creating another parser, store, or
-registry.
+The guard deliberately parses each frozen product record exactly once and carries that
+exact ``ProviderSportEvidence`` object through the canonical registry's captured
+load/overlap/persist primitives. This preserves the existing parser, chronology,
+durability and resolution authorities without creating a second mapping stack.
 """
 
 from types import MappingProxyType
@@ -19,12 +18,29 @@ from types import MappingProxyType
 from . import provider_sport_mapping as mapping
 
 
-# Betfair eventTypeId 1/2 are the product's currently admitted canonical mappings.
-# Keep provider identifiers opaque; do not infer new mappings from textual shape.
+# These are product-curation assertions, not provider-origin claims. The validity
+# boundary is intentionally the curation admission instant: this code does not claim
+# that the mapping was product-authoritative before that point.
 _PRODUCT_CURATED_PROVIDER_SPORTS = MappingProxyType(
     {
-        ("betfair", "1"): "football",
-        ("betfair", "2"): "tennis",
+        ("betfair", "1"): (
+            "football",
+            b'{"canonical_sport":"football","evidence_available_at":"2026-09-27T12:10:00Z",'
+            b'"provider_namespace":"betfair","provider_sport_id":"1",'
+            b'"schema":"autosport.provider_sport_mapping_evidence","schema_version":1,'
+            b'"valid_from":"2026-09-27T12:10:00Z","valid_until":null}',
+            "8f9e2045ac58183711bff88d9fb7df5661c2d5e3dc3ba56c4cbf3253b96d7e5d",
+            "58b7388a83ba7153f49692bf9085e13b3c44a9a74fae2392c854b1d2e8723ba7",
+        ),
+        ("betfair", "2"): (
+            "tennis",
+            b'{"canonical_sport":"tennis","evidence_available_at":"2026-09-27T12:10:00Z",'
+            b'"provider_namespace":"betfair","provider_sport_id":"2",'
+            b'"schema":"autosport.provider_sport_mapping_evidence","schema_version":1,'
+            b'"valid_from":"2026-09-27T12:10:00Z","valid_until":null}',
+            "8670f58946a8c99266f784c0a1f331bfacaa00bff301b801216f0967d469fbc8",
+            "e041f447af18a78da612622087a7b3b779228477588da33f444df5f95766b01d",
+        ),
     }
 )
 
@@ -43,8 +59,12 @@ def _install_guard() -> None:
     registry_type = mapping_module.ProviderSportMappingRegistry
     current_register = registry_type.register_evidence
     current_resolve = registry_type.resolve
+    existing_curated = exact_getattr(registry_type, "register_curated", None)
     if exact_getattr(current_register, "_product_curation_authority_guard", False):
-        if not exact_getattr(current_resolve, "_product_curation_authority_guard", False):
+        if (
+            not exact_getattr(current_resolve, "_product_curation_authority_guard", False)
+            or not exact_getattr(existing_curated, "_product_curation_authority_guard", False)
+        ):
             raise exact_runtime_error("provider sport curation guard is only partially installed")
         return
 
@@ -154,16 +174,61 @@ def _install_guard() -> None:
     canonical_schema = mapping_module._SCHEMA
     canonical_version = mapping_module._VERSION
 
-    def _require_curated(
+    def _curated_record(provider_namespace: str, provider_sport_id: str):
+        record = curated.get((provider_namespace, provider_sport_id))
+        if record is None:
+            raise canonical_error("provider sport mapping lacks product-owned curation authority")
+        return record
+
+    def _require_curated_evidence(
+        evidence,
+        *,
         provider_namespace: str,
         provider_sport_id: str,
-        canonical_sport: str,
+        record,
     ) -> None:
-        expected = curated.get((provider_namespace, provider_sport_id))
-        if expected is None or canonical_sport != expected:
-            raise canonical_error(
-                "provider sport mapping lacks product-owned curation authority"
-            )
+        expected_sport, _raw, expected_source_sha256, expected_binding_id = record
+        if (
+            evidence.provider_namespace != provider_namespace
+            or evidence.provider_sport_id != provider_sport_id
+            or evidence.canonical_sport != expected_sport
+            or evidence.source_snapshot_sha256 != expected_source_sha256
+        ):
+            raise canonical_error("provider sport mapping lacks product-owned curation provenance")
+
+        semantic = {
+            "provider_namespace": evidence.provider_namespace,
+            "provider_sport_id": evidence.provider_sport_id,
+            "canonical_sport": evidence.canonical_sport,
+            "valid_from": evidence.valid_from,
+            "valid_until": evidence.valid_until,
+            "evidence_available_at": evidence.evidence_available_at,
+            "source_snapshot_sha256": evidence.source_snapshot_sha256,
+        }
+        if canonical_digest(semantic) != expected_binding_id:
+            raise canonical_error("product-curated provider sport binding identity changed")
+
+    def _require_curated_binding(binding, record) -> None:
+        expected_sport, _raw, expected_source_sha256, expected_binding_id = record
+        if (
+            binding.canonical_sport != expected_sport
+            or binding.source_snapshot_sha256 != expected_source_sha256
+            or binding.binding_id != expected_binding_id
+        ):
+            raise canonical_error("provider sport mapping lacks product-owned curation provenance")
+
+    def _require_curated_resolution(resolution) -> None:
+        record = _curated_record(
+            resolution.provider_namespace,
+            resolution.provider_sport_id,
+        )
+        expected_sport, _raw, expected_source_sha256, expected_binding_id = record
+        if (
+            resolution.canonical_sport != expected_sport
+            or resolution.source_snapshot_sha256 != expected_source_sha256
+            or resolution.binding_id != expected_binding_id
+        ):
+            raise canonical_error("provider sport mapping lacks product-owned curation provenance")
 
     def _assert_parser_authority() -> None:
         if canonical_parser.__globals__ is not canonical_parser_globals:
@@ -204,6 +269,7 @@ def _install_guard() -> None:
     def _assert_guard_authority(registry=None) -> None:
         if (
             registry_type.register_evidence is not register_evidence
+            or registry_type.register_curated is not register_curated
             or registry_type.resolve is not resolve
         ):
             raise canonical_error("provider sport curation authority changed")
@@ -274,19 +340,35 @@ def _install_guard() -> None:
             raise canonical_error("provider sport durable writer dependency authority changed")
 
     def register_evidence(self, source_snapshot_bytes: bytes):
-        # One and only one semantic parse occurs on the positive curation path.
+        del source_snapshot_bytes
         _assert_guard_authority(self)
+        raise canonical_error(
+            "caller-authored exact bytes are not positive provider sport mapping authority; "
+            "use register_curated(provider_namespace=..., provider_sport_id=...)"
+        )
+
+    def register_curated(
+        self,
+        *,
+        provider_namespace: str,
+        provider_sport_id: str,
+    ):
+        _assert_guard_authority(self)
+        record = _curated_record(provider_namespace, provider_sport_id)
+        _expected_sport, source_snapshot_bytes, _expected_source_sha256, expected_binding_id = record
+
+        # One and only one semantic parse occurs on the positive product-curation path.
         evidence = canonical_parser(canonical_evidence_type, source_snapshot_bytes)
         _assert_guard_authority(self)
-        _require_curated(
-            evidence.provider_namespace,
-            evidence.provider_sport_id,
-            evidence.canonical_sport,
+        _require_curated_evidence(
+            evidence,
+            provider_namespace=provider_namespace,
+            provider_sport_id=provider_sport_id,
+            record=record,
         )
 
         # Carry that exact parsed object through the canonical registry mutation
-        # primitives. Calling the old public register_evidence here would parse the
-        # same bytes a second time and reopen a TOCTOU interpretation interval.
+        # primitives. The public raw-byte API is never delegated to for positive truth.
         with canonical_durable_path_lock(self.path):
             _assert_guard_authority(self)
             if not self.path.exists():
@@ -316,8 +398,11 @@ def _install_guard() -> None:
                 recorded_at=recorded_at,
             )
             _assert_guard_authority(self)
+            if candidate.binding_id != expected_binding_id:
+                raise canonical_error("product-curated provider sport binding identity changed")
             for existing in self._bindings:
                 if existing.binding_id == candidate.binding_id:
+                    _require_curated_binding(existing, record)
                     return existing
 
             canonical_overlap(candidate, self._bindings)
@@ -339,9 +424,9 @@ def _install_guard() -> None:
             return candidate
 
     def resolve(self, *, provider_namespace: str, provider_sport_id: str, as_of: str):
-        # A registry created by a pre-curation version can survive restart. Durable
-        # shape/digest truth is not sufficient to grandfather that old assertion into
-        # positive product truth, so re-apply curation at every positive resolution.
+        # Durable shape/digest truth alone does not grandfather a caller-written
+        # matching tuple. Positive resolution must bind the exact frozen product
+        # curation provenance as well as the provider/sport identity.
         _assert_guard_authority(self)
         resolution = canonical_registry_resolve(
             self,
@@ -352,16 +437,14 @@ def _install_guard() -> None:
         _assert_guard_authority(self)
         if exact_type(resolution) is not canonical_resolution_type:
             raise canonical_error("provider sport resolution authority changed")
-        _require_curated(
-            resolution.provider_namespace,
-            resolution.provider_sport_id,
-            resolution.canonical_sport,
-        )
+        _require_curated_resolution(resolution)
         return resolution
 
     setattr(register_evidence, "_product_curation_authority_guard", True)
+    setattr(register_curated, "_product_curation_authority_guard", True)
     setattr(resolve, "_product_curation_authority_guard", True)
     registry_type.register_evidence = register_evidence
+    registry_type.register_curated = register_curated
     registry_type.resolve = resolve
 
 

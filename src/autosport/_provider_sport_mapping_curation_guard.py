@@ -61,6 +61,9 @@ def _install_guard() -> None:
     exact_type = type
     exact_callable = callable
     exact_runtime_error = RuntimeError
+    exact_any = any
+    exact_len = len
+    exact_sorted = sorted
 
     registry_type = mapping_module.ProviderSportMappingRegistry
     current_register = registry_type.register_evidence
@@ -364,7 +367,7 @@ def _install_guard() -> None:
             binding for binding in registry._bindings
             if binding.binding_id == expected_binding_id
         ]
-        if len(matches) != 1:
+        if exact_len(matches) != 1:
             raise canonical_error("provider sport mapping lacks product-owned curation provenance")
         _require_curated_binding(matches[0], record)
 
@@ -377,7 +380,7 @@ def _install_guard() -> None:
             if canonical_parser_globals.get(name) is not helper:
                 raise canonical_error("canonical evidence parser helper authority changed")
             if expected_code is not None and exact_getattr(helper, "__code__", None) is not expected_code:
-                raise canonical_error("canonical evidence parser helper executable authority changed")
+                raise canonical_error("canonical evidence parser executable authority changed")
         if (
             canonical_parser_globals.get("hashlib") is not canonical_hashlib
             or canonical_hashlib.sha256 is not canonical_sha256
@@ -447,7 +450,7 @@ def _install_guard() -> None:
             or canonical_overlap.__code__ is not canonical_overlap_code
         ):
             raise canonical_error("provider sport canonical mutation authority changed")
-        if registry is not None and any(
+        if registry is not None and exact_any(
             name in exact_vars(registry)
             for name in ("_load", "_persist", "_assert_no_overlap")
         ):
@@ -610,7 +613,7 @@ def _install_guard() -> None:
                     return existing
 
             canonical_overlap(candidate, self._bindings)
-            updated = sorted(
+            updated = exact_sorted(
                 [*self._bindings, candidate],
                 key=lambda value: (
                     value.provider_namespace,

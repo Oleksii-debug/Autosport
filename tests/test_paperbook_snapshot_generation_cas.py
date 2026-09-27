@@ -107,6 +107,59 @@ def test_stale_bound_book_cannot_mutate_after_newer_generation(
     assert tuple(stale._lifecycle) == lifecycle_before
 
 
+def test_stale_bound_book_cannot_settle_after_newer_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Stale generation rejection happens before payout/balance mutation."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    original_ticket = initial.open_ticket(
+        [_leg("shared-selection", "2")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    initial.save(path)
+
+    stale = PaperBook.load(path)
+    current = PaperBook.load(path)
+    current.open_ticket(
+        [_leg("newer-selection", "3")],
+        "5",
+        placed_at="2026-09-23T01:00:01+00:00",
+    )
+    current.save(path)
+    durable_after_current = path.read_bytes()
+
+    stale_ticket = stale.tickets[original_ticket.ticket_id]
+    winning_quote_key = stale_ticket.legs[0].quote_key
+    balance_before = stale.balance
+    payout_before = stale_ticket.payout
+    status_before = stale_ticket.status
+    lifecycle_before = tuple(stale._lifecycle)
+    settlement_times_before = dict(stale._settlement_times)
+
+    with pytest.raises(
+        ValueError,
+        match="snapshot authority is stale; reload current durable snapshot",
+    ):
+        stale.settle(
+            stale_ticket.ticket_id,
+            {winning_quote_key},
+            settled_at="2026-09-23T01:00:02+00:00",
+        )
+
+    assert stale.balance == balance_before
+    assert stale_ticket.payout == payout_before
+    assert stale_ticket.status is status_before
+    assert tuple(stale._lifecycle) == lifecycle_before
+    assert stale._settlement_times == settlement_times_before
+    assert path.read_bytes() == durable_after_current
+
+
 def test_snapshot_publication_lock_fails_closed_for_competing_writer_and_reader(
     tmp_path,
     monkeypatch,

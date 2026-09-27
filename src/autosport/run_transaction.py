@@ -16,6 +16,9 @@ from .decision_ledger import (
 )
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
+from ._paperbook_preload_authority_guard import (
+    _promote_verified_snapshot as _promote_verified_paper_book_snapshot,
+)
 
 
 _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
@@ -326,12 +329,11 @@ class RunTransaction:
         self._validate_precommit_evidence(manifest)
         self._validate_paper_book_commit_state(manifest)
         self._validate_decision_ledger_commit_state(manifest)
-        self._promote_base_or_new(
-            target=self.workspace / "paper_book.json",
-            staged=self.staged_book_path,
-            base_hash=self._hash_field(manifest, "base", "paper_book_sha256"),
-            new_hash=self._hash_field(manifest, "new", "paper_book_sha256"),
-            label="PaperBook",
+        _promote_verified_paper_book_snapshot(
+            self.staged_book_path,
+            self.workspace / "paper_book.json",
+            expected_base_sha256=self._hash_field(manifest, "base", "paper_book_sha256"),
+            expected_new_sha256=self._hash_field(manifest, "new", "paper_book_sha256"),
         )
         self._promote_base_or_new(
             target=self.workspace / "decisions.jsonl",

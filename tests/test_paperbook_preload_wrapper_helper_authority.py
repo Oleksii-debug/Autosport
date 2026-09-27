@@ -12,6 +12,11 @@ from autosport.paper import PaperBook
 
 
 _TS = "2026-09-27T02:00:00+00:00"
+_VERIFIER_NAMES = (
+    "_require_delegate_graph_witnesses",
+    "_require_class_callable_graph_witnesses",
+    "_require_value_type_callable_witnesses",
+)
 
 
 def _authority_root(tmp_path: Path) -> str:
@@ -29,7 +34,11 @@ def _leg(selection_id: str = "selection-wrapper-helper-authority") -> TicketLeg:
     )
 
 
-def _no_class_graph_check(_owner: type, _witnesses: tuple[tuple[object, ...], ...]) -> None:
+def _no_one_arg_check(_value: object) -> None:
+    return None
+
+
+def _no_two_arg_check(_owner: type, _witnesses: tuple[tuple[object, ...], ...]) -> None:
     return None
 
 
@@ -50,11 +59,19 @@ def _inner_persistence_wrapper(public_wrapper: FunctionType) -> FunctionType:
     raise AssertionError("sealed inner PaperBook persistence wrapper is unavailable")
 
 
+def _replacement_code(verifier_name: str):
+    if verifier_name == "_require_class_callable_graph_witnesses":
+        return _no_two_arg_check.__code__
+    return _no_one_arg_check.__code__
+
+
+@pytest.mark.parametrize("verifier_name", _VERIFIER_NAMES)
 def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    verifier_name: str,
 ) -> None:
-    """The outer seal must reject mutation of the reachable inner verifier executable."""
+    """The outer seal must reject mutation of every reachable inner verifier executable."""
 
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
@@ -69,16 +86,17 @@ def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     assert type(load_descriptor) is classmethod
     public_load = load_descriptor.__func__
     inner_load = _inner_persistence_wrapper(public_load)
-    verifier = inner_load.__globals__["_require_class_callable_graph_witnesses"]
+    verifier = inner_load.__globals__[verifier_name]
     assert type(verifier) is FunctionType
 
     parser_descriptor = vars(PaperBook)["_from_raw_snapshot"]
     assert type(parser_descriptor) is classmethod
     parser = parser_descriptor.__func__
 
-    assert verifier.__code__ is not _no_class_graph_check.__code__
+    replacement_code = _replacement_code(verifier_name)
+    assert verifier.__code__ is not replacement_code
     assert parser.__code__ is not _forged_from_raw_snapshot.__code__
-    monkeypatch.setattr(verifier, "__code__", _no_class_graph_check.__code__)
+    monkeypatch.setattr(verifier, "__code__", replacement_code)
     monkeypatch.setattr(parser, "__code__", _forged_from_raw_snapshot.__code__)
 
     with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
@@ -88,9 +106,11 @@ def test_path_load_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     assert witness.read_bytes() == witness_before
 
 
+@pytest.mark.parametrize("verifier_name", _VERIFIER_NAMES)
 def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    verifier_name: str,
 ) -> None:
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
     path = tmp_path / "paper-book.json"
@@ -105,10 +125,11 @@ def test_save_rejects_in_place_mutation_of_reachable_wrapper_verifier(
     public_save = vars(PaperBook)["save"]
     assert type(public_save) is FunctionType
     inner_save = _inner_persistence_wrapper(public_save)
-    verifier = inner_save.__globals__["_require_class_callable_graph_witnesses"]
+    verifier = inner_save.__globals__[verifier_name]
     assert type(verifier) is FunctionType
-    assert verifier.__code__ is not _no_class_graph_check.__code__
-    monkeypatch.setattr(verifier, "__code__", _no_class_graph_check.__code__)
+    replacement_code = _replacement_code(verifier_name)
+    assert verifier.__code__ is not replacement_code
+    monkeypatch.setattr(verifier, "__code__", replacement_code)
 
     with pytest.raises(ValueError, match="authority|executable|dispatch|verifier"):
         book.save(path)

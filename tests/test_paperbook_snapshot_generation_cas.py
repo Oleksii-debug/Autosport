@@ -7,6 +7,7 @@ import pytest
 import autosport._paperbook_preload_authority_guard as guard
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
+from autosport.risk import PaperRiskPolicy
 
 
 _BASE_TS = "2026-09-23T01:00:00+00:00"
@@ -131,6 +132,50 @@ def test_stale_bound_book_cannot_read_committed_stake_after_newer_generation(
         match="snapshot authority is stale; reload current durable snapshot",
     ):
         _ = stale.committed_stake
+
+
+def test_stale_bound_book_cannot_authorize_risk_state_after_newer_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Risk/read validation must consume the same durable generation authority."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.open_ticket(
+        [_leg("initial-selection")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    initial.save(path)
+
+    stale = PaperBook.load(path)
+    current = PaperBook.load(path)
+    current.open_ticket(
+        [_leg("newer-selection")],
+        "5",
+        placed_at="2026-09-23T01:00:01+00:00",
+    )
+    current.save(path)
+
+    with pytest.raises(
+        ValueError,
+        match="snapshot authority is stale; reload current durable snapshot",
+    ):
+        PaperBook._validate_loaded_state(stale)
+
+    assert PaperRiskPolicy._book_state(stale) is None
+    assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(stale) is None
+    assert PaperRiskPolicy._historical_risk_metrics(stale) is None
+    assert PaperRiskPolicy._shadow_book_for_allocation(stale) is None
+
+    live = PaperBook.load(path)
+    assert PaperRiskPolicy._book_state(live) is not None
+    assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(live) is not None
+    assert PaperRiskPolicy._historical_risk_metrics(live) is not None
+    assert PaperRiskPolicy._shadow_book_for_allocation(live) is not None
 
 
 def test_stale_bound_book_cannot_settle_after_newer_generation(

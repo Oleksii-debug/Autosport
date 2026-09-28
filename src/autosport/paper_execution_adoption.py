@@ -555,6 +555,10 @@ class PaperExecutionAdoptionRuntime:
 
     @staticmethod
     def _require_attempt_action_identity(attempt, action: ExecutionAction) -> None:
+        if attempt.side != action.side:
+            raise PaperExecutionAdoptionError(
+                "durable execution attempt side must match prepared action side"
+            )
         if (
             attempt.action_id != action.action_id
             or attempt.bookmaker_id != action.bookmaker_id
@@ -562,7 +566,6 @@ class PaperExecutionAdoptionRuntime:
             or attempt.event_id != action.event_id
             or attempt.market_id != action.market_id
             or attempt.selection_id != action.selection_id
-            or attempt.side != action.side
             or attempt.decision_quote_id != action.quote_id
             or attempt.decision_odds != action.requested_odds
             or attempt.requested_stake != action.requested_stake
@@ -811,11 +814,11 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
         decision_id: str,
     ) -> PaperTicket:
-        self._require_attempt_action_identity(attempt, action)
         if action.side != "BACK":
             raise PaperExecutionAdoptionError(
-                "PaperBook materialization requires matching BACK attempt side"
+                "PaperBook materialization supports BACK execution only"
             )
+        self._require_attempt_action_identity(attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"

@@ -95,7 +95,25 @@ class TransparentBanditHistoryReplayIntegrityTests(unittest.TestCase):
             LearningEnvironmentError,
             "history|integrity|provenance|replay",
         ):
-            BanditPolicyState.from_payload(payload)
+            BanditPolicyState.from_payload(
+                payload,
+                expected_policy_id=successor.policy_id,
+            )
+
+
+    def test_noninitial_restart_without_external_identity_fails_closed(self) -> None:
+        policy, action, reward, transition = self._resolved_step()
+        successor, _ = policy.update(
+            action=action,
+            reward=reward,
+            transition=transition,
+        )
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "external history provenance",
+        ):
+            BanditPolicyState.from_payload(successor.to_payload())
 
     def test_genuine_successor_payload_remains_restartable_and_replay_safe(self) -> None:
         policy, action, reward, transition = self._resolved_step()
@@ -105,7 +123,10 @@ class TransparentBanditHistoryReplayIntegrityTests(unittest.TestCase):
             transition=transition,
         )
 
-        restarted = BanditPolicyState.from_payload(successor.to_payload())
+        restarted = BanditPolicyState.from_payload(
+            successor.to_payload(),
+            expected_policy_id=successor.policy_id,
+        )
         self.assertEqual(restarted, successor)
         with self.assertRaisesRegex(LearningEnvironmentError, "already has"):
             restarted.update(action=action, reward=reward, transition=transition)

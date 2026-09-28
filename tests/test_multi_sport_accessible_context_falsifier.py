@@ -55,6 +55,9 @@ def test_ticket_operator_text_distinguishes_sport_accessibly() -> None:
     assert table_tennis != second_sport
     assert "спорт" in table_tennis.lower()
     assert "спорт" in second_sport.lower()
+    assert "настільний теніс" in table_tennis.lower()
+    assert "table_tennis" not in table_tennis
+    assert "soccer" in second_sport
     assert _ticket_line(sport="table_tennis") == table_tennis
     assert _ticket_line(sport="soccer") == second_sport
 
@@ -66,5 +69,8 @@ def test_observation_operator_text_distinguishes_sport_accessibly() -> None:
     assert table_tennis != second_sport
     assert "спорт" in table_tennis.lower()
     assert "спорт" in second_sport.lower()
+    assert "настільний теніс" in table_tennis.lower()
+    assert "table_tennis" not in table_tennis
+    assert "soccer" in second_sport
     assert _observation_quote_line(sport="table_tennis") == table_tennis
     assert _observation_quote_line(sport="soccer") == second_sport

@@ -309,7 +309,7 @@ def test_account_snapshot_reader_instance_shadow_fails_before_provider_io(
     )
     raw_acquire = _extract_outer_guard_raw_acquire()
     authority = _extract_inner_authority_boundary(raw_acquire)
-    _, client, _ = authority.state(acquirer)
+    _, client, _ = authority._state(acquirer)
     attacker_calls = 0
 
     def forged_funds():
@@ -348,6 +348,13 @@ def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
     assert "state" not in reachable
 
 
+    authority = _extract_inner_authority_boundary(raw_acquire)
+    # The closure-recovered checked object exposes no public mint/retry/state surface.
+    # Internal underscore methods are outside the ordinary public-metadata contract.
+    for name in ("publish_live", "retry_live", "state", "bind", "assert_live"):
+        assert not hasattr(authority, name)
+
+
 def test_mutable_client_credentials_cannot_retarget_init_origin(
     tmp_path,
     monkeypatch,
@@ -378,7 +385,7 @@ def test_mutable_client_credentials_cannot_retarget_init_origin(
     )
     raw_acquire = _extract_outer_guard_raw_acquire()
     authority = _extract_inner_authority_boundary(raw_acquire)
-    _, client, init_origin = authority.state(second)
+    _, client, init_origin = authority._state(second)
     assert init_origin == credentials_b
 
     # This is ordinary attribute assignment on the hidden client recovered through the

@@ -12,12 +12,14 @@ permissions:
   contents: read
   pull-requests: read
 
-# Keep only the newest trusted cancellation decision for one PR. Source qualification
-# workflows remain scheduler-isolated until live admission. Replacing an older controller
-# cannot grant cancellation authority: every irreversible cancellation is still guarded
-# by a fresh live head/state/draft snapshot inside the trusted helper.
+# Keep only the newest trusted cancellation decision for one PR + source workflow.
+# Controllers for CI, Windows candidate, and Endurance must not preempt one another,
+# because each invocation cancels only obsolete runs of its own source workflow.
+# Replacing an older same-workflow controller cannot grant cancellation authority:
+# every irreversible cancellation is still guarded by a fresh live head/state/draft
+# snapshot inside the trusted helper.
 concurrency:
-  group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
+  group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}-${{ github.event.workflow_run.workflow_id }}
   cancel-in-progress: true
 
 jobs:

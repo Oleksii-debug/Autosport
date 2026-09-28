@@ -279,7 +279,10 @@ def load_champion_policy(
     ):
         raise ChampionPolicyError("champion policy artifact identity mismatch")
     try:
-        policy = BanditPolicyState.from_payload(artifact["policy"])
+        policy = BanditPolicyState.from_payload(
+            artifact["policy"],
+            expected_policy_id=champion_id,
+        )
     except (TypeError, ValueError) as exc:
         raise ChampionPolicyError("champion policy payload is invalid") from exc
     if policy.policy_id != champion_id:

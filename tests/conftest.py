@@ -6,6 +6,7 @@ from itertools import count
 import os
 import sys
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 
 import pytest
@@ -58,11 +59,15 @@ else:
     _root_selection_pwd.getpwuid = _pytest_root_selection_getpwuid
 
 from autosport import monotonic_authority_root_binding as _root_selection
+import autosport.trusted_runtime_code_profile as trusted_runtime_profile
 from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,
 )
 
+from autosport.continuous_session import SessionState
 from autosport.domain import MarketEvent
+from autosport.execution_stop_authority import ExecutionStopAuthority
+from autosport.product_runtime import AutonomousProductRuntime
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -223,6 +228,7 @@ def _bind_legacy_paper_value_execution_authority(request, monkeypatch, tmp_path)
 
     monkeypatch.setattr(module, "AgentContext", execution_bound_context)
 
+
 # These files predate the #662 product-semantic splice and exercise provider membership,
 # persistence/recovery, and PAPER transition behavior rather than semantic provenance.
 # Keep their old fixture path private and narrowly scoped; all other tests see the
@@ -242,6 +248,167 @@ def _legacy_provider_semantic_fixture_bridge(request):
         yield
     finally:
         _set_legacy_provider_semantic_bypass_for_tests(False)
+
+
+# The final #1212 Betfair provider-truth suites predate the #1155 STOP-admission
+# composition. Their positive provider cases must now supply the same explicit
+# durable ARMED authority production requires. Keep the bridge exact and local to
+# the deliberately recomposed carrier; the dedicated STOP-composition suite is
+# intentionally excluded so missing/STOPPED/corrupt authority remains fail-closed.
+_RECOMPOSED_BETFAIR_PROVIDER_MODULES = frozenset(
+    {
+        "test_betfair_supervised_execution",
+        "test_betfair_placeorders_customer_order_ref_echo_falsifier",
+        "test_betfair_placeorders_executable_authority_code_seal",
+        "test_betfair_placeorders_execution_errorcode_coherence",
+        "test_betfair_placeorders_network_origin_authority",
+        "test_betfair_placeorders_response_truth",
+        "test_betfair_placeorders_single_instruction_status",
+        "test_betfair_placeorders_terminal_identity",
+        "test_betfair_placeorders_urllib_opener_origin",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
+    module = request.module
+    if module is None:
+        return
+    module_name = module.__name__.rsplit(".", 1)[-1]
+    if module_name not in _RECOMPOSED_BETFAIR_PROVIDER_MODULES:
+        return
+
+    # These restored provider suites use a frozen 2026-09-19 approval timeline.
+    # Their original module-local autouse clock does not follow helpers imported by
+    # sibling test modules, so bind the same reserve instant at this shared bridge.
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: "2026-09-19T08:00:03+00:00",
+    )
+
+    original_prepared = getattr(module, "_prepared", None)
+    if not callable(original_prepared):
+        return
+
+    def prepared_with_armed_stop(tmp, *args, **kwargs):
+        prepared = original_prepared(tmp, *args, **kwargs)
+        stop_path = Path(tmp) / "execution-stop.jsonl"
+        if not stop_path.exists():
+            authority = ExecutionStopAuthority(stop_path)
+            stopped = authority.initialize_stopped(
+                operator_id="test-owner",
+                reason="explicit test safety baseline",
+                command_id="betfair-provider-stop-fixture-init",
+            )
+            authority.arm(
+                operator_id="test-owner",
+                reason="explicit positive provider test authority",
+                confirmation_id="betfair-provider-stop-fixture-confirmation",
+                expected_revision=stopped.revision,
+                command_id="betfair-provider-stop-fixture-arm",
+            )
+        return prepared
+
+    monkeypatch.setattr(module, "_prepared", prepared_with_armed_stop)
+
+
+# #1891 makes a RUNNING closed-registry runtime profile an independent provider-write
+# prerequisite. The restored #1212 positive suites predate that authority. Give only
+# those exact suites a process-local test issuance for each workspace they prepare;
+# every other suite remains capable of proving that missing/stale profile authority
+# fails closed. The STOP-ledger falsifier gets only this profile prerequisite so it
+# can still isolate missing STOP as the deterministic denial under test.
+_BETFAIR_TRUSTED_PROFILE_MODULES = _RECOMPOSED_BETFAIR_PROVIDER_MODULES | {
+    "test_betfair_stop_ledger_boundary"
+}
+_PROFILE_FACTORY_SPEC = "autosport.product_source:create_parlay_product_source"
+_PROFILE_PROVIDER_SOURCE_ID = "parlayapi:table_tennis"
+
+
+class _BetfairRuntimeLeaseStub:
+    authority_active = True
+
+
+class _BetfairStartTransitionStoreStub:
+    @staticmethod
+    def pending() -> None:
+        return None
+
+
+class _BetfairRunningCoordinator:
+    @staticmethod
+    def status() -> SimpleNamespace:
+        return SimpleNamespace(state=SessionState.RUNNING)
+
+
+class _BetfairRunningCollector:
+    @staticmethod
+    def status() -> dict[str, object | None]:
+        return {"stopped_at": None, "stop_reason": None}
+
+
+def _betfair_fixture_runtime(workspace: Path) -> AutonomousProductRuntime:
+    runtime = object.__new__(AutonomousProductRuntime)
+    runtime.workspace = workspace
+    runtime.manifest = SimpleNamespace(source_id=_PROFILE_PROVIDER_SOURCE_ID)
+    runtime.coordinator = _BetfairRunningCoordinator()
+    runtime.collector = _BetfairRunningCollector()
+    runtime._runtime_lease = _BetfairRuntimeLeaseStub()
+    runtime._start_transition_store = _BetfairStartTransitionStoreStub()
+    runtime._closed = False
+    runtime._operation_fence = RLock()
+    return runtime
+
+
+@pytest.fixture(autouse=True)
+def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
+    module = request.module
+    if module is None:
+        yield
+        return
+    module_name = module.__name__.rsplit(".", 1)[-1]
+    if module_name not in _BETFAIR_TRUSTED_PROFILE_MODULES:
+        yield
+        return
+
+    prepared_owner = module
+    original_prepared = getattr(prepared_owner, "_prepared", None)
+    if not callable(original_prepared):
+        prepared_owner = getattr(module, "provider_tests", None)
+        original_prepared = getattr(prepared_owner, "_prepared", None)
+    if prepared_owner is None or not callable(original_prepared):
+        yield
+        return
+
+    issued_by_workspace: dict[str, tuple[AutonomousProductRuntime, object]] = {}
+
+    def ensure_profile(tmp: str | Path) -> None:
+        workspace = Path(tmp).resolve()
+        key = str(workspace)
+        if key in issued_by_workspace:
+            return
+        runtime = _betfair_fixture_runtime(workspace)
+        trusted_runtime_profile._register_started_product_runtime_origin(
+            runtime,
+            source_factory=_PROFILE_FACTORY_SPEC,
+            expected_provider_source_id=_PROFILE_PROVIDER_SOURCE_ID,
+        )
+        profile = trusted_runtime_profile.issue_trusted_runtime_code_profile(runtime)
+        issued_by_workspace[key] = (runtime, profile)
+
+    def prepared_with_trusted_runtime(tmp, *args, **kwargs):
+        prepared = original_prepared(tmp, *args, **kwargs)
+        ensure_profile(tmp)
+        return prepared
+
+    monkeypatch.setattr(prepared_owner, "_prepared", prepared_with_trusted_runtime)
+    try:
+        yield
+    finally:
+        for runtime, profile in tuple(issued_by_workspace.values()):
+            trusted_runtime_profile.revoke_trusted_runtime_code_profile(profile)
+            trusted_runtime_profile._clear_started_product_runtime_origin(runtime)
 
 
 @pytest.fixture(autouse=True)

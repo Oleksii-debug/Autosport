@@ -168,6 +168,13 @@ from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_sel
 # MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
 from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
 
+# The public Betfair placeOrders method must never expose the private deterministic
+# transport/parser/clock seams needed by the canonical high-level ledger boundary.
+# Import this only after the monotonic-root guards have completed composition: the
+# STOP authority freezes that transitive dependency graph when the Betfair boundary
+# imports the execution implementation.
+from . import _betfair_supervised_public_transport_boundary as _betfair_supervised_public_transport_boundary  # noqa: F401,E402
+
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.

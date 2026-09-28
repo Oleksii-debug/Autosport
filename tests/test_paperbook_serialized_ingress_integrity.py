@@ -151,7 +151,10 @@ class PaperBookSerializedIngressIntegrityTests(unittest.TestCase):
         ticket.strategy_reason = "\ud800"
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
 
-        with self.assertRaisesRegex(ValueError, "valid UTF-8 text"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "opening economic identity changed after admission",
+        ):
             book.save(self.path)
 
         self.assertFalse(self.path.exists())

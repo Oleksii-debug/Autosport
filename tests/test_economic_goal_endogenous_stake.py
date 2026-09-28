@@ -445,7 +445,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
 
-    def test_multi_candidate_vector_accepts_exact_vector_bound_ruin_evidence(self) -> None:
+    def test_multi_candidate_vector_rejects_caller_constructed_exact_ruin_evidence(self) -> None:
         first = self._event(
             event_id="event-vector-ror-1",
             market_id="market-vector-ror-1",
@@ -484,8 +484,8 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             risk_of_ruin_vector_evidence=witness,
         )
 
-        self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, expected_stakes)
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
@@ -630,7 +630,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
         self.assertEqual(book.tickets, {})
 
-    def test_multi_candidate_vector_accepts_explicit_ruin_witness(self) -> None:
+    def test_multi_candidate_vector_rejects_caller_constructed_single_ruin_witness(self) -> None:
         event = self._event(event_id="event-ruin", market_id="market-ruin", sequence=16)
         goal = self._goal(max_risk_of_ruin=Decimal("0.10"))
         policy = self._policy(goal)
@@ -651,8 +651,9 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("2.00"),))
+        self.assertEqual(decision.action, "ZERO")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
+        self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
     def test_single_candidate_bare_ruin_scalar_cannot_authorize(self) -> None:

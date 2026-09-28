@@ -16,6 +16,7 @@ class PaperAdmissionResult:
 
     risk: RiskDecision
     ticket: PaperTicket | None
+    book: PaperBook
 
     @property
     def admitted(self) -> bool:
@@ -35,18 +36,6 @@ def _positive_decimal(value: Decimal | str) -> Decimal:
     if not amount.is_finite() or amount <= 0:
         raise ValueError("stake must be a finite positive decimal")
     return amount
-
-
-def _sync_book_state(target: PaperBook, source: PaperBook) -> None:
-    """Refresh one exact caller view from the validated canonical durable book."""
-
-    PaperBook._validate_loaded_state(source)
-    target.initial_bankroll = source.initial_bankroll
-    target.balance = source.balance
-    target.tickets = dict(source.tickets)
-    target._lifecycle = list(source._lifecycle)
-    target._settlement_times = dict(source._settlement_times)
-    PaperBook._validate_loaded_state(target)
 
 
 def _same_semantic_book_state(expected: PaperBook, observed: PaperBook) -> bool:
@@ -160,12 +149,31 @@ def admit_paper_ticket(
             )
         canonical_book = PaperBook.load(book_path)
 
-        decision = risk_policy.evaluate(canonical_book, amount, context=context)
-        if not decision.allowed:
-            _sync_book_state(book, canonical_book)
-            return PaperAdmissionResult(risk=decision, ticket=None)
+        # A caller that still carries the exact current durable generation can remain
+        # the mutable working view. Its normal PaperBook.save() then advances the same
+        # generation binding after publication. A stale or unbound caller is never
+        # rebound by copying fields into it: use the freshly loaded canonical view and
+        # return that authority-bearing object to the caller instead.
+        try:
+            _REQUIRE_CURRENT_BINDING(book, book_path)
+        except (TypeError, ValueError):
+            working_book = canonical_book
+        else:
+            if not _same_semantic_book_state(canonical_book, book):
+                raise ValueError(
+                    "supplied current PaperBook does not match canonical durable state"
+                )
+            working_book = book
 
-        opened = canonical_book.open_ticket(
+        decision = risk_policy.evaluate(working_book, amount, context=context)
+        if not decision.allowed:
+            return PaperAdmissionResult(
+                risk=decision,
+                ticket=None,
+                book=working_book,
+            )
+
+        opened = working_book.open_ticket(
             legs,
             amount,
             reason=reason,
@@ -176,21 +184,32 @@ def admit_paper_ticket(
             currency=currency,
         )
         # Publish the mutation while the same lock is still held. PaperBook.save
-        # uses atomic replacement; a save failure leaves the prior durable state
-        # intact and the caller view has not yet been mutated.
-        canonical_book.save(book_path)
+        # uses atomic replacement and advances the binding of the exact working book
+        # when that caller was already current.
+        working_book.save(book_path)
         persisted = PaperBook.load(book_path)
         persisted_ticket = persisted.tickets.get(opened.ticket_id)
         if persisted_ticket is None:
             raise RuntimeError(
                 "persisted PaperBook lost the ticket opened inside admission"
             )
-        if not _same_semantic_book_state(canonical_book, persisted):
+        if not _same_semantic_book_state(working_book, persisted):
             raise RuntimeError(
                 "persisted PaperBook state does not match the admitted mutation"
             )
-        _sync_book_state(book, persisted)
+        result_book = book if working_book is book else persisted
         return PaperAdmissionResult(
             risk=decision,
-            ticket=book.tickets[persisted_ticket.ticket_id],
+            ticket=result_book.tickets[persisted_ticket.ticket_id],
+            book=result_book,
         )
+
+
+# Resolve PaperBook generation binding from the already-sealed persistence graph on
+# every admission call. The public consumer itself carries no mutable positive verifier.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+admit_paper_ticket = _seal_current_binding_consumer(admit_paper_ticket)
+del _seal_current_binding_consumer

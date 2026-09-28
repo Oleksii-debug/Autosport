@@ -13,6 +13,22 @@ def _workflow(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def _assert_partitioned_pr_scheduler(path: str) -> None:
+    workflow = _workflow(path)
+    concurrency_block = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+
+    assert "cancel-in-progress: true" in concurrency_block
+    assert "format('pr-{0}-{1}'" in concurrency_block
+    assert "github.run_attempt != 1" in concurrency_block
+    assert "format('rerun-{0}', github.event.pull_request.head.sha)" in concurrency_block
+    assert "github.event.action == 'converted_to_draft'" in concurrency_block
+    assert "github.event.action == 'closed'" in concurrency_block
+    assert "'lifecycle'" in concurrency_block
+    assert "'qualify'" in concurrency_block
+    assert "github.run_id" not in concurrency_block
+    assert "format('pr-{0}-run-{1}'" not in concurrency_block
+
+
 def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
 
@@ -59,29 +75,13 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
     assert "Upload endurance evidence" in workflow
 
 
-def test_ci_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    assert "cancel-in-progress: true" in workflow
-    assert "github.run_id" in workflow
-    assert "format('pr-{0}-run-{1}'" in workflow
-    assert "github.run_attempt == 1 && 'fresh'" not in workflow
+def test_ci_pr_scheduler_partitions_qualification_lifecycle_and_reruns() -> None:
+    _assert_partitioned_pr_scheduler(".github/workflows/ci.yml")
 
 
-def test_windows_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -> None:
-    workflow = _workflow(".github/workflows/windows-build.yml")
-    assert "cancel-in-progress: true" in workflow
-    assert "github.run_id" in workflow
-    assert "format('pr-{0}-run-{1}'" in workflow
-    assert "github.run_attempt == 1 && 'fresh'" not in workflow
+def test_windows_pr_scheduler_partitions_qualification_lifecycle_and_reruns() -> None:
+    _assert_partitioned_pr_scheduler(".github/workflows/windows-build.yml")
 
 
-def test_endurance_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -> None:
-    workflow = _workflow(".github/workflows/endurance.yml")
-
-    concurrency_block = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
-    assert "cancel-in-progress: true" in concurrency_block
-    assert "github.run_id" in concurrency_block
-    assert "format('pr-{0}-run-{1}'" in concurrency_block
-    assert "github.run_attempt == 1" not in concurrency_block
-    assert "'fresh'" not in concurrency_block
-    assert "github.event.pull_request.number || github.ref" not in concurrency_block
+def test_endurance_pr_scheduler_partitions_qualification_lifecycle_and_reruns() -> None:
+    _assert_partitioned_pr_scheduler(".github/workflows/endurance.yml")

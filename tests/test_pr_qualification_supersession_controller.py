@@ -36,9 +36,19 @@ def test_current_head_request_cancels_only_obsolete_same_pr_workflow_runs() -> N
     assert "--admission-only" not in workflow
 
 
-def test_controller_keeps_only_latest_pr_cancellation_decision() -> None:
+def test_controller_keeps_only_latest_same_pr_same_workflow_cancellation_decision() -> None:
     workflow = _text()
 
-    assert "group: pr-qualification-supersession-" in workflow
-    assert "cancel-in-progress: true" in workflow
-    assert "fresh live head/state/draft snapshot" in workflow
+    concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    assert "group: pr-qualification-supersession-" in concurrency
+    assert "github.event.workflow_run.pull_requests[0].number" in concurrency
+    assert "github.event.workflow_run.workflow_id" in concurrency
+    assert "cancel-in-progress: true" in concurrency
+    assert "fresh live head/state/draft" in workflow
+
+
+def test_controller_does_not_cross_cancel_other_source_workflow_controllers() -> None:
+    workflow = _text()
+
+    assert "Controllers for CI, Windows candidate, and Endurance must not preempt one another" in workflow
+    assert "each invocation cancels only obsolete runs of its own source workflow" in workflow

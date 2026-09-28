@@ -1019,6 +1019,29 @@ def test_direct_promotion_append_cannot_bypass_evidence_validation(tmp_path):
 
 
 
+
+def test_private_promotion_append_cannot_poison_registry(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    before = registry.path.read_bytes()
+    decision = PromotionDecision(
+        "promotion-private-bypass",
+        PromotionAction.PROMOTE,
+        "strategy-missing",
+        "protocol-missing",
+        SHA_A,
+        "eval-missing",
+        SHA_B,
+        T3,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="record_promotion"):
+        registry._append(decision)
+
+    assert registry.path.read_bytes() == before
+    assert ScientificRegistry(registry.path).get(
+        "PromotionDecision", decision.promotion_decision_id
+    ) is None
+
 def test_timezone_valid_positive_promotion_still_requires_product_ess_authority(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)

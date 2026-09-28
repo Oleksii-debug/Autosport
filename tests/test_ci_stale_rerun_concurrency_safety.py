@@ -36,15 +36,16 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     GitHub evaluates workflow concurrency before job-level live admission. Fresh
     qualification may therefore coalesce only when the exact event head SHA matches;
     a stale rerun must retain that exact-head identity too, and draft/closed lifecycle
-    work must use a separate lane. The read-only admission job remains the final live
-    head/state authority before heavy work can allocate.
+    work must use a separate lane. The top-level event number keeps lifecycle identity
+    stable even when a merged closed event has an empty pull_request object.
     """
 
     text = workflow_path.read_text(encoding="utf-8")
     group = _concurrency_group_expression(text)
 
     assert "cancel-in-progress: true" in text
-    assert "github.event.pull_request.number" in group
+    assert "github.event.number" in group
+    assert "github.event.pull_request.number" not in group
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in group
     assert "github.run_attempt != 1" in group
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in group
@@ -52,3 +53,9 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     assert "github.event.action == 'closed'" in group
     assert "'lifecycle'" in group
     assert "github.run_id" not in group
+
+    # Lifecycle must win over rerun. Otherwise a rerun of a merged closed event can
+    # evaluate a missing pull_request.head.sha instead of the stable lifecycle key.
+    assert group.index("github.event.action == 'converted_to_draft'") < group.index(
+        "github.run_attempt != 1"
+    )

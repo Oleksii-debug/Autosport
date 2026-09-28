@@ -669,3 +669,113 @@ def test_rebound_product_evaluator_resolver_fails_before_attacker_dispatch(
     assert "lacks canonical product-issued evaluator authority" in decision.reason
     assert attacker_calls == 0
 
+
+
+class _ForgedDecimal(Decimal):
+    def is_finite(self):
+        return True
+
+    def __format__(self, spec):
+        del spec
+        return "0"
+
+
+def test_decimal_subclasses_cannot_enter_risk_authority() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    canonical = _single_evidence(policy, book, context)
+
+    try:
+        replace(canonical, evaluated_stake=_ForgedDecimal("1"))
+    except ValueError as exc:
+        assert "evaluated_stake" in str(exc)
+    else:
+        raise AssertionError("Decimal subclass entered single risk evidence")
+
+    try:
+        replace(canonical, upper_bound=_ForgedDecimal("0.005"))
+    except ValueError as exc:
+        assert "upper_bound" in str(exc)
+    else:
+        raise AssertionError("Decimal subclass entered single risk evidence")
+
+    contexts = (_context(1), _context(2))
+    relaxed = _policy(max_risk_of_ruin=Decimal("1"))
+    baseline = relaxed.derive_goal_stake_vector(
+        book,
+        (Decimal("0.01"), Decimal("0.01")),
+        contexts=contexts,
+    )
+    assert baseline.action == "STAKE_VECTOR"
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    candidates = policy.risk_of_ruin_candidate_vector_sha256(contexts)
+    assert portfolio is not None and candidates is not None
+
+    vector = RiskOfRuinVectorEvidence(
+        evidence_id="exact-decimal-vector",
+        research_protocol_sha256="c" * 64,
+        reproducibility_bundle_sha256="d" * 64,
+        producer_identity="canonical-vector-risk-evaluator",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_vector_sha256=candidates,
+        evaluated_stakes=baseline.stakes,
+        upper_bound=Decimal("0.005"),
+    )
+
+    try:
+        replace(vector, evaluated_stakes=(_ForgedDecimal("1"), Decimal("1")))
+    except ValueError as exc:
+        assert "evaluated_stakes" in str(exc)
+    else:
+        raise AssertionError("Decimal subclass entered vector risk evidence")
+
+    try:
+        replace(vector, upper_bound=_ForgedDecimal("0.005"))
+    except ValueError as exc:
+        assert "upper_bound" in str(exc)
+    else:
+        raise AssertionError("Decimal subclass entered vector risk evidence")
+
+
+def test_result_digest_rejects_decimal_subclass_payload() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    canonical = _single_evidence(policy, book, context)
+
+    forged = object.__new__(RiskOfRuinEvidence)
+    for field in (
+        "evidence_id",
+        "research_protocol_sha256",
+        "reproducibility_bundle_sha256",
+        "producer_identity",
+        "causal_cutoff",
+        "evaluated_at",
+        "bankroll_id",
+        "currency",
+        "base_portfolio_sha256",
+        "candidate_sha256",
+        "upper_bound",
+    ):
+        object.__setattr__(forged, field, getattr(canonical, field))
+    object.__setattr__(forged, "evaluated_stake", _ForgedDecimal("1"))
+
+    try:
+        risk_of_ruin_result_sha256(
+            forged,
+            kind="single",
+            evaluator_source_sha256=EVALUATOR_SOURCE,
+            dataset_snapshot_id="risk-dataset",
+            dataset_manifest_sha256=DATASET_MANIFEST,
+            effective_sample_size=SAMPLE_SIZE,
+            evaluation_available_at=EVALUATED_AT,
+        )
+    except ValueError as exc:
+        assert "finite Decimal" in str(exc)
+    else:
+        raise AssertionError("Decimal subclass entered canonical authority digest")

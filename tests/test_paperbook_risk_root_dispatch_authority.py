@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
+
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 
@@ -155,3 +157,34 @@ def test_root_seal_preserves_dataclass_replace_and_instance_dispatch() -> None:
     assert cloned.max_ticket_fraction == Decimal("0.20")
     decision = cloned.evaluate(book, Decimal("1"))
     assert decision.allowed is True
+
+
+def test_book_state_root_cannot_be_retargeted_or_deleted() -> None:
+    """Reconstructed delegates must not bypass admission by replacing _book_state."""
+
+    original = vars(PaperRiskPolicy)["_book_state"]
+    assert type(original) is classmethod
+    hostile_executed = False
+
+    def hostile_book_state(cls, book):
+        nonlocal hostile_executed
+        del cls, book
+        hostile_executed = True
+        return (Decimal("100"), Decimal("100"), Decimal("0"), 0)
+
+    hostile_descriptor = classmethod(hostile_book_state)
+
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        setattr(PaperRiskPolicy, "_book_state", hostile_descriptor)
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        type.__setattr__(PaperRiskPolicy, "_book_state", hostile_descriptor)
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        delattr(PaperRiskPolicy, "_book_state")
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        type.__delattr__(PaperRiskPolicy, "_book_state")
+
+    assert vars(PaperRiskPolicy)["_book_state"] is original
+    resolved = PaperRiskPolicy._book_state
+    assert resolved.__func__ is original.__func__
+    assert resolved.__self__ is PaperRiskPolicy
+    assert hostile_executed is False

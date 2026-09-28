@@ -5,7 +5,7 @@ from types import FunctionType
 
 import pytest
 
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
@@ -515,6 +515,63 @@ def test_closure_reachable_evaluate_spec_cannot_bypass_opening_authority() -> No
     # commitment created by PaperBook.open_ticket.
     ticket.stake = Decimal("1")
     book.balance = Decimal("99")
+    PaperBook._validate_loaded_state(book)
+
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    public_root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_EVALUATE_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+
+    reconstructed = _reconstruct_spec(nested_spec)
+    decision = reconstructed(policy, book, Decimal("1"))
+
+    assert decision.allowed is False
+    assert "virtual bankroll" in decision.reason
+
+
+def test_closure_reachable_evaluate_spec_cannot_bypass_causal_authority() -> None:
+    """Reconstructed delegates must still consume product-issued settlement causality."""
+
+    leg = TicketLeg(
+        "risk-causal-event",
+        "risk-causal-market",
+        "risk-causal-selection",
+        Decimal("2"),
+        sport="soccer",
+        exchange_side="back",
+    )
+    book = PaperBook("100")
+    ticket = book.open_ticket([leg], "10", placed_at=_TS)
+    settled_at = "2026-09-27T21:41:00+00:00"
+    book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=settled_at)
+
+    # Rewrite all caller-visible settlement facts to a coherent LOSS while the
+    # product-issued private causal commitment still records the original WIN.
+    ticket.status = TicketStatus.LOST
+    ticket.payout = Decimal("0")
+    ticket.settled_at = settled_at
+    book.balance = Decimal("90")
+    book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
     PaperBook._validate_loaded_state(book)
 
     policy = PaperRiskPolicy(

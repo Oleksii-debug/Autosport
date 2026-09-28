@@ -14,6 +14,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from weakref import ref
 
 from ._campaign_provider_scope_devapp_identity import (
@@ -1176,8 +1177,6 @@ def _snapshot_from_payload(payload: dict[str, object]) -> BookmakerAccountSnapsh
 # pattern: callers can resolve/verify durable evidence, but cannot pass an arbitrary
 # caller-constructed BookmakerAccountSnapshot to a minting function.
 def _install_account_snapshot_acquisition_authority() -> None:
-    issued: dict[int, tuple[object, _AccountSnapshotStore, BetfairReadOnlyClient]] = {}
-    live_issued: dict[str, tuple[object, str, BetfairSessionCredentials]] = {}
     raw_init = BetfairAccountSnapshotAcquirer.__init__
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
@@ -1185,100 +1184,189 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
 
-    def live_fingerprint(acquired: AuthoritativeAccountSnapshot) -> str:
-        return _canonical_sha256(
-            {
-                "acquisition_id": acquired.receipt.acquisition_id,
-                "acquisition_request_id_sha256": (
-                    acquired.receipt.acquisition_request_id_sha256
-                ),
-                "snapshot_sha256": acquired.receipt.snapshot_sha256,
-            }
-        )
+    class _AccountSnapshotAuthorityBoundary:
+        """Own mutable live capability state behind a non-FunctionType boundary."""
 
-    def forget_live(acquisition_id: str, reference: object) -> None:
-        current = live_issued.get(acquisition_id)
-        if current is not None and current[0] is reference:
-            live_issued.pop(acquisition_id, None)
+        __slots__ = ("_issued", "_live", "_lock")
 
-    def issue_live(
-        acquired: AuthoritativeAccountSnapshot,
-        *,
-        credentials: BetfairSessionCredentials,
-    ) -> AuthoritativeAccountSnapshot:
-        if type(credentials) is not BetfairSessionCredentials:
-            raise AccountSnapshotAcquisitionError(
-                "live account snapshot authority requires exact Betfair credentials"
-            )
-        acquisition_id = acquired.receipt.acquisition_id
-        reference = ref(
-            acquired,
-            lambda current, acquisition_id=acquisition_id: forget_live(
-                acquisition_id, current
-            ),
-        )
-        live_issued[acquisition_id] = (
-            reference,
-            live_fingerprint(acquired),
-            credentials,
-        )
-        return acquired
+        def __init__(self) -> None:
+            self._issued: dict[
+                int,
+                tuple[
+                    object,
+                    _AccountSnapshotStore,
+                    BetfairReadOnlyClient,
+                    BetfairSessionCredentials,
+                ],
+            ] = {}
+            self._live: dict[
+                str,
+                tuple[object, str, BetfairSessionCredentials],
+            ] = {}
+            self._lock = RLock()
 
-    def current_live(
-        acquisition_id: str,
-        *,
-        credentials: BetfairSessionCredentials,
-    ) -> AuthoritativeAccountSnapshot | None:
-        if type(credentials) is not BetfairSessionCredentials:
-            raise AccountSnapshotAcquisitionError(
-                "live account snapshot retry requires exact Betfair credentials"
-            )
-        current = live_issued.get(acquisition_id)
-        if current is None:
-            return None
-        value = current[0]()
-        if value is None:
-            live_issued.pop(acquisition_id, None)
-            return None
-        if (
-            type(value) is not AuthoritativeAccountSnapshot
-            or current[1] != live_fingerprint(value)
-        ):
-            live_issued.pop(acquisition_id, None)
-            return None
-        if current[2] != credentials:
-            raise AccountSnapshotAcquisitionError(
-                "live account snapshot acquisition is bound to a different "
-                "authenticated credential origin"
-            )
-        return value
-
-    def assert_live(
-        acquired: AuthoritativeAccountSnapshot,
-    ) -> None:
-        if type(acquired) is not AuthoritativeAccountSnapshot:
-            raise AccountSnapshotAcquisitionError(
-                "provider-origin authority requires exact acquired snapshot evidence"
-            )
-        current = live_issued.get(acquired.receipt.acquisition_id)
-        if (
-            current is None
-            or current[0]() is not acquired
-            or current[1] != live_fingerprint(acquired)
-        ):
-            raise AccountSnapshotAcquisitionError(
-                "account snapshot was not issued by live canonical provider acquisition"
+        @staticmethod
+        def _fingerprint(acquired: AuthoritativeAccountSnapshot) -> str:
+            return _canonical_sha256(
+                {
+                    "acquisition_id": acquired.receipt.acquisition_id,
+                    "acquisition_request_id_sha256": (
+                        acquired.receipt.acquisition_request_id_sha256
+                    ),
+                    "snapshot_sha256": acquired.receipt.snapshot_sha256,
+                }
             )
 
-    def state(
-        self: BetfairAccountSnapshotAcquirer,
-    ) -> tuple[_AccountSnapshotStore, BetfairReadOnlyClient]:
-        record = issued.get(id(self))
-        if record is None or record[0]() is not self:
-            raise AccountSnapshotAcquisitionError(
-                "account snapshot acquirer was not initialized by canonical product authority"
-            )
-        return record[1], record[2]
+        def bind(
+            self,
+            acquirer: BetfairAccountSnapshotAcquirer,
+            store: _AccountSnapshotStore,
+            client: BetfairReadOnlyClient,
+            credentials: BetfairSessionCredentials,
+        ) -> None:
+            if type(credentials) is not BetfairSessionCredentials:
+                raise AccountSnapshotAcquisitionError(
+                    "canonical account snapshot origin requires exact Betfair credentials"
+                )
+            instance_id = id(acquirer)
+
+            def forget(_weakref: object, *, key: int = instance_id) -> None:
+                with self._lock:
+                    self._issued.pop(key, None)
+
+            with self._lock:
+                self._issued[instance_id] = (
+                    ref(acquirer, forget),
+                    store,
+                    client,
+                    credentials,
+                )
+
+        def state(
+            self,
+            acquirer: BetfairAccountSnapshotAcquirer,
+        ) -> tuple[
+            _AccountSnapshotStore,
+            BetfairReadOnlyClient,
+            BetfairSessionCredentials,
+        ]:
+            with self._lock:
+                record = self._issued.get(id(acquirer))
+                if record is None or record[0]() is not acquirer:
+                    raise AccountSnapshotAcquisitionError(
+                        "account snapshot acquirer was not initialized by canonical "
+                        "product authority"
+                    )
+                return record[1], record[2], record[3]
+
+        def _forget_live(self, acquisition_id: str, reference: object) -> None:
+            with self._lock:
+                current = self._live.get(acquisition_id)
+                if current is not None and current[0] is reference:
+                    self._live.pop(acquisition_id, None)
+
+        def retry_live(
+            self,
+            acquisition_id: str,
+            *,
+            credentials: BetfairSessionCredentials,
+        ) -> AuthoritativeAccountSnapshot | None:
+            if type(credentials) is not BetfairSessionCredentials:
+                raise AccountSnapshotAcquisitionError(
+                    "live account snapshot retry requires exact Betfair credentials"
+                )
+            with self._lock:
+                current = self._live.get(acquisition_id)
+                if current is None:
+                    return None
+                value = current[0]()
+                if value is None:
+                    self._live.pop(acquisition_id, None)
+                    return None
+                if (
+                    type(value) is not AuthoritativeAccountSnapshot
+                    or current[1] != self._fingerprint(value)
+                ):
+                    self._live.pop(acquisition_id, None)
+                    raise AccountSnapshotAcquisitionError(
+                        "live account snapshot authority integrity changed"
+                    )
+                if current[2] != credentials:
+                    raise AccountSnapshotAcquisitionError(
+                        "live account snapshot acquisition is bound to a different "
+                        "authenticated credential origin"
+                    )
+                return value
+
+        def publish_live(
+            self,
+            acquired: AuthoritativeAccountSnapshot,
+            *,
+            credentials: BetfairSessionCredentials,
+        ) -> AuthoritativeAccountSnapshot:
+            if type(acquired) is not AuthoritativeAccountSnapshot:
+                raise AccountSnapshotAcquisitionError(
+                    "live account snapshot authority requires exact acquired evidence"
+                )
+            if type(credentials) is not BetfairSessionCredentials:
+                raise AccountSnapshotAcquisitionError(
+                    "live account snapshot authority requires exact Betfair credentials"
+                )
+            acquisition_id = acquired.receipt.acquisition_id
+            with self._lock:
+                current = self._live.get(acquisition_id)
+                if current is not None:
+                    value = current[0]()
+                    if value is None:
+                        self._live.pop(acquisition_id, None)
+                    elif (
+                        type(value) is not AuthoritativeAccountSnapshot
+                        or current[1] != self._fingerprint(value)
+                    ):
+                        self._live.pop(acquisition_id, None)
+                        raise AccountSnapshotAcquisitionError(
+                            "live account snapshot authority integrity changed"
+                        )
+                    elif current[2] != credentials:
+                        raise AccountSnapshotAcquisitionError(
+                            "live account snapshot acquisition is bound to a different "
+                            "authenticated credential origin"
+                        )
+                    else:
+                        return value
+                reference = ref(
+                    acquired,
+                    lambda current, acquisition_id=acquisition_id: self._forget_live(
+                        acquisition_id, current
+                    ),
+                )
+                self._live[acquisition_id] = (
+                    reference,
+                    self._fingerprint(acquired),
+                    credentials,
+                )
+                return acquired
+
+        def assert_live(self, acquired: AuthoritativeAccountSnapshot) -> None:
+            if type(acquired) is not AuthoritativeAccountSnapshot:
+                raise AccountSnapshotAcquisitionError(
+                    "provider-origin authority requires exact acquired snapshot evidence"
+                )
+            with self._lock:
+                current = self._live.get(acquired.receipt.acquisition_id)
+                if (
+                    current is None
+                    or current[0]() is not acquired
+                    or current[1] != self._fingerprint(acquired)
+                ):
+                    raise AccountSnapshotAcquisitionError(
+                        "account snapshot was not issued by live canonical provider acquisition"
+                    )
+
+    authority = _AccountSnapshotAuthorityBoundary()
+
+    def assert_live(acquired: AuthoritativeAccountSnapshot) -> None:
+        authority.assert_live(acquired)
 
     def __init__(
         self: BetfairAccountSnapshotAcquirer,
@@ -1299,12 +1387,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
         client = self._client
         del self._store
         del self._client
-        instance_id = id(self)
-
-        def forget(_weakref: object, *, key: int = instance_id) -> None:
-            issued.pop(key, None)
-
-        issued[instance_id] = (ref(self, forget), store, client)
+        authority.bind(self, store, client, credentials)
 
     def acquire(
         self: BetfairAccountSnapshotAcquirer,
@@ -1312,7 +1395,15 @@ def _install_account_snapshot_acquisition_authority() -> None:
         *,
         acquisition_id: str,
     ) -> AuthoritativeAccountSnapshot:
-        store, client = state(self)
+        store, client, origin_credentials = authority.state(self)
+        client_credentials = getattr(client, "_credentials", None)
+        if (
+            type(client_credentials) is not BetfairSessionCredentials
+            or client_credentials != origin_credentials
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "canonical Betfair client credential origin changed after initialization"
+            )
         acquisition_id = _text(acquisition_id, "acquisition_id")
         if type(requested_capabilities) is not frozenset:
             raise AccountSnapshotAcquisitionError(
@@ -1366,10 +1457,9 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "acquisition_id cannot be reused for another provider/account/capability scope"
                 )
-            credentials = getattr(client, "_credentials", None)
-            live = current_live(
+            live = authority.retry_live(
                 existing.receipt.acquisition_id,
-                credentials=credentials,
+                credentials=origin_credentials,
             )
             if live is not None:
                 return live
@@ -1449,8 +1539,15 @@ def _install_account_snapshot_acquisition_authority() -> None:
             raise AccountSnapshotAcquisitionError(
                 "canonical Betfair account snapshot reader changed during acquisition"
             )
-        credentials = getattr(client, "_credentials", None)
-        return issue_live(
+        client_credentials = getattr(client, "_credentials", None)
+        if (
+            type(client_credentials) is not BetfairSessionCredentials
+            or client_credentials != origin_credentials
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "canonical Betfair client credential origin changed during acquisition"
+            )
+        return authority.publish_live(
             raw_record(
                 store,
                 snapshot,
@@ -1460,14 +1557,14 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 authenticated_account_identity_sha256=account_identity.account_identity_sha256,
                 account_identity_observed_at=account_identity.observed_at,
             ),
-            credentials=credentials,
+            credentials=origin_credentials,
         )
 
     def resolve(
         self: BetfairAccountSnapshotAcquirer,
         acquisition_id: str,
     ) -> AuthoritativeAccountSnapshot:
-        store, _ = state(self)
+        store, _, _ = authority.state(self)
         return raw_resolve(store, acquisition_id)
 
     def verify(
@@ -1483,7 +1580,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             raise AccountSnapshotAcquisitionError(
                 "receipt must be an exact AccountSnapshotAcquisitionReceipt"
             )
-        store, _ = state(self)
+        store, _, _ = authority.state(self)
         resolved = raw_resolve(store, receipt.acquisition_id)
         if resolved.receipt != receipt:
             raise AccountSnapshotAcquisitionError(

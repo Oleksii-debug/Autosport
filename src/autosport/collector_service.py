@@ -110,6 +110,7 @@ class CollectorServiceSource(Protocol):
 class CollectorServiceConfig:
     max_items: int = 250
     poll_interval_seconds: float = 30.0
+    evaluation_slot_count: int | None = None
     retry_attempts: int = 3
     initial_backoff_seconds: float = 1.0
     max_backoff_seconds: float = 30.0
@@ -125,6 +126,14 @@ class CollectorServiceConfig:
         ):
             raise ValueError(
                 f"max_items must be in 1..{_MAX_DELTA_PAGE_ITEMS}"
+            )
+        if self.evaluation_slot_count is not None and (
+            isinstance(self.evaluation_slot_count, bool)
+            or not isinstance(self.evaluation_slot_count, int)
+            or self.evaluation_slot_count <= 0
+        ):
+            raise ValueError(
+                "evaluation_slot_count must be a positive integer or None"
             )
         if (
             isinstance(self.retry_attempts, bool)
@@ -640,15 +649,75 @@ class HeadlessCollectorService:
                 "run explicit pin-aware compaction or enlarge the budget, then retry"
             )
 
-    def run_cycle(self) -> CollectorCycleResult:
+    def run_cycle(
+        self,
+        *,
+        _schedule_slot: dict[str, object] | None = None,
+    ) -> CollectorCycleResult:
         attempt_at = self.clock()
         _CollectorServiceState._instant(attempt_at, "attempt_at")
         self._state.record_attempt(at=attempt_at)
+
+        # Reserve immutable source-observation evidence immediately before the first
+        # provider-facing operation. A crash after this point leaves an explicit
+        # pending cycle rather than silently shrinking a future evidence denominator.
+        cycle_source = self._require_source_identity()
+        cycle_stream_epoch = cycle_source.stream_epoch
+        if _schedule_slot is None:
+            cycle_seq = self.delta_store._begin_collector_cycle(
+                source_id=self.source_id,
+                run_id=self._state.run_id,
+                stream_epoch=cycle_stream_epoch,
+                attempted_at=attempt_at,
+            )
+        else:
+            if not isinstance(_schedule_slot, dict):
+                raise CollectorServiceError(
+                    "scheduled collector cycle requires canonical slot evidence"
+                )
+            frozen_max_items = _schedule_slot.get("max_items")
+            if frozen_max_items != self.config.max_items:
+                raise CollectorServiceError(
+                    "scheduled collector cycle max_items does not match frozen schedule"
+                )
+            try:
+                cycle_seq = self.delta_store._begin_scheduled_collector_cycle(
+                    source_id=self.source_id,
+                    run_id=self._state.run_id,
+                    stream_epoch=cycle_stream_epoch,
+                    max_items=self.config.max_items,
+                    slot_ordinal=_schedule_slot.get("slot_ordinal"),
+                    due_at=_schedule_slot.get("due_at"),
+                    attempted_at=attempt_at,
+                )
+            except (TypeError, ValueError) as exc:
+                raise CollectorServiceError(
+                    "cannot bind scheduled collector cycle to canonical due slot"
+                ) from exc
+        catalog_changes: tuple[str, ...] = ()
+        observed: list[str] = []
+        committed: list[str] = []
+        duplicates: list[str] = []
+
+        def finish_cycle(status: str, *, error_code: str | None = None) -> str:
+            completed_at = self.clock()
+            _CollectorServiceState._instant(completed_at, "completed_at")
+            self.delta_store._finish_collector_cycle(
+                source_id=self.source_id,
+                cycle_seq=cycle_seq,
+                status=status,
+                completed_at=completed_at,
+                catalog_changes=catalog_changes,
+                observed_delta_ids=tuple(observed),
+                committed_delta_ids=tuple(committed),
+                duplicate_delta_ids=tuple(duplicates),
+                error_code=error_code,
+            )
+            return completed_at
+
         try:
-            cycle_source = self._require_source_identity()
-            cycle_stream_epoch = cycle_source.stream_epoch
             self._check_storage_budget()
-            catalog_changes = self._bounded_provider_call(
+            refreshed = self._bounded_provider_call(
                 lambda: self.lifecycle.refresh_once(
                     cycle_source.fetch_catalog_page,
                     source_id=self.source_id,
@@ -658,8 +727,9 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            if not isinstance(catalog_changes, tuple):
+            if not isinstance(refreshed, tuple):
                 raise TypeError("lifecycle refresh must return a tuple")
+            catalog_changes = tuple(refreshed)
             records = tuple(
                 item
                 for item in self.lifecycle.records()
@@ -686,8 +756,6 @@ class HeadlessCollectorService:
                 )
 
             discovered_event_ids = {item.identity for item in records}
-            committed: list[str] = []
-            duplicates: list[str] = []
             for delta in raw_deltas:
                 if not isinstance(delta, CollectorDelta):
                     raise TypeError(
@@ -706,6 +774,7 @@ class HeadlessCollectorService:
                     raise CollectorServiceError(
                         "collector delta event is absent from durable event lifecycle"
                     )
+                observed.append(delta.delta_id)
                 if self._adapter.submit_committed_delta(delta):
                     committed.append(delta.delta_id)
                 else:
@@ -715,8 +784,7 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            completed_at = self.clock()
-            _CollectorServiceState._instant(completed_at, "completed_at")
+            completed_at = finish_cycle("SUCCESS")
             self._state.record_success(
                 at=completed_at,
                 committed=len(committed),
@@ -724,13 +792,27 @@ class HeadlessCollectorService:
             )
             return CollectorCycleResult(
                 source_id=self.source_id,
-                catalog_changes=tuple(catalog_changes),
+                catalog_changes=catalog_changes,
                 committed_delta_ids=tuple(committed),
                 duplicate_delta_ids=tuple(duplicates),
             )
-        except _StopRequested:
+        except _StopRequested as exc:
+            try:
+                finish_cycle("STOP_REQUESTED", error_code="STOP_REQUESTED")
+            except BaseException as evidence_error:
+                try:
+                    exc.add_note(
+                        "collector cycle STOP evidence also failed: "
+                        f"{type(evidence_error).__name__}: {evidence_error}"
+                    )
+                except BaseException:
+                    pass
             raise
         except ProviderUnavailableError as exc:
+            finish_cycle(
+                "PROVIDER_UNAVAILABLE",
+                error_code=type(exc).__name__,
+            )
             self._state.record_provider_failure(code=type(exc).__name__)
             return CollectorCycleResult(
                 source_id=self.source_id,
@@ -740,20 +822,66 @@ class HeadlessCollectorService:
                 provider_unavailable=True,
             )
         except BaseException as exc:
-            self._state.record_local_failure(code=type(exc).__name__)
+            try:
+                finish_cycle("LOCAL_FAILURE", error_code=type(exc).__name__)
+            except BaseException as evidence_error:
+                try:
+                    exc.add_note(
+                        "collector cycle failure evidence also failed: "
+                        f"{type(evidence_error).__name__}: {evidence_error}"
+                    )
+                except BaseException:
+                    pass
+            try:
+                self._state.record_local_failure(code=type(exc).__name__)
+            except BaseException as state_error:
+                try:
+                    exc.add_note(
+                        "collector service failure projection also failed: "
+                        f"{type(state_error).__name__}: {state_error}"
+                    )
+                except BaseException:
+                    pass
             raise
 
     def stop(self, reason: str = "operator_stop") -> None:
         self._state.stop(at=self.clock(), reason=reason)
 
     def run(self, *, max_cycles: int | None = None) -> CollectorRunResult:
-        """Run until STOP without retaining an unbounded in-memory cycle history."""
+        """Run against one frozen prospective cadence without shifting missed slots."""
         if max_cycles is not None and (
             isinstance(max_cycles, bool)
             or not isinstance(max_cycles, int)
             or max_cycles <= 0
         ):
             raise ValueError("max_cycles must be a positive integer or None")
+
+        schedule_anchor = self.clock()
+        _CollectorServiceState._instant(schedule_anchor, "schedule_anchor")
+        schedule_source = self._require_source_identity()
+        schedule_stream_epoch = schedule_source.stream_epoch
+        try:
+            self.delta_store._ensure_collector_schedule(
+                source_id=self.source_id,
+                run_id=self._state.run_id,
+                stream_epoch=schedule_stream_epoch,
+                anchor_at=schedule_anchor,
+                interval_seconds=self.config.poll_interval_seconds,
+                max_items=self.config.max_items,
+                evaluation_start_slot_ordinal=(
+                    0 if self.config.evaluation_slot_count is not None else None
+                ),
+                evaluation_end_slot_ordinal=(
+                    self.config.evaluation_slot_count - 1
+                    if self.config.evaluation_slot_count is not None
+                    else None
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            raise CollectorServiceError(
+                "cannot establish prospective collector schedule authority"
+            ) from exc
+
         cycles_executed = 0
         last_cycle: CollectorCycleResult | None = None
         while max_cycles is None or cycles_executed < max_cycles:
@@ -762,7 +890,32 @@ class HeadlessCollectorService:
                 self.stop(reason)
                 break
             try:
-                last_cycle = self.run_cycle()
+                schedule_slot = self.delta_store._next_collector_schedule_slot(
+                    source_id=self.source_id,
+                    run_id=self._state.run_id,
+                )
+            except (TypeError, ValueError) as exc:
+                raise CollectorServiceError(
+                    "cannot resolve next canonical collector due slot"
+                ) from exc
+
+            due_at = _CollectorServiceState._instant(
+                schedule_slot.get("due_at"),
+                "due_at",
+            )
+            now = _CollectorServiceState._instant(self.clock(), "clock")
+            while now < due_at:
+                self.sleep((due_at - now).total_seconds())
+                reason = self._requested_stop_reason()
+                if reason is not None:
+                    self.stop(reason)
+                    break
+                now = _CollectorServiceState._instant(self.clock(), "clock")
+            if reason is not None:
+                break
+
+            try:
+                last_cycle = self.run_cycle(_schedule_slot=schedule_slot)
             except _StopRequested:
                 break
             cycles_executed += 1
@@ -773,7 +926,6 @@ class HeadlessCollectorService:
             if reason is not None:
                 self.stop(reason)
                 break
-            self.sleep(self.config.poll_interval_seconds)
         return CollectorRunResult(
             cycles_executed=cycles_executed,
             last_cycle=last_cycle,
@@ -839,6 +991,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Explicitly resume this durable run_id after a persisted STOP.",
     )
     parser.add_argument("--max-cycles", type=int)
+    parser.add_argument(
+        "--evaluation-slots",
+        type=int,
+        help=(
+            "Prospectively freeze the finite scientific evaluation window for "
+            "this durable run. This is separate from per-invocation --max-cycles."
+        ),
+    )
     parser.add_argument("--max-items", type=int, default=250)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--retry-attempts", type=int, default=3)
@@ -879,6 +1039,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config=CollectorServiceConfig(
                 max_items=args.max_items,
                 poll_interval_seconds=args.poll_seconds,
+                evaluation_slot_count=args.evaluation_slots,
                 retry_attempts=args.retry_attempts,
                 initial_backoff_seconds=args.initial_backoff_seconds,
                 max_backoff_seconds=args.max_backoff_seconds,

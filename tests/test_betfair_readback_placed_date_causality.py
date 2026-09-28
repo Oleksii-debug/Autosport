@@ -131,6 +131,83 @@ def _capture(action: ExecutionAction, *, placed_date: str):
     )
 
 
+
+def _capture_cleared(
+    action: ExecutionAction,
+    *,
+    placed_date: str,
+    settled_date: str,
+):
+    cleared_order = {
+        "betId": "bet-placed-date-causality",
+        "eventId": action.event_id,
+        "marketId": action.market_id,
+        "selectionId": int(action.selection_id),
+        "side": action.side,
+        "placedDate": placed_date,
+        "settledDate": settled_date,
+        "priceRequested": 2.0,
+        "priceMatched": 2.0,
+        "sizeSettled": 10.0,
+        "profit": 10.0,
+        "customerOrderRef": PROVIDER_REF,
+    }
+    responses = [
+        _rpc_result(
+            [{"marketId": action.market_id, "event": {"id": action.event_id}}],
+            1,
+        ),
+        _rpc_result(
+            {"currentOrders": [], "moreAvailable": False},
+            2,
+        ),
+        _rpc_result(
+            {"clearedOrders": [cleared_order], "moreAvailable": False},
+            3,
+        ),
+    ]
+    for request_id in range(4, 7):
+        responses.append(
+            _rpc_result(
+                {"clearedOrders": [], "moreAvailable": False},
+                request_id,
+            )
+        )
+
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=_ReadbackTransport(responses),
+        clock=lambda: datetime.fromisoformat(OBSERVED_AT),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    return client.read_execution_readback(
+        action_id=action.action_id,
+        market_id=action.market_id,
+        provider_order_ref=PROVIDER_REF,
+    )
+
+
+def _verify_cleared(
+    action: ExecutionAction,
+    *,
+    placed_date: str,
+    settled_date: str,
+):
+    profile = _profile()
+    capture = _capture_cleared(
+        action,
+        placed_date=placed_date,
+        settled_date=settled_date,
+    )
+    return verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=PROVIDER_REF,
+    )
+
 def _verify(action: ExecutionAction, *, placed_date: str):
     profile = _profile()
     capture = _capture(action, placed_date=placed_date)
@@ -167,3 +244,59 @@ def test_current_order_placed_before_quote_cannot_mint_effect_evidence() -> None
             action,
             placed_date="2026-09-21T17:59:59+00:00",
         )
+
+def test_current_order_placed_after_capture_cannot_mint_effect_evidence() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify(
+            action,
+            placed_date="2026-09-21T18:00:17+00:00",
+        )
+
+
+def test_current_order_placed_at_capture_boundary_is_admissible() -> None:
+    action = _action()
+
+    evidence = _verify(
+        action,
+        placed_date=OBSERVED_AT,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+
+
+def test_cleared_order_settlement_cannot_predate_placement() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify_cleared(
+            action,
+            placed_date="2026-09-21T18:00:05+00:00",
+            settled_date="2026-09-21T18:00:04+00:00",
+        )
+
+
+def test_cleared_order_settlement_cannot_postdate_capture() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify_cleared(
+            action,
+            placed_date="2026-09-21T18:00:05+00:00",
+            settled_date="2026-09-21T18:00:17+00:00",
+        )
+
+
+def test_cleared_order_equal_chronology_boundaries_are_admissible() -> None:
+    action = _action()
+
+    evidence = _verify_cleared(
+        action,
+        placed_date=OBSERVED_AT,
+        settled_date=OBSERVED_AT,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+    assert evidence.accepted_stake == Decimal("10.0")
+

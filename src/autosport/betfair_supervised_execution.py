@@ -1922,12 +1922,23 @@ def execute_betfair_supervised_action(
                 None,
                 None,
             )
+        # After placeOrders may have produced an external effect, authority drift is
+        # uncertainty evidence, not a pre-effect configuration error. The descriptor
+        # intentionally raises on drift when reached by the canonical executor, so
+        # collapse that postflight signal to a boolean and durably mark UNKNOWN below.
+        try:
+            canonical_place_action_after_provider = (
+                BetfairSupervisedPlaceOrdersClient.place_action
+                is _CANONICAL_BETFAIR_PLACE_ACTION
+            )
+        except BetfairSupervisedExecutionError:
+            canonical_place_action_after_provider = False
+
         ambient_urllib_opener = (
             _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("_opener")
         )
         if (
-            BetfairSupervisedPlaceOrdersClient.place_action
-            is not _CANONICAL_BETFAIR_PLACE_ACTION
+            not canonical_place_action_after_provider
             or _CANONICAL_BETFAIR_PLACE_ACTION.__code__
             is not _CANONICAL_BETFAIR_PLACE_ACTION_CODE
             or UrllibBetfairHttpTransport.post

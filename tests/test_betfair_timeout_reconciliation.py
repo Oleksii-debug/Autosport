@@ -458,7 +458,7 @@ def test_complete_empty_before_visibility_horizon_stays_indeterminate(
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
-def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
+def test_semantic_core_at_visibility_horizon_does_not_issue_absence_authority(
     tmp_path, monkeypatch
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
@@ -469,7 +469,11 @@ def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
     assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     assert result.definitive is True
     assert result.evidence is evidence
-    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_finishes_late(
@@ -493,7 +497,7 @@ def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_fin
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
-def test_complete_empty_inside_cleared_history_window_can_issue_absence(
+def test_semantic_core_inside_cleared_history_does_not_issue_absence_authority(
     tmp_path, monkeypatch
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
@@ -505,7 +509,11 @@ def test_complete_empty_inside_cleared_history_window_can_issue_absence(
     assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     assert result.definitive is True
     assert result.evidence is evidence
-    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_complete_empty_exactly_at_cleared_history_boundary_fails_closed(

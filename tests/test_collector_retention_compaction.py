@@ -95,6 +95,37 @@ def acknowledge(store: DesktopDeltaCheckpointStore, delta: CollectorDelta) -> No
     )
 
 
+def _install_predecessor_commit_order_guard_for_test(
+    store: CollectorDeltaStore,
+) -> None:
+    """Downgrade only the commit-order guard to the exact predecessor contract."""
+
+    connection = store._connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DROP TRIGGER collector_deltas_projection_immutable_v1"
+        )
+        connection.execute(
+            "DELETE FROM collector_meta "
+            "WHERE key='commit_order_integrity_v1' "
+            "OR key LIKE 'commit_order_unverified_source_v1:%'"
+        )
+        connection.execute(
+            "CREATE TRIGGER collector_deltas_projection_immutable_v1 "
+            "BEFORE UPDATE OF delta_id, source_id, stream_epoch, cursor_position, "
+            "revision_number, desktop_available_at, collector_committed_at "
+            "ON collector_deltas BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'collector delta indexed projections are immutable'); END"
+        )
+        connection.commit()
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.close()
+
+
 def _seed_runtime_epoch_for_test(
     store: CollectorDeltaStore,
     *,
@@ -280,6 +311,31 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
                 [item.delta_id for item in reopened.deltas_after_commit(source_id="source-x")],
                 ["d2", "e2-d0"],
             )
+
+    def test_ambiguous_predecessor_order_cannot_mint_retention_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal, _ = self.make_history(tmp)
+            acknowledge(desktop, first)
+            acknowledge(desktop, terminal)
+            _install_predecessor_commit_order_guard_for_test(collector)
+
+            reopened = CollectorDeltaStore(Path(tmp) / "collector.sqlite")
+            self.assertEqual(reopened.get(first.delta_id), first)
+            manager = CollectorRetentionManager(reopened)
+
+            with self.assertRaisesRegex(
+                CollectorRetentionError,
+                "independently verified commit order",
+            ):
+                manager.preview(
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                    desktop_checkpoint=desktop,
+                )
+
+            self.assertEqual(manager.compaction_journal(), ())
+            self.assertEqual(reopened.get(first.delta_id), first)
+            self.assertEqual(reopened.get(terminal.delta_id), terminal)
 
     def test_unacknowledged_history_is_never_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:

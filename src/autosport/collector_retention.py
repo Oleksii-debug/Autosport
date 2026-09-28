@@ -436,6 +436,12 @@ class CollectorRetentionManager:
         stream_epoch: str,
         desktop_checkpoint: DesktopDeltaCheckpointStore,
     ) -> CollectorRetentionPlan:
+        try:
+            self.collector._require_verified_commit_order(connection, source_id)
+        except ValueError as exc:
+            raise CollectorRetentionError(
+                "collector retention requires independently verified commit order"
+            ) from exc
         current_stream_epoch, active_epoch_generation = (
             self._resolved_current_stream_epoch(connection, source_id)
         )

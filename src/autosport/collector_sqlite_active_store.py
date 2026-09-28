@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from .causal_collector_legacy import (
     CollectorDelta,
     CursorRegressionError,
     DeltaConflictError,
+    GapState,
     StreamCheckpoint,
     _instant,
     _text,
@@ -21,7 +23,13 @@ from .collector_sqlite_store import (
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _PROJECTION_INTEGRITY_META_KEY = "indexed_projection_integrity_v1"
+_COMMIT_ORDER_INTEGRITY_META_KEY = "commit_order_integrity_v1"
+_COMMIT_ORDER_UNVERIFIED_SOURCE_PREFIX = "commit_order_unverified_source_v1:"
 _PROJECTION_IMMUTABILITY_TRIGGER = "collector_deltas_projection_immutable_v1"
+_COMMIT_ORDER_UNVERIFIED_ERROR = (
+    "collector durable commit order is not independently verified for this source"
+)
+_PROJECTION_IMMUTABILITY_ERROR = "collector delta indexed projections are immutable"
 _INDEXED_PROJECTION_FIELDS = (
     "delta_id",
     "source_id",
@@ -31,9 +39,54 @@ _INDEXED_PROJECTION_FIELDS = (
     "desktop_available_at",
     "collector_committed_at",
 )
+_IMMUTABLE_INDEX_FIELDS = ("commit_seq", *_INDEXED_PROJECTION_FIELDS)
+_PREDECESSOR_PROJECTION_IMMUTABILITY_TRIGGER_SQL = (
+    f"CREATE TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER} BEFORE UPDATE OF "
+    + ", ".join(_INDEXED_PROJECTION_FIELDS)
+    + " ON collector_deltas BEGIN "
+    + f"SELECT RAISE(ABORT, '{_PROJECTION_IMMUTABILITY_ERROR}'); END"
+)
+_PROJECTION_IMMUTABILITY_TRIGGER_SQL = (
+    f"CREATE TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER} BEFORE UPDATE OF "
+    + ", ".join(_IMMUTABLE_INDEX_FIELDS)
+    + " ON collector_deltas BEGIN "
+    + f"SELECT RAISE(ABORT, '{_PROJECTION_IMMUTABILITY_ERROR}'); END"
+)
 _DELTA_SELECT_COLUMNS = ", ".join(
     ("commit_seq", *_INDEXED_PROJECTION_FIELDS, "payload_sha256", "payload_json")
 )
+
+
+def _normalized_trigger_sql(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.strip().rstrip(";").split())
+
+
+def _matches_projection_trigger_sql(value: object, expected_sql: str) -> bool:
+    normalized = _normalized_trigger_sql(value)
+    expected = _normalized_trigger_sql(expected_sql)
+    assert expected is not None
+    legacy_expected = expected.replace(
+        "CREATE TRIGGER ",
+        "CREATE TRIGGER IF NOT EXISTS ",
+        1,
+    )
+    return normalized in {expected, legacy_expected}
+
+
+def _is_canonical_projection_trigger(value: object) -> bool:
+    return _matches_projection_trigger_sql(
+        value,
+        _PROJECTION_IMMUTABILITY_TRIGGER_SQL,
+    )
+
+
+def _is_predecessor_projection_trigger(value: object) -> bool:
+    return _matches_projection_trigger_sql(
+        value,
+        _PREDECESSOR_PROJECTION_IMMUTABILITY_TRIGGER_SQL,
+    )
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -91,14 +144,167 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         finally:
             connection.close()
 
-    def _ensure_projection_integrity_guard(self) -> None:
-        """One-time reconcile indexed projections, then make them SQL-immutable.
+    @classmethod
+    def _reconcile_predecessor_commit_order(
+        cls,
+        rows: list[sqlite3.Row],
+    ) -> set[str]:
+        """Return sources whose legacy commit order cannot be uniquely reconstructed.
 
-        Existing stores created by an earlier branch head receive one bounded upgrade
-        scan. Once the marker and trigger are committed, normal reopen stays O(1) in
-        retained history while all future SQL projection updates fail before they can
-        create a second routing truth beside the digest-authenticated payload.
+        The predecessor guard authenticated payload-derived projections but did not
+        protect commit_seq. A legacy sequence is promoted only when retained payload
+        relationships force one per-source append order and the observed sequence is
+        that order. Ambiguity remains explicit instead of becoming authority.
         """
+
+        by_source: dict[str, list[tuple[int, CollectorDelta]]] = {}
+        for row in rows:
+            commit_seq = row["commit_seq"]
+            if (
+                isinstance(commit_seq, bool)
+                or not isinstance(commit_seq, int)
+                or commit_seq <= 0
+            ):
+                raise ValueError("collector commit order contains an invalid sequence")
+            delta = cls._row_delta(row)
+            by_source.setdefault(delta.source_id, []).append((commit_seq, delta))
+
+        unverified_sources: set[str] = set()
+        for source_id, entries in by_source.items():
+            entries.sort(key=lambda item: item[0])
+            observed_ids = [delta.delta_id for _, delta in entries]
+            positions = {
+                delta_id: index for index, delta_id in enumerate(observed_ids)
+            }
+            deltas = {delta.delta_id: delta for _, delta in entries}
+            if len(deltas) != len(entries):
+                raise ValueError("collector commit order contains duplicate delta identity")
+
+            adjacency: dict[str, set[str]] = {
+                delta_id: set() for delta_id in observed_ids
+            }
+            indegree = {delta_id: 0 for delta_id in observed_ids}
+
+            def add_edge(before: str, after: str) -> None:
+                if after not in adjacency[before]:
+                    adjacency[before].add(after)
+                    indegree[after] += 1
+
+            by_epoch: dict[str, list[CollectorDelta]] = {}
+            for delta in deltas.values():
+                by_epoch.setdefault(delta.stream_epoch, []).append(delta)
+
+            for epoch_deltas in by_epoch.values():
+                bases = sorted(
+                    (
+                        delta
+                        for delta in epoch_deltas
+                        if delta.revision_of is None
+                    ),
+                    key=lambda delta: delta.cursor_position,
+                )
+                base_positions = [delta.cursor_position for delta in bases]
+                if len(base_positions) != len(set(base_positions)):
+                    raise ValueError(
+                        "collector commit order conflicts with immutable causal history"
+                    )
+                for before, after in zip(bases, bases[1:]):
+                    add_edge(before.delta_id, after.delta_id)
+
+            for delta in deltas.values():
+                if delta.revision_of is None:
+                    continue
+                predecessor = deltas.get(delta.revision_of)
+                if predecessor is None:
+                    # A retained correction can outlive a compacted predecessor.
+                    # Without that predecessor's order evidence this source remains
+                    # usable for payload/causal reads but not delivery-order cursors.
+                    unverified_sources.add(source_id)
+                    continue
+                if (
+                    predecessor.source_id != delta.source_id
+                    or predecessor.stream_epoch != delta.stream_epoch
+                    or predecessor.event_dedupe_key != delta.event_dedupe_key
+                    or predecessor.event_id != delta.event_id
+                    or predecessor.cursor_position != delta.cursor_position
+                    or predecessor.source_cursor != delta.source_cursor
+                    or delta.revision_number != predecessor.revision_number + 1
+                    or delta.gap_from_cursor != predecessor.gap_from_cursor
+                    or delta.gap_to_cursor != predecessor.gap_to_cursor
+                ):
+                    raise ValueError(
+                        "collector commit order conflicts with immutable causal history"
+                    )
+                if predecessor.gap_state is GapState.DETECTED:
+                    if delta.gap_state is not GapState.RECOVERED:
+                        raise ValueError(
+                            "collector commit order conflicts with immutable causal history"
+                        )
+                elif delta.gap_state is GapState.RECOVERED:
+                    raise ValueError(
+                        "collector commit order conflicts with immutable causal history"
+                    )
+                add_edge(predecessor.delta_id, delta.delta_id)
+
+            for before, successors in adjacency.items():
+                for after in successors:
+                    if positions[before] >= positions[after]:
+                        raise ValueError(
+                            "collector commit order conflicts with immutable causal history"
+                        )
+
+            ready = [
+                (positions[delta_id], delta_id)
+                for delta_id, degree in indegree.items()
+                if degree == 0
+            ]
+            heapq.heapify(ready)
+            processed = 0
+            unique = source_id not in unverified_sources
+            while ready:
+                if len(ready) != 1:
+                    unique = False
+                _, current = heapq.heappop(ready)
+                processed += 1
+                for successor in adjacency[current]:
+                    indegree[successor] -= 1
+                    if indegree[successor] == 0:
+                        heapq.heappush(
+                            ready,
+                            (positions[successor], successor),
+                        )
+
+            if processed != len(entries):
+                raise ValueError(
+                    "collector commit order conflicts with immutable causal history"
+                )
+            if not unique:
+                unverified_sources.add(source_id)
+
+        return unverified_sources
+
+    @staticmethod
+    def _require_verified_commit_order(
+        connection: sqlite3.Connection,
+        source_id: str,
+    ) -> None:
+        marker = connection.execute(
+            "SELECT value FROM collector_meta WHERE key=?",
+            (_COMMIT_ORDER_INTEGRITY_META_KEY,),
+        ).fetchone()
+        if marker is None or marker[0] != "1":
+            raise ValueError(_COMMIT_ORDER_UNVERIFIED_ERROR)
+        unverified = connection.execute(
+            "SELECT value FROM collector_meta WHERE key=?",
+            (_COMMIT_ORDER_UNVERIFIED_SOURCE_PREFIX + source_id,),
+        ).fetchone()
+        if unverified is not None:
+            if unverified[0] != "1":
+                raise ValueError("invalid collector commit-order integrity metadata")
+            raise ValueError(_COMMIT_ORDER_UNVERIFIED_ERROR)
+
+    def _ensure_projection_integrity_guard(self) -> None:
+        """Reconcile projections and establish explicit commit-order authority."""
 
         connection = self._connect()
         try:
@@ -124,32 +330,112 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "SELECT value FROM collector_meta WHERE key=?",
                 (_PROJECTION_INTEGRITY_META_KEY,),
             ).fetchone()
+            order_marker = connection.execute(
+                "SELECT value FROM collector_meta WHERE key=?",
+                (_COMMIT_ORDER_INTEGRITY_META_KEY,),
+            ).fetchone()
             trigger = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?",
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
                 (_PROJECTION_IMMUTABILITY_TRIGGER,),
             ).fetchone()
 
+            if order_marker is not None and order_marker[0] != "1":
+                raise ValueError("invalid collector commit-order integrity metadata")
+
+            needs_order_reconciliation = order_marker is None
             if marker is None:
+                if order_marker is not None:
+                    raise ValueError(
+                        "collector commit-order integrity metadata lacks projection authority"
+                    )
                 rows = connection.execute(
                     f"SELECT {_DELTA_SELECT_COLUMNS} "
                     "FROM collector_deltas ORDER BY commit_seq"
                 ).fetchall()
                 for row in rows:
                     self._row_delta(row)
-                connection.execute(
-                    f"CREATE TRIGGER IF NOT EXISTS {_PROJECTION_IMMUTABILITY_TRIGGER} "
-                    "BEFORE UPDATE OF "
-                    + ", ".join(_INDEXED_PROJECTION_FIELDS)
-                    + " ON collector_deltas BEGIN "
-                    "SELECT RAISE(ABORT, 'collector delta indexed projections are immutable'); "
-                    "END"
-                )
+                unverified_sources = self._reconcile_predecessor_commit_order(rows)
+
+                # Without the projection marker, a same-name trigger has no product
+                # authority. Reconcile first, then replace it and publish both
+                # projection and commit-order migration metadata atomically.
+                if trigger is not None:
+                    connection.execute(
+                        f"DROP TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER}"
+                    )
+                connection.execute(_PROJECTION_IMMUTABILITY_TRIGGER_SQL)
                 connection.execute(
                     "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
                     (_PROJECTION_INTEGRITY_META_KEY,),
                 )
+                for source_id in sorted(unverified_sources):
+                    connection.execute(
+                        "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                        (_COMMIT_ORDER_UNVERIFIED_SOURCE_PREFIX + source_id,),
+                    )
+                connection.execute(
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                    (_COMMIT_ORDER_INTEGRITY_META_KEY,),
+                )
             elif marker[0] != "1" or trigger is None:
-                raise ValueError("collector indexed projection integrity guard is missing")
+                raise ValueError(
+                    "collector indexed projection integrity guard is missing or noncanonical"
+                )
+            elif not _is_canonical_projection_trigger(trigger[0]):
+                if not _is_predecessor_projection_trigger(trigger[0]):
+                    raise ValueError(
+                        "collector indexed projection integrity guard is missing or noncanonical"
+                    )
+                if order_marker is not None:
+                    raise ValueError(
+                        "collector commit-order metadata conflicts with predecessor guard"
+                    )
+
+                rows = connection.execute(
+                    f"SELECT {_DELTA_SELECT_COLUMNS} "
+                    "FROM collector_deltas ORDER BY commit_seq"
+                ).fetchall()
+                for row in rows:
+                    self._row_delta(row)
+                unverified_sources = self._reconcile_predecessor_commit_order(rows)
+
+                # The predecessor marker proves only payload-derived projections.
+                # Reconstruct what can be proven about per-source append order before
+                # installing the stronger commit_seq guard. Ambiguous sources stay
+                # explicitly unverified rather than inheriting false authority.
+                connection.execute(
+                    f"DROP TRIGGER {_PROJECTION_IMMUTABILITY_TRIGGER}"
+                )
+                connection.execute(_PROJECTION_IMMUTABILITY_TRIGGER_SQL)
+                for source_id in sorted(unverified_sources):
+                    connection.execute(
+                        "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                        (_COMMIT_ORDER_UNVERIFIED_SOURCE_PREFIX + source_id,),
+                    )
+                connection.execute(
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                    (_COMMIT_ORDER_INTEGRITY_META_KEY,),
+                )
+            elif needs_order_reconciliation:
+                # A branch predecessor may already have installed the stronger
+                # trigger without recording whether legacy commit order was provable.
+                # The trigger freezes the current rows, so classify exactly once.
+                rows = connection.execute(
+                    f"SELECT {_DELTA_SELECT_COLUMNS} "
+                    "FROM collector_deltas ORDER BY commit_seq"
+                ).fetchall()
+                for row in rows:
+                    self._row_delta(row)
+                unverified_sources = self._reconcile_predecessor_commit_order(rows)
+                for source_id in sorted(unverified_sources):
+                    connection.execute(
+                        "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                        (_COMMIT_ORDER_UNVERIFIED_SOURCE_PREFIX + source_id,),
+                    )
+                connection.execute(
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                    (_COMMIT_ORDER_INTEGRITY_META_KEY,),
+                )
             connection.commit()
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:
@@ -183,6 +469,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         source_id = _text(source_id, "source_id")
         connection = self._connect()
         try:
+            self._require_verified_commit_order(connection, source_id)
             row = connection.execute(
                 "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
                 "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
@@ -218,6 +505,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_verified_commit_order(connection, source_id)
             current = connection.execute(
                 "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
                 "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
@@ -287,6 +575,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
 
             activation_evidence = changed
             if not activation_evidence:
+                self._require_verified_commit_order(connection, delta.source_id)
                 latest = connection.execute(
                     "SELECT delta_id, stream_epoch FROM collector_deltas "
                     "WHERE source_id=? ORDER BY commit_seq DESC LIMIT 1",
@@ -552,6 +841,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             raise ValueError("max_items must be a positive integer")
         connection = self._connect()
         try:
+            self._require_verified_commit_order(connection, source_id)
             after_seq = 0
             if after_delta_id is not None:
                 _text(after_delta_id, "after_delta_id")

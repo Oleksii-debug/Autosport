@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from hashlib import sha256
 import json
 from threading import RLock
@@ -232,7 +233,9 @@ def _issue_assessment(
     return assessment
 
 
-def assess_betfair_commission_applicability(
+def _assess_betfair_commission_applicability(
+    fee_input_reader,
+    assessment_issuer,
     client: BetfairReadOnlyClient,
     *,
     market_id: str,
@@ -243,10 +246,30 @@ def assess_betfair_commission_applicability(
     provider reads do not prove account package/tariff mode, Australasian-event or
     Master/Sub-Account regime, conditional additional-charge applicability, or the
     terminal market net winnings on which commission is actually settled.
+
+    The public callable captures both the canonical authenticated fee-input reader and
+    this module's exact issuer once at import time. Later module-global rebinding cannot
+    replace either authority root.
     """
 
-    observation = read_betfair_execution_fee_inputs(client, market_id=market_id)
-    return _issue_assessment(observation)
+    observation = fee_input_reader(client, market_id=market_id)
+    return assessment_issuer(observation)
+
+
+assess_betfair_commission_applicability = partial(
+    _assess_betfair_commission_applicability,
+    read_betfair_execution_fee_inputs,
+    _issue_assessment,
+)
+assess_betfair_commission_applicability.__name__ = (
+    "assess_betfair_commission_applicability"
+)
+assess_betfair_commission_applicability.__qualname__ = (
+    "assess_betfair_commission_applicability"
+)
+assess_betfair_commission_applicability.__doc__ = (
+    _assess_betfair_commission_applicability.__doc__
+)
 
 
 def require_product_betfair_commission_applicability(

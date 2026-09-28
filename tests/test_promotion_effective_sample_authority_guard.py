@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from autosport.scientific_registry import EvaluationBundleRef, ScientificRegistry
+from autosport.scientific_registry import (
+    EvaluationBundleRef,
+    PromotionAction,
+    PromotionDecision,
+    PromotionEvidenceError,
+    ResearchOutcome,
+    ScientificRegistry,
+)
+from test_scientific_registry import T3, _experiment, _foundation, _promotion_evidence
 
 
 def _sha(char: str) -> str:
@@ -75,3 +83,46 @@ def test_private_append_path_cannot_bypass_promotion_lineage(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="canonical scientific lineage"):
         registry._append(_bundle(promotion_shaped=True))
+
+
+def test_valid_looking_caller_effective_sample_cannot_promote(tmp_path) -> None:
+    """Durable matching scalars are not product-issued dependence/ESS authority."""
+
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry-positive-promotion.json"
+    )
+    foundation = _foundation(registry)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="caller-ess-positive-authority",
+        rollback_identity="NONE",
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-caller-ess-authority",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="product-issued effective-sample/dependence authority",
+    ):
+        registry.record_promotion(decision)
+
+    assert registry.get("PromotionDecision", decision.promotion_decision_id) is None
+    assert registry.champion_strategy(as_of=T3) is None

@@ -27,6 +27,22 @@ def _authority_root(tmp_path) -> str:
     return str(tmp_path.parent / f"{tmp_path.name}-risk-decision-generation-authority")
 
 
+class _PublicationTriggerDecimal(Decimal):
+    """Exact Decimal value that runs one test callback on right-side multiplication."""
+
+    def __new__(cls, value: str, trigger):
+        instance = super().__new__(cls, value)
+        instance._trigger = trigger
+        instance._triggered = False
+        return instance
+
+    def __rmul__(self, other):
+        if not self._triggered:
+            self._triggered = True
+            self._trigger()
+        return Decimal(other) * Decimal(self)
+
+
 def test_evaluate_holds_publication_lock_through_final_decision(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -46,16 +62,9 @@ def test_evaluate_holds_publication_lock_through_final_decision(
         max_committed_fraction=Decimal("1"),
         minimum_cash_reserve_fraction=Decimal("0"),
     )
-    original_derived = PaperRiskPolicy._derived_risk_values
     writer_blocked = False
 
-    def interleave_publication(
-        self,
-        initial_bankroll,
-        balance,
-        committed_stake,
-        amount,
-    ):
+    def interleave_publication() -> None:
         nonlocal writer_blocked
         try:
             writer.open_ticket(
@@ -67,18 +76,11 @@ def test_evaluate_holds_publication_lock_through_final_decision(
         except ValueError as exc:
             assert "publication lock" in str(exc)
             writer_blocked = True
-        return original_derived(
-            self,
-            initial_bankroll,
-            balance,
-            committed_stake,
-            amount,
-        )
 
-    monkeypatch.setattr(
-        PaperRiskPolicy,
-        "_derived_risk_values",
-        interleave_publication,
+    object.__setattr__(
+        policy,
+        "minimum_cash_reserve_fraction",
+        _PublicationTriggerDecimal("0", interleave_publication),
     )
 
     decision = policy.evaluate(evaluated, Decimal("10"))

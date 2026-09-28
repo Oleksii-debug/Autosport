@@ -490,3 +490,60 @@ def test_closure_reachable_stake_vector_spec_rejects_generation_change(
     assert decision.action == "WAIT"
     assert decision.stakes == (Decimal("0"),)
     assert "changed during stake-vector allocation" in decision.reason
+
+
+def test_closure_reachable_evaluate_spec_cannot_bypass_opening_authority() -> None:
+    """Reconstructed delegates must still consume product-issued opening economics."""
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [
+            TicketLeg(
+                "risk-private-event",
+                "risk-private-market",
+                "risk-private-selection",
+                Decimal("2"),
+                sport="soccer",
+                exchange_side="back",
+            )
+        ],
+        "10",
+        placed_at=_TS,
+    )
+
+    # Keep public structure internally valid while contradicting the private opening
+    # commitment created by PaperBook.open_ticket.
+    ticket.stake = Decimal("1")
+    book.balance = Decimal("99")
+    PaperBook._validate_loaded_state(book)
+
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    public_root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_EVALUATE_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+
+    reconstructed = _reconstruct_spec(nested_spec)
+    decision = reconstructed(policy, book, Decimal("1"))
+
+    assert decision.allowed is False
+    assert "virtual bankroll" in decision.reason

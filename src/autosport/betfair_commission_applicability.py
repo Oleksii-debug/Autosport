@@ -291,38 +291,47 @@ assess_betfair_commission_applicability.__doc__ = (
 )
 
 
-def require_product_betfair_commission_applicability(
+def _require_product_betfair_commission_applicability(
+    issue_lock,
+    issued_by_id,
+    assessment_type,
+    error_type,
+    unproven_status,
+    canonical_reasons,
+    ruleset_id,
+    provider_rule_sources,
+    hash_constructor,
+    canonical_json,
+    schema,
+    schema_version,
     assessment: BetfairCommissionApplicabilityAssessment,
 ) -> BetfairCommissionApplicabilityAssessment:
-    """Validate exact in-process issuance and fail closed on any positive widening."""
+    """Validate exact in-process issuance using import-time-bound authority roots."""
 
-    if type(assessment) is not BetfairCommissionApplicabilityAssessment:
-        raise BetfairCommissionApplicabilityError(
+    if type(assessment) is not assessment_type:
+        raise error_type(
             "assessment must be exact BetfairCommissionApplicabilityAssessment"
         )
-    with _ISSUE_LOCK:
-        reference = _ISSUED_BY_ID.get(id(assessment))
+    with issue_lock:
+        reference = issued_by_id.get(id(assessment))
         if reference is None or reference() is not assessment:
-            raise BetfairCommissionApplicabilityError(
-                "assessment is not product-issued in this process"
-            )
+            raise error_type("assessment is not product-issued in this process")
     if (
-        assessment.status is not BetfairCommissionApplicabilityStatus.UNPROVEN
-        or assessment.reasons != _CANONICAL_REASONS
-        or assessment.ruleset_id != _RULESET_ID
-        or assessment.provider_rule_sources
-        != (_PROVIDER_COMMISSION_SOURCE, _PROVIDER_CHARGES_SOURCE, _PROVIDER_MBR_SOURCE)
+        assessment.status is not unproven_status
+        or assessment.reasons != canonical_reasons
+        or assessment.ruleset_id != ruleset_id
+        or assessment.provider_rule_sources != provider_rule_sources
         or assessment.prospective_commission_amount_authorized is not False
         or assessment.complete_execution_fee_cost_authorized is not False
         or assessment.provider_write_authorized is not False
         or assessment.real_money_execution_authorized is not False
     ):
-        raise BetfairCommissionApplicabilityError(
+        raise error_type(
             "assessment exceeds the canonical fail-closed applicability boundary"
         )
     payload = {
-        "schema": _SCHEMA,
-        "schema_version": _SCHEMA_VERSION,
+        "schema": schema,
+        "schema_version": schema_version,
         "venue_id": assessment.venue_id,
         "account_id": assessment.account_id,
         "market_id": assessment.market_id,
@@ -344,6 +353,32 @@ def require_product_betfair_commission_applicability(
         "provider_write_authorized": assessment.provider_write_authorized,
         "real_money_execution_authorized": assessment.real_money_execution_authorized,
     }
-    if assessment.assessment_id != sha256(_canonical_json(payload)).hexdigest():
-        raise BetfairCommissionApplicabilityError("assessment identity is inconsistent")
+    if assessment.assessment_id != hash_constructor(canonical_json(payload)).hexdigest():
+        raise error_type("assessment identity is inconsistent")
     return assessment
+
+
+require_product_betfair_commission_applicability = partial(
+    _require_product_betfair_commission_applicability,
+    _ISSUE_LOCK,
+    _ISSUED_BY_ID,
+    BetfairCommissionApplicabilityAssessment,
+    BetfairCommissionApplicabilityError,
+    BetfairCommissionApplicabilityStatus.UNPROVEN,
+    _CANONICAL_REASONS,
+    _RULESET_ID,
+    (_PROVIDER_COMMISSION_SOURCE, _PROVIDER_CHARGES_SOURCE, _PROVIDER_MBR_SOURCE),
+    sha256,
+    _canonical_json,
+    _SCHEMA,
+    _SCHEMA_VERSION,
+)
+require_product_betfair_commission_applicability.__name__ = (
+    "require_product_betfair_commission_applicability"
+)
+require_product_betfair_commission_applicability.__qualname__ = (
+    "require_product_betfair_commission_applicability"
+)
+require_product_betfair_commission_applicability.__doc__ = (
+    _require_product_betfair_commission_applicability.__doc__
+)

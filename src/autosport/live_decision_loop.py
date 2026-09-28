@@ -1924,9 +1924,46 @@ class PersistentLiveDecisionLoop:
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
-            self.book.save(self.pre_action_book_path)
+            #
+            # The pre-action artifact is recovery evidence, not an alternate
+            # persistence path for the live PaperBook.  In PAPER mode #623 owns
+            # that exact live object at workspace/paper_book.json; publishing the
+            # same object here would either rebind or cross-path-save its durable
+            # generation.  Reuse the canonical risk shadow capability to create
+            # a detached exact semantic clone with product-issued opening/causal
+            # authority but no live generation/path binding.  Its first save
+            # therefore establishes only the dedicated recovery-snapshot lineage.
+            live_context_sha256 = self._decision_context_sha256()
+            snapshot = self.authority.risk_policy._shadow_book_for_allocation(
+                self.book
+            )
+            if (
+                type(snapshot) is not PaperBook
+                or snapshot is self.book
+                or not self._same_book_state(snapshot, self.book)
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot detach exact pre-action PaperBook"
+                )
+            snapshot_context_sha256 = self._decision_context_sha256_for_book(
+                snapshot
+            )
+            if snapshot_context_sha256 != live_context_sha256:
+                raise LiveDecisionProgressError(
+                    "pre-action PaperBook context changed before durability"
+                )
+
+            snapshot.save(self.pre_action_book_path)
             durable_pre_action = PaperBook.load(self.pre_action_book_path)
-            if not self._same_book_state(durable_pre_action, self.book):
+            durable_context_sha256 = self._decision_context_sha256_for_book(
+                durable_pre_action
+            )
+            current_context_sha256 = self._decision_context_sha256()
+            if (
+                not self._same_book_state(durable_pre_action, self.book)
+                or durable_context_sha256 != live_context_sha256
+                or current_context_sha256 != live_context_sha256
+            ):
                 raise LiveDecisionProgressError(
                     "pre-action PaperBook durability verification failed"
                 )
@@ -1935,9 +1972,7 @@ class PersistentLiveDecisionLoop:
                 phase=_PHASE_PENDING,
                 decision_ts=decision_ts,
                 market_state_sha256=market_state_sha256,
-                decision_context_sha256=self._decision_context_sha256_for_book(
-                    durable_pre_action
-                ),
+                decision_context_sha256=durable_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=self.dependencies.input_ids,
                 decision_id=None,

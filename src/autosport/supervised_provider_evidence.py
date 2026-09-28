@@ -281,8 +281,10 @@ def _require_bound_profile(
     account_id: str,
     observed_at: str,
 ) -> None:
-    if not isinstance(profile, BookmakerCapabilityProfile):
-        raise ProviderEvidenceError("provider evidence requires canonical capability profile")
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise ProviderEvidenceError(
+            "provider evidence requires exact canonical capability profile"
+        )
     if (
         profile.venue_id != bookmaker_id
         or profile.account_id != account_id
@@ -314,11 +316,11 @@ def verify_betfair_provider_state(
 ) -> VerifiedProviderState:
     """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
 
-    if not isinstance(action, ExecutionAction):
-        raise ProviderEvidenceError("action must be canonical ExecutionAction")
-    if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+    if type(action) is not ExecutionAction:
+        raise ProviderEvidenceError("action must be exact canonical ExecutionAction")
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
         raise ProviderEvidenceError(
-            "provider evidence requires canonical action-scoped readback envelope"
+            "provider evidence requires exact canonical action-scoped readback envelope"
         )
     try:
         readback.assert_authoritative()
@@ -423,11 +425,17 @@ def verify_betfair_provider_state(
         ]
     ] = []
     for order in current:
-        if order.customer_order_ref == provider_order_ref:
-            candidates.append(("current", None, order))
+        if order.customer_order_ref != provider_order_ref:
+            raise ProviderEvidenceError(
+                "current-order customerOrderRef conflicts with captured execution scope"
+            )
+        candidates.append(("current", None, order))
     for status, order in cleared:
-        if order.customer_order_ref == provider_order_ref:
-            candidates.append(("cleared", status, order))
+        if order.customer_order_ref != provider_order_ref:
+            raise ProviderEvidenceError(
+                "cleared-order customerOrderRef conflicts with captured execution scope"
+            )
+        candidates.append(("cleared", status, order))
 
     for kind, _, order in candidates:
         if (
@@ -438,12 +446,43 @@ def verify_betfair_provider_state(
             raise ProviderEvidenceError(
                 "provider order identity conflicts with execution action"
             )
+        if _time(order.placed_date, "provider order placed_date") < _time(
+            action.quote_observed_at, "execution quote_observed_at"
+        ):
+            raise ProviderEvidenceError(
+                "provider order placement predates execution action quote"
+            )
+        if kind == "current":
+            assert isinstance(order, BetfairCurrentOrderObservation)
+            if order.price is None or order.price != action.requested_odds:
+                raise ProviderEvidenceError(
+                    "provider current order requested price conflicts with execution action"
+                )
+            if (
+                order.requested_size is None
+                or order.requested_size != action.requested_stake
+            ):
+                raise ProviderEvidenceError(
+                    "provider current order requested stake conflicts with execution action"
+                )
         if kind == "cleared":
             assert isinstance(order, BetfairClearedOrderObservation)
             if order.event_id != action.event_id:
                 raise ProviderEvidenceError(
                     "provider cleared order event conflicts with execution action"
                 )
+            if order.price_requested != action.requested_odds:
+                raise ProviderEvidenceError(
+                    "provider cleared order requested price conflicts with execution action"
+                )
+    cleared_statuses_by_receipt: dict[str, set[str]] = {}
+    for status, order in cleared:
+        cleared_statuses_by_receipt.setdefault(order.bet_id, set()).add(status)
+    if any(len(statuses) > 1 for statuses in cleared_statuses_by_receipt.values()):
+        raise ProviderEvidenceError(
+            "provider receipt has contradictory cleared terminal statuses"
+        )
+
     receipt_ids = {order.bet_id for _, _, order in candidates}
     if len(receipt_ids) > 1:
         raise ProviderEvidenceError(
@@ -511,6 +550,14 @@ def verify_betfair_provider_state(
     if accepted_stake <= 0 or accepted_odds <= 0:
         raise ProviderEvidenceError(
             "provider order exists but matched execution economics remain unresolved"
+        )
+    if action.side == "BACK" and accepted_odds < action.requested_odds:
+        raise ProviderEvidenceError(
+            "provider matched price is worse than submitted Betfair BACK limit"
+        )
+    if action.side == "LAY" and accepted_odds > action.requested_odds:
+        raise ProviderEvidenceError(
+            "provider matched price is worse than submitted Betfair LAY limit"
         )
     if accepted_stake > action.requested_stake:
         raise ProviderEvidenceError("provider matched stake exceeds requested stake")

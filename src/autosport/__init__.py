@@ -6,6 +6,20 @@ __version__ = "0.1.0"
 # facade subclasses or calls the legacy compatibility implementation.
 from . import _paper_execution_anti_rollback as _paper_execution_anti_rollback  # noqa: F401,E402
 from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: F401,E402
+
+# Compose the one canonical PaperBook durable-authority graph before any execution
+# surface imports PaperExecutionAdoptionRuntime/RunTransaction. Order is semantic:
+# generation CAS extends the owning witness guard; stdlib member targets freeze before
+# the positive load/save graph is cloned; surface/helper witnesses seal that graph;
+# only then may obsolete pre-generation handles be removed and risk roots finalized.
+from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: F401,E402
+from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_generation_cas_guard  # noqa: F401,E402
+from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: F401,E402
+from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: F401,E402
+from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: F401,E402
+from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: F401,E402
+from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: F401,E402
+
 from . import _paper_execution_append_recovery as _paper_execution_append_recovery  # noqa: F401,E402
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402

@@ -382,13 +382,13 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(
                 ValueError,
-                "serialized candidate causal history differs from product-issued authority",
+                "persistence class dispatch authority changed",
             ):
                 book.save(self.path)
         finally:
             PaperBook._validate_loaded_state = original_descriptor
 
-        self.assertTrue(injected)
+        self.assertFalse(injected)
         self.assertEqual(self.path.read_bytes(), durable_before)
 
     def test_private_causal_history_rejects_coherent_reopen_before_second_settlement(self) -> None:

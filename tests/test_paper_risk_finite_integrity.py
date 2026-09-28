@@ -178,7 +178,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = policy.evaluate(book, stake)
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
 
     def test_finite_operands_whose_derived_risk_arithmetic_overflows_are_denied(self) -> None:
         book = PaperBook("9E+999999")
@@ -192,7 +192,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = policy.evaluate(book, "9E+999999")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
 
     def test_risk_arithmetic_does_not_depend_on_or_mutate_caller_decimal_context(self) -> None:
         book = PaperBook("100")

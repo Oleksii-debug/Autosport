@@ -1378,6 +1378,60 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 "use a new acquisition_id for a new provider read"
             )
 
+        from . import betfair_account_readonly as readonly_module
+        from ._scientific_registry_read_authority import (
+            ScientificRegistryReadAuthorityError,
+            _source_owned_function,
+        )
+
+        reader_method_names = (
+            "read_account_snapshot",
+            "read_account_details",
+            "read_account_funds",
+            "_read_all_current_orders_with_evidence",
+            "_read_all_cleared_orders_with_evidence",
+            "read_current_orders_page",
+            "read_cleared_orders_page",
+            "_to_position",
+            "_rpc",
+            "_next_request_id",
+            "_observed_at",
+        )
+
+        def require_snapshot_reader_graph():
+            instance_namespace = getattr(client, "__dict__", None)
+            if type(instance_namespace) is not dict:
+                raise AccountSnapshotAcquisitionError(
+                    "canonical Betfair client instance state is unavailable"
+                )
+            snapshot_reader = None
+            for method_name in reader_method_names:
+                if method_name in instance_namespace:
+                    raise AccountSnapshotAcquisitionError(
+                        "canonical Betfair account snapshot reader has instance-level "
+                        f"dispatch shadow: {method_name}"
+                    )
+                candidate = vars(BetfairReadOnlyClient).get(method_name)
+                try:
+                    verified = _source_owned_function(
+                        candidate,
+                        module=readonly_module,
+                        qualname=f"BetfairReadOnlyClient.{method_name}",
+                    )
+                except ScientificRegistryReadAuthorityError as exc:
+                    raise AccountSnapshotAcquisitionError(
+                        "canonical Betfair account snapshot reader dispatch changed: "
+                        f"{method_name}"
+                    ) from exc
+                if method_name == "read_account_snapshot":
+                    snapshot_reader = verified
+            if snapshot_reader is None:
+                raise AccountSnapshotAcquisitionError(
+                    "canonical Betfair account snapshot reader is unavailable"
+                )
+            return snapshot_reader
+
+        snapshot_reader = require_snapshot_reader_graph()
         try:
             account_identity = _read_developer_account_identity(client)
         except _provider_scope.CampaignProviderScopeError as exc:
@@ -1389,8 +1443,12 @@ def _install_account_snapshot_acquisition_authority() -> None:
             self,
             client,
             requested_capabilities,
-            canonical_snapshot_read,
+            snapshot_reader,
         )
+        if require_snapshot_reader_graph() is not snapshot_reader:
+            raise AccountSnapshotAcquisitionError(
+                "canonical Betfair account snapshot reader changed during acquisition"
+            )
         credentials = getattr(client, "_credentials", None)
         return issue_live(
             raw_record(

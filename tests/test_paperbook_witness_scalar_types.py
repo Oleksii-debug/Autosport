@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from pathlib import Path
+from types import FunctionType
 
 import pytest
 
@@ -10,6 +11,21 @@ import autosport._paperbook_preload_authority_guard as guard
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 
+
+
+def _clone_with_builtins(function: FunctionType, builtins_map: dict[str, object]) -> FunctionType:
+    globals_copy = dict(function.__globals__)
+    globals_copy["__builtins__"] = builtins_map
+    clone = FunctionType(
+        function.__code__,
+        globals_copy,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+        closure=function.__closure__,
+    )
+    if function.__kwdefaults__ is not None:
+        clone.__kwdefaults__ = dict(function.__kwdefaults__)
+    return clone
 
 _TS = "2026-09-27T13:50:00+00:00"
 
@@ -104,7 +120,7 @@ def test_witness_schema_exact_type_ignores_self_restoring_builtin_substitution(
     load_descriptor = vars(PaperBook)["load"]
     assert type(load_descriptor) is classmethod
     guarded_load = load_descriptor.__func__
-    builtins_map = guarded_load.__builtins__
+    builtins_map = dict(guarded_load.__builtins__)
     original_type = builtins_map["type"]
     bypass_attempted = False
 
@@ -117,10 +133,8 @@ def test_witness_schema_exact_type_ignores_self_restoring_builtin_substitution(
         return original_type(value)
 
     builtins_map["type"] = hostile_type
-    try:
-        with pytest.raises(ValueError, match="schema"):
-            PaperBook.load(path)
-    finally:
-        builtins_map["type"] = original_type
+    isolated_load = _clone_with_builtins(guarded_load, builtins_map)
+    with pytest.raises(ValueError, match="schema"):
+        isolated_load(PaperBook, path)
 
     assert bypass_attempted is False

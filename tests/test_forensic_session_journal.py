@@ -745,6 +745,9 @@ def test_hardlink_alias_is_rejected_fail_closed(tmp_path: Path) -> None:
         pytest.skip("hard links are not available in this environment")
     with pytest.raises(JournalIntegrityError, match="hard-linked"):
         ForensicSessionJournal(alias, clock=FakeClock(), session_id=str(uuid.UUID(int=34)))
+    with pytest.raises(JournalIntegrityError, match="single-link regular file"):
+        verify_journal(path)
+    alias.unlink()
     assert [record.event_type for record in verify_journal(path)] == [
         "lifecycle.startup",
         "lifecycle.shutdown",
@@ -940,6 +943,9 @@ def test_hardlink_created_while_writer_active_blocks_next_append(tmp_path: Path)
         pytest.skip("hard links are not available in this environment")
     with pytest.raises(JournalIntegrityError, match="link count changed"):
         journal.append_material("after.hardlink", {"x": 1})
+    with pytest.raises(JournalIntegrityError, match="single-link regular file"):
+        verify_journal(path)
+    alias.unlink()
     assert verify_journal(path)[-1].event_type == "lifecycle.startup"
 
 

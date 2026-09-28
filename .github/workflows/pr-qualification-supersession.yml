@@ -12,12 +12,13 @@ permissions:
   contents: read
   pull-requests: read
 
-# Serialize cancellation decisions for one PR. The source qualification workflows
-# retain their own per-run scheduler isolation, so a stale lifecycle event can never
-# evict a current run before live-head/admission truth is re-resolved.
+# Keep only the newest trusted cancellation decision for one PR. Source qualification
+# workflows remain scheduler-isolated until live admission. Replacing an older controller
+# cannot grant cancellation authority: every irreversible cancellation is still guarded
+# by a fresh live head/state/draft snapshot inside the trusted helper.
 concurrency:
   group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   cancel_superseded_head_runs:

@@ -137,6 +137,22 @@ def _generation_race_leg() -> TicketLeg:
     )
 
 
+class _PublicationTriggerDecimal(Decimal):
+    """Exact Decimal value that runs one test callback on right-side multiplication."""
+
+    def __new__(cls, value: str, trigger):
+        instance = super().__new__(cls, value)
+        instance._trigger = trigger
+        instance._triggered = False
+        return instance
+
+    def __rmul__(self, other):
+        if not self._triggered:
+            self._triggered = True
+            self._trigger()
+        return Decimal(other) * Decimal(self)
+
+
 def test_reconstructible_nested_evaluate_spec_cannot_bypass_decision_generation_scope(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -169,16 +185,9 @@ def test_reconstructible_nested_evaluate_spec_cannot_bypass_decision_generation_
     assert type(nested_spec) is tuple and len(nested_spec) == 6
     reconstructed = _reconstruct_spec(nested_spec)
 
-    original_derived = PaperRiskPolicy._derived_risk_values
     writer_published = False
 
-    def interleave_publication(
-        self,
-        initial_bankroll,
-        balance,
-        committed_stake,
-        amount,
-    ):
+    def interleave_publication() -> None:
         nonlocal writer_published
         writer.open_ticket(
             [_generation_race_leg()],
@@ -187,18 +196,11 @@ def test_reconstructible_nested_evaluate_spec_cannot_bypass_decision_generation_
         )
         writer.save(path)
         writer_published = True
-        return original_derived(
-            self,
-            initial_bankroll,
-            balance,
-            committed_stake,
-            amount,
-        )
 
-    monkeypatch.setattr(
-        PaperRiskPolicy,
-        "_derived_risk_values",
-        interleave_publication,
+    object.__setattr__(
+        policy,
+        "minimum_cash_reserve_fraction",
+        _PublicationTriggerDecimal("0", interleave_publication),
     )
 
     decision = reconstructed(policy, evaluated, Decimal("10"))
@@ -251,16 +253,9 @@ def test_closure_reachable_nested_evaluate_spec_cannot_bypass_generation_scope(
     assert outer_spec is not None
     reconstructed = _reconstruct_spec(outer_spec)
 
-    original_derived = PaperRiskPolicy._derived_risk_values
     writer_published = False
 
-    def interleave_publication(
-        self,
-        initial_bankroll,
-        balance,
-        committed_stake,
-        amount,
-    ):
+    def interleave_publication() -> None:
         nonlocal writer_published
         writer.open_ticket(
             [_generation_race_leg()],
@@ -269,18 +264,11 @@ def test_closure_reachable_nested_evaluate_spec_cannot_bypass_generation_scope(
         )
         writer.save(path)
         writer_published = True
-        return original_derived(
-            self,
-            initial_bankroll,
-            balance,
-            committed_stake,
-            amount,
-        )
 
-    monkeypatch.setattr(
-        PaperRiskPolicy,
-        "_derived_risk_values",
-        interleave_publication,
+    object.__setattr__(
+        policy,
+        "minimum_cash_reserve_fraction",
+        _PublicationTriggerDecimal("0", interleave_publication),
     )
 
     decision = reconstructed(policy, evaluated, Decimal("10"))
@@ -346,10 +334,9 @@ def test_closure_reachable_goal_stake_spec_rejects_generation_change(
     assert nested_spec is not None
     reconstructed = _reconstruct_spec(nested_spec)
 
-    original_limits = PaperRiskPolicy._effective_fraction_limits
     writer_published = False
 
-    def interleave_publication(self):
+    def interleave_publication() -> None:
         nonlocal writer_published
         writer.open_ticket(
             [_generation_race_leg()],
@@ -358,12 +345,11 @@ def test_closure_reachable_goal_stake_spec_rejects_generation_change(
         )
         writer.save(path)
         writer_published = True
-        return original_limits(self)
 
-    monkeypatch.setattr(
-        PaperRiskPolicy,
-        "_effective_fraction_limits",
-        interleave_publication,
+    object.__setattr__(
+        policy,
+        "minimum_cash_reserve_fraction",
+        _PublicationTriggerDecimal("0", interleave_publication),
     )
 
     amount = reconstructed(policy, evaluated, Decimal("0.5"))
@@ -457,25 +443,22 @@ def test_closure_reachable_stake_vector_spec_rejects_generation_change(
     assert nested_spec is not None
     reconstructed = _reconstruct_spec(nested_spec)
 
-    original_limits = PaperRiskPolicy._effective_fraction_limits
     writer_published = False
 
-    def interleave_publication(self):
+    def interleave_publication() -> None:
         nonlocal writer_published
-        if not writer_published:
-            writer.open_ticket(
-                [_generation_race_leg()],
-                "95",
-                placed_at=_TS,
-            )
-            writer.save(path)
-            writer_published = True
-        return original_limits(self)
+        writer.open_ticket(
+            [_generation_race_leg()],
+            "95",
+            placed_at=_TS,
+        )
+        writer.save(path)
+        writer_published = True
 
-    monkeypatch.setattr(
-        PaperRiskPolicy,
-        "_effective_fraction_limits",
-        interleave_publication,
+    object.__setattr__(
+        policy,
+        "minimum_cash_reserve_fraction",
+        _PublicationTriggerDecimal("0", interleave_publication),
     )
 
     decision = reconstructed(

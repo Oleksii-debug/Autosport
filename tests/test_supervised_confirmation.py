@@ -445,7 +445,7 @@ def test_nonempty_confirmation_state_fails_closed_after_monotonic_authority_loss
 
     with pytest.raises(
         SupervisedConfirmationIntegrityError,
-        match="independent monotonic authority",
+        match="activated monotonic authority history is missing under selected root",
     ):
         SupervisedConfirmationAuthority(path, clock=clock)
 

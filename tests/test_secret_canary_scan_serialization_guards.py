@@ -36,6 +36,87 @@ def test_json_string_serialization_cannot_hide_canary(
     assert canary not in repr(report)
 
 
+def _unicode_escape_every_code_unit(value: str) -> bytes:
+    encoded: list[str] = []
+    for character in value:
+        code_point = ord(character)
+        if code_point <= 0xFFFF:
+            encoded.append(f"\\u{code_point:04x}")
+            continue
+        scalar = code_point - 0x10000
+        high = 0xD800 + (scalar >> 10)
+        low = 0xDC00 + (scalar & 0x3FF)
+        encoded.append(f"\\u{high:04X}\\u{low:04x}")
+    return "".join(encoded).encode("ascii")
+
+
+def test_json_semantic_unicode_escapes_cannot_hide_canary_across_chunks(
+    tmp_path: Path,
+) -> None:
+    canary = "S3/😀-А-secret"
+    payload = _unicode_escape_every_code_unit(canary)
+    assert canary.encode("utf-8") not in payload
+    assert json.dumps(canary, ensure_ascii=True)[1:-1].encode("ascii") != payload
+    (tmp_path / "unicode-escaped.json").write_bytes(
+        b'{"token":"' + payload + b'"}'
+    )
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=4,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "json-string-semantic" in report.findings[0].encodings
+    assert canary not in repr(report)
+
+
+def test_json_semantic_mixed_simple_and_solidus_escapes_cannot_hide_canary(
+    tmp_path: Path,
+) -> None:
+    canary = 'oauth/"\\-line\n-secret'
+    canonical = json.dumps(canary, ensure_ascii=False)[1:-1]
+    payload = canonical.replace("/", "\\/").encode("utf-8")
+    assert payload != canonical.encode("utf-8")
+    assert canary.encode("utf-8") not in payload
+    (tmp_path / "mixed-escaped.json").write_bytes(
+        b'{"token":"' + payload + b'"}'
+    )
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=3,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert "json-string-semantic" in report.findings[0].encodings
+    assert canary not in repr(report)
+
+
+def test_malformed_surrogate_sequence_does_not_fabricate_json_semantic_match(
+    tmp_path: Path,
+) -> None:
+    canary = "A😀B"
+    (tmp_path / "malformed.json").write_bytes(
+        b'{"token":"A\\uD83DX\\uDE00B"}'
+    )
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=5,
+    )
+
+    assert report.status == "CLEAN"
+    assert report.exit_code == 0
+    assert report.findings == ()
+
+
 def test_windows_reparse_attribute_is_treated_as_link_like() -> None:
     class FakeStat:
         st_file_attributes = secret_canary_scan._REPARSE_POINT_FLAG

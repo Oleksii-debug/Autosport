@@ -19,13 +19,14 @@ permissions:
   contents: read
   pull-requests: read
 
-# PR runs must reach the lightweight admission job before any supersession decision.
-# If fresh lifecycle events share a cancel-in-progress group, GitHub can kill an older
-# useful full-suite run before admission can evaluate the live PR head. Isolate every
-# PR workflow run at scheduler level; stale PR heads are rejected read-only below.
-# Main/push branch runs remain coalesced.
+# Coalesce only scheduler-safe classes before runner allocation. Fresh integration-capable
+# events share one QUALIFY lane so newer head/readiness work displaces obsolete work.
+# Draft/closed events use a separate LIFECYCLE lane and therefore cannot evict useful
+# qualification before live admission. Re-runs are isolated by exact event head SHA so a
+# stale-head rerun cannot cancel current-head qualification. The trusted controller and
+# read-only admission helper remain the authority for live PR state/head decisions.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}-run-{1}', github.event.pull_request.number, github.run_id) || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || ((github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || 'qualify')) || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -61,9 +62,9 @@ jobs:
 
   test:
     needs: superseded_run_admission
-    # Draft/closed/stale PR runs are not integration-capable. Lifecycle events on the
-    # same exact head are intentionally not deduplicated here: an older draft event
-    # must never suppress a later ready_for_review qualification for that same head.
+    # Draft/closed/stale PR runs are not integration-capable. Scheduler partitioning only
+    # coalesces equivalent qualification or lifecycle work; admission still re-resolves
+    # exact live PR state/head before this heavy matrix can allocate.
     if: >-
       needs.superseded_run_admission.outputs.current_head == 'true' &&
       (github.event_name != 'pull_request' ||

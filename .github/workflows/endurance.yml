@@ -45,13 +45,14 @@ permissions:
   contents: read
   pull-requests: read
 
-# Coalesce only scheduler-safe classes before runner allocation. Fresh integration-capable
-# events share one QUALIFY lane; draft/closed events use a separate LIFECYCLE lane and
-# cannot evict useful qualification. Re-runs are isolated by exact event head SHA.
-# The trusted supersession controller and read-only admission helper retain live truth
-# authority; workflow-dispatch runs keep ordinary branch/ref coalescing behavior.
+# Coalesce only scheduler-safe classes before runner allocation. Fresh qualification
+# events share one lane only for the same exact PR head, so a delayed stale-head event
+# can never evict current-head qualification. Draft/closed events use a separate
+# LIFECYCLE lane and cannot evict useful qualification. Re-runs are isolated by exact
+# event head SHA. The trusted supersession controller and read-only admission helper
+# retain live truth authority; workflow-dispatch keeps ordinary ref coalescing.
 concurrency:
-  group: endurance-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || ((github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || 'qualify')) || github.ref }}
+  group: endurance-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || ((github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || format('qualify-{0}', github.event.pull_request.head.sha))) || github.ref }}
   cancel-in-progress: true
 
 jobs:

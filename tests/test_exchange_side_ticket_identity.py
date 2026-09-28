@@ -89,7 +89,7 @@ def test_paperbook_rejects_lay_mutation_before_settlement() -> None:
     ticket.legs = (lay,)
     balance_before = book.balance
 
-    with pytest.raises(ValueError, match="LAY economic materialization"):
+    with pytest.raises(ValueError, match="opening economic identity changed after admission"):
         book.settle(ticket.ticket_id, {lay.quote_key}, settled_at=_TS)
 
     assert book.balance == balance_before
@@ -238,7 +238,7 @@ def test_paperbook_save_and_load_fail_closed_on_lay_materialization(tmp_path) ->
     durable_before = path.read_bytes()
 
     ticket.legs = (_leg("lay"),)
-    with pytest.raises(ValueError, match="LAY economic materialization"):
+    with pytest.raises(ValueError, match="opening economic identity changed after admission"):
         book.save(path)
     assert path.read_bytes() == durable_before
 

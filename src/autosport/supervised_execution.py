@@ -19,7 +19,7 @@ if _timeout_authority_module_name in _timeout_origin_sys.modules:
 from .betfair_timeout_reconciliation import (
     BetfairTimeoutResolutionError,
     _BETFAIR_AMBIGUOUS_UNKNOWN_REASON,
-    assert_betfair_timeout_absence_authoritative,
+    assert_betfair_timeout_absence_authoritative_for_attempt,
 )
 
 del _timeout_authority_module_name, _timeout_origin_sys
@@ -1076,12 +1076,11 @@ def reconcile_provider_not_found(
             raise BetfairTimeoutResolutionError(
                 "provider absence does not resolve one durable execution attempt"
             )
-        if attempts[0].unknown_reason == _BETFAIR_AMBIGUOUS_UNKNOWN_REASON:
-            assert_betfair_timeout_absence_authoritative(readback)
     except (ProviderEvidenceError, BetfairTimeoutResolutionError) as exc:
         raise SupervisedExecutionError(
             "verified complete provider absence evidence is not authoritative"
         ) from exc
+    attempt_view = attempts[0]
     action, state = _attempt_action(ledger, bound, attempt_id)
     if state is not AttemptState.UNKNOWN:
         raise SupervisedExecutionError("not-found readback requires UNKNOWN attempt")
@@ -1116,6 +1115,18 @@ def reconcile_provider_not_found(
         adapter_version=readback.adapter_version,
         profile_version=readback.profile_version,
     )
+    if attempt_view.unknown_reason == _BETFAIR_AMBIGUOUS_UNKNOWN_REASON:
+        try:
+            assert_betfair_timeout_absence_authoritative_for_attempt(
+                ledger,
+                action,
+                attempt_id,
+                readback,
+            )
+        except BetfairTimeoutResolutionError as exc:
+            raise SupervisedExecutionError(
+                "verified complete provider absence evidence is not authoritative"
+            ) from exc
     ledger.reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,

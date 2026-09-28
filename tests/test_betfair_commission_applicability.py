@@ -287,3 +287,29 @@ def test_verifier_keeps_import_time_authority_roots_after_module_rebinding(monke
         match="assessment identity is inconsistent",
     ):
         require_product_betfair_commission_applicability(assessment)
+
+
+
+def test_issuer_keeps_nested_identity_builder_graph_after_module_rebinding(monkeypatch):
+    client, transport = _client()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("rebound nested identity helper must not become issuer authority")
+
+    monkeypatch.setattr(applicability_module, "_fee_input_payload", forbidden)
+    monkeypatch.setattr(applicability_module, "_fee_input_sha256", forbidden)
+    monkeypatch.setattr(applicability_module, "_canonical_json", forbidden)
+    monkeypatch.setattr(applicability_module, "sha256", forbidden)
+    monkeypatch.setattr(applicability_module, "_CANONICAL_REASONS", ())
+    monkeypatch.setattr(applicability_module, "_RULESET_ID", "rebound-ruleset")
+    monkeypatch.setattr(applicability_module, "_PROVIDER_COMMISSION_SOURCE", "rebound")
+    monkeypatch.setattr(applicability_module, "_PROVIDER_CHARGES_SOURCE", "rebound")
+    monkeypatch.setattr(applicability_module, "_PROVIDER_MBR_SOURCE", "rebound")
+
+    assessment = assess_betfair_commission_applicability(client, market_id="1.234")
+
+    assert len(transport.calls) == 2
+    assert assessment.status is BetfairCommissionApplicabilityStatus.UNPROVEN
+    assert assessment.ruleset_id != "rebound-ruleset"
+    assert "rebound" not in assessment.provider_rule_sources
+    assert require_product_betfair_commission_applicability(assessment) is assessment

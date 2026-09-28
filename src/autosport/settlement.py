@@ -290,10 +290,15 @@ def _build_serialized_settlement_operations():
     # TicketStatus, Decimal/context helpers, or another PaperBook helper fails
     # closed. Exact code-object checks here are defense in depth within the same
     # trusted-process boundary, not an external executable-integrity root.
-    paper_module_globals = descriptor_function(
-        paper_book_type.__dict__["settle"]
-    ).__globals__
-    paper_global_seal: dict[str, tuple[object, object | None]] = {}
+    # PaperBook.settle may be a composed wrapper installed from a guard module,
+    # while helper methods such as _settlement_result remain defined in paper.py.
+    # One namespace chosen from settle() therefore cannot attest the complete
+    # dispatch graph. Seal each reachable function against its own defining-module
+    # globals and recurse only within that exact namespace.
+    paper_global_seal: dict[
+        tuple[int, str],
+        tuple[dict[str, object], object, object | None],
+    ] = {}
     pending_functions = [
         descriptor_function(descriptor)
         for _, descriptor, _ in paper_dispatch_seal
@@ -305,29 +310,34 @@ def _build_serialized_settlement_operations():
         if function_id in seen_function_ids:
             continue
         seen_function_ids.add(function_id)
-        if getattr(function, "__globals__", None) is not paper_module_globals:
+        function_globals = getattr(function, "__globals__", None)
+        if type(function_globals) is not dict:
             continue
         for global_name in function.__code__.co_names:
-            if global_name not in paper_module_globals:
+            if global_name not in function_globals:
                 continue
-            value = paper_module_globals[global_name]
+            value = function_globals[global_name]
             code = getattr(value, "__code__", None)
-            existing = paper_global_seal.get(global_name)
+            key = (id(function_globals), global_name)
+            existing = paper_global_seal.get(key)
             if existing is not None and (
-                existing[0] is not value or existing[1] is not code
+                existing[0] is not function_globals
+                or existing[1] is not value
+                or existing[2] is not code
             ):
                 raise RuntimeError(
                     "PaperBook settlement global dependency is inconsistent"
                 )
-            paper_global_seal[global_name] = (value, code)
+            paper_global_seal[key] = (function_globals, value, code)
             if (
                 code is not None
-                and getattr(value, "__globals__", None) is paper_module_globals
+                and getattr(value, "__globals__", None) is function_globals
             ):
                 pending_functions.append(value)
     frozen_paper_globals = tuple(
-        (name, value, code)
-        for name, (value, code) in sorted(paper_global_seal.items())
+        (namespace, name, value, code)
+        for (_namespace_id, name), (namespace, value, code)
+        in paper_global_seal.items()
     )
 
     # PaperBook's imported domain DTO classes are mutable class objects too.
@@ -456,11 +466,8 @@ def _build_serialized_settlement_operations():
                 )
 
     def require_paper_module_globals() -> None:
-        for name, value, code in frozen_paper_globals:
-            if (
-                name not in paper_module_globals
-                or paper_module_globals[name] is not value
-            ):
+        for namespace, name, value, code in frozen_paper_globals:
+            if name not in namespace or namespace[name] is not value:
                 raise ValueError(
                     "PaperBook settlement authority globals changed"
                 )

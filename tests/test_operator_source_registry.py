@@ -19,7 +19,9 @@ from autosport.operator_source_registry import (
     list_product_source_entries,
     resolve_product_source_entry,
     resolve_product_source_factory_spec,
+    resolve_product_source_runtime_binding,
 )
+
 
 
 def test_registry_ids_round_trip_through_stacked_operator_config_contract() -> None:
@@ -54,7 +56,6 @@ def test_configured_but_unregistered_source_id_fails_closed_at_registry_boundary
     ):
         resolve_product_source_entry(selection.source_id)
 
-
 def test_registry_exposes_only_grounded_canonical_product_source() -> None:
     entries = list_product_source_entries()
 
@@ -75,8 +76,14 @@ def test_registered_factory_spec_resolves_through_existing_canonical_loader() ->
     entry = resolve_product_source_entry("parlayapi-table-tennis")
 
     factory = _load_source_factory(entry.factory_spec)
+    bound_entry, bound_factory = resolve_product_source_runtime_binding(
+        entry.factory_spec,
+        entry.expected_provider_source_id,
+    )
 
     assert factory is create_parlay_product_source
+    assert bound_entry is entry
+    assert bound_factory is create_parlay_product_source
     assert entry.runtime_authorized is False
 
 
@@ -175,3 +182,16 @@ def test_listing_is_stable_and_contains_no_duplicate_authority_keys() -> None:
     assert len(entries) == len({entry.source_id for entry in entries})
     assert len(entries) == len({entry.factory_spec for entry in entries})
     assert tuple(entry.source_id for entry in entries) == ("parlayapi-table-tennis",)
+
+
+def test_runtime_binding_rejects_unregistered_factory_or_provider_pair() -> None:
+    with pytest.raises(OperatorSourceRegistryError, match="not registered"):
+        resolve_product_source_runtime_binding(
+            "autosport.product_source:create_parlay_product_source",
+            "different:provider",
+        )
+    with pytest.raises(OperatorSourceRegistryError, match="not registered"):
+        resolve_product_source_runtime_binding(
+            "autosport.product_source:other_factory",
+            "parlayapi:table_tennis",
+        )

@@ -242,8 +242,20 @@ class BanditPolicyState:
         }
 
     @classmethod
-    def from_payload(cls, payload: object) -> "BanditPolicyState":
-        """Reconstruct one policy without accepting aliases or lossy numerics."""
+    def from_payload(
+        cls,
+        payload: object,
+        *,
+        expected_policy_id: str | None = None,
+    ) -> "BanditPolicyState":
+        """Reconstruct a policy and bind non-initial restart to external identity.
+
+        policy_id is derived from the payload itself, so a rewritten restart
+        artifact cannot authenticate its own accumulated history. Any non-initial
+        restart therefore requires an expected identity obtained from an authority
+        outside these caller-rewritable bytes. The product path uses the champion
+        identity already resolved from ScientificRegistry/promotion authority.
+        """
 
         expected = {
             "schema",
@@ -293,7 +305,7 @@ class BanditPolicyState:
         for name in ("applied_action_ids", "applied_reward_ids"):
             if type(payload[name]) is not list:
                 raise LearningEnvironmentError(f"policy {name} must be a list")
-        return cls(
+        state = cls(
             environment_id=payload["environment_id"],
             protocol_id=payload["protocol_id"],
             config_sha256=payload["config_sha256"],
@@ -306,6 +318,18 @@ class BanditPolicyState:
             schema=payload["schema"],
             schema_version=payload["schema_version"],
         )
+        if expected_policy_id is None:
+            if state.generation > 0:
+                raise LearningEnvironmentError(
+                    "non-initial policy restart requires external history provenance"
+                )
+            return state
+        expected = _sha256("expected_policy_id", expected_policy_id)
+        if state.policy_id != expected:
+            raise LearningEnvironmentError(
+                "policy restart identity does not match external history provenance"
+            )
+        return state
 
     def choose(self, *, admissible_actions: frozenset[str]) -> str:
         """Choose only among owner-supplied actions; deterministic ties are lexical."""

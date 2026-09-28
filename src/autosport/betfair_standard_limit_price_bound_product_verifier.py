@@ -123,6 +123,10 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
             )
+        if issuance_store.authority_root is not None:
+            raise BetfairStandardLimitPriceBoundError(
+                "product issuance store must use the product-selected authority root"
+            )
 
         if type(ledger) is not canonical_ledger_type:
             raise BetfairStandardLimitPriceBoundError(

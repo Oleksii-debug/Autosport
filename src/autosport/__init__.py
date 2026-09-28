@@ -158,6 +158,20 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # have been re-read against the already-committed monotonic witness.
 from . import _product_decision_activation_commit_return_guard as _product_decision_activation_commit_return_guard  # noqa: F401,E402
 
+# Caller-owned market-filter containers cannot remain authority-bearing after the
+# authenticated Betfair subscription starts. Snapshot once, then let the canonical
+# existing issuer hash and send only that detached product-owned value.
+from . import _betfair_authenticated_stream_filter_snapshot as _betfair_authenticated_stream_filter_snapshot  # noqa: F401,E402
+
+# Resolve the product-owned selector location through platform callables captured
+# before the broader executable-dispatch composition freezes the selection chain.
+from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_selection_os_resolver_guard  # noqa: F401,E402
+
+# The machine-state root selector is only an independent trust root if its executable
+# store resolver cannot be replaced after package import. Freeze that dispatch and
+# MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
+from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
+
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.

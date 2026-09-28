@@ -174,6 +174,87 @@ def test_injected_transport_complete_is_structural_not_authoritative() -> None:
         result.assert_complete()
 
 
+def test_instance_shadowed_public_read_dispatch_fails_before_attacker_execution() -> None:
+    client = _product_client(_rpc({"currentOrders": [], "moreAvailable": False}, 1))
+    attacker_calls = 0
+
+    def forged_read_current_orders_page(**kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del kwargs
+        raise AssertionError("shadowed read method executed")
+
+    client.read_current_orders_page = forged_read_current_orders_page  # type: ignore[method-assign]
+    observer = BetfairReadCompletenessObserver(client)
+
+    with pytest.raises(BetfairReadOnlyError, match="client read dispatch changed"):
+        observer.read_current_orders(page_size=10)
+
+    assert attacker_calls == 0
+
+
+def test_instance_shadowed_rpc_dispatch_fails_before_attacker_execution() -> None:
+    client = _product_client(
+        _rpc(
+            {
+                "availableToBetBalance": 100,
+                "exposure": -5,
+                "retainedCommission": 0,
+                "exposureLimit": -1000,
+            },
+            1,
+        )
+    )
+    attacker_calls = 0
+
+    def forged_rpc(*args, **kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del args, kwargs
+        raise AssertionError("shadowed rpc executed")
+
+    client._rpc = forged_rpc  # type: ignore[method-assign]
+    observer = BetfairReadCompletenessObserver(client)
+
+    with pytest.raises(BetfairReadOnlyError, match="client read dispatch changed"):
+        observer.read_account_funds()
+
+    assert attacker_calls == 0
+
+
+def test_rebound_client_read_method_fails_before_attacker_execution(monkeypatch) -> None:
+    client = _product_client(
+        _rpc(
+            {
+                "availableToBetBalance": 100,
+                "exposure": -5,
+                "retainedCommission": 0,
+                "exposureLimit": -1000,
+            },
+            1,
+        )
+    )
+    observer = BetfairReadCompletenessObserver(client)
+    attacker_calls = 0
+
+    def forged_read_account_funds(self):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del self
+        raise AssertionError("rebound class read method executed")
+
+    monkeypatch.setattr(
+        BetfairReadOnlyClient,
+        "read_account_funds",
+        forged_read_account_funds,
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="client read dispatch changed"):
+        observer.read_account_funds()
+
+    assert attacker_calls == 0
+
+
 def test_injected_observer_clock_complete_is_not_authoritative() -> None:
     client = _product_client(_rpc({"currentOrders": [], "moreAvailable": False}, 1))
     observer = BetfairReadCompletenessObserver(client, clock=lambda: NOW)

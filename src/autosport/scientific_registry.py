@@ -1771,6 +1771,10 @@ class ScientificRegistry:
             return self._append_entry_locked(state, entry)
 
     def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
+        if record.record_type == "PromotionDecision":
+            raise PromotionEvidenceError(
+                "promotion decisions must be recorded through record_promotion"
+            )
         entry = self._entry(record)
         if type(allow_repeat_experiment) is not bool:
             raise ValueError("allow_repeat_experiment must be boolean")

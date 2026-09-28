@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+import autosport.supervised_provider_evidence as provider_evidence
+
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -150,3 +152,36 @@ def test_current_order_wrong_requested_size_cannot_mint_effect_evidence() -> Non
             readback=capture,
             expected_provider_order_ref=PROVIDER_REF,
         )
+
+
+def test_provider_verifier_rejects_completeness_helper_rebind(monkeypatch) -> None:
+    action = _action()
+    profile = _profile()
+    capture = _capture_with_provider_requested_size(
+        action,
+        requested_size=10.0,
+    )
+    hostile_called = False
+
+    def hostile_complete_current_pages(_pages):
+        nonlocal hostile_called
+        hostile_called = True
+        return (), "0" * 64, OBSERVED_AT
+
+    monkeypatch.setattr(
+        provider_evidence,
+        "_complete_current_pages",
+        hostile_complete_current_pages,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider evidence executable authority changed",
+    ):
+        verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=PROVIDER_REF,
+        )
+    assert hostile_called is False

@@ -203,7 +203,8 @@ def test_reconstructible_nested_evaluate_spec_cannot_bypass_decision_generation_
 
     decision = reconstructed(policy, evaluated, Decimal("10"))
 
-    assert not (decision.allowed is True and writer_published is True)
+    assert writer_published is True
+    assert decision.allowed is False
 
 
 def test_closure_reachable_nested_evaluate_spec_cannot_bypass_generation_scope(

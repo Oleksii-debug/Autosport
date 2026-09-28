@@ -79,14 +79,8 @@ def test_ci_pr_scheduler_coalesces_only_same_head_qualification() -> None:
     _assert_head_partitioned_pr_scheduler(".github/workflows/ci.yml")
 
 
-def test_windows_pr_scheduler_keeps_per_run_isolation_until_safe_successor() -> None:
-    workflow = _workflow(".github/workflows/windows-build.yml")
-    concurrency_block = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
-
-    assert "cancel-in-progress: true" in concurrency_block
-    assert "github.run_id" in concurrency_block
-    assert "format('pr-{0}-run-{1}'" in concurrency_block
-    assert "format('qualify-{0}', github.event.pull_request.head.sha)" not in concurrency_block
+def test_windows_pr_scheduler_coalesces_only_same_head_qualification() -> None:
+    _assert_head_partitioned_pr_scheduler(".github/workflows/windows-build.yml")
 
 
 def test_endurance_pr_scheduler_coalesces_only_same_head_qualification() -> None:

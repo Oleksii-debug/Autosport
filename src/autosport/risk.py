@@ -57,43 +57,6 @@ def _verify_product_risk_of_ruin_authority(
     )
 
 
-def _build_product_risk_authority_dispatch(verifier):
-    """Pin the exact lazy authority helper executable used by the policy gate."""
-
-    verifier_code = verifier.__code__
-    dispatch_code = None
-
-    def dispatch(
-        registry_path: str | Path | None,
-        evidence: object,
-        *,
-        kind: str,
-        available_by: str,
-    ) -> tuple[bool, str]:
-        if (
-            dispatch.__code__ is not dispatch_code
-            or _verify_product_risk_of_ruin_authority is not verifier
-            or getattr(verifier, "__code__", None) is not verifier_code
-        ):
-            prefix = "portfolio" if kind == "single" else "portfolio vector"
-            return False, f"{prefix} risk-of-ruin product authority dispatch changed"
-        return verifier(
-            registry_path,
-            evidence,
-            kind=kind,
-            available_by=available_by,
-        )
-
-    dispatch_code = dispatch.__code__
-    return dispatch
-
-
-_PRODUCT_RISK_AUTHORITY_DISPATCH = _build_product_risk_authority_dispatch(
-    _verify_product_risk_of_ruin_authority
-)
-del _build_product_risk_authority_dispatch
-
-
 def _canonical_context_text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be a non-empty canonical string")
@@ -2004,7 +1967,6 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         amount: Decimal,
         goal: EconomicGoalContract,
         context: ProposedTicketRiskContext,
-        _authority_dispatch=_PRODUCT_RISK_AUTHORITY_DISPATCH,
     ) -> RiskDecision | None:
         base_decision = _PaperRiskPolicyCore._risk_of_ruin_evidence_decision(
             book,
@@ -2017,7 +1979,24 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         evidence = context.risk_of_ruin_evidence
         assert evidence is not None
         assert context.proposal_ts is not None
-        verified, reason = _authority_dispatch(
+        from ._scientific_registry_read_authority import (
+            ScientificRegistryReadAuthorityError,
+            _source_owned_function,
+        )
+
+        risk_module = __import__(__name__, fromlist=["_verify_product_risk_of_ruin_authority"])
+        try:
+            verifier = _source_owned_function(
+                getattr(risk_module, "_verify_product_risk_of_ruin_authority", None),
+                module=risk_module,
+                qualname="_verify_product_risk_of_ruin_authority",
+            )
+        except ScientificRegistryReadAuthorityError:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin product authority dispatch changed",
+            )
+        verified, reason = verifier(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="single",
@@ -2032,7 +2011,6 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
         contexts: tuple[ProposedTicketRiskContext, ...],
         stakes: tuple[Decimal, ...],
         evidence: RiskOfRuinVectorEvidence | None,
-        _authority_dispatch=_PRODUCT_RISK_AUTHORITY_DISPATCH,
     ) -> RiskDecision | None:
         base_decision = _PaperRiskPolicyCore._risk_of_ruin_vector_evidence_decision(
             book,
@@ -2055,16 +2033,27 @@ class PaperRiskPolicy(_PaperRiskPolicyCore):
                 "portfolio vector risk-of-ruin evidence lacks canonical proposal time",
             )
         available_by = min(proposal_times).astimezone(timezone.utc).isoformat()
-        verified, reason = _authority_dispatch(
+        from ._scientific_registry_read_authority import (
+            ScientificRegistryReadAuthorityError,
+            _source_owned_function,
+        )
+
+        risk_module = __import__(__name__, fromlist=["_verify_product_risk_of_ruin_authority"])
+        try:
+            verifier = _source_owned_function(
+                getattr(risk_module, "_verify_product_risk_of_ruin_authority", None),
+                module=risk_module,
+                qualname="_verify_product_risk_of_ruin_authority",
+            )
+        except ScientificRegistryReadAuthorityError:
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin product authority dispatch changed",
+            )
+        verified, reason = verifier(
             self.risk_of_ruin_registry_path,
             evidence,
             kind="vector",
             available_by=available_by,
         )
         return None if verified else RiskDecision(False, reason)
-
-
-# The policy methods retain the exact guarded dispatcher in their immutable
-# function defaults.  Do not leave a module-global callable that can be rebound
-# into positive financial authority.
-del _PRODUCT_RISK_AUTHORITY_DISPATCH

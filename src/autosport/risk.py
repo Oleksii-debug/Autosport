@@ -1526,6 +1526,14 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 book, amount, goal, context
             ) is not None:
                 return None
+
+        # The canonical public wrapper normally holds one generation-stable read
+        # scope around this derivation. Reconstructed historical delegate specs
+        # must still fail closed: re-resolve the same canonical book state before
+        # returning positive sizing authority. A concurrent durable publication
+        # makes a path-bound stale book fail the generation-aware _book_state read.
+        if self._book_state(book) != state:
+            return None
         return amount
 
     @staticmethod
@@ -1708,6 +1716,17 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 economic_goal=replace(goal, max_risk_of_ruin=Decimal("1")),
             )
 
+        # Capture a generation-validated live state before detached allocation.
+        # This gives even a reconstructible pre-wrapper delegate a linearization
+        # point that can be revalidated before it returns positive portfolio sizing.
+        authority_state = self._book_state(book)
+        if authority_state is None:
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "virtual bankroll allocation authority is invalid",
+            )
+
         shadow = allocation_policy._shadow_book_for_allocation(book)
         if shadow is None:
             return StakeVectorDecision(
@@ -1781,6 +1800,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                         zero_vector,
                         vector_ruin_decision.reason,
                     )
+            if self._book_state(book) != authority_state:
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll changed during stake-vector allocation",
+                )
             return StakeVectorDecision(
                 "STAKE_VECTOR",
                 result,
@@ -1927,4 +1952,11 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             return RiskDecision(False, "aggregate committed stake limit exceeded")
         if remaining_balance < reserve_limit:
             return RiskDecision(False, "minimum virtual cash reserve would be violated")
+
+        # Positive authority must linearize against one durable PaperBook generation
+        # even when an older executable spec is reconstructed from Python-visible
+        # wrapper state. The generation-aware _book_state check rejects a stale
+        # path-bound object after any concurrent canonical publication.
+        if self._book_state(book) != state:
+            return RiskDecision(False, "virtual bankroll changed during risk evaluation")
         return RiskDecision(True, "allowed")

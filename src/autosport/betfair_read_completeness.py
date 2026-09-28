@@ -33,6 +33,23 @@ from .betfair_account_readonly import (
 )
 
 
+# Freeze the canonical provider read dispatch used by completeness authority.
+# Exact client type alone is insufficient: ordinary Python instances can shadow
+# methods in __dict__, and class methods can be rebound or have __code__ replaced.
+_CANONICAL_READ_ACCOUNT_FUNDS = BetfairReadOnlyClient.read_account_funds
+_CANONICAL_READ_ACCOUNT_DETAILS = BetfairReadOnlyClient.read_account_details
+_CANONICAL_READ_CURRENT_ORDERS_PAGE = BetfairReadOnlyClient.read_current_orders_page
+_CANONICAL_READ_CLEARED_ORDERS_PAGE = BetfairReadOnlyClient.read_cleared_orders_page
+_CANONICAL_RPC = BetfairReadOnlyClient._rpc
+_CANONICAL_READ_DISPATCH = (
+    ("read_account_funds", _CANONICAL_READ_ACCOUNT_FUNDS, _CANONICAL_READ_ACCOUNT_FUNDS.__code__),
+    ("read_account_details", _CANONICAL_READ_ACCOUNT_DETAILS, _CANONICAL_READ_ACCOUNT_DETAILS.__code__),
+    ("read_current_orders_page", _CANONICAL_READ_CURRENT_ORDERS_PAGE, _CANONICAL_READ_CURRENT_ORDERS_PAGE.__code__),
+    ("read_cleared_orders_page", _CANONICAL_READ_CLEARED_ORDERS_PAGE, _CANONICAL_READ_CLEARED_ORDERS_PAGE.__code__),
+    ("_rpc", _CANONICAL_RPC, _CANONICAL_RPC.__code__),
+)
+
+
 class BetfairObservationCompleteness(str, Enum):
     """What the acquisition attempt can authoritatively say about its query."""
 
@@ -313,10 +330,12 @@ class BetfairReadCompletenessObserver:
         self._attempt_sequence = 0
 
     def read_account_funds(self) -> BetfairValueReadResult:
-        return self._read_value("getAccountFunds", {}, self._client.read_account_funds)
+        self._require_canonical_client_read_dispatch()
+        return self._read_value("getAccountFunds", {}, _CANONICAL_READ_ACCOUNT_FUNDS)
 
     def read_account_details(self) -> BetfairValueReadResult:
-        return self._read_value("getAccountDetails", {}, self._client.read_account_details)
+        self._require_canonical_client_read_dispatch()
+        return self._read_value("getAccountDetails", {}, _CANONICAL_READ_ACCOUNT_DETAILS)
 
     def read_current_orders(
         self,
@@ -342,7 +361,9 @@ class BetfairReadCompletenessObserver:
         offset = 0
         for _ in range(max_pages):
             try:
-                page = self._client.read_current_orders_page(
+                self._require_canonical_client_read_dispatch()
+                page = _CANONICAL_READ_CURRENT_ORDERS_PAGE(
+                    self._client,
                     from_record=offset,
                     record_count=page_size,
                     customer_order_refs=customer_order_refs,
@@ -442,7 +463,9 @@ class BetfairReadCompletenessObserver:
         offset = 0
         for _ in range(max_pages):
             try:
-                page = self._client.read_cleared_orders_page(
+                self._require_canonical_client_read_dispatch()
+                page = _CANONICAL_READ_CLEARED_ORDERS_PAGE(
+                    self._client,
                     from_record=offset,
                     record_count=page_size,
                     settled_from=settled_from,
@@ -520,12 +543,12 @@ class BetfairReadCompletenessObserver:
         self,
         operation: str,
         query: dict[str, object],
-        reader: Callable[[], BetfairAccountFundsObservation | BetfairAccountDetailsObservation],
+        reader: Callable[[BetfairReadOnlyClient], BetfairAccountFundsObservation | BetfairAccountDetailsObservation],
     ) -> BetfairValueReadResult:
         query_payload = {"operation": operation, **query}
         started, query_sha, attempt_id = self._start(query_payload)
         try:
-            value = reader()
+            value = reader(self._client)
         except BetfairReadOnlyError as exc:
             completeness, code = _classify_failure(exc, partial=False)
             witness = self._witness(
@@ -611,6 +634,28 @@ class BetfairReadCompletenessObserver:
             authoritative_origin=self._product_origin_is_intact(),
         )
 
+    def _client_read_dispatch_is_intact(self) -> bool:
+        """Reject caller-shadowed or rebound provider read executables."""
+
+        try:
+            instance_dict = vars(self._client)
+        except TypeError:
+            return False
+        for name, canonical, canonical_code in _CANONICAL_READ_DISPATCH:
+            if name in instance_dict:
+                return False
+            if getattr(BetfairReadOnlyClient, name, None) is not canonical:
+                return False
+            if getattr(canonical, "__code__", None) is not canonical_code:
+                return False
+        return True
+
+    def _require_canonical_client_read_dispatch(self) -> None:
+        if not self._client_read_dispatch_is_intact():
+            raise BetfairReadOnlyError(
+                "Betfair completeness client read dispatch changed"
+            )
+
     def _product_origin_is_intact(self) -> bool:
         """Require the already-owned canonical client + observer time origin.
 
@@ -621,7 +666,11 @@ class BetfairReadCompletenessObserver:
         client component or the observer clock during the read fails closed.
         """
 
-        if self._product_clock is None or self._clock is not self._product_clock:
+        if (
+            self._product_clock is None
+            or self._clock is not self._product_clock
+            or not self._client_read_dispatch_is_intact()
+        ):
             return False
         try:
             origin = _client_origin._CANONICAL_CLIENT_ORIGINS.get(self._client)

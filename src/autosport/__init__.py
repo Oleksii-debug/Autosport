@@ -145,6 +145,10 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
 
+# Forward-economic evidence keeps caller-facing copies, but the private committed
+# step list must also remain identity-stable after admission.
+from . import _forward_economic_step_identity_guard as _forward_economic_step_identity_guard  # noqa: F401,E402
+
 # Product PolicyEvaluation issuance already exact-fences the FactoryArtifactStore
 # surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.

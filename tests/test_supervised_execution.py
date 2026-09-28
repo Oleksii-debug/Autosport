@@ -757,26 +757,21 @@ def test_caller_cannot_clone_verified_effect_to_mint_ack() -> None:
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
-def test_complete_provider_absence_without_timeout_authority_cannot_release_retry() -> None:
+def test_complete_provider_absence_is_diagnostic_without_retry_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
         verified = _verified_state(bound, action, matched_stake=None)
         assert isinstance(verified, VerifiedProviderAbsenceEvidence)
-
-        with pytest.raises(
-            SupervisedExecutionError,
-            match="verified complete provider absence evidence is not authoritative",
-        ):
-            reconcile_provider_not_found(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=verified,
-            )
-
-        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+        result = reconcile_provider_not_found(
+            ledger,
+            bound,
+            attempt_id="attempt-1",
+            readback=verified,
+        )
+        assert result.outcome is ReadbackOutcome.NOT_FOUND
+        assert ledger.attempt_state("attempt-1") is AttemptState.RECONCILED_NOT_FOUND
         assert ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,

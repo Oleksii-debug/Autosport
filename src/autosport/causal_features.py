@@ -258,10 +258,13 @@ class AvailabilityCache:
     def put(self, key: str, value: object, *, available_at: datetime) -> None:
         if not key.strip():
             raise CausalFeatureError("cache key must not be empty")
-        self._values[key] = (
-            require_aware_utc(available_at, "available_at"),
-            value,
-        )
+        normalized_available_at = require_aware_utc(available_at, "available_at")
+        existing = self._values.get(key)
+        if existing is not None and normalized_available_at <= existing[0]:
+            raise FeatureLeakageError(
+                "cache replacement available_at must advance for an existing key"
+            )
+        self._values[key] = (normalized_available_at, value)
 
     def get(self, key: str, *, at: datetime) -> object | None:
         decision_at = require_aware_utc(at, "at")

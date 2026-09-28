@@ -226,10 +226,13 @@ def test_bound_book_rejects_authority_root_drift_and_fresh_overwrite(
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(second_root))
     with pytest.raises(
         ValueError,
-        match="path or authority root|lacks independent durable authority",
+        match="path or authority root|verified path-bound authority",
     ):
         loaded.save(path)
 
     fresh = PaperBook("100")
-    with pytest.raises(ValueError, match="lacks independent durable authority"):
+    with pytest.raises(
+        ValueError,
+        match="verified path-bound authority|lacks independent durable authority",
+    ):
         fresh.save(path)

@@ -1217,7 +1217,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 }
             )
 
-        def bind(
+        def _bind(
             self,
             acquirer: BetfairAccountSnapshotAcquirer,
             store: _AccountSnapshotStore,
@@ -1242,7 +1242,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     credentials,
                 )
 
-        def state(
+        def _state(
             self,
             acquirer: BetfairAccountSnapshotAcquirer,
         ) -> tuple[
@@ -1265,7 +1265,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 if current is not None and current[0] is reference:
                     self._live.pop(acquisition_id, None)
 
-        def retry_live(
+        def _retry_live(
             self,
             acquisition_id: str,
             *,
@@ -1298,7 +1298,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     )
                 return value
 
-        def publish_live(
+        def _publish_live(
             self,
             acquired: AuthoritativeAccountSnapshot,
             *,
@@ -1347,7 +1347,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 )
                 return acquired
 
-        def assert_live(self, acquired: AuthoritativeAccountSnapshot) -> None:
+        def _assert_live(self, acquired: AuthoritativeAccountSnapshot) -> None:
             if type(acquired) is not AuthoritativeAccountSnapshot:
                 raise AccountSnapshotAcquisitionError(
                     "provider-origin authority requires exact acquired snapshot evidence"
@@ -1366,7 +1366,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     authority = _AccountSnapshotAuthorityBoundary()
 
     def assert_live(acquired: AuthoritativeAccountSnapshot) -> None:
-        authority.assert_live(acquired)
+        authority._assert_live(acquired)
 
     def __init__(
         self: BetfairAccountSnapshotAcquirer,
@@ -1387,7 +1387,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
         client = self._client
         del self._store
         del self._client
-        authority.bind(self, store, client, credentials)
+        authority._bind(self, store, client, credentials)
 
     def acquire(
         self: BetfairAccountSnapshotAcquirer,
@@ -1395,7 +1395,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
         *,
         acquisition_id: str,
     ) -> AuthoritativeAccountSnapshot:
-        store, client, origin_credentials = authority.state(self)
+        store, client, origin_credentials = authority._state(self)
         client_credentials = getattr(client, "_credentials", None)
         if (
             type(client_credentials) is not BetfairSessionCredentials
@@ -1457,7 +1457,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "acquisition_id cannot be reused for another provider/account/capability scope"
                 )
-            live = authority.retry_live(
+            live = authority._retry_live(
                 existing.receipt.acquisition_id,
                 credentials=origin_credentials,
             )
@@ -1547,7 +1547,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             raise AccountSnapshotAcquisitionError(
                 "canonical Betfair client credential origin changed during acquisition"
             )
-        return authority.publish_live(
+        return authority._publish_live(
             raw_record(
                 store,
                 snapshot,
@@ -1564,7 +1564,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
         self: BetfairAccountSnapshotAcquirer,
         acquisition_id: str,
     ) -> AuthoritativeAccountSnapshot:
-        store, _, _ = authority.state(self)
+        store, _, _ = authority._state(self)
         return raw_resolve(store, acquisition_id)
 
     def verify(
@@ -1580,7 +1580,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             raise AccountSnapshotAcquisitionError(
                 "receipt must be an exact AccountSnapshotAcquisitionReceipt"
             )
-        store, _, _ = authority.state(self)
+        store, _, _ = authority._state(self)
         resolved = raw_resolve(store, receipt.acquisition_id)
         if resolved.receipt != receipt:
             raise AccountSnapshotAcquisitionError(

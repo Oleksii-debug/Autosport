@@ -193,6 +193,11 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
         module=_registry,
         qualname="ScientificRegistry._validate_ablation_authority_causal_inputs",
     )
+    validate_promotion_ess = _source_owned_function(
+        _raw_class_function("_validate_promotion_effective_sample_causal_inputs"),
+        module=_registry,
+        qualname="ScientificRegistry._validate_promotion_effective_sample_causal_inputs",
+    )
     raw = _integrity.read_verified_scientific_registry_text(self.path)
     try:
         state = json.loads(
@@ -218,6 +223,8 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
         if key in seen:
             raise ValueError("scientific registry contains duplicate record identity")
         seen.add(key)
+        if raw_entry["record_type"] == "EvaluationBundle":
+            validate_promotion_ess(records, raw_entry)
         if raw_entry["record_type"] == "Experiment":
             fingerprint = raw_entry["payload"].get("fingerprint")
             prior_state = {

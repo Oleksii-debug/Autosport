@@ -36,8 +36,9 @@ def test_current_head_request_cancels_only_obsolete_same_pr_workflow_runs() -> N
     assert "--admission-only" not in workflow
 
 
-def test_controller_serializes_decisions_without_last_writer_wins_cancellation() -> None:
+def test_controller_keeps_only_latest_pr_cancellation_decision() -> None:
     workflow = _text()
 
     assert "group: pr-qualification-supersession-" in workflow
-    assert "cancel-in-progress: false" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "fresh live head/state/draft snapshot" in workflow

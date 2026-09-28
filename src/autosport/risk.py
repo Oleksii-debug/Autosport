@@ -476,7 +476,7 @@ class ProposedTicketRiskContext:
         if self.risk_of_ruin_upper_bound is not None:
             bound = self.risk_of_ruin_upper_bound
             if (
-                not isinstance(bound, Decimal)
+                type(bound) is not Decimal
                 or not bound.is_finite()
                 or bound < Decimal("0")
                 or bound > Decimal("1")
@@ -484,9 +484,9 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
-        if self.risk_of_ruin_evidence is not None and not isinstance(
-            self.risk_of_ruin_evidence, RiskOfRuinEvidence
-        ):
+        if self.risk_of_ruin_evidence is not None and type(
+            self.risk_of_ruin_evidence
+        ) is not RiskOfRuinEvidence:
             raise ValueError(
                 "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
             )
@@ -937,7 +937,7 @@ class PaperRiskPolicy:
                 False,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
-        if not isinstance(evidence, RiskOfRuinVectorEvidence):
+        if type(evidence) is not RiskOfRuinVectorEvidence:
             return RiskDecision(
                 False,
                 "multi-candidate portfolio risk-of-ruin vector evidence is invalid",

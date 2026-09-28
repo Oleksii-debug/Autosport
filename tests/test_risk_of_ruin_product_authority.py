@@ -779,3 +779,84 @@ def test_result_digest_rejects_decimal_subclass_payload() -> None:
         assert "finite Decimal" in str(exc)
     else:
         raise AssertionError("Decimal subclass entered canonical authority digest")
+
+
+class _RiskEvidenceSubclass(RiskOfRuinEvidence):
+    pass
+
+
+class _RiskVectorEvidenceSubclass(RiskOfRuinVectorEvidence):
+    pass
+
+
+def test_risk_evidence_subclasses_cannot_enter_policy_authority() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    canonical = _single_evidence(policy, book, context)
+    subclass = _RiskEvidenceSubclass(
+        evidence_id=canonical.evidence_id,
+        research_protocol_sha256=canonical.research_protocol_sha256,
+        reproducibility_bundle_sha256=canonical.reproducibility_bundle_sha256,
+        producer_identity=canonical.producer_identity,
+        causal_cutoff=canonical.causal_cutoff,
+        evaluated_at=canonical.evaluated_at,
+        bankroll_id=canonical.bankroll_id,
+        currency=canonical.currency,
+        base_portfolio_sha256=canonical.base_portfolio_sha256,
+        candidate_sha256=canonical.candidate_sha256,
+        evaluated_stake=canonical.evaluated_stake,
+        upper_bound=canonical.upper_bound,
+    )
+
+    try:
+        replace(context, risk_of_ruin_evidence=subclass)
+    except ValueError as exc:
+        assert "canonical RiskOfRuinEvidence" in str(exc)
+    else:
+        raise AssertionError("RiskOfRuinEvidence subclass entered policy context")
+
+    try:
+        replace(context, risk_of_ruin_upper_bound=_ForgedDecimal("0.001"))
+    except ValueError as exc:
+        assert "risk_of_ruin_upper_bound" in str(exc)
+    else:
+        raise AssertionError("Decimal subclass entered scalar ruin ingress")
+
+
+def test_vector_evidence_subclass_cannot_enter_policy_authority() -> None:
+    policy = _policy()
+    relaxed = _policy(max_risk_of_ruin=Decimal("1"))
+    book = PaperBook("100")
+    contexts = (_context(1), _context(2))
+    signals = (Decimal("0.01"), Decimal("0.01"))
+    baseline = relaxed.derive_goal_stake_vector(book, signals, contexts=contexts)
+    assert baseline.action == "STAKE_VECTOR"
+
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    candidates = policy.risk_of_ruin_candidate_vector_sha256(contexts)
+    assert portfolio is not None and candidates is not None
+
+    subclass = _RiskVectorEvidenceSubclass(
+        evidence_id="vector-subclass",
+        research_protocol_sha256="c" * 64,
+        reproducibility_bundle_sha256="d" * 64,
+        producer_identity="canonical-vector-risk-evaluator",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_vector_sha256=candidates,
+        evaluated_stakes=baseline.stakes,
+        upper_bound=Decimal("0.005"),
+    )
+
+    decision = policy.derive_goal_stake_vector(
+        book,
+        signals,
+        contexts=contexts,
+        risk_of_ruin_vector_evidence=subclass,
+    )
+    assert decision.action != "STAKE_VECTOR"
+    assert "vector evidence is invalid" in decision.reason

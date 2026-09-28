@@ -166,6 +166,80 @@ def _percent_decode_bytes(value: bytes) -> bytes:
     return bytes(decoded)
 
 
+def _json_string_unescape_bytes(value: bytes) -> bytes:
+    """Decode valid JSON string escapes into UTF-8 bytes without parsing artifacts.
+
+    The scanner applies this only to private streaming windows and compares the
+    result with the exact canary bytes. Invalid/incomplete escapes are preserved
+    literally, so they cannot manufacture a semantic match.
+    """
+
+    simple = {
+        0x22: b'"',
+        0x5C: b"\\",
+        0x2F: b"/",
+        0x62: b"\x08",
+        0x66: b"\x0c",
+        0x6E: b"\n",
+        0x72: b"\r",
+        0x74: b"\t",
+    }
+    decoded = bytearray()
+    index = 0
+    while index < len(value):
+        if value[index] != 0x5C or index + 1 >= len(value):
+            decoded.append(value[index])
+            index += 1
+            continue
+
+        escape = value[index + 1]
+        replacement = simple.get(escape)
+        if replacement is not None:
+            decoded.extend(replacement)
+            index += 2
+            continue
+
+        if (
+            escape == 0x75
+            and index + 5 < len(value)
+            and all(byte in _HEX_DIGITS for byte in value[index + 2 : index + 6])
+        ):
+            code_unit = int(value[index + 2 : index + 6], 16)
+            if 0xD800 <= code_unit <= 0xDBFF:
+                if (
+                    index + 11 < len(value)
+                    and value[index + 6 : index + 8] == b"\\u"
+                    and all(
+                        byte in _HEX_DIGITS
+                        for byte in value[index + 8 : index + 12]
+                    )
+                ):
+                    low = int(value[index + 8 : index + 12], 16)
+                    if 0xDC00 <= low <= 0xDFFF:
+                        code_point = (
+                            0x10000
+                            + ((code_unit - 0xD800) << 10)
+                            + (low - 0xDC00)
+                        )
+                        decoded.extend(chr(code_point).encode("utf-8"))
+                        index += 12
+                        continue
+                decoded.extend(value[index : index + 6])
+                index += 6
+                continue
+            if 0xDC00 <= code_unit <= 0xDFFF:
+                decoded.extend(value[index : index + 6])
+                index += 6
+                continue
+            decoded.extend(chr(code_unit).encode("utf-8"))
+            index += 6
+            continue
+
+        decoded.append(value[index])
+        index += 1
+    return bytes(decoded)
+
+
 def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
     raw = canary.encode("utf-8")
     percent_encoded = quote_from_bytes(raw, safe="")
@@ -218,7 +292,7 @@ def _scan_file(
 
         max_needle = max(
             max(len(needle) for needle, _labels in needles),
-            len(semantic_utf8) * 3,
+            len(semantic_utf8) * 6,
         )
         overlap = max(0, max_needle - 1)
         required_labels = {label for _needle, labels in needles for label in labels}
@@ -254,6 +328,18 @@ def _scan_file(
                     and semantic_utf8 in _percent_decode_bytes(window)
                 ):
                     found.add("url-percent-utf8-semantic")
+
+                # JSON permits equivalent escape spellings beyond Python's
+                # json.dumps output (for example \\u escapes for ASCII, escaped
+                # solidus, and mixed simple/unicode escapes). Decode valid string
+                # escapes only in the private window and compare exact canary bytes.
+                if (
+                    "json-string-semantic" not in found
+                    and semantic_utf8 not in window
+                    and b"\\" in window
+                    and semantic_utf8 in _json_string_unescape_bytes(window)
+                ):
+                    found.add("json-string-semantic")
 
                 if required_labels.issubset(found):
                     break

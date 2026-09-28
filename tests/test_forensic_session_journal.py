@@ -751,6 +751,104 @@ def test_hardlink_alias_is_rejected_fail_closed(tmp_path: Path) -> None:
     ]
 
 
+def test_public_verifier_rejects_hardlinked_journal_even_with_valid_checkpoint(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "forensic-session.jsonl"
+    journal = ForensicSessionJournal(
+        path,
+        clock=FakeClock(),
+        session_id=str(uuid.UUID(int=35)),
+    )
+    journal.close()
+
+    alias = tmp_path / "hardlink-verify.jsonl"
+    try:
+        alias.hardlink_to(path)
+    except (OSError, NotImplementedError):
+        pytest.skip("hard links are not available in this environment")
+    alias_checkpoint = alias.with_name(alias.name + ".head.json")
+    alias_checkpoint.write_bytes(journal.checkpoint_path.read_bytes())
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="single-link regular file",
+    ):
+        verify_journal(alias)
+
+
+def test_public_verifier_rejects_path_replacement_after_bound_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "forensic-session.jsonl"
+    journal = ForensicSessionJournal(
+        path,
+        clock=FakeClock(),
+        session_id=str(uuid.UUID(int=36)),
+    )
+    journal.append_material("provider.connected", {"provider": "paper"})
+    journal.close()
+
+    original = path.read_bytes()
+    replacement = tmp_path / "public-verify-replacement.jsonl"
+    replacement.write_bytes(original)
+    real_reconcile = forensic_session_journal._reconcile_checkpoint
+    swapped = False
+
+    def reconcile_then_replace(journal_path, records, *, recover):
+        nonlocal swapped
+        real_reconcile(journal_path, records, recover=recover)
+        if not swapped:
+            swapped = True
+            replacement.replace(path)
+
+    monkeypatch.setattr(
+        forensic_session_journal,
+        "_reconcile_checkpoint",
+        reconcile_then_replace,
+    )
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="journal path identity changed during verification",
+    ):
+        verify_journal(path)
+
+    assert swapped is True
+    assert path.read_bytes() == original
+
+
+def test_public_verifier_rejects_path_appearing_after_missing_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "appearing.jsonl"
+    real_reconcile = forensic_session_journal._reconcile_checkpoint
+    created = False
+
+    def reconcile_then_create(journal_path, records, *, recover):
+        nonlocal created
+        real_reconcile(journal_path, records, recover=recover)
+        if not created:
+            path.write_bytes(b"")
+            created = True
+
+    monkeypatch.setattr(
+        forensic_session_journal,
+        "_reconcile_checkpoint",
+        reconcile_then_create,
+    )
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="journal path appeared during public verification",
+    ):
+        read_verified_records(path)
+
+    assert created is True
+
+
 def test_constructor_never_adopts_path_replacement_after_verified_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

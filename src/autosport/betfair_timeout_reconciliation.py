@@ -758,7 +758,7 @@ def _install_betfair_timeout_absence_authority() -> None:
         evidence: VerifiedProviderAbsenceEvidence,
     ) -> None:
         assert_executable_authority_intact()
-        if not isinstance(evidence, sealed_absence_type):
+        if type(evidence) is not sealed_absence_type:
             raise sealed_error("timeout absence evidence type is not canonical")
         if evidence.provider_order_ref is None:
             return
@@ -769,10 +769,44 @@ def _install_betfair_timeout_absence_authority() -> None:
                     "provider absence did not pass durable Betfair timeout visibility authority"
                 )
 
+    def assert_betfair_timeout_absence_authoritative_for_attempt(
+        ledger: RealExecutionLedger,
+        action: ExecutionAction,
+        attempt_id: str,
+        evidence: VerifiedProviderAbsenceEvidence,
+    ) -> None:
+        """Bind positive timeout-absence authority to one durable attempt."""
+
+        assert_executable_authority_intact()
+        if type(evidence) is not sealed_absence_type:
+            raise sealed_error("timeout absence evidence type is not canonical")
+        provider_order_ref, _timeout_boundary_at, _ledger_sha = (
+            _durable_timeout_authority(ledger, action, attempt_id)
+        )
+        if evidence.provider_order_ref != provider_order_ref:
+            raise sealed_error(
+                "timeout absence evidence mismatches durable provider order reference"
+            )
+        expected_anchor_key = (id(ledger), attempt_id)
+        with issued_lock:
+            record = issued.get(id(evidence))
+            if (
+                record is None
+                or record[0]() is not evidence
+                or record[1] != expected_anchor_key
+                or record[2]() is not ledger
+            ):
+                raise sealed_error(
+                    "provider absence authority is not bound to this timeout attempt"
+                )
+
     globals()["resolve_betfair_timeout_provider_state"] = authoritative_resolve
     globals()[
         "assert_betfair_timeout_absence_authoritative"
     ] = assert_betfair_timeout_absence_authoritative
+    globals()[
+        "assert_betfair_timeout_absence_authoritative_for_attempt"
+    ] = assert_betfair_timeout_absence_authoritative_for_attempt
 
 
 _install_betfair_timeout_absence_authority()

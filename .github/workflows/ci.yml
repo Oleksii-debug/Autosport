@@ -13,26 +13,76 @@ on:
       - '.gitattributes'
       - '.github/workflows/ci.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
 
+permissions:
+  contents: read
+  pull-requests: read
+
+# PR runs must reach the lightweight admission job before any supersession decision.
+# If fresh lifecycle events share a cancel-in-progress group, GitHub can kill an older
+# useful full-suite run before admission can evaluate the live PR head. Isolate every
+# PR workflow run at scheduler level; stale PR heads are rejected read-only below.
+# Main/push branch runs remain coalesced.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}-run-{1}', github.event.pull_request.number, github.run_id) || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  superseded_run_admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
+    steps:
+      - name: Admit non-PR and closed lifecycle events without PR checkout
+        if: github.event_name != 'pull_request' || github.event.action == 'closed'
+        id: lifecycle
+        run: echo "current_head=true" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact PR head for read-only admission helper
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject stale PR head before heavy matrix allocation
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        id: admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/cancel_superseded_pr_workflow_runs.py
+          --pr-number "${{ github.event.pull_request.number }}"
+          --event-head-sha "${{ github.event.pull_request.head.sha }}"
+          --workflow-name "${{ github.workflow }}"
+          --current-run-id "${{ github.run_id }}"
+          --admission-only
+
   test:
+    needs: superseded_run_admission
+    # Draft/closed/stale PR runs are not integration-capable. Lifecycle events on the
+    # same exact head are intentionally not deduplicated here: an older draft event
+    # must never suppress a later ready_for_review qualification for that same head.
+    if: >-
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false))
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Verify exact pristine source checkout before CI

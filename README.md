@@ -99,3 +99,15 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 `NVDA_VERIFIED=false`  
 `REAL_MONEY_EXECUTION=false`  
 `V1_READY=false`
+
+## Binding Windows accessibility architecture
+
+This is a product law for the final standalone Windows application.
+
+The binding end-state for the primary Autosport Windows shell is **WebView2 + semantic HTML + a correctly exposed Windows UI Automation host**. The semantic surface must use real standard controls and expose accessible names, roles, state and deterministic focus so NVDA can navigate it by keyboard. Critical bankroll, risk, odds, portfolio, execution, reconciliation, errors and evidence must be real selectable/copyable text. No critical workflow or information may exist only in a canvas, chart, color, pointer position or mouse-only interaction.
+
+The current Tk/Ttk + tk-uia shell is allowed to remain as a transitional delivery/qualification path while product work continues. Adopting this law does **not** restart Autosport and does not authorize rewriting the economic, market, provider, portfolio, learning, replay, persistence or execution core. Those must remain reusable behind a presentation boundary while the user-interface shell can be replaced incrementally.
+
+Do not delay high-value product/domain work merely to rearrange visual layout or styling. However, new domain logic must not become tightly coupled to Tk/Ttk or any inaccessible presentation technology.
+
+NVDA_VERIFIED=true still requires physical keyboard-only NVDA acceptance on the exact packaged Windows candidate. Automated Tk/UIA, DOM or accessibility-tree checks are supporting evidence only.

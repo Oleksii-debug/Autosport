@@ -623,6 +623,139 @@ def verify_betfair_provider_state(
 def _install_verified_provider_evidence_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     raw_verify = verify_betfair_provider_state
+    raw_verify_code = raw_verify.__code__
+    sealed_effect_type = VerifiedProviderEffectEvidence
+    sealed_absence_type = VerifiedProviderAbsenceEvidence
+    sealed_fingerprint = _verified_provider_evidence_fingerprint
+    sealed_fingerprint_code = sealed_fingerprint.__code__
+    sealed_error = ProviderEvidenceError
+    missing = object()
+
+    def descriptor_code(value: object) -> object | None:
+        code = getattr(value, "__code__", None)
+        if code is not None:
+            return code
+        if isinstance(value, property) and value.fget is not None:
+            return getattr(value.fget, "__code__", None)
+        return None
+
+    sealed_readback_assertion = BetfairExecutionReadbackEnvelope.assert_authoritative
+    sealed_readback_assertion_code = descriptor_code(sealed_readback_assertion)
+    sealed_readback_fingerprint = BetfairExecutionReadbackEnvelope._authority_fingerprint
+    sealed_readback_fingerprint_code = descriptor_code(sealed_readback_fingerprint)
+    sealed_profile_descriptors = {
+        "profile_id": BookmakerCapabilityProfile.profile_id,
+        "to_canonical_dict": BookmakerCapabilityProfile.to_canonical_dict,
+        "state_of": BookmakerCapabilityProfile.state_of,
+        "require": BookmakerCapabilityProfile.require,
+    }
+    sealed_profile_descriptor_codes = {
+        name: descriptor_code(value)
+        for name, value in sealed_profile_descriptors.items()
+    }
+
+    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+        module_globals = globals()
+        sealed: dict[str, tuple[object, object | None]] = {}
+        pending = [root]
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            function_globals = getattr(function, "__globals__", None)
+            if code is None or function_globals is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed:
+                    continue
+                value = module_globals[name]
+                value_code = getattr(value, "__code__", None)
+                sealed[name] = (value, value_code)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return sealed
+
+    sealed_verify_graph = seal_function_graph(raw_verify)
+    sealed_fingerprint_graph = seal_function_graph(sealed_fingerprint)
+    sealed_wrapper_bindings = {
+        "BetfairExecutionReadbackEnvelope": BetfairExecutionReadbackEnvelope,
+        "VerifiedProviderEffectEvidence": sealed_effect_type,
+        "VerifiedProviderAbsenceEvidence": sealed_absence_type,
+        "_verified_provider_evidence_fingerprint": sealed_fingerprint,
+        "ProviderEvidenceError": sealed_error,
+    }
+
+    def assert_graph_intact(
+        graph: dict[str, tuple[object, object | None]],
+    ) -> None:
+        module_globals = globals()
+        for name, (expected, expected_code) in graph.items():
+            current = module_globals.get(name, missing)
+            if current is not expected:
+                raise sealed_error(
+                    f"provider evidence executable authority changed: {name}"
+                )
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"provider evidence executable code changed: {name}"
+                )
+
+    def assert_executable_authority_intact() -> None:
+        module_globals = globals()
+        if raw_verify.__code__ is not raw_verify_code:
+            raise sealed_error("provider verifier executable code changed")
+        if sealed_fingerprint.__code__ is not sealed_fingerprint_code:
+            raise sealed_error("provider evidence fingerprint executable code changed")
+        assert_graph_intact(sealed_verify_graph)
+        assert_graph_intact(sealed_fingerprint_graph)
+        for name, expected in sealed_wrapper_bindings.items():
+            if module_globals.get(name, missing) is not expected:
+                raise sealed_error(
+                    f"provider evidence authority binding changed: {name}"
+                )
+        current_readback_assertion = getattr(
+            BetfairExecutionReadbackEnvelope,
+            "assert_authoritative",
+            missing,
+        )
+        if (
+            current_readback_assertion is not sealed_readback_assertion
+            or descriptor_code(current_readback_assertion)
+            is not sealed_readback_assertion_code
+        ):
+            raise sealed_error("provider readback origin authority method changed")
+        current_readback_fingerprint = getattr(
+            BetfairExecutionReadbackEnvelope,
+            "_authority_fingerprint",
+            missing,
+        )
+        if (
+            current_readback_fingerprint is not sealed_readback_fingerprint
+            or descriptor_code(current_readback_fingerprint)
+            is not sealed_readback_fingerprint_code
+        ):
+            raise sealed_error(
+                "provider readback authority fingerprint method changed"
+            )
+        for name, expected in sealed_profile_descriptors.items():
+            current = getattr(BookmakerCapabilityProfile, name, missing)
+            if (
+                current is not expected
+                or descriptor_code(current)
+                is not sealed_profile_descriptor_codes[name]
+            ):
+                raise sealed_error(
+                    f"provider capability profile authority method changed: {name}"
+                )
 
     def authoritative_verify(
         action: ExecutionAction,
@@ -632,6 +765,7 @@ def _install_verified_provider_evidence_authority() -> None:
         readback: BetfairExecutionReadbackEnvelope,
         expected_provider_order_ref: str | None = None,
     ) -> VerifiedProviderState:
+        assert_executable_authority_intact()
         evidence = raw_verify(
             action,
             profile,
@@ -639,6 +773,7 @@ def _install_verified_provider_evidence_authority() -> None:
             readback=readback,
             expected_provider_order_ref=expected_provider_order_ref,
         )
+        assert_executable_authority_intact()
         evidence_key = id(evidence)
 
         def forget(_weakref: object, *, key: int = evidence_key) -> None:
@@ -646,27 +781,26 @@ def _install_verified_provider_evidence_authority() -> None:
 
         issued[evidence_key] = (
             ref(evidence, forget),
-            _verified_provider_evidence_fingerprint(evidence),
+            sealed_fingerprint(evidence),
         )
         return evidence
 
     def assert_verified_provider_evidence_authoritative(
         evidence: VerifiedProviderState,
     ) -> None:
-        if not isinstance(
-            evidence,
-            (VerifiedProviderEffectEvidence, VerifiedProviderAbsenceEvidence),
-        ):
-            raise ProviderEvidenceError("provider evidence type is not canonical")
+        assert_executable_authority_intact()
+        if type(evidence) not in (sealed_effect_type, sealed_absence_type):
+            raise sealed_error("provider evidence type is not canonical")
         record = issued.get(id(evidence))
         if record is None or record[0]() is not evidence:
-            raise ProviderEvidenceError(
+            raise sealed_error(
                 "verified provider evidence was not issued by canonical verifier"
             )
-        if record[1] != _verified_provider_evidence_fingerprint(evidence):
-            raise ProviderEvidenceError(
+        if record[1] != sealed_fingerprint(evidence):
+            raise sealed_error(
                 "verified provider evidence changed after canonical verification"
             )
+        assert_executable_authority_intact()
 
     globals()["verify_betfair_provider_state"] = authoritative_verify
     globals()[

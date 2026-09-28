@@ -277,9 +277,14 @@ class _PlaceActionBoundary:
             caller_code = None
 
         if caller_code is _CANONICAL_EXECUTE_CODE:
+            if not _trusted_profile_graph_unchanged():
+                raise _impl.BetfairSupervisedExecutionError(
+                    "trusted runtime profile authority changed"
+                )
             if not _canonical_internal_dispatch_unchanged():
                 raise _impl.BetfairSupervisedExecutionError(
-                    "canonical Betfair internal provider-write authority changed"
+                    "terminal Betfair execution requires canonical client, transport, "
+                    "and parser authority; executable code authority changed"
                 )
             dispatch = _TRUSTED_PRIVATE_PLACE_ACTION
         else:

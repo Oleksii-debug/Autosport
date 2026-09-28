@@ -34,13 +34,18 @@ def _action() -> ExecutionAction:
     )
 
 
-def _success_payload(*, size_matched: int, average_price_matched: int) -> bytes:
+def _success_payload(
+    *,
+    size_matched: int,
+    average_price_matched: int,
+    execution_error_code: str | None = "BET_ACTION_ERROR",
+) -> bytes:
     return json.dumps(
         {
             "jsonrpc": "2.0",
             "result": {
                 "status": "SUCCESS",
-                "errorCode": "BET_ACTION_ERROR",
+                "errorCode": execution_error_code,
                 "marketId": "1.23456789",
                 "instructionReports": [
                     {
@@ -258,6 +263,7 @@ def test_success_zero_match_with_positive_average_is_ambiguous() -> None:
             _success_payload(
                 size_matched=0,
                 average_price_matched=2,
+                execution_error_code=None,
             ),
             request_id=1,
             request_sha256="a" * 64,

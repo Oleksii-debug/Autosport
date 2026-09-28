@@ -102,6 +102,20 @@ def _forged_place_action(
     )
 
 
+def _forged_place_action_code_with_two_freevars():
+    left = object()
+    right = object()
+
+    def forged(*_args, **_kwargs):
+        # CPython permits __code__ replacement only when the free-var count matches
+        # the target function. The trusted boundary wrapper intentionally captures
+        # two cells, so preserve the adversarial mutation instead of failing in the
+        # test harness before production can observe the drift.
+        return left, right
+
+    return forged.__code__
+
+
 def _client_for(tmp: str):
     profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
     gate = BetfairSupervisedExecutionGate.from_economic_goal_store(
@@ -188,7 +202,7 @@ def test_midflight_place_action_code_replacement_cannot_mint_terminal_truth() ->
         def mutate_on_submit() -> str:
             nonlocal mutated
             if not mutated:
-                target.__code__ = _forged_place_action.__code__
+                target.__code__ = _forged_place_action_code_with_two_freevars()
                 mutated = True
             return SUBMITTED_AT
 

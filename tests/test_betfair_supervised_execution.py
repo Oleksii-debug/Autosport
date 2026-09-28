@@ -1204,8 +1204,8 @@ def test_terminal_provider_observation_time_ignores_caller_client_clock() -> Non
         acknowledgements = [
             record
             for record in records
-            if record["event_type"] == "EXTERNAL_ACKNOWLEDGEMENT"
-            and record["attempt_id"] == "attempt-product-observation-clock"
+            if record.get("event_type") == "EXTERNAL_ACKNOWLEDGEMENT"
+            and record.get("attempt_id") == "attempt-product-observation-clock"
         ]
         assert len(acknowledgements) == 1
         acknowledgement_time = acknowledgements[0]["payload"][

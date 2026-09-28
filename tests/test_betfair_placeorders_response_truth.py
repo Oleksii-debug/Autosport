@@ -221,8 +221,8 @@ def test_success_with_bet_id_without_placed_date_is_ambiguous() -> None:
         execution_status="SUCCESS",
         instruction_status="SUCCESS",
         include_size_matched=True,
-        size_matched=action.requested_stake,
-        average_price_matched=action.requested_odds,
+        size_matched=float(action.requested_stake),
+        average_price_matched=float(action.requested_odds),
         bet_id="bet-sync-missing-placed-date",
         include_placed_date=False,
     )

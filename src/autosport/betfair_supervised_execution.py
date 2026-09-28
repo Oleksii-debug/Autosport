@@ -1395,6 +1395,28 @@ def _parse_place_orders_response(
             "placeOrders instruction report omits sizeMatched; "
             "external effect is ambiguous"
         )
+    average_price_matched = _provider_response_decimal(
+        item.get("averagePriceMatched", 0),
+        "averagePriceMatched",
+        positive=False,
+    )
+    size_matched = _provider_response_decimal(
+        item["sizeMatched"],
+        "sizeMatched",
+        positive=False,
+    )
+    if (
+        instruction_status == "FAILURE"
+        and (size_matched != 0 or average_price_matched != 0)
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders instruction report is internally inconsistent: "
+            "failed placeOrders instruction contradicts matched execution economics"
+        )
+    if size_matched == 0 and average_price_matched != 0:
+        raise BetfairPlaceOrdersAmbiguous(
+            "zero matched stake cannot claim positive average price"
+        )
     try:
         instruction = BetfairInstructionReport(
             status=instruction_status,
@@ -1414,16 +1436,8 @@ def _parse_place_orders_response(
                 item.get("placedDate"),
                 "placedDate",
             ),
-            average_price_matched=_provider_response_decimal(
-                item.get("averagePriceMatched", 0),
-                "averagePriceMatched",
-                positive=False,
-            ),
-            size_matched=_provider_response_decimal(
-                item["sizeMatched"],
-                "sizeMatched",
-                positive=False,
-            ),
+            average_price_matched=average_price_matched,
+            size_matched=size_matched,
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(

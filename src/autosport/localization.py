@@ -106,6 +106,8 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.manual_calculation.error.unknown": "Невідома ручна операція.",
         "ui.windows.manual_calculation.error.operation_empty": "Операція не вибрана.",
         "ui.windows.shell.frame.title": "Навігація продукту",
+        "ui.windows.error.internal_hidden": "Сталася внутрішня помилка. Технічні подробиці приховано.",
+        "ui.windows.product_runtime.error.recovery_required": "Тривалий імітаційний режим завершився помилкою. Спочатку відновіть робочу область.",
         "ui.windows.shell.screen.label": "Екран:",
         "ui.windows.shell.button.open": "Перейти до робочої поверхні",
         "ui.windows.shell.state.active": "Активна робоча поверхня",

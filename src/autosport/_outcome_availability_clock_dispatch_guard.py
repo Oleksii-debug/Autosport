@@ -133,6 +133,7 @@ def _install_guard() -> None:
             "_availability_module",
             "_canonical_public_clock",
             "_clock",
+            "_outcome_trust_dependencies",
             "_error_type",
             "_public_wrapper",
         )
@@ -146,6 +147,7 @@ def _install_guard() -> None:
             availability_module,
             canonical_clock: FunctionType,
             clock,
+            outcome_trust_dependencies: tuple[tuple[object, str, object], ...],
             error,
         ) -> None:
             self._function = function
@@ -155,6 +157,7 @@ def _install_guard() -> None:
             self._availability_module = availability_module
             self._canonical_public_clock = canonical_clock
             self._clock = clock
+            self._outcome_trust_dependencies = outcome_trust_dependencies
             self._error_type = error
             self._public_wrapper = None
 
@@ -172,6 +175,11 @@ def _install_guard() -> None:
                 raise self._error_type(
                     "outcome availability clock sampler dispatch was rebound"
                 )
+            for module, name, expected in self._outcome_trust_dependencies:
+                if getattr(module, name, self) is not expected:
+                    raise self._error_type(
+                        f"outcome availability transitive dependency {name!r} was rebound"
+                    )
             globals_dict = self._function.__globals__
             for name, expected in self._snapshot:
                 if globals_dict.get(name, self) is not expected:
@@ -180,6 +188,18 @@ def _install_guard() -> None:
                     )
             return self._function(registry, *args, **kwargs)
 
+    outcome_trust = _availability._outcome_trust
+    outcome_trust_dependencies = tuple(
+        (outcome_trust, name, getattr(outcome_trust, name))
+        for name in (
+            "_canonical_timestamp",
+            "_parse_timestamp",
+            "assert_compatible_outcome_lineages",
+            "TrustedOutcomeRevision",
+            "OutcomeLineageBinding",
+            "outcome_lineage_payload",
+        )
+    )
     checked_begin = CheckedBegin(
         begin_clone,
         begin_snapshot,
@@ -188,6 +208,7 @@ def _install_guard() -> None:
         _availability,
         canonical_public_clock,
         checked_clock,
+        outcome_trust_dependencies,
         error_type,
     )
     del begin_clone

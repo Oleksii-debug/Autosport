@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -16,6 +17,7 @@ WSU_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecur
 _MAX_XML_BYTES: Final = 4 * 1024 * 1024
 _MAX_TEXT: Final = 512
 _RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE: Final = 16
+_XSD_DECIMAL_RE: Final = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\\Z", re.ASCII)
 
 
 class BetdaqWireError(ValueError):
@@ -165,9 +167,13 @@ def _decimal(
     strictly_positive: bool = False,
     nonnegative: bool = False,
 ) -> Decimal:
+    if type(value) is not str or _XSD_DECIMAL_RE.fullmatch(value) is None:
+        raise BetdaqSoapProtocolError(
+            f"{field} must use XML Schema decimal lexical form"
+        )
     try:
         parsed = Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as exc:
+    except (InvalidOperation, ValueError) as exc:
         raise BetdaqSoapProtocolError(f"{field} must be a decimal") from exc
     if not parsed.is_finite():
         raise BetdaqSoapProtocolError(f"{field} must be finite")

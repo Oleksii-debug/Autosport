@@ -91,8 +91,21 @@ def _fee_input_payload(observation: BetfairExecutionFeeInputsObservation) -> dic
     }
 
 
-def _fee_input_sha256(observation: BetfairExecutionFeeInputsObservation) -> str:
-    return sha256(_canonical_json(_fee_input_payload(observation))).hexdigest()
+def _fee_input_sha256(
+    payload_builder,
+    canonical_json,
+    hash_constructor,
+    observation: BetfairExecutionFeeInputsObservation,
+) -> str:
+    return hash_constructor(canonical_json(payload_builder(observation))).hexdigest()
+
+
+_FEE_INPUT_SHA256_CAPABILITY = partial(
+    _fee_input_sha256,
+    _fee_input_payload,
+    _canonical_json,
+    sha256,
+)
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -166,32 +179,47 @@ def _register_issued(assessment: BetfairCommissionApplicabilityAssessment) -> No
 
 
 def _assessment_payload(
+    fee_input_hasher,
+    schema,
+    schema_version,
+    unproven_status,
+    canonical_reasons,
+    ruleset_id,
+    provider_rule_sources,
     observation: BetfairExecutionFeeInputsObservation,
 ) -> dict[str, object]:
     return {
-        "schema": _SCHEMA,
-        "schema_version": _SCHEMA_VERSION,
+        "schema": schema,
+        "schema_version": schema_version,
         "venue_id": observation.venue_id,
         "account_id": observation.account_id,
         "market_id": observation.market_id,
         "currency_code": observation.currency_code,
         "region": observation.region,
-        "fee_input_sha256": _fee_input_sha256(observation),
+        "fee_input_sha256": fee_input_hasher(observation),
         "account_source_payload_sha256": observation.account_evidence.source_payload_sha256,
         "market_source_payload_sha256": observation.market_evidence.source_payload_sha256,
-        "status": BetfairCommissionApplicabilityStatus.UNPROVEN.value,
-        "reasons": [reason.value for reason in _CANONICAL_REASONS],
-        "ruleset_id": _RULESET_ID,
-        "provider_rule_sources": [
-            _PROVIDER_COMMISSION_SOURCE,
-            _PROVIDER_CHARGES_SOURCE,
-            _PROVIDER_MBR_SOURCE,
-        ],
+        "status": unproven_status.value,
+        "reasons": [reason.value for reason in canonical_reasons],
+        "ruleset_id": ruleset_id,
+        "provider_rule_sources": list(provider_rule_sources),
         "prospective_commission_amount_authorized": False,
         "complete_execution_fee_cost_authorized": False,
         "provider_write_authorized": False,
         "real_money_execution_authorized": False,
     }
+
+
+_ASSESSMENT_PAYLOAD_CAPABILITY = partial(
+    _assessment_payload,
+    _FEE_INPUT_SHA256_CAPABILITY,
+    _SCHEMA,
+    _SCHEMA_VERSION,
+    BetfairCommissionApplicabilityStatus.UNPROVEN,
+    _CANONICAL_REASONS,
+    _RULESET_ID,
+    (_PROVIDER_COMMISSION_SOURCE, _PROVIDER_CHARGES_SOURCE, _PROVIDER_MBR_SOURCE),
+)
 
 
 def _issue_assessment(
@@ -240,7 +268,7 @@ def _issue_assessment(
 
 _ISSUE_ASSESSMENT_CAPABILITY = partial(
     _issue_assessment,
-    _assessment_payload,
+    _ASSESSMENT_PAYLOAD_CAPABILITY,
     _canonical_json,
     sha256,
     BetfairCommissionApplicabilityAssessment,

@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import FunctionType
 
 import pytest
 
 import autosport._paperbook_preload_authority_guard as guard
 import autosport.paper as paper
 
+
+
+def _clone_with_builtins(function: FunctionType, builtins_map: dict[str, object]) -> FunctionType:
+    globals_copy = dict(function.__globals__)
+    globals_copy["__builtins__"] = builtins_map
+    clone = FunctionType(
+        function.__code__,
+        globals_copy,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+        closure=function.__closure__,
+    )
+    if function.__kwdefaults__ is not None:
+        clone.__kwdefaults__ = dict(function.__kwdefaults__)
+    return clone
 
 def _authority_root(tmp_path: Path) -> str:
     return str(tmp_path.parent / f"{tmp_path.name}-paper-authority")
@@ -25,7 +41,7 @@ def test_witness_append_sequence_ignores_self_restoring_builtin_len(
     book.save(path)
 
     guarded_save = paper.PaperBook.save
-    builtins_map = guarded_save.__builtins__
+    builtins_map = dict(guarded_save.__builtins__)
     original_len = builtins_map["len"]
     bypass_attempted = False
 
@@ -46,10 +62,8 @@ def test_witness_append_sequence_ignores_self_restoring_builtin_len(
         return original_len(value)
 
     builtins_map["len"] = hostile_len
-    try:
-        guarded_save(book, path)
-    finally:
-        builtins_map["len"] = original_len
+    isolated_save = _clone_with_builtins(guarded_save, builtins_map)
+    isolated_save(book, path)
 
     assert bypass_attempted is False
     loaded = paper.PaperBook.load(path)
@@ -76,7 +90,7 @@ def test_witness_append_predecessor_ignores_self_restoring_builtin_str(
     assert type(prior_witness_sha256) is str
 
     guarded_save = paper.PaperBook.save
-    builtins_map = guarded_save.__builtins__
+    builtins_map = dict(guarded_save.__builtins__)
     original_str = builtins_map["str"]
     bypass_attempted = False
 
@@ -89,10 +103,8 @@ def test_witness_append_predecessor_ignores_self_restoring_builtin_str(
         return original_str(value, *args, **kwargs)
 
     builtins_map["str"] = hostile_str
-    try:
-        guarded_save(book, path)
-    finally:
-        builtins_map["str"] = original_str
+    isolated_save = _clone_with_builtins(guarded_save, builtins_map)
+    isolated_save(book, path)
 
     assert bypass_attempted is False
     loaded = paper.PaperBook.load(path)

@@ -524,21 +524,40 @@ def parse_get_prices_response(
         root,
         soap_ns,
     )
+    allowed_envelope_children = {
+        _tag(soap_ns, "Header"),
+        _tag(soap_ns, "Body"),
+    }
+    if any(child.tag not in allowed_envelope_children for child in list(root)):
+        raise BetdaqSoapProtocolError(
+            "SOAP Envelope contains an unexpected child element or namespace"
+        )
     body = _one_child(root, _tag(soap_ns, "Body"), "SOAP Body")
     fault = _soap_fault(body, soap_ns)
     if fault is not None:
         raise fault
-
-    response = _one_child(
-        body,
-        _tag(EXTERNAL_API_NS, "GetPricesResponse"),
-        "GetPricesResponse",
-    )
-    result = _one_child(
-        response,
-        _tag(EXTERNAL_API_NS, "GetPricesResult"),
-        "GetPricesResult",
-    )
+    body_children = list(body)
+    if (
+        len(body_children) != 1
+        or body_children[0].tag != _tag(EXTERNAL_API_NS, "GetPricesResponse")
+    ):
+        raise BetdaqSoapProtocolError(
+            "SOAP Body must contain exactly one GetPricesResponse"
+        )
+    response = body_children[0]
+    if response.attrib:
+        raise BetdaqSoapProtocolError(
+            "GetPricesResponse must not contain attributes"
+        )
+    response_children = list(response)
+    if (
+        len(response_children) != 1
+        or response_children[0].tag != _tag(EXTERNAL_API_NS, "GetPricesResult")
+    ):
+        raise BetdaqSoapProtocolError(
+            "GetPricesResponse must contain exactly one GetPricesResult"
+        )
+    result = response_children[0]
     if result.attrib:
         raise BetdaqSoapProtocolError(
             "GetPricesResult must not contain attributes"

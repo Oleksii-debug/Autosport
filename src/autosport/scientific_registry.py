@@ -1152,6 +1152,11 @@ class ScientificRegistry:
             if key in seen:
                 raise ValueError("scientific registry contains duplicate record identity")
             seen.add(key)
+            if raw_entry["record_type"] == "EvaluationBundle":
+                self._validate_promotion_effective_sample_causal_inputs(
+                    records,
+                    raw_entry,
+                )
             if raw_entry["record_type"] == "Experiment":
                 fingerprint = raw_entry["payload"].get("fingerprint")
                 prior_state = {
@@ -1211,6 +1216,197 @@ class ScientificRegistry:
                             "payload": raw_entry["payload"]})
         if _sha256(raw_entry["record_sha256"], "record_sha256") != expected:
             raise ValueError("scientific registry record digest mismatch")
+
+    @staticmethod
+    def _promotion_effective_sample_bundle_from_entry(
+        entry: Mapping[str, Any],
+    ) -> EvaluationBundleRef | None:
+        if entry.get("record_type") != "EvaluationBundle":
+            return None
+        payload = entry.get("payload")
+        if type(payload) is not dict:
+            raise ValueError("persisted EvaluationBundle payload is invalid")
+
+        promotion_fields = (
+            "effective_sample_size",
+            "effect_interval_low",
+            "effect_interval_high",
+            "practical_improvement",
+        )
+        if not all(payload.get(name) is not None for name in promotion_fields):
+            return None
+
+        expected_fields = {
+            "evaluation_bundle_id",
+            "bundle_sha256",
+            "evaluator_source_sha256",
+            "dataset_snapshot_id",
+            "protocol_sha256",
+            "artifact_hashes",
+            "created_at",
+            "evaluated_strategy_version_id",
+            "evaluated_model_version_id",
+            "effective_sample_size",
+            "effect_interval_low",
+            "effect_interval_high",
+            "practical_improvement",
+        }
+        if set(payload) != expected_fields:
+            raise ValueError(
+                "persisted promotion-shaped EvaluationBundle payload fields mismatch"
+            )
+        artifact_hashes = payload.get("artifact_hashes")
+        if type(artifact_hashes) is not list:
+            raise ValueError(
+                "persisted promotion-shaped EvaluationBundle artifact_hashes must be a list"
+            )
+        try:
+            bundle = EvaluationBundleRef(
+                evaluation_bundle_id=payload["evaluation_bundle_id"],
+                bundle_sha256=payload["bundle_sha256"],
+                evaluator_source_sha256=payload["evaluator_source_sha256"],
+                dataset_snapshot_id=payload["dataset_snapshot_id"],
+                protocol_sha256=payload["protocol_sha256"],
+                artifact_hashes=tuple(artifact_hashes),
+                created_at=payload["created_at"],
+                evaluated_strategy_version_id=payload[
+                    "evaluated_strategy_version_id"
+                ],
+                evaluated_model_version_id=payload["evaluated_model_version_id"],
+                effective_sample_size=payload["effective_sample_size"],
+                effect_interval_low=payload["effect_interval_low"],
+                effect_interval_high=payload["effect_interval_high"],
+                practical_improvement=payload["practical_improvement"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "persisted promotion-shaped EvaluationBundle is not canonical"
+            ) from exc
+        if (
+            entry.get("record_id") != bundle.record_id
+            or entry.get("available_at") != bundle.available_at
+            or ScientificRegistry._entry(bundle) != entry
+        ):
+            raise ValueError(
+                "persisted promotion-shaped EvaluationBundle envelope does not match canonical payload"
+            )
+        return bundle
+
+    @staticmethod
+    def _validate_promotion_effective_sample_causal_inputs(
+        records: list[dict[str, Any]],
+        entry: Mapping[str, Any],
+    ) -> None:
+        bundle = ScientificRegistry._promotion_effective_sample_bundle_from_entry(entry)
+        if bundle is None:
+            return
+
+        bundle_index = len(records)
+        for index, raw in enumerate(records):
+            if (
+                raw.get("record_type") == entry.get("record_type")
+                and raw.get("record_id") == entry.get("record_id")
+                and raw.get("record_sha256") == entry.get("record_sha256")
+            ):
+                bundle_index = index
+                break
+
+        bundle_at = _instant(bundle.created_at, "EvaluationBundle.created_at")
+
+        def require_prior(
+            record_type: str,
+            record_id: str,
+            field: str,
+        ) -> Mapping[str, Any]:
+            matches = [
+                (index, raw)
+                for index, raw in enumerate(records)
+                if raw.get("record_type") == record_type
+                and raw.get("record_id") == record_id
+            ]
+            if not matches:
+                raise ValueError(
+                    "promotion-shaped EvaluationBundle lacks canonical scientific lineage: "
+                    f"{field} is missing"
+                )
+            index, raw = matches[0]
+            if index >= bundle_index:
+                raise ValueError(
+                    f"promotion-shaped EvaluationBundle {field} must be durably recorded first"
+                )
+            if _instant(raw["available_at"], f"{field}.available_at") > bundle_at:
+                raise ValueError(
+                    f"promotion-shaped EvaluationBundle predates its {field} lineage"
+                )
+            reveal = raw["payload"].get("outcome_reveal_after")
+            if (
+                isinstance(reveal, str)
+                and _instant(reveal, f"{field}.outcome_reveal_after") > bundle_at
+            ):
+                raise ValueError(
+                    f"promotion-shaped EvaluationBundle predates revealed {field} lineage"
+                )
+            return raw
+
+        require_prior(
+            "DatasetSnapshot",
+            bundle.dataset_snapshot_id,
+            "DatasetSnapshot",
+        )
+
+        protocols = [
+            (index, raw)
+            for index, raw in enumerate(records)
+            if index < bundle_index
+            and raw.get("record_type") == "ResearchProtocol"
+            and raw.get("payload", {}).get("protocol_sha256")
+            == bundle.protocol_sha256.lower()
+            and _instant(raw["available_at"], "ResearchProtocol.available_at")
+            <= bundle_at
+        ]
+        if len(protocols) != 1:
+            raise ValueError(
+                "promotion-shaped EvaluationBundle lacks one canonical causal ResearchProtocol"
+            )
+        protocol = protocols[0][1]
+        reveal = protocol["payload"].get("outcome_reveal_after")
+        if (
+            isinstance(reveal, str)
+            and _instant(reveal, "ResearchProtocol.outcome_reveal_after") > bundle_at
+        ):
+            raise ValueError(
+                "promotion-shaped EvaluationBundle predates revealed ResearchProtocol lineage"
+            )
+
+        if bundle.evaluated_strategy_version_id is not None:
+            strategy = require_prior(
+                "StrategyVersion",
+                bundle.evaluated_strategy_version_id,
+                "StrategyVersion",
+            )
+            if (
+                bundle.evaluated_model_version_id is not None
+                and strategy["payload"].get("model_version_id")
+                != bundle.evaluated_model_version_id
+            ):
+                raise ValueError(
+                    "promotion-shaped EvaluationBundle strategy/model lineage mismatch"
+                )
+
+        if bundle.evaluated_model_version_id is not None:
+            model = require_prior(
+                "ModelVersion",
+                bundle.evaluated_model_version_id,
+                "ModelVersion",
+            )
+            if model["payload"].get("dataset_snapshot_id") != bundle.dataset_snapshot_id:
+                raise ValueError(
+                    "promotion-shaped EvaluationBundle model/dataset lineage mismatch"
+                )
+            if model["payload"].get("research_protocol_id") != protocol["record_id"]:
+                raise ValueError(
+                    "promotion-shaped EvaluationBundle model/protocol lineage mismatch"
+                )
 
     @staticmethod
     def _ablation_authority_from_payload(payload: object) -> AblationAuthorityEvidence:
@@ -1882,6 +2078,11 @@ class ScientificRegistry:
             self._validate_promotion_evidence_causal_inputs(state, entry)
         if entry["record_type"] == "Postmortem":
             self._validate_postmortem_causal_inputs(state, entry)
+        if entry["record_type"] == "EvaluationBundle":
+            self._validate_promotion_effective_sample_causal_inputs(
+                state["records"],
+                entry,
+            )
         for existing in state["records"]:
             if (existing["record_type"], existing["record_id"]) == (
                 entry["record_type"], entry["record_id"]

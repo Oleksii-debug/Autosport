@@ -252,3 +252,38 @@ def test_verifier_does_not_trust_rebound_assessment_to_dict(monkeypatch):
         match="assessment identity is inconsistent",
     ):
         require_product_betfair_commission_applicability(assessment)
+
+
+def test_verifier_keeps_import_time_authority_roots_after_module_rebinding(monkeypatch):
+    client, _ = _client()
+    assessment = assess_betfair_commission_applicability(client, market_id="1.234")
+
+    class ForbiddenLock:
+        def __enter__(self):
+            raise AssertionError("rebound issue lock must not become verifier authority")
+
+        def __exit__(self, *_args):
+            return False
+
+    class ForgivingHash:
+        def hexdigest(self):
+            return assessment.assessment_id
+
+    monkeypatch.setattr(applicability_module, "_ISSUE_LOCK", ForbiddenLock())
+    monkeypatch.setattr(applicability_module, "_ISSUED_BY_ID", {})
+    monkeypatch.setattr(applicability_module, "_CANONICAL_REASONS", ())
+    monkeypatch.setattr(applicability_module, "_RULESET_ID", "rebound-ruleset")
+    monkeypatch.setattr(applicability_module, "_PROVIDER_COMMISSION_SOURCE", "rebound")
+    monkeypatch.setattr(applicability_module, "_PROVIDER_CHARGES_SOURCE", "rebound")
+    monkeypatch.setattr(applicability_module, "_PROVIDER_MBR_SOURCE", "rebound")
+    monkeypatch.setattr(applicability_module, "_canonical_json", lambda _payload: b"forged")
+    monkeypatch.setattr(applicability_module, "sha256", lambda _payload: ForgivingHash())
+
+    assert require_product_betfair_commission_applicability(assessment) is assessment
+
+    object.__setattr__(assessment, "venue_id", "forged-venue")
+    with pytest.raises(
+        BetfairCommissionApplicabilityError,
+        match="assessment identity is inconsistent",
+    ):
+        require_product_betfair_commission_applicability(assessment)

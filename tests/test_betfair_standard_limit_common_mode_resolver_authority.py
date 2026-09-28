@@ -14,7 +14,7 @@ from autosport.betfair_standard_limit_price_bound import (
 from autosport.real_execution_ledger import RealExecutionLedger
 
 from test_betfair_supervised_execution import _bound, _profile
-from test_supervised_plan_issuance import _store
+from test_supervised_plan_issuance import _active_runtime_profile, _store
 
 
 def _copy_with_instruction_sha(
@@ -129,7 +129,7 @@ def test_product_facade_cannot_reopen_coordinated_resolver_substitution(
     )
 
     store.issue(bound=bound, approval=approval)
-    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
     ledger.reserve_plan(bound.execution_plan)
     ledger.bind_supervised_approval(
         plan_id=bound.execution_plan.plan_id,
@@ -143,17 +143,19 @@ def test_product_facade_cannot_reopen_coordinated_resolver_substitution(
         action_id=bound.execution_plan.actions[0].action_id,
     )
 
-    with pytest.raises(
-        BetfairStandardLimitPriceBoundError,
-        match="durable issuance-time Betfair request identity changed",
-    ):
-        product_module.verify_product_betfair_standard_limit_price_bound(
-            evidence=candidate,
-            ledger=ledger,
-            issuance_store=store,
-            execution_plan_id=bound.execution_plan.plan_id,
-            action_id=bound.execution_plan.actions[0].action_id,
-        )
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="durable issuance-time Betfair request identity changed",
+        ):
+            product_module.verify_product_betfair_standard_limit_price_bound(
+                evidence=candidate,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=bound.execution_plan.actions[0].action_id,
+            )
 
 
 def test_in_place_canonical_resolver_code_swap_fails_before_fresh_authority(

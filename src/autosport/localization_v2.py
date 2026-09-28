@@ -414,6 +414,7 @@ _UK_UA = MappingProxyType(
         "ui.ticket.status.won": "виграно",
         "ui.ticket.status.lost": "програно",
         "ui.ticket.status.void": "повернено",
+        "ui.sport.table_tennis": "настільний теніс",
         "ui.source_health.status.unknown": "невідомий",
         "ui.source_health.status.healthy": "нормальний",
         "ui.source_health.status.degraded": "погіршений",

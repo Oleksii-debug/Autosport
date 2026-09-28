@@ -203,3 +203,85 @@ def test_reconstructible_nested_evaluate_spec_cannot_bypass_decision_generation_
     decision = reconstructed(policy, evaluated, Decimal("10"))
 
     assert not (decision.allowed is True and writer_published is True)
+
+
+def test_closure_reachable_nested_evaluate_spec_cannot_bypass_generation_scope(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closure-retained specs must be no weaker than the installed public risk root."""
+
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-risk-closure-reconstruct-authority"),
+    )
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.save(path)
+    evaluated = PaperBook.load(path)
+    writer = PaperBook.load(path)
+
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+
+    public_root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(public_root) is FunctionType
+    outer_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            nested = globals_snapshot.get("_EVALUATE_SPEC")
+            if type(nested) is tuple and len(nested) == 6:
+                outer_spec = nested
+                break
+    assert outer_spec is not None
+    reconstructed = _reconstruct_spec(outer_spec)
+
+    original_derived = PaperRiskPolicy._derived_risk_values
+    writer_published = False
+
+    def interleave_publication(
+        self,
+        initial_bankroll,
+        balance,
+        committed_stake,
+        amount,
+    ):
+        nonlocal writer_published
+        writer.open_ticket(
+            [_generation_race_leg()],
+            "95",
+            placed_at=_TS,
+        )
+        writer.save(path)
+        writer_published = True
+        return original_derived(
+            self,
+            initial_bankroll,
+            balance,
+            committed_stake,
+            amount,
+        )
+
+    monkeypatch.setattr(
+        PaperRiskPolicy,
+        "_derived_risk_values",
+        interleave_publication,
+    )
+
+    decision = reconstructed(policy, evaluated, Decimal("10"))
+
+    assert writer_published is True
+    assert decision.allowed is False

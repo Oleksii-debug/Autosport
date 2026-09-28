@@ -19,14 +19,14 @@ permissions:
   contents: read
   pull-requests: read
 
-# Coalesce only scheduler-safe classes before runner allocation. Fresh integration-capable
-# events share one QUALIFY lane so newer head/readiness work displaces obsolete work.
-# Draft/closed events use a separate LIFECYCLE lane and therefore cannot evict useful
-# qualification before live admission. Re-runs are isolated by exact event head SHA so a
-# stale-head rerun cannot cancel current-head qualification. The trusted controller and
-# read-only admission helper remain the authority for live PR state/head decisions.
+# Coalesce only scheduler-safe classes before runner allocation. Fresh qualification
+# events share one lane only for the same exact PR head, so a delayed stale-head event
+# can never evict current-head qualification. Draft/closed events use a separate
+# LIFECYCLE lane and cannot evict useful qualification before live admission. Re-runs
+# are isolated by exact event head SHA. The trusted controller and read-only admission
+# helper remain the authority for live PR state/head decisions.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || ((github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || 'qualify')) || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || ((github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || format('qualify-{0}', github.event.pull_request.head.sha))) || github.ref }}
   cancel-in-progress: true
 
 jobs:

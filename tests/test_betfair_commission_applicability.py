@@ -220,6 +220,11 @@ def test_public_assessment_root_keeps_canonical_reader_and_issuer_after_module_r
         "_issue_assessment",
         forbidden_issuer,
     )
+    monkeypatch.setattr(
+        applicability_module,
+        "_assessment_payload",
+        forbidden_issuer,
+    )
 
     assessment = assess_betfair_commission_applicability(client, market_id="1.234")
 

@@ -360,8 +360,8 @@ class BetfairReadCompletenessObserver:
         pages: list[tuple[int, int, bool, str]] = []
         offset = 0
         for _ in range(max_pages):
+            self._require_canonical_client_read_dispatch()
             try:
-                self._require_canonical_client_read_dispatch()
                 page = _CANONICAL_READ_CURRENT_ORDERS_PAGE(
                     self._client,
                     from_record=offset,
@@ -462,8 +462,8 @@ class BetfairReadCompletenessObserver:
         pages: list[tuple[int, int, bool, str]] = []
         offset = 0
         for _ in range(max_pages):
+            self._require_canonical_client_read_dispatch()
             try:
-                self._require_canonical_client_read_dispatch()
                 page = _CANONICAL_READ_CLEARED_ORDERS_PAGE(
                     self._client,
                     from_record=offset,

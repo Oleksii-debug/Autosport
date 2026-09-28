@@ -165,22 +165,10 @@ def web_shell_index_path() -> Path:
 
 
 def _safe_exception_text(exc: BaseException) -> str:
-    """Project only bounded exception type; raw detail may contain secrets or paths."""
+    """Project a secret-safe localized operator error without Python type leakage."""
 
-    try:
-        name = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        name = "BaseException"
-    if (
-        type(name) is not str
-        or not name
-        or len(name) > 64
-        or not name.isascii()
-        or not name.replace("_", "a").isalnum()
-        or not (name[0].isalpha() or name[0] == "_")
-    ):
-        name = "BaseException"
-    return text("ui.error.exception.message_unavailable", exception_type=name)
+    del exc
+    return text("ui.windows.error.internal_hidden")
 
 
 def _safe_worker_error_detail(_value: object) -> str:
@@ -726,10 +714,8 @@ class AutosportWebController:
                 self._refresh_economic_projection()
             elif product_message.kind == "ERROR":
                 self._recovery_required_workspaces.add(Path(self._active_workspace))
-                error_type = product_message.error_type or "BaseException"
-                self.product_runtime_status = (
-                    "Тривалий імітаційний режим завершився помилкою типу "
-                    f"{error_type}. Спочатку відновіть робочу область."
+                self.product_runtime_status = text(
+                    "ui.windows.product_runtime.error.recovery_required"
                 )
                 self._fail(self.product_runtime_status)
 

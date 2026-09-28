@@ -101,6 +101,45 @@ class TransparentBanditHistoryReplayIntegrityTests(unittest.TestCase):
             )
 
 
+    def test_forged_initial_state_cannot_hide_accumulated_reward_observation(self) -> None:
+        policy, _, _, _ = self._resolved_step()
+        payload = policy.to_payload()
+        for estimate in payload["estimates"]:
+            if estimate["action_type"] == "PAPER_PROPOSAL":
+                estimate["observations"] = 1
+                estimate["reward_sum"] = "0.25"
+                break
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "accumulated policy observation count",
+        ):
+            BanditPolicyState.from_payload(payload)
+
+    def test_direct_constructor_rejects_generation_observation_count_mismatch(self) -> None:
+        policy, _, _, _ = self._resolved_step()
+        forged_estimates = tuple(
+            type(estimate)(
+                estimate.action_type,
+                1 if estimate.action_type == "PAPER_PROPOSAL" else 0,
+                Decimal("0.25") if estimate.action_type == "PAPER_PROPOSAL" else Decimal("0"),
+            )
+            for estimate in policy.estimates
+        )
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "accumulated policy observation count",
+        ):
+            BanditPolicyState(
+                environment_id=policy.environment_id,
+                protocol_id=policy.protocol_id,
+                config_sha256=policy.config_sha256,
+                seed=policy.seed,
+                generation=0,
+                estimates=forged_estimates,
+            )
+
     def test_noninitial_restart_without_external_identity_fails_closed(self) -> None:
         policy, action, reward, transition = self._resolved_step()
         successor, _ = policy.update(

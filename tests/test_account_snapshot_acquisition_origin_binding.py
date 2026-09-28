@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import FunctionType
 
 import pytest
 
@@ -221,17 +222,42 @@ def test_inner_live_retry_origin_survives_outer_guard_bypass(
     assert same_origin_calls == []
 
 
-def _extract_inner_acquirer_state(raw_acquire):
+def _extract_inner_authority_boundary(raw_acquire):
     closure = raw_acquire.__closure__
     assert closure is not None
     candidates = [
         cell.cell_contents
         for cell in closure
-        if callable(cell.cell_contents)
-        and getattr(cell.cell_contents, "__name__", None) == "state"
+        if type(cell.cell_contents).__name__ == "_AccountSnapshotAuthorityBoundary"
     ]
     assert len(candidates) == 1
     return candidates[0]
+
+
+def _reachable_function_names(root: FunctionType) -> set[str]:
+    pending = [root]
+    seen: set[int] = set()
+    names: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        names.add(current.__name__)
+        for value in current.__defaults__ or ():
+            if type(value) is FunctionType:
+                pending.append(value)
+        for value in (current.__kwdefaults__ or {}).values():
+            if type(value) is FunctionType:
+                pending.append(value)
+        for cell in current.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if type(value) is FunctionType:
+                pending.append(value)
+    return names
 
 
 def test_account_snapshot_reader_class_dispatch_rebind_fails_before_provider_io(
@@ -282,8 +308,8 @@ def test_account_snapshot_reader_instance_shadow_fails_before_provider_io(
         account_id="default-account",
     )
     raw_acquire = _extract_outer_guard_raw_acquire()
-    state = _extract_inner_acquirer_state(raw_acquire)
-    _, client = state(acquirer)
+    authority = _extract_inner_authority_boundary(raw_acquire)
+    _, client, _ = authority.state(acquirer)
     attacker_calls = 0
 
     def forged_funds():
@@ -309,3 +335,96 @@ def test_account_snapshot_reader_instance_shadow_fails_before_provider_io(
 
     assert attacker_calls == 0
     assert calls == []
+
+
+def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
+    raw_acquire = _extract_outer_guard_raw_acquire()
+    reachable = _reachable_function_names(raw_acquire)
+
+    # Durable record/resolve helpers may remain closure-reachable because they cannot
+    # mint live provider origin. The live issuer/retry/state primitives must not.
+    assert "issue_live" not in reachable
+    assert "current_live" not in reachable
+    assert "state" not in reachable
+
+
+def test_mutable_client_credentials_cannot_retarget_init_origin(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "account.sqlite3"
+    credentials_a = _credentials("A")
+    credentials_b = _credentials("B")
+    first_calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    first_acquirer = BetfairAccountSnapshotAcquirer(
+        database,
+        credentials_a,
+        account_id="default-account",
+    )
+    first = first_acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="mutable-client-origin",
+    )
+    assert len(first_calls) == 3
+    assert first.source_authority_proven is True
+
+    second = BetfairAccountSnapshotAcquirer(
+        database,
+        credentials_b,
+        account_id="default-account",
+    )
+    raw_acquire = _extract_outer_guard_raw_acquire()
+    authority = _extract_inner_authority_boundary(raw_acquire)
+    _, client, init_origin = authority.state(second)
+    assert init_origin == credentials_b
+
+    # This is ordinary attribute assignment on the hidden client recovered through the
+    # same raw-acquire closure surface. Origin authority must not be re-derived from it.
+    client._credentials = credentials_a
+    different_origin_calls = _install_transport(monkeypatch, [])
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="credential origin changed after initialization",
+    ):
+        raw_acquire(
+            second,
+            _balance_capabilities(),
+            acquisition_id="mutable-client-origin",
+        )
+    assert different_origin_calls == []
+    assert first.source_authority_proven is True
+
+
+def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    live = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-cannot-self-promote",
+    )
+    assert len(calls) == 3
+    assert live.source_authority_proven is True
+
+    durable = acquirer.resolve(live.receipt.acquisition_id)
+    assert durable is not live
+    assert durable.source_authority_proven is False
+
+    # Recursive ordinary FunctionType metadata traversal of the raw owner cannot recover
+    # a callable live issuer that could turn this durable object back into source authority.
+    raw_acquire = _extract_outer_guard_raw_acquire()
+    reachable = _reachable_function_names(raw_acquire)
+    assert "issue_live" not in reachable
+    assert "current_live" not in reachable

@@ -216,6 +216,26 @@ def _first_promotion(
         promotion_evidence_id=promotion_evidence_id,
     )
 
+def _first_retain(
+    protocol: ResearchProtocol,
+    bundle: EvaluationBundleRef,
+    *,
+    decision_id: str = "retain-1",
+    decided_at: str = T3,
+) -> PromotionDecision:
+    return PromotionDecision(
+        decision_id,
+        PromotionAction.RETAIN,
+        "strategy-1",
+        "protocol-1",
+        protocol.protocol_sha256,
+        "eval-1",
+        bundle.bundle_sha256,
+        decided_at,
+        candidate_model_version_id="model-1",
+    )
+
+
 def test_evaluation_bundle_cannot_be_rebound_to_different_experiment_lineage(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     first = ExperimentRecord(
@@ -252,70 +272,58 @@ def test_evaluation_bundle_cannot_be_rebound_to_different_experiment_lineage(tmp
         registry.append(second)
 
 
-def test_second_promotion_must_name_current_durable_champion(tmp_path):
-    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, eval2, _, evidence_id = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
-    conflicting = PromotionDecision(
-        "promotion-2",
-        PromotionAction.PROMOTE,
-        "strategy-2",
-        "protocol-1",
-        protocol.protocol_sha256,
-        "eval-2",
-        eval2.bundle_sha256,
-        T3,
-        candidate_model_version_id="model-1",
-    )
-    with pytest.raises(PromotionEvidenceError, match="current context champion"):
-        registry.record_promotion(conflicting)
-
-    assert registry.champion_strategy(as_of=T3) == "strategy-1"
-
-
-def test_promotion_decision_cannot_be_backdated_before_durable_history(tmp_path):
+def test_positive_promotion_cannot_create_current_champion_without_ess_authority(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
-    backdated = PromotionDecision(
-        "promotion-backdated",
-        PromotionAction.RETAIN,
-        "strategy-1",
-        "protocol-1",
-        protocol.protocol_sha256,
-        "eval-1",
-        eval1.bundle_sha256,
-        T2,
-        candidate_model_version_id="model-1",
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="product-issued effective-sample/dependence authority",
+    ):
+        registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
+
+    assert registry.champion_strategy(as_of=T3) is None
+    assert registry.get("PromotionDecision", "promotion-1") is None
+
+
+def test_non_promoting_decision_cannot_be_backdated_before_durable_history(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    protocol, eval1, _, _, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_retain(protocol, eval1, decision_id="retain-later"))
+
+    backdated = _first_retain(
+        protocol,
+        eval1,
+        decision_id="retain-backdated",
+        decided_at=T2,
     )
     with pytest.raises(PromotionEvidenceError, match="backdated"):
         registry.record_promotion(backdated)
 
+    assert registry.get("PromotionDecision", "retain-later") is not None
+    assert registry.get("PromotionDecision", "retain-backdated") is None
+    assert registry.champion_strategy(as_of=T3) is None
 
-def test_equal_instant_promotion_cannot_reorder_before_durable_history(tmp_path):
+
+def test_equal_instant_non_promoting_decision_cannot_reorder_durable_history(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, eval2, _, evidence_id = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
+    protocol, eval1, _, _, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(
+        _first_retain(protocol, eval1, decision_id="z-retain", decided_at=T3)
+    )
 
-    earlier_total_order = PromotionDecision(
-        "promotion-0",
-        PromotionAction.PROMOTE,
-        "strategy-2",
-        "protocol-1",
-        protocol.protocol_sha256,
-        "eval-2",
-        eval2.bundle_sha256,
-        T3,
-        candidate_model_version_id="model-1",
-        predecessor_strategy_version_id="strategy-1",
+    earlier_total_order = _first_retain(
+        protocol,
+        eval1,
+        decision_id="a-retain",
+        decided_at=T3,
     )
     with pytest.raises(PromotionEvidenceError, match="backdated"):
         registry.record_promotion(earlier_total_order)
 
-    assert registry.champion_strategy(as_of=T3) == "strategy-1"
-
+    assert registry.get("PromotionDecision", "a-retain") is None
+    assert registry.champion_strategy(as_of=T3) is None
 
 def test_promotion_rejects_dataset_causal_cutoff_outside_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
@@ -328,10 +336,11 @@ def test_promotion_rejects_dataset_causal_cutoff_outside_frozen_protocol(tmp_pat
         registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
 
 
-def test_rollback_rejects_existing_strategy_that_was_never_champion(tmp_path):
+
+def test_rollback_rejects_when_no_product_issued_champion_exists(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
-    protocol, eval1, _, _, evidence_id = _seed_promotion_evidence(registry)
-    registry.record_promotion(_first_promotion(protocol, eval1, evidence_id))
+    protocol, eval1, _, _, _ = _seed_promotion_evidence(registry)
+    registry.record_promotion(_first_retain(protocol, eval1))
 
     unrelated = PromotionDecision(
         "rollback-unrelated",
@@ -345,11 +354,14 @@ def test_rollback_rejects_existing_strategy_that_was_never_champion(tmp_path):
         rollback_to_strategy_version_id="strategy-2",
         candidate_model_version_id="model-1",
     )
-    with pytest.raises(PromotionEvidenceError, match="rollback target"):
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="rollback candidate does not match current context champion",
+    ):
         registry.record_promotion(unrelated)
 
-    assert registry.champion_strategy(as_of=T3) == "strategy-1"
-
+    assert registry.champion_strategy(as_of=T3) is None
+    assert registry.get("PromotionDecision", "rollback-unrelated") is None
 
 def test_promotion_rejects_feature_version_outside_frozen_protocol(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")

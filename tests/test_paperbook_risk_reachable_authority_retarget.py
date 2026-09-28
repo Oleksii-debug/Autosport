@@ -754,3 +754,125 @@ def test_reconstructed_evaluate_rejects_in_place_mutated_policy_helper_code() ->
     assert decision.allowed is False
     assert "virtual bankroll" in decision.reason
 
+def test_reconstructed_goal_stake_rejects_mutated_raw_helper() -> None:
+    """Raw reconstructed sizing must fail closed before mutable helper dispatch."""
+
+    goal = EconomicGoalContract(
+        goal_id="risk-reconstruct-stake-helper",
+        revision=1,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("1"),
+        max_session_loss_fraction=Decimal("1"),
+        max_day_loss_fraction=Decimal("1"),
+        max_drawdown_fraction=Decimal("1"),
+        max_capital_at_risk_fraction=Decimal("1"),
+        max_turnover_fraction=Decimal("1000"),
+        max_risk_of_ruin=Decimal("1"),
+        max_concurrent_positions=10,
+    )
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+    book = PaperBook("100")
+    public_root = vars(PaperRiskPolicy)["derive_goal_stake"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_DERIVE_GOAL_STAKE_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+    reconstructed = _reconstruct_spec(nested_spec)
+
+    original = vars(PaperRiskPolicy)["_effective_fraction_limits"]
+    hostile_executed = False
+
+    def hostile_limits(self):
+        nonlocal hostile_executed
+        del self
+        hostile_executed = True
+        return Decimal("1"), Decimal("1")
+
+    try:
+        setattr(PaperRiskPolicy, "_effective_fraction_limits", hostile_limits)
+        amount = reconstructed(policy, book, Decimal("0.5"))
+    finally:
+        if vars(PaperRiskPolicy).get("_effective_fraction_limits") is not original:
+            setattr(PaperRiskPolicy, "_effective_fraction_limits", original)
+
+    assert hostile_executed is False
+    assert amount is None
+
+
+def test_reconstructed_stake_vector_rejects_mutated_raw_helper() -> None:
+    """Raw reconstructed vector sizing must reject mutable helper dispatch."""
+
+    policy = PaperRiskPolicy()
+    book = PaperBook("100")
+    public_root = vars(PaperRiskPolicy)["derive_goal_stake_vector"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_DERIVE_GOAL_STAKE_VECTOR_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+    reconstructed = _reconstruct_spec(nested_spec)
+
+    original = vars(PaperRiskPolicy)["_risk_rejection_requires_wait"]
+    hostile_executed = False
+
+    def hostile_wait(reason):
+        nonlocal hostile_executed
+        del reason
+        hostile_executed = True
+        return False
+
+    try:
+        setattr(
+            PaperRiskPolicy,
+            "_risk_rejection_requires_wait",
+            staticmethod(hostile_wait),
+        )
+        decision = reconstructed(
+            policy,
+            book,
+            (),
+            contexts=(),
+            risk_of_ruin_vector_evidence=None,
+        )
+    finally:
+        if vars(PaperRiskPolicy).get("_risk_rejection_requires_wait") is not original:
+            setattr(PaperRiskPolicy, "_risk_rejection_requires_wait", original)
+
+    assert hostile_executed is False
+    assert decision.action == "WAIT"
+    assert decision.stakes == ()
+    assert "helper authority" in decision.reason
+

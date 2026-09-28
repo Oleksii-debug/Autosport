@@ -101,19 +101,20 @@ def test_huge_negative_threshold_exponent_fails_on_public_request_contract() -> 
 @pytest.mark.parametrize(
     ("field", "payload"),
     [
-        ("BETDAQ available amount", _response(stake="1E+1000000")),
-        ("BETDAQ decimal odds", _response(price="1E+1000000")),
-        ("BETDAQ deduction factor", _response(deduction="1E-1000000")),
+        ("FOR stake", _response(stake="1E+1000000")),
+        ("FOR price", _response(price="1E+1000000")),
+        ("selection DeductionFactor", _response(deduction="1E-1000000")),
+        ("FOR stake", _response(stake="1_000")),
     ],
 )
-def test_provider_compact_exponent_cannot_expand_unbounded_metadata_or_odds(
+def test_provider_non_xsd_decimal_lexemes_fail_before_publication(
     field: str,
     payload: str,
 ) -> None:
     provider, transport = _provider(payload)
     with pytest.raises(
         BetdaqSoapProtocolError,
-        match=rf"{field} fixed-point representation exceeds",
+        match=rf"{field} must use XML Schema decimal lexical form",
     ):
         provider.read_batch()
     assert transport.calls == 1
@@ -121,12 +122,15 @@ def test_provider_compact_exponent_cannot_expand_unbounded_metadata_or_odds(
 
 
 def test_exact_512_character_fixed_point_boundary_remains_bounded() -> None:
+    stake = "1" + ("0" * 511)
+    deduction = "0." + ("0" * 510)
     provider, _ = _provider(
         _response(
-            stake="1E+511",
-            deduction="0E-510",
+            stake=stake,
+            deduction=deduction,
         )
     )
     quote = provider.read_batch().quotes[0]
+    assert quote.metadata["betdaq_available_amount"] == stake
+    assert quote.metadata["betdaq_deduction_factor"] == "0"
     assert len(quote.metadata["betdaq_available_amount"]) == 512
-    assert len(quote.metadata["betdaq_deduction_factor"]) == 512

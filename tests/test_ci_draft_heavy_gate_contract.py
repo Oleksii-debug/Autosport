@@ -19,6 +19,8 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
 
     assert "cancel-in-progress: true" in concurrency_block
     assert "format('pr-{0}-{1}'" in concurrency_block
+    assert "github.event.number" in concurrency_block
+    assert "github.event.pull_request.number" not in concurrency_block
     assert "github.run_attempt != 1" in concurrency_block
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in concurrency_block
@@ -27,6 +29,13 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert "'lifecycle'" in concurrency_block
     assert "github.run_id" not in concurrency_block
     assert "format('pr-{0}-run-{1}'" not in concurrency_block
+
+    # A rerun of a closed/converted-to-draft event must stay in the lifecycle lane.
+    # This is also what makes a merged closed event safe when pull_request is empty:
+    # lifecycle identity uses top-level event.number and never reaches head.sha.
+    lifecycle_index = concurrency_block.index("github.event.action == 'converted_to_draft'")
+    rerun_index = concurrency_block.index("github.run_attempt != 1")
+    assert lifecycle_index < rerun_index
 
 
 def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() -> None:
@@ -85,3 +94,18 @@ def test_windows_pr_scheduler_coalesces_only_same_head_qualification() -> None:
 
 def test_endurance_pr_scheduler_coalesces_only_same_head_qualification() -> None:
     _assert_head_partitioned_pr_scheduler(".github/workflows/endurance.yml")
+
+
+def test_qualification_workflows_have_repository_wide_distinct_group_prefixes() -> None:
+    blocks = {
+        path: _workflow(path).split("concurrency:", 1)[1].split("jobs:", 1)[0]
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/windows-build.yml",
+            ".github/workflows/endurance.yml",
+        )
+    }
+
+    assert "group: ci-${{ github.workflow }}-" in blocks[".github/workflows/ci.yml"]
+    assert "group: windows-candidate-" in blocks[".github/workflows/windows-build.yml"]
+    assert "group: endurance-" in blocks[".github/workflows/endurance.yml"]

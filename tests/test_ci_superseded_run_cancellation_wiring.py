@@ -44,9 +44,12 @@ def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
     assert concurrency is not None
     group = concurrency.group("body")
     assert "cancel-in-progress: true" in group
-    assert "github.run_id" in group, (
-        "workflow must isolate every PR run before job-level live-head admission"
-    )
+    assert "format('qualify-{0}', github.event.pull_request.head.sha)" in group
+    assert "format('rerun-{0}', github.event.pull_request.head.sha)" in group
+    assert "github.event.action == 'converted_to_draft'" in group
+    assert "github.event.action == 'closed'" in group
+    assert "'lifecycle'" in group
+    assert "github.run_id" not in group
 
     heavy = _job_body(text, heavy_job)
     assert re.search(

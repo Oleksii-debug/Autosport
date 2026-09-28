@@ -595,8 +595,25 @@ def _read_verified_records_bound(
 
 def read_verified_records(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
     journal_path = Path(path)
-    records = _read_verified_records_only(journal_path)
+    records, verified_identity, verified_size = _read_verified_records_bound(
+        journal_path
+    )
     _reconcile_checkpoint(journal_path, records, recover=False)
+    if verified_identity is None:
+        try:
+            os.lstat(journal_path)
+        except FileNotFoundError:
+            pass
+        else:
+            raise JournalIntegrityError(
+                "journal path appeared during public verification"
+            )
+    else:
+        _assert_bound_journal_path(
+            journal_path,
+            verified_identity,
+            verified_size,
+        )
     return records
 
 

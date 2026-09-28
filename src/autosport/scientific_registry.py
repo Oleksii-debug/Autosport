@@ -1733,6 +1733,11 @@ class ScientificRegistry:
                         f"persisted promotion decision evidence {field} mismatch"
                     )
 
+        if decision.action is PromotionAction.PROMOTE:
+            raise PromotionEvidenceError(
+                "persisted PROMOTE lacks product-issued effective-sample/dependence authority"
+            )
+
     @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:
         if record.record_type not in _RECORD_TYPES:
@@ -2578,6 +2583,15 @@ class ScientificRegistry:
                     raise PromotionEvidenceError("PROMOTE requires strictly positive observed improvement and effect interval")
                 if low < frozen_minimum_improvement or practical < frozen_minimum_improvement:
                     raise PromotionEvidenceError("PROMOTE requires improvement clearing the frozen minimum")
+
+                # Durable matching scalars prove consistency, not who derived the
+                # dependence structure or effective sample.  Until Autosport has a
+                # product-owned raw-sample/cluster/dependence authority that can be
+                # re-resolved here, caller-constructible EvaluationBundle and
+                # PromotionEvidence values cannot grant positive promotion authority.
+                raise PromotionEvidenceError(
+                    "PROMOTE requires product-issued effective-sample/dependence authority"
+                )
             return self._append_entry_locked(state, entry)
 
     def champion_strategy(

@@ -31,7 +31,7 @@ def test_endurance_pr_runs_are_scheduler_isolated_until_live_admission() -> None
     assert "github.event.pull_request.number || github.ref" not in concurrency_block
 
 
-def test_trusted_supersession_controller_covers_endurance() -> None:
+def test_trusted_supersession_controller_covers_endurance_without_cross_workflow_preemption() -> None:
     text = _workflow("pr-qualification-supersession.yml")
 
     assert "workflows: [CI, Windows candidate, Endurance]" in text
@@ -39,3 +39,4 @@ def test_trusted_supersession_controller_covers_endurance() -> None:
     assert "cancel-in-progress: true" in text
     assert "github.event.workflow_run.head_sha" in text
     assert "github.event.workflow_run.name" in text
+    assert "github.event.workflow_run.workflow_id" in text

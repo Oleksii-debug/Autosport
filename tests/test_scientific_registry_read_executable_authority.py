@@ -43,3 +43,35 @@ def test_runtime_causal_precedes_rebind_is_rejected_before_attacker_executes(mon
         require_scientific_registry_read_authority()
 
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    (
+        "_promotion_effective_sample_bundle_from_entry",
+        "_entry",
+    ),
+)
+def test_runtime_promotion_ess_transitive_helper_rebind_is_rejected_before_use(
+    tmp_path,
+    monkeypatch,
+    dependency_name,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / f"scientific-registry-{dependency_name}.json"
+    )
+    calls: list[str] = []
+
+    def forged(*args, **kwargs):
+        calls.append(dependency_name)
+        return None
+
+    monkeypatch.setattr(ScientificRegistry, dependency_name, staticmethod(forged))
+
+    with pytest.raises(
+        ScientificRegistryReadAuthorityError,
+        match=dependency_name,
+    ):
+        ScientificRegistry(registry.path)
+
+    assert calls == []

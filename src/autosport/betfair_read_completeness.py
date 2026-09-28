@@ -132,25 +132,21 @@ class BetfairReadCompletenessWitness:
         return True
 
     def assert_issued(self) -> None:
-        """Require that this exact witness object came from this observer issuance registry."""
-        with _ISSUED_LOCK:
-            issued = _ISSUED_WITNESSES.get(id(self))
-        if issued is None or issued[0] != self._fingerprint():
-            raise BetfairReadOnlyError("Betfair completeness witness was not issued by the observer")
+        """Fail closed until closure-private issuance verification is installed."""
+        raise BetfairReadOnlyError(
+            "Betfair completeness issuance authority is not installed"
+        )
 
     def assert_authoritative(self) -> None:
-        """Reject degraded, partial, or caller-fabricated completeness claims."""
-        if self.completeness is not BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW:
+        """Fail closed until closure-private issuance verification is installed."""
+        if (
+            self.completeness
+            is not BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW
+        ):
             raise BetfairReadOnlyError(
                 f"Betfair read is not complete: {self.completeness.value}"
             )
         self.assert_issued()
-        with _ISSUED_LOCK:
-            issued = _ISSUED_WITNESSES.get(id(self))
-        if issued is None or not issued[1]:
-            raise BetfairReadOnlyError(
-                "Betfair completeness witness lacks product-owned provider origin"
-            )
 
     def assert_authoritative_for(self, *, venue_id: str, account_id: str) -> None:
         """Require positive completeness for the exact configured client scope."""
@@ -203,12 +199,9 @@ class BetfairPagedReadResult:
         ).hexdigest()
 
     def _assert_issued(self) -> None:
-        with _ISSUED_LOCK:
-            issued = _ISSUED_RESULTS.get(id(self))
-        if issued != self._fingerprint():
-            raise BetfairReadOnlyError(
-                "Betfair paged result was not issued by the observer"
-            )
+        raise BetfairReadOnlyError(
+            "Betfair paged result issuance authority is not installed"
+        )
 
     @property
     def authoritative_empty(self) -> bool:
@@ -249,12 +242,9 @@ class BetfairValueReadResult:
         ).hexdigest()
 
     def _assert_issued(self) -> None:
-        with _ISSUED_LOCK:
-            issued = _ISSUED_RESULTS.get(id(self))
-        if issued != self._fingerprint():
-            raise BetfairReadOnlyError(
-                "Betfair value result was not issued by the observer"
-            )
+        raise BetfairReadOnlyError(
+            "Betfair value result issuance authority is not installed"
+        )
 
     def assert_complete(self) -> BetfairAccountFundsObservation | BetfairAccountDetailsObservation:
         self._assert_issued()

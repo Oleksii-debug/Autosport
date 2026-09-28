@@ -921,8 +921,7 @@ def reconcile_provider_readback(
         )
     try:
         assert_verified_provider_evidence_authoritative(readback)
-        assert_betfair_timeout_absence_authoritative(readback)
-    except (ProviderEvidenceError, BetfairTimeoutResolutionError) as exc:
+    except ProviderEvidenceError as exc:
         raise SupervisedExecutionError(
             "verified canonical provider evidence is not authoritative"
         ) from exc
@@ -1070,7 +1069,8 @@ def reconcile_provider_not_found(
         )
     try:
         assert_verified_provider_evidence_authoritative(readback)
-    except ProviderEvidenceError as exc:
+        assert_betfair_timeout_absence_authoritative(readback)
+    except (ProviderEvidenceError, BetfairTimeoutResolutionError) as exc:
         raise SupervisedExecutionError(
             "verified complete provider absence evidence is not authoritative"
         ) from exc

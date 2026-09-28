@@ -139,7 +139,7 @@ class ActionEstimate:
 
 @dataclass(frozen=True, slots=True)
 class BanditPolicyState:
-    """Immutable restart-safe policy state; selection is deterministic and bounded."""
+    """Immutable policy state; non-initial restart requires external identity authority."""
 
     environment_id: str
     protocol_id: str
@@ -190,6 +190,10 @@ class BanditPolicyState:
             raise LearningEnvironmentError("applied action/reward histories must have equal length")
         if self.generation != len(self.applied_action_ids):
             raise LearningEnvironmentError("generation must equal applied update count")
+        if sum(item.observations for item in self.estimates) != self.generation:
+            raise LearningEnvironmentError(
+                "generation must equal accumulated policy observation count"
+            )
         if self.generation == 0:
             if self.predecessor_policy_id is not None:
                 raise LearningEnvironmentError("initial policy cannot have predecessor_policy_id")

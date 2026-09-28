@@ -108,14 +108,26 @@ class ActionEstimate:
     @property
     def mean_reward(self) -> Decimal:
         if self.observations == 0:
-            return Decimal("0")
+            raise LearningEnvironmentError(
+                "unobserved action has no empirical mean reward"
+            )
         return self.reward_sum / Decimal(self.observations)
 
     @property
     def exact_mean_reward(self) -> Fraction:
         if self.observations == 0:
-            return Fraction(0)
+            raise LearningEnvironmentError(
+                "unobserved action has no empirical mean reward"
+            )
         return Fraction(self.reward_sum) / self.observations
+
+    @property
+    def selection_score(self) -> Fraction:
+        """Deterministic bootstrap score; never evidence of an observed reward."""
+
+        if self.observations == 0:
+            return Fraction(0)
+        return self.exact_mean_reward
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -308,7 +320,7 @@ class BanditPolicyState:
             )
         ranked = sorted(
             admitted,
-            key=lambda action_type: (-estimates[action_type].exact_mean_reward, action_type),
+            key=lambda action_type: (-estimates[action_type].selection_score, action_type),
         )
         return ranked[0]
 

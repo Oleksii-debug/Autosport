@@ -18,6 +18,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from threading import RLock
+from weakref import ReferenceType, ref
 
 from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_execution_fee_inputs import (
@@ -93,7 +94,7 @@ def _fee_input_sha256(observation: BetfairExecutionFeeInputsObservation) -> str:
     return sha256(_canonical_json(_fee_input_payload(observation))).hexdigest()
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class BetfairCommissionApplicabilityAssessment:
     """Product-issued negative prerequisite for prospective Betfair commission truth."""
 
@@ -144,11 +145,23 @@ class BetfairCommissionApplicabilityAssessment:
         }
 
 
-# Strong exact-object registry is intentional. A structurally equal object or an
-# object.__new__ forgery must not inherit in-process product issuance through value
-# equality, weak-reference hashing, or Python id reuse after collection.
-_ISSUED_BY_ID: dict[int, BetfairCommissionApplicabilityAssessment] = {}
+# Exact-object issuance without permanent retention. The key cannot be reused while
+# the referent is alive; the callback removes it as soon as that exact assessment dies.
+_ISSUED_BY_ID: dict[int, ReferenceType[BetfairCommissionApplicabilityAssessment]] = {}
 _ISSUE_LOCK = RLock()
+
+
+def _register_issued(assessment: BetfairCommissionApplicabilityAssessment) -> None:
+    object_id = id(assessment)
+
+    def cleanup(reference: ReferenceType[BetfairCommissionApplicabilityAssessment]) -> None:
+        with _ISSUE_LOCK:
+            if _ISSUED_BY_ID.get(object_id) is reference:
+                _ISSUED_BY_ID.pop(object_id, None)
+
+    reference = ref(assessment, cleanup)
+    with _ISSUE_LOCK:
+        _ISSUED_BY_ID[object_id] = reference
 
 
 def _assessment_payload(
@@ -215,8 +228,7 @@ def _issue_assessment(
     object.__setattr__(assessment, "provider_write_authorized", False)
     object.__setattr__(assessment, "real_money_execution_authorized", False)
     object.__setattr__(assessment, "assessment_id", assessment_id)
-    with _ISSUE_LOCK:
-        _ISSUED_BY_ID[id(assessment)] = assessment
+    _register_issued(assessment)
     return assessment
 
 
@@ -247,7 +259,8 @@ def require_product_betfair_commission_applicability(
             "assessment must be exact BetfairCommissionApplicabilityAssessment"
         )
     with _ISSUE_LOCK:
-        if _ISSUED_BY_ID.get(id(assessment)) is not assessment:
+        reference = _ISSUED_BY_ID.get(id(assessment))
+        if reference is None or reference() is not assessment:
             raise BetfairCommissionApplicabilityError(
                 "assessment is not product-issued in this process"
             )

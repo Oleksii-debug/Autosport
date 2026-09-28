@@ -101,21 +101,32 @@ def test_failed_final_replace_recovers_last_committed_snapshot(
 
     import autosport._paperbook_preload_authority_guard as guard
 
-    original_replace = guard._OS_REPLACE
-
-    def fail_replace(*_args, **_kwargs):
-        raise OSError("injected final replace failure")
-
-    monkeypatch.setattr(guard, "_OS_REPLACE", fail_replace)
-    with pytest.raises(OSError, match="injected final replace failure"):
-        book.save(path)
-    monkeypatch.setattr(guard, "_OS_REPLACE", original_replace)
+    # Model the durable prefix left by a failure after PREPARE but before the
+    # final snapshot replace. Production dispatch is deliberately frozen, so
+    # monkeypatching its captured replace function is not a valid crash injector.
+    candidate = tmp_path / "paper-book.candidate.json"
+    guard._ORIGINAL_SAVE(book, candidate)
+    candidate_sha = guard._file_sha256(candidate)
+    assert candidate_sha is not None
+    records, committed, pending = guard._read_witnesses(path)
+    assert records and committed is not None and pending is None
+    generation = committed[0] + 1
+    guard._append_witness(
+        path,
+        event=guard._PREPARE,
+        generation=generation,
+        snapshot_sha256=candidate_sha,
+    )
 
     assert path.read_bytes() == last_good
     restored = PaperBook.load(path)
     assert tuple(restored.tickets) == (first.ticket_id,)
     assert restored.balance == Decimal("90")
     assert restored.committed_stake == Decimal("10")
+
+    _records, committed_after, pending_after = guard._read_witnesses(path)
+    assert committed_after == committed
+    assert pending_after is None
 
 
 def test_published_candidate_with_interrupted_commit_recovers_forward(
@@ -130,27 +141,31 @@ def test_published_candidate_with_interrupted_commit_recovers_forward(
 
     import autosport._paperbook_preload_authority_guard as guard
 
-    original_append = guard._append_witness
-
-    def interrupt_commit(snapshot_path, *, event, generation, snapshot_sha256):
-        if event == guard._COMMIT:
-            raise OSError("injected COMMIT interruption")
-        return original_append(
-            snapshot_path,
-            event=event,
-            generation=generation,
-            snapshot_sha256=snapshot_sha256,
-        )
-
-    monkeypatch.setattr(guard, "_append_witness", interrupt_commit)
-    with pytest.raises(OSError, match="injected COMMIT interruption"):
-        book.save(path)
-    monkeypatch.setattr(guard, "_append_witness", original_append)
+    # Model the complementary durable crash prefix: PREPARE is durable and the
+    # candidate snapshot has replaced BASE, but COMMIT has not yet been appended.
+    candidate = tmp_path / "paper-book.candidate.json"
+    guard._ORIGINAL_SAVE(book, candidate)
+    candidate_sha = guard._file_sha256(candidate)
+    assert candidate_sha is not None
+    records, committed, pending = guard._read_witnesses(path)
+    assert records and committed is not None and pending is None
+    generation = committed[0] + 1
+    guard._append_witness(
+        path,
+        event=guard._PREPARE,
+        generation=generation,
+        snapshot_sha256=candidate_sha,
+    )
+    guard._OS_REPLACE(candidate, path)
 
     restored = PaperBook.load(path)
     assert restored.balance == Decimal("85")
     assert restored.committed_stake == Decimal("15")
     assert len(restored.tickets) == 2
+
+    _records, committed_after, pending_after = guard._read_witnesses(path)
+    assert committed_after == (generation, candidate_sha)
+    assert pending_after is None
 
 
 def test_empty_snapshot_is_still_bound_to_independent_witness(

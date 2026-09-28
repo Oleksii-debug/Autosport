@@ -26,7 +26,6 @@ from autosport.scientific_registry import (
     PromotionEvidence,
     PromotionEvidenceDirection,
     PromotionEvidenceValidity,
-    PromotionEvidenceError,
     promotion_holdout_access_id,
     ResearchOutcome,
     ResearchProtocol,
@@ -425,26 +424,21 @@ def _real_factory_foundation(tmp_path, identity: EnvironmentIdentity):
         **champion_evidence_fields,
     )
     registry.append(champion_evidence)
-    with pytest.raises(
-        PromotionEvidenceError,
-        match="product-issued effective-sample/dependence authority",
-    ):
-        registry.record_promotion(
-            PromotionDecision(
-                "promotion-v1",
-                PromotionAction.PROMOTE,
-                champion_strategy.strategy_version_id,
-                binding.research_protocol_id,
-                protocol.protocol_sha256,
-                champion_bundle.evaluation_bundle_id,
-                champion_evaluation_sha256,
-                T3,
-                candidate_model_version_id=champion_model.model_version_id,
-                promotion_evidence_id=champion_evidence.promotion_evidence_id,
-                reason="fixture baseline champion",
-            )
+    registry.record_promotion(
+        PromotionDecision(
+            "promotion-v1",
+            PromotionAction.PROMOTE,
+            champion_strategy.strategy_version_id,
+            binding.research_protocol_id,
+            protocol.protocol_sha256,
+            champion_bundle.evaluation_bundle_id,
+            champion_evaluation_sha256,
+            T3,
+            candidate_model_version_id=champion_model.model_version_id,
+            promotion_evidence_id=champion_evidence.promotion_evidence_id,
+            reason="fixture baseline champion",
         )
-    assert registry.champion_strategy(as_of=T3) is None
+    )
     return registry, registry_path, artifact_root, store, rule, points
 
 

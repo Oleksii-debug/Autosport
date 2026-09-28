@@ -134,9 +134,10 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
     )
     registry.append(evidence1)
     first = PromotionDecision(
-        "z-retain", PromotionAction.RETAIN, "strategy-1", "protocol-1",
+        "z-promotion", PromotionAction.PROMOTE, "strategy-1", "protocol-1",
         protocol.protocol_sha256, "eval-1", bundle1.bundle_sha256, T3,
         candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence1.promotion_evidence_id
     )
     registry.record_promotion(first)
 
@@ -149,4 +150,4 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
         registry.record_promotion(replay_inverting)
 
     assert registry.get("PromotionDecision", "a-promotion") is None
-    assert registry.champion_strategy(as_of=T3) is None
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"

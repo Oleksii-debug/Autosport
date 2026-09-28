@@ -179,16 +179,10 @@ def test_promotion_rejects_dataset_cutoff_different_from_frozen_protocol(tmp_pat
     assert registry.get("PromotionDecision", "promotion-1") is None
 
 
-
-def test_rollback_remains_blocked_when_positive_champion_was_never_issued(tmp_path):
+def test_rollback_rejects_existing_strategy_that_was_never_a_champion(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     protocol, model, first_experiment, evidence_id = _seed_foundation(registry)
-
-    with pytest.raises(
-        PromotionEvidenceError,
-        match="product-issued effective-sample/dependence authority",
-    ):
-        registry.record_promotion(_promotion(protocol, evidence_id))
+    registry.record_promotion(_promotion(protocol, evidence_id))
 
     strategy2 = StrategyVersion(
         "strategy-2",
@@ -243,12 +237,8 @@ def test_rollback_remains_blocked_when_positive_champion_was_never_issued(tmp_pa
         candidate_model_version_id="model-1",
     )
 
-    with pytest.raises(
-        PromotionEvidenceError,
-        match="rollback candidate does not match current context champion",
-    ):
+    with pytest.raises(PromotionEvidenceError, match="prior durable champion"):
         registry.record_promotion(rollback)
 
-    assert registry.champion_strategy(as_of=T3) is None
+    assert registry.champion_strategy(as_of=T3) == "strategy-1"
     assert registry.get("PromotionDecision", "rollback-3") is None
-

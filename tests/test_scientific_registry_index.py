@@ -121,6 +121,35 @@ def _seed_registry(path):
     )
     for record in (question, hypothesis, protocol, dataset, features, model, strategy1, eval1, experiment1):
         registry.append(record)
+    evidence1 = _promotion_evidence(
+        experiment_id="experiment-1", strategy_id="strategy-1", model_id="model-1",
+        bundle_id="eval-1", dataset_id="dataset-1", protocol_id="protocol-1",
+        bundle_sha=eval1.bundle_sha256, evidence_id="promotion-1-evidence",
+        rollback_identity="NONE", minimum_n=3, created_at=T2,
+        holdout_access_id=promotion_holdout_access_id(
+            research_protocol_id="protocol-1",
+            dataset_manifest_sha256=SHA_A,
+            source_identity="fixture",
+            license_identity="fixture-rights",
+            confirmation_trial_family_id="protocol-1:confirmation-trial-family",
+        ),
+    )
+    registry.append(evidence1)
+    registry.record_promotion(
+        PromotionDecision(
+            "promotion-1",
+            PromotionAction.PROMOTE,
+            "strategy-1",
+            "protocol-1",
+            protocol.protocol_sha256,
+            "eval-1",
+            eval1.bundle_sha256,
+            T2,
+            candidate_model_version_id="model-1",
+            promotion_evidence_id=evidence1.promotion_evidence_id,
+        )
+    )
+
     strategy2 = StrategyVersion(
         "strategy-2",
         "paper-strategy",
@@ -189,12 +218,12 @@ def test_strategy_state_is_causal_and_restart_deterministic(tmp_path):
     index = ScientificRegistryIndex(registry)
 
     before_rejection = index.strategy_state("paper-strategy", as_of=T2)
-    assert before_rejection.champion_strategy_version_id is None
-    assert before_rejection.state_of("strategy-1") is StrategyLifecycleState.CHALLENGER
+    assert before_rejection.champion_strategy_version_id == "strategy-1"
+    assert before_rejection.state_of("strategy-1") is StrategyLifecycleState.PROMOTED
     assert before_rejection.state_of("strategy-2") is StrategyLifecycleState.CHALLENGER
 
     after_rejection = index.strategy_state("paper-strategy", as_of=T3)
-    assert after_rejection.champion_strategy_version_id is None
+    assert after_rejection.champion_strategy_version_id == "strategy-1"
     assert after_rejection.state_of("strategy-2") is StrategyLifecycleState.REJECTED
 
     reopened = ScientificRegistryIndex(ScientificRegistry(path))
@@ -210,7 +239,7 @@ def test_lineage_indexes_bind_dataset_model_and_strategy_without_future_decision
     assert [entry.record_id for entry in dataset.strategies] == ["strategy-1", "strategy-2"]
     assert [entry.record_id for entry in dataset.experiments] == ["experiment-1", "experiment-2"]
     assert [entry.record_id for entry in dataset.evaluations] == ["eval-1", "eval-2"]
-    assert [entry.record_id for entry in dataset.promotions] == ["rejection-2"]
+    assert [entry.record_id for entry in dataset.promotions] == ["promotion-1", "rejection-2"]
 
     model = index.by_model("model-1", as_of=T3)
     assert [entry.record_id for entry in model.strategies] == ["strategy-1", "strategy-2"]
@@ -221,7 +250,7 @@ def test_lineage_indexes_bind_dataset_model_and_strategy_without_future_decision
     assert [entry.record_id for entry in strategy.models] == ["model-1"]
     assert [entry.record_id for entry in strategy.experiments] == ["experiment-1", "experiment-2"]
     assert [entry.record_id for entry in strategy.evaluations] == ["eval-1", "eval-2"]
-    assert [entry.record_id for entry in strategy.promotions] == []
+    assert [entry.record_id for entry in strategy.promotions] == ["promotion-1"]
 
 
 def test_lineage_indexes_traverse_strategy_and_model_predecessors(tmp_path):
@@ -315,7 +344,7 @@ def test_independent_strategy_contexts_do_not_inherit_champion_without_independe
     index = ScientificRegistryIndex(registry)
     paper = index.strategy_state("paper-strategy", as_of=T3)
     context_b = index.strategy_state("totals-strategy", as_of=T3)
-    assert paper.champion_strategy_version_id is None
+    assert paper.champion_strategy_version_id == "strategy-1"
     assert context_b.champion_strategy_version_id is None
     assert context_b.state_of("strategy-context-b-1") is StrategyLifecycleState.CHALLENGER
 

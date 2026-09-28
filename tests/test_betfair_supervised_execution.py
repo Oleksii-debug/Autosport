@@ -1196,11 +1196,12 @@ def test_terminal_provider_observation_time_ignores_caller_client_clock() -> Non
             binding["observed_at"].replace("Z", "+00:00")
         )
 
-        records = [
+        envelopes = [
             json.loads(line)
             for line in ledger.path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        records = [envelope["event"] for envelope in envelopes]
         acknowledgements = [
             record
             for record in records

@@ -33,6 +33,49 @@ def _canonical_context_text(name: str, value: object) -> str:
     return value
 
 
+def _validate_proposed_ticket_leg(leg: object) -> TicketLeg:
+    """Validate proposal identity without applying PaperBook materialization policy."""
+
+    if type(leg) is not TicketLeg:
+        raise ValueError("proposal leg must be an exact TicketLeg")
+
+    for name, value in (
+        ("leg event_id", leg.event_id),
+        ("leg market_id", leg.market_id),
+        ("leg selection_id", leg.selection_id),
+    ):
+        text = _canonical_context_text(name, value)
+        if "|" in text:
+            raise ValueError(f"{name} must not contain quote-key delimiter '|'")
+
+    if leg.sport is not None:
+        sport = _canonical_context_text("leg sport", leg.sport)
+        if (
+            sport != sport.lower()
+            or "|" in sport
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in sport
+            )
+            or sport in {"unknown", "mixed"}
+        ):
+            raise ValueError("leg sport must be a canonical sport identity")
+
+    if leg.exchange_side is not None:
+        side = _canonical_context_text("leg exchange_side", leg.exchange_side)
+        if side not in {"back", "lay"}:
+            raise ValueError("leg exchange_side must be canonical 'back' or 'lay'")
+
+    if (
+        type(leg.locked_odds) is not Decimal
+        or not leg.locked_odds.is_finite()
+        or leg.locked_odds <= Decimal("1")
+    ):
+        raise ValueError("leg locked_odds must be a finite exact Decimal greater than 1")
+
+    return leg
+
+
 def _canonical_context_timestamp(name: str, value: object) -> tuple[str, datetime]:
     timestamp = _canonical_context_text(name, value)
     try:
@@ -296,7 +339,7 @@ class ProposedTicketRiskContext:
         leg_keys: set[str] = set()
         for leg in self.legs:
             try:
-                PaperBook._validate_ticket_leg(leg)
+                _validate_proposed_ticket_leg(leg)
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("proposed ticket context contains an invalid leg") from exc
             if leg.quote_key in leg_keys:

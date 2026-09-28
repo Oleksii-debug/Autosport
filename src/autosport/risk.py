@@ -1464,6 +1464,27 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         returns ZERO semantics as None rather than inventing a stake.
         """
 
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+            descriptor_wrapped,
+        ) in _PAPER_RISK_DERIVE_GOAL_STAKE_HELPER_WITNESSES:
+            current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+            if current_descriptor is not expected_descriptor:
+                return None
+            current_function = (
+                current_descriptor.__func__
+                if descriptor_wrapped
+                else current_descriptor
+            )
+            if (
+                current_function is not expected_function
+                or current_function.__code__ is not expected_code
+            ):
+                return None
+
         goal = self.economic_goal
         if goal is None:
             return None
@@ -1590,6 +1611,35 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
         context_count = len(contexts) if type(contexts) is tuple else 0
         zero_vector = tuple(Decimal("0") for _ in range(context_count))
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+            descriptor_wrapped,
+        ) in _PAPER_RISK_DERIVE_GOAL_STAKE_VECTOR_HELPER_WITNESSES:
+            current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+            if current_descriptor is not expected_descriptor:
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+            current_function = (
+                current_descriptor.__func__
+                if descriptor_wrapped
+                else current_descriptor
+            )
+            if (
+                current_function is not expected_function
+                or current_function.__code__ is not expected_code
+            ):
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+
         goal = self.economic_goal
         if goal is None:
             return StakeVectorDecision(
@@ -1995,51 +2045,37 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         return RiskDecision(True, "allowed")
 
 # Raw risk executable specs are intentionally reconstructible evidence. Preserve
-# fail-closed semantics by binding the exact class descriptors/functions they may
-# dispatch to outside the separately wrapped _book_state authority. A reconstructed
-# evaluator carries this immutable witness tuple in its captured globals snapshot.
+# fail-closed semantics by binding exact class descriptors/functions for every helper
+# they may dispatch to outside the separately wrapped generation/private roots.
+# Reconstructed delegates carry these immutable witness tuples in captured globals.
 _eval_proposal = PaperRiskPolicy.__dict__["_proposal_restriction_decision"]
 _eval_history = PaperRiskPolicy.__dict__["_goal_history_rooms"]
 _eval_quote = PaperRiskPolicy.__dict__["_quote_risk_decision"]
 _eval_ruin = PaperRiskPolicy.__dict__["_risk_of_ruin_evidence_decision"]
 _eval_derived = PaperRiskPolicy.__dict__["_derived_risk_values"]
+_stake_limits = PaperRiskPolicy.__dict__["_effective_fraction_limits"]
+_stake_decimal_context = PaperRiskPolicy.__dict__["_decimal_context"]
+_vector_wait = PaperRiskPolicy.__dict__["_risk_rejection_requires_wait"]
+_vector_ruin = PaperRiskPolicy.__dict__["_risk_of_ruin_vector_evidence_decision"]
 
 _PAPER_RISK_EVALUATE_HELPER_WITNESSES = (
-    (
-        "_proposal_restriction_decision",
-        _eval_proposal,
-        _eval_proposal.__func__,
-        _eval_proposal.__func__.__code__,
-        True,
-    ),
-    (
-        "_goal_history_rooms",
-        _eval_history,
-        _eval_history.__func__,
-        _eval_history.__func__.__code__,
-        True,
-    ),
-    (
-        "_quote_risk_decision",
-        _eval_quote,
-        _eval_quote.__func__,
-        _eval_quote.__func__.__code__,
-        True,
-    ),
-    (
-        "_risk_of_ruin_evidence_decision",
-        _eval_ruin,
-        _eval_ruin.__func__,
-        _eval_ruin.__func__.__code__,
-        True,
-    ),
-    (
-        "_derived_risk_values",
-        _eval_derived,
-        _eval_derived,
-        _eval_derived.__code__,
-        False,
-    ),
+    ("_proposal_restriction_decision", _eval_proposal, _eval_proposal.__func__, _eval_proposal.__func__.__code__, True),
+    ("_goal_history_rooms", _eval_history, _eval_history.__func__, _eval_history.__func__.__code__, True),
+    ("_quote_risk_decision", _eval_quote, _eval_quote.__func__, _eval_quote.__func__.__code__, True),
+    ("_risk_of_ruin_evidence_decision", _eval_ruin, _eval_ruin.__func__, _eval_ruin.__func__.__code__, True),
+    ("_derived_risk_values", _eval_derived, _eval_derived, _eval_derived.__code__, False),
+)
+
+_PAPER_RISK_DERIVE_GOAL_STAKE_HELPER_WITNESSES = (
+    ("_goal_history_rooms", _eval_history, _eval_history.__func__, _eval_history.__func__.__code__, True),
+    ("_effective_fraction_limits", _stake_limits, _stake_limits, _stake_limits.__code__, False),
+    ("_decimal_context", _stake_decimal_context, _stake_decimal_context.__func__, _stake_decimal_context.__func__.__code__, True),
+    ("_risk_of_ruin_evidence_decision", _eval_ruin, _eval_ruin.__func__, _eval_ruin.__func__.__code__, True),
+)
+
+_PAPER_RISK_DERIVE_GOAL_STAKE_VECTOR_HELPER_WITNESSES = (
+    ("_risk_rejection_requires_wait", _vector_wait, _vector_wait.__func__, _vector_wait.__func__.__code__, True),
+    ("_risk_of_ruin_vector_evidence_decision", _vector_ruin, _vector_ruin.__func__, _vector_ruin.__func__.__code__, True),
 )
 
 del _eval_proposal
@@ -2047,4 +2083,7 @@ del _eval_history
 del _eval_quote
 del _eval_ruin
 del _eval_derived
-
+del _stake_limits
+del _stake_decimal_context
+del _vector_wait
+del _vector_ruin

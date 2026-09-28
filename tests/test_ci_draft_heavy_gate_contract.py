@@ -13,7 +13,7 @@ def _workflow(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def _assert_partitioned_pr_scheduler(path: str) -> None:
+def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     workflow = _workflow(path)
     concurrency_block = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
 
@@ -21,10 +21,10 @@ def _assert_partitioned_pr_scheduler(path: str) -> None:
     assert "format('pr-{0}-{1}'" in concurrency_block
     assert "github.run_attempt != 1" in concurrency_block
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in concurrency_block
+    assert "format('qualify-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "github.event.action == 'converted_to_draft'" in concurrency_block
     assert "github.event.action == 'closed'" in concurrency_block
     assert "'lifecycle'" in concurrency_block
-    assert "'qualify'" in concurrency_block
     assert "github.run_id" not in concurrency_block
     assert "format('pr-{0}-run-{1}'" not in concurrency_block
 
@@ -75,13 +75,19 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
     assert "Upload endurance evidence" in workflow
 
 
-def test_ci_pr_scheduler_partitions_qualification_lifecycle_and_reruns() -> None:
-    _assert_partitioned_pr_scheduler(".github/workflows/ci.yml")
+def test_ci_pr_scheduler_coalesces_only_same_head_qualification() -> None:
+    _assert_head_partitioned_pr_scheduler(".github/workflows/ci.yml")
 
 
-def test_windows_pr_scheduler_partitions_qualification_lifecycle_and_reruns() -> None:
-    _assert_partitioned_pr_scheduler(".github/workflows/windows-build.yml")
+def test_windows_pr_scheduler_keeps_per_run_isolation_until_safe_successor() -> None:
+    workflow = _workflow(".github/workflows/windows-build.yml")
+    concurrency_block = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+
+    assert "cancel-in-progress: true" in concurrency_block
+    assert "github.run_id" in concurrency_block
+    assert "format('pr-{0}-run-{1}'" in concurrency_block
+    assert "format('qualify-{0}', github.event.pull_request.head.sha)" not in concurrency_block
 
 
-def test_endurance_pr_scheduler_partitions_qualification_lifecycle_and_reruns() -> None:
-    _assert_partitioned_pr_scheduler(".github/workflows/endurance.yml")
+def test_endurance_pr_scheduler_coalesces_only_same_head_qualification() -> None:
+    _assert_head_partitioned_pr_scheduler(".github/workflows/endurance.yml")

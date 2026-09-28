@@ -513,6 +513,71 @@ def test_rebound_transitive_authority_verifier_cannot_grant_positive_stake(
     assert attacker_calls == 0
 
 
+def test_policy_authority_gate_has_no_dispatch_bearer_defaults_or_closure() -> None:
+    for name in (
+        "_risk_of_ruin_evidence_decision",
+        "_risk_of_ruin_vector_evidence_decision",
+    ):
+        method = vars(PaperRiskPolicy)[name]
+        assert method.__defaults__ is None
+        assert method.__closure__ is None
+        assert "_PRODUCT_RISK_AUTHORITY_DISPATCH" not in method.__code__.co_names
+
+
+def test_vector_rebound_policy_authority_helper_cannot_grant_positive_stake(
+    monkeypatch,
+) -> None:
+    policy = _policy()
+    relaxed = _policy(max_risk_of_ruin=Decimal("1"))
+    book = PaperBook("100")
+    contexts = (_context(1), _context(2))
+    signals = (Decimal("0.01"), Decimal("0.01"))
+    baseline = relaxed.derive_goal_stake_vector(book, signals, contexts=contexts)
+    assert baseline.action == "STAKE_VECTOR"
+
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    candidates = policy.risk_of_ruin_candidate_vector_sha256(contexts)
+    assert portfolio is not None and candidates is not None
+    evidence = RiskOfRuinVectorEvidence(
+        evidence_id="rebound-vector-authority-helper",
+        research_protocol_sha256="c" * 64,
+        reproducibility_bundle_sha256="d" * 64,
+        producer_identity="canonical-vector-risk-evaluator",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_vector_sha256=candidates,
+        evaluated_stakes=baseline.stakes,
+        upper_bound=Decimal("0.005"),
+    )
+    attacker_calls = 0
+
+    def forged_verifier(*args, **kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del args, kwargs
+        return True, "forged positive vector authority"
+
+    monkeypatch.setattr(
+        risk_module,
+        "_verify_product_risk_of_ruin_authority",
+        forged_verifier,
+    )
+
+    decision = policy.derive_goal_stake_vector(
+        book,
+        signals,
+        contexts=contexts,
+        risk_of_ruin_vector_evidence=evidence,
+    )
+
+    assert decision.action != "STAKE_VECTOR"
+    assert "product authority dispatch changed" in decision.reason
+    assert attacker_calls == 0
+
+
 def test_injected_module_dispatch_handle_cannot_replace_policy_closure(
     monkeypatch,
 ) -> None:

@@ -1,13 +1,13 @@
 """Fail-closed Betfair prospective commission applicability evidence.
 
-The canonical Betfair fee-input reader proves authenticated account/market inputs.  It
+The canonical Betfair fee-input reader proves authenticated account/market inputs. It
 cannot prove which tariff regime applies to the account/market, whether a Rewards
 package or Master/Sub-Account rule overrides ordinary MBR semantics, or whether
-Transaction/Expert/Turnover charges apply.  This module makes that distinction a
+Transaction/Expert/Turnover charges apply. This module makes that distinction a
 product-owned decision-time fact instead of letting authenticated inputs be mistaken
 for a complete prospective cost rule.
 
-This is deliberately a *negative prerequisite* authority.  It never returns a
+This is deliberately a negative prerequisite authority. It never returns a
 prospective commission amount, never marks execution fees complete, and grants no
 provider-write or real-money authority.
 """
@@ -18,7 +18,6 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from threading import RLock
-from weakref import WeakSet
 
 from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_execution_fee_inputs import (
@@ -94,7 +93,7 @@ def _fee_input_sha256(observation: BetfairExecutionFeeInputsObservation) -> str:
     return sha256(_canonical_json(_fee_input_payload(observation))).hexdigest()
 
 
-@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+@dataclass(frozen=True, slots=True, init=False)
 class BetfairCommissionApplicabilityAssessment:
     """Product-issued negative prerequisite for prospective Betfair commission truth."""
 
@@ -145,7 +144,10 @@ class BetfairCommissionApplicabilityAssessment:
         }
 
 
-_ISSUED: WeakSet[BetfairCommissionApplicabilityAssessment] = WeakSet()
+# Strong exact-object registry is intentional. A structurally equal object or an
+# object.__new__ forgery must not inherit in-process product issuance through value
+# equality, weak-reference hashing, or Python id reuse after collection.
+_ISSUED_BY_ID: dict[int, BetfairCommissionApplicabilityAssessment] = {}
 _ISSUE_LOCK = RLock()
 
 
@@ -214,7 +216,7 @@ def _issue_assessment(
     object.__setattr__(assessment, "real_money_execution_authorized", False)
     object.__setattr__(assessment, "assessment_id", assessment_id)
     with _ISSUE_LOCK:
-        _ISSUED.add(assessment)
+        _ISSUED_BY_ID[id(assessment)] = assessment
     return assessment
 
 
@@ -225,7 +227,7 @@ def assess_betfair_commission_applicability(
 ) -> BetfairCommissionApplicabilityAssessment:
     """Re-read authenticated inputs and issue the bounded current applicability truth.
 
-    Positive commission calculation is intentionally unavailable.  Current canonical
+    Positive commission calculation is intentionally unavailable. Current canonical
     provider reads do not prove account package/tariff mode, Australasian-event or
     Master/Sub-Account regime, conditional additional-charge applicability, or the
     terminal market net winnings on which commission is actually settled.
@@ -245,7 +247,7 @@ def require_product_betfair_commission_applicability(
             "assessment must be exact BetfairCommissionApplicabilityAssessment"
         )
     with _ISSUE_LOCK:
-        if assessment not in _ISSUED:
+        if _ISSUED_BY_ID.get(id(assessment)) is not assessment:
             raise BetfairCommissionApplicabilityError(
                 "assessment is not product-issued in this process"
             )

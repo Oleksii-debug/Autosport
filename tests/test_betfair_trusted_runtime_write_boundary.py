@@ -241,10 +241,8 @@ def test_runtime_profile_resolver_rebind_fails_closed_before_provider_io(
         ):
             _execute(prepared, attempt_id="attempt-runtime-authority-rebound")
         assert transport.calls == []
-        assert (
+        with pytest.raises(KeyError):
             ledger.attempt_state("attempt-runtime-authority-rebound")
-            is AttemptState.RESERVED
-        )
     finally:
         runtime_profile.revoke_trusted_runtime_code_profile(trusted)
         runtime_profile._clear_started_product_runtime_origin(runtime)

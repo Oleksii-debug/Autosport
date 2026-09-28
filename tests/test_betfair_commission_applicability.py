@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+import autosport.betfair_commission_applicability as applicability_module
+
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -195,3 +197,34 @@ def test_malformed_provider_input_fails_before_assessment_issuance():
         assess_betfair_commission_applicability(client, market_id="1.234")
 
     assert len(transport.calls) == 1
+
+
+def test_public_assessment_root_keeps_canonical_reader_and_issuer_after_module_rebinding(
+    monkeypatch,
+):
+    client, transport = _client()
+
+    def forbidden_reader(*_args, **_kwargs):
+        raise AssertionError("mutable module reader must not become assessment authority")
+
+    def forbidden_issuer(*_args, **_kwargs):
+        raise AssertionError("mutable module issuer must not become assessment authority")
+
+    monkeypatch.setattr(
+        applicability_module,
+        "read_betfair_execution_fee_inputs",
+        forbidden_reader,
+    )
+    monkeypatch.setattr(
+        applicability_module,
+        "_issue_assessment",
+        forbidden_issuer,
+    )
+
+    assessment = assess_betfair_commission_applicability(client, market_id="1.234")
+
+    assert len(transport.calls) == 2
+    assert assessment.status is BetfairCommissionApplicabilityStatus.UNPROVEN
+    assert require_product_betfair_commission_applicability(assessment) is assessment
+    assert assessment.prospective_commission_amount_authorized is False
+    assert assessment.complete_execution_fee_cost_authorized is False

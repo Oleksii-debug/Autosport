@@ -36,6 +36,9 @@ _MARKET_TYPE_TEXT_KEYS = {
     MarketType.HANDICAP: "ui.observation.market_type.handicap",
     MarketType.OTHER: "ui.observation.market_type.other",
 }
+_SPORT_TEXT_KEYS = {
+    "table_tennis": "ui.sport.table_tennis",
+}
 
 
 def _localized_product_token(token: str, keys: dict[str, str]) -> str:
@@ -178,7 +181,7 @@ def ticket_lines(session) -> list[str]:
         legs = ", ".join(
             text(
                 "ui.ticket.leg",
-                sport=leg.sport,
+                sport=_localized_product_token(leg.sport, _SPORT_TEXT_KEYS),
                 event_id=leg.event_id,
                 market_id=leg.market_id,
                 selection_id=leg.selection_id,
@@ -230,7 +233,7 @@ def observation_quote_lines(result: ObservationResult) -> list[str]:
     lines = [
         text(
             "ui.observation.quote",
-            sport=event.sport,
+            sport=_localized_product_token(event.sport, _SPORT_TEXT_KEYS),
             event_id=event.event_id,
             market_type=text(_MARKET_TYPE_TEXT_KEYS[event.market_type]),
             market_id=event.market_id,

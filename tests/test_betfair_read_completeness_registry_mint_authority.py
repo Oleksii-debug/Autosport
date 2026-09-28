@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import autosport.betfair_read_completeness as completeness
+from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
+    BetfairSessionCredentials,
+)
 from autosport.betfair_read_completeness import (
     BetfairObservationCompleteness,
     BetfairPagedReadResult,
+    BetfairReadCompletenessObserver,
     BetfairReadCompletenessWitness,
 )
 
@@ -62,3 +67,34 @@ def test_module_registry_mutation_cannot_mint_authoritative_empty_result(
     )
 
     assert result.authoritative_empty is False
+
+
+
+def test_importable_issue_registrar_cannot_mint_complete_witness_authority() -> None:
+    witness = _caller_constructed_complete_witness()
+    assert witness.authoritative is False
+
+    completeness._issue(witness, authoritative_origin=True)
+
+    assert witness.authoritative is False
+
+
+def test_direct_observer_witness_helper_cannot_mint_complete_without_provider_read() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_id="acct-1",
+    )
+    observer = BetfairReadCompletenessObserver(client)
+
+    witness = observer._witness(
+        "listCurrentOrders",
+        "a" * 64,
+        "b" * 64,
+        "2026-09-28T20:00:00+00:00",
+        ((0, 1000, False, "c" * 64),),
+        0,
+        BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
+        None,
+    )
+
+    assert witness.authoritative is False

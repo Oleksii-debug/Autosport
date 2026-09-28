@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.supervised_execution as supervised_execution_module
 import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -825,6 +826,61 @@ def test_betfair_timeout_unknown_still_accepts_positive_provider_effect() -> Non
         )
         assert result.outcome is ReadbackOutcome.ACCEPTED
         assert ledger.attempt_state("attempt-1") is AttemptState.ACCEPTED
+
+
+def test_not_found_consumer_rejects_timeout_assertion_rebind(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl",
+            unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+
+        monkeypatch.setattr(
+            supervised_execution_module,
+            "assert_betfair_timeout_absence_authoritative_for_attempt",
+            lambda *_args, **_kwargs: None,
+        )
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider not-found executable authority changed",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+
+def test_not_found_consumer_rejects_verified_execution_view_rebind(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+
+        monkeypatch.setattr(
+            RealExecutionLedger,
+            "verified_execution_view",
+            lambda *_args, **_kwargs: None,
+        )
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider not-found authority method changed",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
 def test_opaque_not_found_hashes_cannot_release_retry() -> None:

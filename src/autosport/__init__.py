@@ -131,10 +131,6 @@ from . import _collector_retention_desktop_ack_authority as _collector_retention
 # can be minted from it.
 from . import _scientific_registry_read_authority as _scientific_registry_read_authority  # noqa: F401,E402
 
-# Promotion-shaped effective-sample assertions must not become durable scientific
-# truth until product-owned raw/dependence/cluster derivation authority exists.
-from . import _promotion_effective_sample_authority_guard as _promotion_effective_sample_authority_guard  # noqa: F401,E402
-
 # Snapshot the final product-loaded lineage/registry concrete class surfaces. Exact
 # authority instances must not dispatch through caller-replaced class implementations,
 # and explicit runtime-repair reloads must restore this seal before positive use.
